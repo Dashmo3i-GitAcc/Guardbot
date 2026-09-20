@@ -63,11 +63,4 @@ async def enforce(
         except Exception:
             log.exception("failed to record confirmed moderation action")
 
-    matched = result.matched
-    log.info(
-        "confirmed explicit media deleted class=%s score=%.2f strike=%s",
-        matched.label if matched else "?",
-        matched.score if matched else 0.0,
-        strike,
-    )
     return Outcome(result.decision, "deleted", True, strike, result.reason)

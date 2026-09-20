@@ -1,8 +1,11 @@
 import asyncio
 import logging
 import os
+import shutil
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 from telegram import (
     ChatPermissions,
@@ -164,6 +167,10 @@ async def captcha_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ------------------------------------------------------------ media
+def _thumb_of(obj):
+    return getattr(obj, "thumbnail", None) or getattr(obj, "thumb", None)
+
+
 def _pick_media(msg):
     """Returns (file_obj, kind, is_video_like) or None."""
     if msg.photo:
@@ -176,7 +183,13 @@ def _pick_media(msg):
         return msg.video_note, "video_note", True
     if msg.sticker:
         st = msg.sticker
-        if st.is_animated:  # .tgs (Lottie) can't be decoded by ffmpeg -> skip
+        if st.is_animated:
+            # .tgs (Lottie) can't be decoded by ffmpeg. Telegram attaches a
+            # static preview thumbnail, so analyse that instead of dropping
+            # the sticker entirely.
+            th = _thumb_of(st)
+            if th:
+                return th, "animated_sticker", False
             return None
         return st, "sticker", bool(st.is_video)
     if msg.document and msg.document.mime_type:
@@ -188,23 +201,69 @@ def _pick_media(msg):
     return None
 
 
-def _thumb_of(obj):
-    return getattr(obj, "thumbnail", None) or getattr(obj, "thumb", None)
+def _analyze_blocking(path: str, is_video: bool, work_dir: str) -> detector.MediaAnalysis:
+    if is_video:
+        return detector.analyze_video(path, work_dir)
+    return detector.analyze_image(path)
 
 
-def _analyze_blocking(path: str, is_video: bool) -> detector.MediaAnalysis:
-    return detector.analyze_video(path) if is_video else detector.analyze_image(path)
-
-
-def _describe(result) -> str:
+def _explicit_report_text(chat, user, msg, kind, result, note) -> str:
     matched = result.matched
-    cls = matched.label if matched else "-"
+    label = matched.label if matched else "-"
     score = matched.score if matched else 0.0
-    return f"class=<b>{cls}</b> score=<b>{score:.2f}</b>"
+    username = f"@{user.username}" if getattr(user, "username", None) else "-"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (
+        f"🚨 <b>حذف محتوای صریح</b>\n\n"
+        f"👤 کاربر: {mention(user)}\n"
+        f"🆔 User ID: <code>{user.id}</code>\n"
+        f"🔗 Username: {username}\n"
+        f"💬 Chat ID: <code>{chat.id}</code>\n"
+        f"📩 Message ID: <code>{msg.message_id}</code>\n\n"
+        f"📦 نوع محتوا: <b>{kind}</b> {note}\n"
+        f"🔎 تشخیص: <b>{label}</b>\n"
+        f"📊 امتیاز: <b>{score:.2f}</b>\n\n"
+        f"⛔ دلیل:\n"
+        f"محتوای صریح بزرگسالان با نمایش واضح ناحیه تناسلی تشخیص داده شد.\n\n"
+        f"✅ اقدام:\n"
+        f"پیام از گروه حذف شد.\n\n"
+        f"ℹ️ بررسی دستی:\n"
+        f"در صورت خطای تشخیص، مدیر می‌تواند این مورد را بررسی کند.\n\n"
+        f"🕒 زمان: {now}"
+    )
+
+
+async def _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, note) -> None:
+    """Admin report for a confirmed deletion, with a representative frame.
+
+    Only EXPLICIT + DELETE_SUCCESS reaches this function. Evidence is uploaded
+    from the per-job temp dir and the file is removed by the caller's finally.
+    """
+    if not config.ADMIN_LOG_CHAT:
+        return
+    text = _explicit_report_text(chat, user, msg, kind, result, note)
+
+    evidence = analysis.evidence_frame(result.matched.label) if result.matched else None
+    if evidence and os.path.exists(evidence):
+        for method, field in (("send_photo", "photo"), ("send_document", "document")):
+            try:
+                with open(evidence, "rb") as fh:
+                    await getattr(ctx.bot, method)(
+                        config.ADMIN_LOG_CHAT,
+                        **{field: fh},
+                        caption=text,
+                        parse_mode="HTML",
+                    )
+                return
+            except TelegramError as e:
+                log.warning("%s evidence failed: %s", method, e)
+
+    # never leave the admin without the report itself
+    await report(ctx, text)
 
 
 async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Media pipeline: normalize -> detect -> decide -> enforce."""
+    """Media pipeline: download -> detect -> decide -> delete -> report -> cleanup."""
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -215,103 +274,96 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     picked = _pick_media(msg)
     if not picked:
+        log.info(
+            "media SKIPPED chat=%s message=%s reason=unsupported_or_undecodable",
+            chat.id, getattr(msg, "message_id", "-"),
+        )
         return
     obj, kind, is_video = picked
 
     os.makedirs(config.TMP_DIR, exist_ok=True)
-    path = None
-    analysis = None
+    # Every job owns one temp dir; the finally below guarantees its removal on
+    # success, detector error, decode error, Telegram error, cancellation or
+    # any other exception.
+    work_dir = tempfile.mkdtemp(
+        prefix=f"job_{chat.id}_{getattr(msg, 'message_id', 0)}_", dir=config.TMP_DIR
+    )
     note = ""
 
     try:
         size_mb = (getattr(obj, "file_size", 0) or 0) / 1024 / 1024
         target = obj
         target_is_video = is_video
+        if kind == "animated_sticker":
+            note = "(فقط پیش‌نمایش استیکر متحرک بررسی شد)"
         if size_mb > config.MAX_DOWNLOAD_MB:
             # too big for Bot API: fall back to the thumbnail
             th = _thumb_of(obj)
             if not th:
-                await report(
-                    ctx,
-                    f"⚠️ فایل بزرگ بدون تامبنیل، بررسی نشد\nاز: {mention(user)}",
+                log.warning(
+                    "media SKIPPED chat=%s message=%s reason=oversized_without_thumbnail",
+                    chat.id, getattr(msg, "message_id", "-"),
                 )
                 return
             target, target_is_video = th, False
             note = "(فقط تامبنیل بررسی شد)"
 
         f = await ctx.bot.get_file(target.file_id)
-        path = os.path.join(config.TMP_DIR, f"{chat.id}_{msg.message_id}")
+        path = os.path.join(work_dir, "media")
         await f.download_to_drive(path)
 
         loop = asyncio.get_running_loop()
         analysis = await loop.run_in_executor(
-            _pool, _analyze_blocking, path, target_is_video
+            _pool, _analyze_blocking, path, target_is_video, work_dir
         )
-    except Exception as e:
-        # fail-open: never delete legit content because of a bug
+
+        result = _engine.decide(analysis)
+
+        log.info(
+            "media chat=%s user=%s kind=%s detector=%s frames=%d decision=%s "
+            "class=%s confidence=%.2f detections=%s generic=%s reason=%s",
+            chat.id, user.id, kind, config.DETECTOR_BACKEND, analysis.frames_checked,
+            result.decision.value,
+            result.matched.label if result.matched else "-",
+            result.matched.score if result.matched else 0.0,
+            analysis.detections_summary(),
+            f"{result.generic_nsfw:.2f}" if result.generic_nsfw is not None else "-",
+            result.reason,
+        )
+
+        if result.decision is Decision.SAFE:
+            return
+
+        if result.decision is Decision.REVIEW:
+            # borderline: logged only. No delete, no admin message, no punishment.
+            return
+
+        # EXPLICIT -> delete the Telegram message. Nothing else: no strike,
+        # no mute, no ban, no kick, no restrict.
+        outcome = await moderation.enforce(result, delete_media=lambda: msg.delete())
+
+        if not outcome.deleted:
+            log.error(
+                "DELETE_FAILED chat=%s message=%s class=%s confidence=%.2f error=%s",
+                chat.id, getattr(msg, "message_id", "-"),
+                result.matched.label if result.matched else "-",
+                result.matched.score if result.matched else 0.0,
+                outcome.reason,
+            )
+            return
+
+        log.info(
+            "DELETE_SUCCESS chat=%s message=%s class=%s confidence=%.2f",
+            chat.id, getattr(msg, "message_id", "-"),
+            result.matched.label if result.matched else "-",
+            result.matched.score if result.matched else 0.0,
+        )
+        await _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, note)
+    except Exception:
+        # fail open: never delete or punish because of an internal error
         log.exception("media pipeline failed")
-        await report(ctx, f"⚠️ خطا در بررسی مدیا: <code>{e}</code>")
-        return
     finally:
-        # media is only kept for the duration of inference
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-    result = _engine.decide(analysis)
-
-    log.info(
-        "media chat=%s user=%s kind=%s detector=%s frames=%d decision=%s "
-        "class=%s confidence=%.2f detections=%s generic=%s reason=%s",
-        chat.id, user.id, kind, config.DETECTOR_BACKEND, analysis.frames_checked,
-        result.decision.value,
-        result.matched.label if result.matched else "-",
-        result.matched.score if result.matched else 0.0,
-        analysis.detections_summary(),
-        f"{result.generic_nsfw:.2f}" if result.generic_nsfw is not None else "-",
-        result.reason,
-    )
-
-    if result.decision is Decision.SAFE:
-        return
-
-    if result.decision is Decision.REVIEW:
-        # borderline: allowed, never deleted, never punished
-        await report(
-            ctx,
-            f"🔎 <b>REVIEW</b> (بررسی دستی، حذف نشد) {note}\n"
-            f"کاربر: {mention(user)} (<code>{user.id}</code>)\n"
-            f"نوع: {kind} | {_describe(result)} | فریم‌ها: {analysis.frames_checked}\n"
-            f"دلیل: <code>{result.reason}</code>",
-        )
-        return
-
-    # EXPLICIT -> delete only. No ban/mute in this stage.
-    outcome = await moderation.enforce(
-        result,
-        delete_media=lambda: msg.delete(),
-        record_confirmed=lambda: db.add_strike(chat.id, user.id),
-    )
-
-    if outcome.action == "delete_failed":
-        await report(
-            ctx,
-            f"⚠️ <b>حذف ناموفق</b> (هیچ اخطار/بنی اعمال نشد) {note}\n"
-            f"کاربر: {mention(user)} (<code>{user.id}</code>)\n"
-            f"نوع: {kind} | {_describe(result)}\n"
-            f"خطا: <code>{outcome.reason}</code>",
-        )
-        return
-
-    await report(
-        ctx,
-        f"🚫 <b>مدیای صریح حذف شد</b> {note}\n"
-        f"کاربر: {mention(user)} (<code>{user.id}</code>)\n"
-        f"نوع: {kind} | {_describe(result)} | فریم‌ها: {analysis.frames_checked}\n"
-        f"اخطار ثبت‌شده: {outcome.strike} | اقدام: <b>حذف مدیا</b>",
-    )
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # ------------------------------------------------------------ wiring

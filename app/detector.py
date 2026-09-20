@@ -22,7 +22,6 @@ detector can be swapped or extended without touching the policy.
 import logging
 import os
 import subprocess
-import tempfile
 from dataclasses import dataclass, field
 
 from . import config
@@ -43,6 +42,14 @@ class Detection:
 
 
 @dataclass
+class FrameAnalysis:
+    """Detections for one decoded frame (or the single image)."""
+
+    path: str
+    detections: list[Detection]
+
+
+@dataclass
 class MediaAnalysis:
     """Aggregated detector output for one media item.
 
@@ -53,6 +60,9 @@ class MediaAnalysis:
     ok: bool
     detections: list[Detection] = field(default_factory=list)
     frames_checked: int = 0
+    # Per-frame detail, kept so the caller can pick a representative frame as
+    # evidence for the moderation report. Frame files are owned by the caller.
+    frames: list[FrameAnalysis] = field(default_factory=list)
     # Optional auxiliary signal. It is never a deletion trigger (see
     # decision.py) and is None when no generic classifier is wired in.
     generic_nsfw: float | None = None
@@ -61,6 +71,20 @@ class MediaAnalysis:
 
     def strongest(self) -> Detection | None:
         return max(self.detections, key=lambda d: d.score) if self.detections else None
+
+    def evidence_frame(self, label: str) -> str | None:
+        """Path of the frame with the highest score for ``label``.
+
+        This is the frame the decision was actually based on, so it is the
+        most useful still image to attach to a moderation report.
+        """
+        best_path: str | None = None
+        best_score = -1.0
+        for frame in self.frames:
+            for d in frame.detections:
+                if d.label == label and d.score > best_score:
+                    best_score, best_path = d.score, frame.path
+        return best_path
 
     def detections_summary(self) -> str:
         """Compact metadata string of every detected class + score, for logging.
@@ -172,34 +196,49 @@ def analyze_image(path: str) -> MediaAnalysis:
     except Exception as e:
         log.warning("image analysis failed: %s", e)
         return MediaAnalysis(ok=False, error=str(e), note="image decode/detect failed")
-    return MediaAnalysis(ok=True, detections=found, frames_checked=1)
+    return MediaAnalysis(
+        ok=True,
+        detections=found,
+        frames_checked=1,
+        frames=[FrameAnalysis(path, found)],
+    )
 
 
-def analyze_video(path: str) -> MediaAnalysis:
-    """Classify a video / GIF / animated video sticker (mp4 or webm)."""
+def analyze_video(path: str, work_dir: str) -> MediaAnalysis:
+    """Classify a video / GIF / animated video sticker (mp4 or webm).
+
+    Frames are written into ``work_dir``, which is owned by the caller: this
+    function never deletes them, so the caller can use one as evidence before
+    removing the whole directory.
+    """
     try:
-        os.makedirs(config.TMP_DIR, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as d:
-            frames = extract_frames(path, d, config.VIDEO_FRAMES)
-            if not frames:
-                return MediaAnalysis(
-                    ok=False, error="no frames extracted", note="video decode failed"
-                )
-            best: dict[str, Detection] = {}
-            failures = 0
-            for f in frames:
-                try:
-                    _merge_best(best, _detect_file(f))
-                except Exception as e:
-                    failures += 1
-                    log.warning("frame scoring failed: %s", e)
-            if failures == len(frames):
-                return MediaAnalysis(
-                    ok=False, error="all frames failed", note="detector error"
-                )
+        frames = extract_frames(path, work_dir, config.VIDEO_FRAMES)
+        if not frames:
             return MediaAnalysis(
-                ok=True, detections=list(best.values()), frames_checked=len(frames)
+                ok=False, error="no frames extracted", note="video decode failed"
             )
+        best: dict[str, Detection] = {}
+        frame_results: list[FrameAnalysis] = []
+        failures = 0
+        for f in frames:
+            try:
+                found = _detect_file(f)
+            except Exception as e:
+                failures += 1
+                log.warning("frame scoring failed: %s", e)
+                continue
+            _merge_best(best, found)
+            frame_results.append(FrameAnalysis(f, found))
+        if failures == len(frames):
+            return MediaAnalysis(
+                ok=False, error="all frames failed", note="detector error"
+            )
+        return MediaAnalysis(
+            ok=True,
+            detections=list(best.values()),
+            frames_checked=len(frames),
+            frames=frame_results,
+        )
     except Exception as e:
         log.warning("video analysis failed: %s", e)
         return MediaAnalysis(ok=False, error=str(e), note="video analysis failed")

@@ -120,3 +120,37 @@ def test_default_engine_uses_config_classes_and_thresholds():
     # a class not in config.EXPLICIT_CLASSES can never delete
     res2 = default_engine().decide(analysis([Detection("FEMALE_BREAST_EXPOSED", 0.99)]))
     assert res2.decision is Decision.SAFE
+
+
+# --- regression: live test on 2026-09-20 sent confirmed explicit media and
+# --- everything landed in REVIEW because the delete threshold was 0.80.
+def test_live_confirmed_explicit_samples_are_now_explicit():
+    samples = [
+        ("FEMALE_GENITALIA_EXPOSED", 0.50),
+        ("MALE_GENITALIA_EXPOSED", 0.67),
+        ("ANUS_EXPOSED", 0.56),
+        ("MALE_GENITALIA_EXPOSED", 0.51),
+    ]
+    for label, score in samples:
+        res = default_engine().decide(analysis([Detection(label, score)]))
+        assert res.decision is Decision.EXPLICIT, f"{label} {score} -> {res.decision}"
+
+
+def test_live_non_explicit_sample_stays_safe():
+    """Real live sample with no explicit-region class must not be touched."""
+    dets = [
+        Detection("BELLY_EXPOSED", 0.82),
+        Detection("FACE_FEMALE", 0.78),
+        Detection("FEMALE_BREAST_EXPOSED", 0.77),
+    ]
+    assert default_engine().decide(analysis(dets)).decision is Decision.SAFE
+
+
+def test_default_threshold_boundaries():
+    e = default_engine()
+    assert e.explicit_threshold == 0.45
+    assert e.review_threshold == 0.25
+    assert e.decide(analysis([Detection("ANUS_EXPOSED", 0.45)])).decision is Decision.EXPLICIT
+    assert e.decide(analysis([Detection("ANUS_EXPOSED", 0.44)])).decision is Decision.REVIEW
+    assert e.decide(analysis([Detection("ANUS_EXPOSED", 0.25)])).decision is Decision.REVIEW
+    assert e.decide(analysis([Detection("ANUS_EXPOSED", 0.24)])).decision is Decision.SAFE

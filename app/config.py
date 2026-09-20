@@ -61,10 +61,20 @@ EXPLICIT_CLASSES = set(
 )
 
 # >= this confidence for an explicit class -> EXPLICIT (auto-delete).
-# Deliberately high: false positives are worse than missing borderline media.
-EXPLICIT_DELETE_THRESHOLD = _float("EXPLICIT_DELETE_THRESHOLD", 0.80)
-# >= this (but below delete) -> REVIEW: allowed and logged only, never deleted.
-EXPLICIT_REVIEW_THRESHOLD = _float("EXPLICIT_REVIEW_THRESHOLD", 0.40)
+#
+# Calibration note: NudeNet 320n is not a calibrated probability model. Its own
+# operating point is a 0.20 detection gate with NMS at 0.25. Live testing with
+# confirmed explicit media produced 0.50 / 0.51 / 0.56 / 0.67 for the explicit
+# classes, so the previous 0.80 never fired and everything landed in REVIEW.
+# 0.45 sits just below the lowest confirmed true positive (0.50) with a small
+# margin, while staying ~1.8x above the model's 0.25 noise floor. Explicit
+# classes are region-specific, so swimwear/clothing normally produces the
+# *_COVERED classes instead and is not affected.
+EXPLICIT_DELETE_THRESHOLD = _float("EXPLICIT_DELETE_THRESHOLD", 0.45)
+# >= this (but below the delete threshold) -> REVIEW: logged only, never
+# deleted and never notified. Set to NudeNet's NMS floor so REVIEW stays a
+# meaningful state instead of a degenerate sliver just under the delete value.
+EXPLICIT_REVIEW_THRESHOLD = _float("EXPLICIT_REVIEW_THRESHOLD", 0.25)
 # A generic NSFW score may only ever raise REVIEW, never EXPLICIT.
 GENERIC_REVIEW_THRESHOLD = _float("GENERIC_REVIEW_THRESHOLD", 0.90)
 

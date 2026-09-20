@@ -1,5 +1,6 @@
 """Detector-level tests: parsing, fail-open behaviour, media-type allow rules."""
 import asyncio
+import os
 
 from app import detector
 from app.decision import Decision, default_engine
@@ -63,9 +64,9 @@ def test_merge_best_keeps_highest_per_class():
     assert best["FACE_MALE"].score == 0.5
 
 
-def test_video_with_no_frames_fails_open(monkeypatch):
+def test_video_with_no_frames_fails_open(monkeypatch, tmp_path):
     monkeypatch.setattr(detector, "extract_frames", lambda *a, **k: [])
-    result = detector.analyze_video("/tmp/x.mp4")
+    result = detector.analyze_video("/tmp/x.mp4", str(tmp_path))
     assert result.ok is False
     assert default_engine().decide(result).decision is Decision.SAFE
 
@@ -89,13 +90,51 @@ def test_video_uses_strongest_frame(monkeypatch, tmp_path):
             return []
 
     monkeypatch.setattr(detector, "_detector", Seq())
-    result = detector.analyze_video("/tmp/x.mp4")
+    result = detector.analyze_video("/tmp/x.mp4", str(tmp_path))
     assert result.ok is True
     assert result.frames_checked == 3
     assert default_engine().decide(result).decision is Decision.EXPLICIT
 
 
-# 9. normal sticker -> allowed
+def test_analyze_video_keeps_frames_for_evidence(monkeypatch, tmp_path):
+    """Frames must survive the call so the caller can attach evidence."""
+    frames = []
+    for i in range(3):
+        p = tmp_path / f"f{i}.jpg"
+        p.write_bytes(b"x")
+        frames.append(str(p))
+    monkeypatch.setattr(detector, "extract_frames", lambda *a, **k: frames)
+
+    class Seq:
+        def __init__(self):
+            self.n = 0
+
+        def detect(self, path):
+            self.n += 1
+            if self.n == 3:
+                return [{"class": "ANUS_EXPOSED", "score": 0.61, "box": [0, 0, 1, 1]}]
+            return [{"class": "ANUS_EXPOSED", "score": 0.30, "box": [0, 0, 1, 1]}]
+
+    monkeypatch.setattr(detector, "_detector", Seq())
+    result = detector.analyze_video("/tmp/x.mp4", str(tmp_path))
+
+    assert len(result.frames) == 3
+    # the decision frame is the third one, not the first
+    assert result.evidence_frame("ANUS_EXPOSED") == frames[2]
+    assert all(os.path.exists(f) for f in frames)
+
+
+def test_analyze_image_exposes_itself_as_evidence(monkeypatch, tmp_path):
+    img = tmp_path / "media"
+    img.write_bytes(b"x")
+    monkeypatch.setattr(detector, "_detector", StubDetector(
+        result=[{"class": "MALE_GENITALIA_EXPOSED", "score": 0.72, "box": [0, 0, 1, 1]}]
+    ))
+    result = detector.analyze_image(str(img))
+    assert result.evidence_frame("MALE_GENITALIA_EXPOSED") == str(img)
+    assert result.evidence_frame("ANUS_EXPOSED") is None
+
+
 def test_normal_sticker_allowed(monkeypatch):
     monkeypatch.setattr(detector, "_detector", StubDetector(result=[]))
     analysis = detector.analyze_image("/tmp/sticker.webp")
@@ -108,7 +147,7 @@ def test_normal_gif_allowed(monkeypatch, tmp_path):
     frame.write_bytes(b"x")
     monkeypatch.setattr(detector, "extract_frames", lambda *a, **k: [str(frame)])
     monkeypatch.setattr(detector, "_detector", StubDetector(result=[]))
-    analysis = detector.analyze_video("/tmp/cat.gif")
+    analysis = detector.analyze_video("/tmp/cat.gif", str(tmp_path))
     assert default_engine().decide(analysis).decision is Decision.SAFE
 
 
