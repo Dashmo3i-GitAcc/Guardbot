@@ -94,8 +94,9 @@ this file.
 
 - **Language / runtime:** Python 3.12, `python-telegram-bot[job-queue]==21.6`,
   `Pillow`, `nudenet==3.4.2` (bundles a small ONNX model; pulls
-  `onnxruntime` + `opencv-python-headless`). Tests need
-  `requirements-dev.txt` (adds `pytest`).
+  `onnxruntime` + `opencv-python-headless`), and `transformers` + CPU-only
+  `torch` for the optional second-stage scene classifier. Tests need
+  `pytest` and the same runtime, so run them inside the image (see §11).
 - **Entry point:** `python -m app.main` (`app/main.py:main`). It creates the
   DB dir and temp dir, calls `db.init()`, loads the detector if
   `MEDIA_ENABLED`, builds the `Application`, registers handlers, then
@@ -106,23 +107,29 @@ this file.
   | File | Responsibility |
   |---|---|
   | `app/config.py` | every setting, from environment variables |
-  | `app/db.py` | SQLite: `users` (strikes) and `captchas` |
-  | `app/detector.py` | raw detections only; NudeNet + ffmpeg frame sampling |
+  | `app/db.py` | SQLite: `users` (strikes/violations) and `captchas` |
+  | `app/burst.py` | pure, bounded instant-flood tracker (no Telegram, no I/O) |
+  | `app/detector.py` | raw detections only; NudeNet + ffmpeg frame sampling + optional REVIEW-only scene stage |
   | `app/decision.py` | the policy: `MediaAnalysis` → `SAFE`/`REVIEW`/`EXPLICIT` |
   | `app/moderation.py` | executing a decision (delete); no Telegram import |
-  | `app/main.py` | Telegram wiring: captcha handlers + the media pipeline |
+  | `app/main.py` | Telegram wiring: captcha handlers + the media/flood pipeline |
 
   The detector/policy split is deliberate: `detector.py` produces raw
   detections, `decision.py` owns *which* classes and *which* confidence count
   as explicit. Keep them separate — a future stage must be able to extend one
-  without touching the other.
+  without touching the other. `burst.py` is pure and bounded for the same
+  reason: the flood rule is unit-testable without Telegram or a clock.
 
-- **Two features only:** captcha for new members, and conservative
-  explicit-media moderation. Nothing else exists, on purpose.
-- **Deployment:** `Dockerfile` (`python:3.12-slim` + `ffmpeg`, `CMD python -m
-  app.main`) and `docker-compose.yml` (service `guardbot`, `restart: always`,
-  `env_file: .env`, `./data:/data`, 2 GB memory limit). The VPS runs it from
-  `~/guardbot` with `docker compose up -d --build`.
+- **Three independent signals, never conflated:** explicit sexual content
+  (detector + decision engine), instant media flood (burst tracker), and the
+  repeated-violation ladder. A flood is a violation on its own and does not
+  require sexual content; a photo is never counted toward a flood.
+- **Deployment:** `Dockerfile` (`python:3.12-slim` + `ffmpeg` + CPU-only torch
+  from the pytorch CPU index, `HF_HOME=/data/hf`, `CMD python -m app.main`) and
+  `docker-compose.yml` (service `guardbot`, `restart: always`, `env_file:
+  .env`, `./data:/data`, 2 GB memory limit). The VPS runs it from `~/guardbot`
+  with `docker compose up -d --build`. `HF_HOME` is why the ~340 MB scene
+  model survives rebuilds; do not point it somewhere that is not the volume.
 - **Persistence:** SQLite at `DB_PATH` (default `/data/guardbot.db`, inside the
   mounted volume). Runtime data under `data/` and `.env` are gitignored and
   must never be committed.
@@ -165,17 +172,21 @@ side effect of another change.
 
 ### 4.3 Deletion and its failure
 
-- `app/moderation.py:enforce` is the only place that executes an action.
-  `EXPLICIT` → attempt delete. Delete succeeded → `deleted=True`. Delete
-  raised → `delete_failed`, **no strike, no ban, no notification**.
+- `app/moderation.py:enforce` is the only place that executes a content action.
+  `EXPLICIT` → attempt delete. Delete succeeded → `deleted=True`, and
+  `record_confirmed` (which is `db.add_strike`) is called **once**. Delete
+  raised → `delete_failed`, **no violation, no restriction, no notification**.
 - `DELETE_SUCCESS` and `DELETE_FAILED` are the two log outcomes. Only
-  `DELETE_SUCCESS` reaches the admin report.
+  `DELETE_SUCCESS` reaches the admin report and the violation ladder.
+- A failed deletion must never become a successful moderation action, and must
+  never count as a violation.
 
 ### 4.4 Admin reporting
 
 - The admin chat (`ADMIN_LOG_CHAT`) receives a message **only** for
-  `EXPLICIT` + `DELETE_SUCCESS`. `SAFE`, `REVIEW`, `DELETE_FAILED` and every
-  operational error are container-log only.
+  `EXPLICIT` + `DELETE_SUCCESS`, and for a confirmed flood whose restriction
+  Telegram refused. `SAFE`, `REVIEW`, `DELETE_FAILED`, a *successful*
+  restriction and every operational error are container-log only.
 - The report carries media type, user, user id, username, chat id, message id,
   detected class, confidence, a reason line and a UTC timestamp, plus a
   representative evidence frame (`MediaAnalysis.evidence_frame` — the frame
@@ -188,17 +199,60 @@ side effect of another change.
 - The report text is Persian and HTML-parse-mode. If you touch it, keep the
   same register and the same fields; do not machine-translate or restructure it.
 
-### 4.5 No punishment
+### 4.5 Punishment is a timed restriction, never a ban
 
-There is **no member punishment in the media path**: no strike, mute, ban,
-kick or restrict. The only automatic action is deleting the message.
-`db.add_strike` exists but is **intentionally unused** — member punishment is
-deferred to its own future task. Do not start it, do not wire it into the media
-path, and do not delete it either. (The captcha path is separate and does
-kick on timeout; that is existing captcha behaviour, not a media-punishment
-hook.)
+- The only member action is `restrict_chat_member` with `MUTED` permissions and
+  an expiry of `MUTE_HOURS` (default 24). Telegram lifts a timed restriction
+  itself, so there is no reaper. `MUTE_HOURS=0` means no automatic expiry.
+- There is **no ban and no permanent punishment**. Do not add one.
+- One confirmed explicit deletion is one violation, recorded through the
+  existing `db.add_strike` / `users.strikes` (do not add a second violation
+  store). Every violation warns the user; at `VIOLATION_MUTE_AFTER` (default 3)
+  the timed restriction is applied. Every violation at or after the threshold
+  re-applies it, which extends the restriction.
+- **A failed deletion, a detector error or a database error never punishes
+  anyone.** If recording the violation fails, the deletion still stands and
+  `outcome.strike` is `None`, so nothing else happens.
+- `_restrict_user` returns True only when Telegram accepted the call. A refusal
+  (an administrator target, missing `can_restrict_members`) is logged and
+  reported, never claimed as a success.
 
-### 4.6 Thresholds are calibrated evidence, not guesses
+### 4.6 Instant media flood
+
+- A separate signal from content. More than `BURST_MAX_ITEMS` qualifying media
+  messages (default kinds: `gif`, `sticker`, `animated_sticker`,
+  `video_sticker`, `video_note`) from the same user inside
+  `BURST_WINDOW_SECONDS` (default 3 s) is a flood.
+- The rule is decided from message metadata in `app/burst.py` — no download,
+  no ffmpeg, no inference. Keep it that way: the whole point is to stop a flood
+  cheaply.
+- **Ordinary photos are never counted.** Sending several photos quickly is not
+  a flood; each photo is still checked by the content pipeline on its own.
+- On a flood: restrict the sender, delete **only** the messages recorded as
+  belonging to that burst, and warn. Never delete other history from the same
+  user.
+- A flood does not require sexual content, and it does not increment the
+  violation ladder. The two signals are independent.
+- `app/burst.py` must stay bounded (per-user deque cap, tracked-user cap) and
+  must clear a user's window once it reports a burst, so one burst is reported
+  once.
+
+### 4.7 Exemption
+
+- Only `WHITELIST_USER_IDS` (bot owners) are exempt. That is the owner rule.
+- **Telegram admins are not exempt** — not from content moderation and not from
+  the flood rule. Do not reintroduce an administrator check in `on_media`.
+- The captcha path still uses `is_admin`; that is a different, older rule and is
+  unchanged.
+
+### 4.8 Out of scope by default
+
+Text/profanity/username/link moderation, raid detection, bans, a dashboard and
+unrelated Telegram features do **not** exist. Do not add any of them unless the
+current stage explicitly asks. The project advances one narrow stage at a time;
+pre-building a future stage is a defect, not initiative.
+
+### 4.9 Thresholds are calibrated evidence, not guesses
 
 `EXPLICIT_DELETE_THRESHOLD=0.45`, `EXPLICIT_REVIEW_THRESHOLD=0.25`. NudeNet
 320n is **not** a calibrated probability model: its own detection gate is 0.20
@@ -211,13 +265,6 @@ Thresholds are environment variables and are tuned from real traffic. If a
 change genuinely requires a different threshold, say so explicitly in the
 report and let the owner decide — do not bake a new number into the code.
 
-### 4.7 Out of scope by default
-
-Text/profanity/username/link moderation, raid detection, member punishment,
-a dashboard and additional detectors do **not** exist. Do not add any of them
-unless the current stage explicitly asks. The project advances one narrow stage
-at a time; pre-building a future stage is a defect, not initiative.
-
 ---
 
 ## 5. Telegram engineering realities
@@ -229,9 +276,10 @@ The Bot API and Telegram's media model have hard limits. Design within them.
   documents) **and** `filters.ChatType.GROUPS`. A new media type or a changed
   filter changes what is inspected. `chat_member` updates must be requested in
   `allowed_updates` or the captcha silently stops working.
-- **Admins and the whitelist are immune.** `is_admin` (with a 300 s
-  `_admin_cache`) and `WHITELIST_USER_IDS` short-circuit the media path. Do not
-  remove or reorder that check.
+- **Only bot owners are immune.** `WHITELIST_USER_IDS` short-circuits the media
+  path. Telegram admins are deliberately **not** exempt. `is_admin` (with a
+  300 s `_admin_cache`) still guards the captcha path; do not use it to skip
+  media moderation again.
 - **Media types.** Photo, GIF/animation, video, video note, static sticker,
   video sticker and image/video documents are analysed. Animated `.tgs`
   (Lottie) stickers cannot be decoded by ffmpeg and are analysed through their
@@ -315,8 +363,12 @@ This is a small VPS. Disk leaks are production incidents.
   `detections=` comes from `MediaAnalysis.detections_summary()` and must keep
   distinguishing `n/a` (analysis failed) from `none` (ran, no detections) from
   `CLASS:score,...`.
-- The outcome lines are `DELETE_SUCCESS`, `DELETE_FAILED`, `media SKIPPED`.
-  Do not rename or remove them; operators grep them.
+- The outcome lines are `DELETE_SUCCESS`, `DELETE_FAILED`, `media SKIPPED`,
+  and for the new signals `FLOOD`, `FLOOD_RESTRICT`, `FLOOD_CLEARED`,
+  `FLOOD_DELETE_FAILED`, `VIOLATION`, `VIOLATION_RESTRICT`. Do not rename or
+  remove them; operators grep them.
+- The scene stage's score appears as `generic=` on the decision line. It is
+  auxiliary: it can raise `REVIEW` and never `EXPLICIT`.
 - **Never log media content, file bytes, tokens or the bot token.** Class names
   and scores are fine; the media is not.
 - Add a log line only when it tells an operator something they cannot already
@@ -355,11 +407,14 @@ This is a small VPS. Disk leaks are production incidents.
 
 ## 11. Testing
 
-- Tests are `pytest`, run with:
+- Tests are `pytest` and they import the app, which imports
+  `python-telegram-bot`, `Pillow`, `nudenet` and `transformers`. Run them in
+  the image, not on a bare host:
 
   ```bash
-  pip install -r requirements-dev.txt
-  python -m pytest tests -q
+  docker compose build
+  docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot \
+    bash -lc "pip install -q pytest && python -m pytest tests -q"
   ```
 
 - `tests/conftest.py` sets safe defaults (`BOT_TOKEN`, `GROUP_IDS`, in-memory
@@ -367,10 +422,18 @@ This is a small VPS. Disk leaks are production incidents.
 - The existing tests pin the safety contracts and must keep passing:
   - `tests/test_decision.py` — the policy table, fail-open, generic-never-explicit.
   - `tests/test_detector.py` — parsing, fail-open on decode error, media rules.
-  - `tests/test_moderation.py` — delete success/failure, no-punishment rules.
+  - `tests/test_moderation.py` — delete success/failure, no-punishment-on-failure.
   - `tests/test_media_pipeline.py` — the real `on_media` handler end to end with
     a fake Telegram layer and a stubbed detector: delete, no-delete, fail-open,
     `DELETE_FAILED` applies nothing, evidence fallbacks, temp cleanup.
+  - `tests/test_burst.py` — the pure flood tracker: threshold, window, separate
+    bursts, photo exclusion, per-user isolation, bounding.
+  - `tests/test_flood_pipeline.py` — the flood rule through the handler:
+    restrict, only-the-burst deletion, admin not exempt, owner exempt, fail-open.
+  - `tests/test_violations.py` — the violation ladder: warn, count, restrict at
+    the threshold, and everything that must not count.
+  - `tests/test_scene_stage.py` — the REVIEW-only scene stage: one frame per
+    item, fail-open, and it can never produce `EXPLICIT`.
 - **Do not weaken or delete a test to make a change pass.** If a contract
   genuinely changes, update the contract text here and in `README.md` and the
   test in the same commit.
@@ -501,18 +564,35 @@ Rules for the report:
    `work_dir`; the handler removes the whole directory in `finally`.
 5. **`.tgs` stickers are preview-only.** Do not claim animated stickers are
    fully analysed.
-6. **`generic_nsfw` is always `None` today.** The generic branch in
-   `decision.py` is dormant plumbing, not an active classifier.
-7. **`db.add_strike` is intentionally unused.** No punishment exists in the
-   media path; member punishment is a separate future task.
-8. **Admins and whitelisted users are immune.** Keep that check in front of the
-   media pipeline.
-9. **The bot needs delete-message permission and privacy mode off.** If
-   deletion silently fails, check the Telegram-side setup before the code.
-10. **`drop_pending_updates=True` means restarts skip the backlog** by design —
+6. **`generic_nsfw` is auxiliary, never a delete trigger.** When
+   `GENERIC_NSFW_ENABLED` is on, the scene stage fills it; the policy still only
+   lets it raise `REVIEW`. Turning it off or breaking it must leave the bot
+   working (it returns `None`).
+7. **`db.add_strike` is now used for the violation ladder.** Do not add a second
+   violation store, and remember it is only ever called after a *successful*
+   deletion.
+8. **Only bot owners (`WHITELIST_USER_IDS`) are immune.** Telegram admins are
+   moderated like anyone else — do not add an admin bypass to `on_media`.
+9. **A flood fires the moment the threshold is crossed, not after the window
+   closes.** The first `BURST_MAX_ITEMS` messages are processed normally; only
+   the burst's own messages are deleted, and the window is then cleared so the
+   next message starts a fresh burst. Do not "fix" this into waiting for the
+   window to expire.
+10. **The scene classifier costs ~1-2 s per media item on a 2-core VPS.** It is
+    scored on exactly one frame per item on purpose. Scoring every frame would
+    multiply that cost; do not do it.
+11. **The live `.env` still contains first-generation leftovers** (`MAX_STRIKES`,
+    `NSFW_DELETE_THRESHOLD`, `NSFW_BAN_THRESHOLD`, `HIGH_CONF_ACTION`,
+    `TRUST_AFTER_MESSAGES`, `TRUSTED_EXTRA_MARGIN`). Nothing reads them. The
+    violation threshold is `VIOLATION_MUTE_AFTER` (default 3) precisely so the
+    stale `MAX_STRIKES=5` cannot change the documented three-strike policy. Do
+    not start reading the old names.
+12. **The bot needs delete-message permission and privacy mode off.** If
+    deletion silently fails, check the Telegram-side setup before the code.
+13. **`drop_pending_updates=True` means restarts skip the backlog** by design —
     do not "fix" it into processing old messages.
-11. **`data/` and `.env` are gitignored and must stay out of Git.** The model
+14. **`data/` and `.env` are gitignored and must stay out of Git.** The model
     cache, the SQLite DB and the token never belong in a commit.
-12. **A documentation change is not a code change.** Do not let a docs commit
+15. **A documentation change is not a code change.** Do not let a docs commit
     carry source edits, and do not let a code commit quietly rewrite the
     decision table.

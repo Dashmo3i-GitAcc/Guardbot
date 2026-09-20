@@ -64,23 +64,29 @@ over the current code.
 ## 3. What GuardBot is (and is not)
 
 GuardBot is a **production Telegram moderation bot** for the owner's groups. It
-has exactly two features:
+has:
 
 1. **Captcha for new members** — restrict on join, inline button to confirm,
    kick on timeout.
 2. **Conservative explicit-media moderation** — every photo / video / GIF /
-   sticker is checked locally with NudeNet, and clearly explicit adult
-   genital media is deleted.
+   sticker is checked locally with NudeNet (plus an optional REVIEW-only scene
+   classifier), and clearly explicit adult genital media is deleted.
+3. **An instant media-flood rule** — more than `BURST_MAX_ITEMS`
+   GIFs/stickers inside `BURST_WINDOW_SECONDS` restricts the sender and removes
+   only that burst's messages.
+4. **A repeated-violation ladder** — a confirmed explicit deletion warns and
+   counts; the third restricts for `MUTE_HOURS`.
 
 It is **not** a general NSFW, profanity, text, link, username, raid or
 behaviour moderation system. Nothing else exists, and future stages are added
 one narrow stage at a time.
 
-The moderation contract is defined in `AgentMD.md` §4 and in `README.md`. In
-one line: decisions are `SAFE` / `REVIEW` / `EXPLICIT`; only `EXPLICIT` deletes;
-`REVIEW` is log-only; any error fails open to `SAFE`; there is **no member
-punishment** in the media path. Do not propose work that changes this without
-the owner explicitly asking.
+The contract is defined in `AgentMD.md` §4 and in `README.md`. In one line:
+decisions are `SAFE` / `REVIEW` / `EXPLICIT`; only `EXPLICIT` deletes; `REVIEW`
+is log-only; any error fails open to `SAFE`; the only member action is a
+**timed** restriction (never a ban); only bot owners are exempt, Telegram
+admins are not; a photo is never counted toward a flood. Do not propose work
+that changes any of this without the owner explicitly asking.
 
 ---
 
@@ -258,42 +264,59 @@ The point of this file is that the project does not have to be re-explained.
 Update this section after each meaningful change. The facts below were verified
 against the repository when this file was created.
 
-- **Branch:** `main`. **Tip at the time of writing:**
-  `fedca9b fix: actually delete confirmed explicit media after live test`.
+- **Branch:** `main`. **Tip:** run `git log -1`. At the time of writing the
+  last code change was `62d7163 feat(media): add instant-flood detection, a
+  violation ladder and a REVIEW-only scene stage`; this documentation update
+  sits directly on top of it. Do not trust a hard-coded hash — read `git log`.
 - **Commit history (full, in order):**
   1. `3395061 Initial commit: GuardBot (captcha + NSFW media moderation)`
   2. `e924caa feat: add conservative explicit media moderation`
   3. `e0ccff3 chore: log all detector classes and scores for threshold calibration`
   4. `fedca9b fix: actually delete confirmed explicit media after live test`
+  5. `a914012 docs(agents): add GuardBot agent workflow`
+  6. `62d7163 feat(media): add instant-flood detection, a violation ladder and a
+     REVIEW-only scene stage`
+  7. `docs: document flood detection, violation ladder and scene stage`
+     (this file's update — see `git log -1` for its hash)
 - **What is done:**
   - Captcha for new members (restrict → inline button → kick on timeout).
   - Conservative explicit-media moderation for photos, videos, GIFs, video
     notes, static/video stickers and image/video documents, with animated
     `.tgs` analysed through their static preview thumbnail.
-  - Detector = NudeNet 320n (ONNX, CPU), explicit body-region classes only.
+  - Detector = NudeNet 320n (ONNX, CPU), explicit body-region classes only,
+    plus an optional local scene classifier (`GENERIC_NSFW_ENABLED`, default
+    on) whose score is **REVIEW-only** and can never delete.
   - Decision engine `SAFE` / `REVIEW` / `EXPLICIT`; only `EXPLICIT` deletes;
     fail-open on any error; `REVIEW` log-only.
-  - Admin report only for `EXPLICIT` + `DELETE_SUCCESS`, with an evidence frame
-    (photo → document → text fallback).
+  - Admin report for `EXPLICIT` + `DELETE_SUCCESS` with an evidence frame
+    (photo → document → text fallback), plus a notice when a confirmed flood
+    could not be restricted.
+  - Instant-flood rule: >`BURST_MAX_ITEMS` (5) GIF/sticker kind messages in
+    `BURST_WINDOW_SECONDS` (3 s) → restrict + delete only that burst + warn.
+    Photos are never counted; admins are not exempt; owners are.
+  - Violation ladder: one confirmed explicit deletion = one violation in
+    `users.strikes`; warn each time; timed restriction (`MUTE_HOURS`, 24) at
+    `VIOLATION_MUTE_AFTER` (3). A failed delete applies nothing.
   - Per-job temp directory removed in `finally`.
   - Thresholds recalibrated to `EXPLICIT_DELETE_THRESHOLD=0.45` /
     `EXPLICIT_REVIEW_THRESHOLD=0.25` after the initial 0.80 never fired on
     confirmed explicit media (which scored 0.50–0.67).
-  - Test suite under `tests/` covering the decision policy, the detector,
-    the action layer and the end-to-end media pipeline.
+  - 108 tests under `tests/` covering the decision policy, the detector, the
+    action layer, the end-to-end media pipeline, the flood tracker, the flood
+    handler path, the violation ladder and the scene stage.
 - **What is not done / not present:**
-  - No member punishment of any kind in the media path.
+  - No ban and no permanent punishment; the only member action is a timed
+    restriction.
   - No text/profanity/link/username moderation, no raid detection, no
-    dashboard, no hash whitelist/blacklist, no shadow mode, no extra detectors,
-    no statistics.
+    dashboard, no hash whitelist/blacklist, no shadow mode, no statistics.
   - No CI pipeline.
+  - No real-Telegram end-to-end run: the flood and violation paths are proven
+    by the test suite and by Docker runtime checks, not by a live flood.
 - **Planned future stages (named by the owner, deliberately not pre-built):**
   hash whitelist/blacklist, admin review, better sticker support, shadow mode,
-  additional detectors, statistics, text moderation, raid protection. **Member
-  punishment (strike/mute/ban/kick/restrict) is a separate future task of its
-  own.**
-- **Next:** owner verification on real traffic, then the next named stage —
-  one at a time, only when asked.
+  additional detectors, statistics, text moderation, raid protection.
+- **Next:** owner verification on real traffic (a real flood and a real third
+  violation), then the next named stage — one at a time, only when asked.
 
 ---
 
@@ -306,11 +329,29 @@ against the repository when this file was created.
 - **NudeNet 320n is not a calibrated probability model.** Its own gate is 0.20,
   NMS is 0.25, and confirmed explicit media scored 0.50–0.67. The 0.45 delete
   threshold is derived from that live evidence — do not "round it up".
-- **`generic_nsfw` is always `None` in production.** The generic branch in
-  `app/decision.py` is dormant plumbing; there is no active generic NSFW
-  classifier.
-- **`db.add_strike` is intentionally unused.** No punishment exists in the
-  media path; member punishment is deferred to its own task.
+- **`generic_nsfw` is auxiliary and can never delete.** When
+  `GENERIC_NSFW_ENABLED` is on, the local scene classifier fills it; the policy
+  only lets it raise `REVIEW`. It fails open (missing model/dependency →
+  `None`). Measured ~1-2 s per media item on this VPS, one frame per item.
+- **`db.add_strike` is now the violation counter.** One confirmed explicit
+  deletion = one violation in `users.strikes`; `VIOLATION_MUTE_AFTER` (default
+  3) applies the timed restriction. Do not add a second store.
+- **The only member action is a timed restriction** (`MUTE_HOURS`, default 24).
+  There is no ban and no permanent punishment.
+- **Only bot owners (`WHITELIST_USER_IDS`) are exempt.** Telegram admins are
+  moderated like anyone else, and a bot cannot restrict an admin — that refusal
+  is logged and reported, never claimed as a success.
+- **The flood rule is separate from content.** More than `BURST_MAX_ITEMS`
+  (default 5) GIF/sticker kind messages in `BURST_WINDOW_SECONDS` (default 3 s)
+  restricts the sender and deletes only that burst's messages. Photos are never
+  counted. A flood is detected from metadata, so it costs no download or
+  inference — but it is only detected when the threshold is crossed, so the
+  first `BURST_MAX_ITEMS` messages are processed normally.
+- **The live `.env` still holds first-generation leftovers** (`MAX_STRIKES=5`,
+  `NSFW_DELETE_THRESHOLD`, `NSFW_BAN_THRESHOLD`, `HIGH_CONF_ACTION=mute`,
+  `TRUST_AFTER_MESSAGES`, `TRUSTED_EXTRA_MARGIN`). Nothing reads them. The
+  three-strike policy uses the new `VIOLATION_MUTE_AFTER` name precisely so the
+  stale `MAX_STRIKES=5` cannot change it.
 - **Animated `.tgs` stickers are preview-only.** Explicit content that appears
   only mid-animation can be missed. This is a documented limit, not a bug.
 - **Files over 20 MB are checked by thumbnail only** (Bot API limit); with no
