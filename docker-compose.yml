@@ -1,0 +1,12 @@
+services:
+  guardbot:
+    build: .
+    container_name: guardbot
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/data          # sqlite db + downloaded model cache
+    deploy:
+      resources:
+        limits:
+          memory: 2g
