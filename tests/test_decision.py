@@ -16,18 +16,19 @@ def engine(**over) -> DecisionEngine:
         explicit_classes=EXPLICIT,
         explicit_threshold=0.80,
         review_threshold=0.40,
-        generic_review_threshold=0.90,
+        scene_delete_threshold=0.95,
+        scene_review_threshold=0.60,
     )
     kw.update(over)
     return DecisionEngine(**kw)
 
 
-def analysis(detections=(), ok=True, generic=None, frames=1, error=""):
+def analysis(detections=(), ok=True, scene=None, frames=1, error=""):
     return MediaAnalysis(
         ok=ok,
         detections=list(detections),
         frames_checked=frames,
-        generic_nsfw=generic,
+        scene_nsfw=scene,
         error=error,
     )
 
@@ -51,15 +52,63 @@ def test_high_confidence_genitalia_is_explicit():
         assert res.matched.label == label
 
 
-# 4. high generic NSFW score without explicit genital evidence -> never EXPLICIT
-def test_generic_nsfw_alone_never_explicit():
-    res = engine().decide(analysis(generic=0.999))
+# 4. scene-level sexual content is a first-class signal
+def test_scene_level_high_confidence_is_explicit():
+    """No anatomical detection at all - the scene score alone deletes."""
+    res = engine().decide(analysis(scene=0.99))
+    assert res.decision is Decision.EXPLICIT
+    assert res.matched is None
+    assert res.source == "scene"
+
+
+def test_scene_level_borderline_is_review():
+    res = engine().decide(analysis(scene=0.72))
+    assert res.decision is Decision.REVIEW
+    assert res.source == "scene"
+
+
+def test_scene_level_low_is_safe():
+    assert engine().decide(analysis(scene=0.30)).decision is Decision.SAFE
+
+
+def test_scene_below_review_threshold_is_safe():
+    # just under the review band
+    assert engine().decide(analysis(scene=0.59)).decision is Decision.SAFE
+    # exactly at the review threshold -> REVIEW
+    assert engine().decide(analysis(scene=0.60)).decision is Decision.REVIEW
+    # exactly at the delete threshold -> EXPLICIT
+    assert engine().decide(analysis(scene=0.95)).decision is Decision.EXPLICIT
+    # just below the delete threshold -> REVIEW
+    assert engine().decide(analysis(scene=0.94)).decision is Decision.REVIEW
+
+
+def test_nudenet_safe_with_scene_explicit_is_explicit():
+    res = engine().decide(analysis(scene=0.98))
+    assert res.decision is Decision.EXPLICIT
+    assert res.source == "scene"
+
+
+def test_nudenet_review_with_scene_safe_does_not_delete():
+    """A borderline NudeNet hit must not become a deletion just because the
+    scene stage ran and found nothing."""
+    dets = [Detection("FEMALE_GENITALIA_EXPOSED", 0.55)]
+    res = engine().decide(analysis(dets, scene=0.10))
     assert res.decision is Decision.REVIEW
     assert res.decision is not Decision.EXPLICIT
+    assert res.source == "nudenet"
 
 
-def test_generic_nsfw_below_threshold_is_safe():
-    assert engine().decide(analysis(generic=0.5)).decision is Decision.SAFE
+def test_anatomical_evidence_wins_over_the_scene_stage():
+    dets = [Detection("MALE_GENITALIA_EXPOSED", 0.95)]
+    res = engine().decide(analysis(dets, scene=0.99))
+    assert res.decision is Decision.EXPLICIT
+    assert res.matched.label == "MALE_GENITALIA_EXPOSED"
+    assert res.source == "nudenet"
+
+
+def test_an_absent_scene_score_never_deletes():
+    # None means "no scene evidence" (disabled / failed), never "score 0"
+    assert engine().decide(analysis(scene=None)).decision is Decision.SAFE
 
 
 # covered / non-explicit classes must never be treated as explicit evidence
@@ -154,3 +203,21 @@ def test_default_threshold_boundaries():
     assert e.decide(analysis([Detection("ANUS_EXPOSED", 0.44)])).decision is Decision.REVIEW
     assert e.decide(analysis([Detection("ANUS_EXPOSED", 0.25)])).decision is Decision.REVIEW
     assert e.decide(analysis([Detection("ANUS_EXPOSED", 0.24)])).decision is Decision.SAFE
+
+
+def test_default_scene_thresholds():
+    e = default_engine()
+    assert e.scene_delete_threshold == 0.95
+    assert e.scene_review_threshold == 0.60
+    # the delete threshold is deliberately above the review threshold
+    assert e.scene_delete_threshold > e.scene_review_threshold
+    assert e.decide(analysis(scene=0.95)).decision is Decision.EXPLICIT
+    assert e.decide(analysis(scene=0.94)).decision is Decision.REVIEW
+    assert e.decide(analysis(scene=0.60)).decision is Decision.REVIEW
+    assert e.decide(analysis(scene=0.59)).decision is Decision.SAFE
+
+
+def test_scene_alone_deletes_through_the_default_engine():
+    res = default_engine().decide(analysis(scene=0.997))
+    assert res.decision is Decision.EXPLICIT
+    assert res.source == "scene"

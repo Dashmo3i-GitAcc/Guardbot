@@ -24,9 +24,9 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-The NudeNet model (~12 MB) ships inside the `nudenet` wheel. The optional
-second-stage scene classifier (~340 MB) is downloaded once on first start into
-`./data/hf` and then reused. Wait for `Detector ready.` and, if enabled,
+The NudeNet model (~12 MB) ships inside the `nudenet` wheel. The second-stage
+scene classifier (~330 MB) is downloaded once on first start into `./data/hf`
+and then reused. Wait for `Detector ready.` and, if enabled,
 `Scene classifier ready.`
 
 ## Before you start (Telegram side)
@@ -45,7 +45,7 @@ Telegram media
        -> burst -> restrict sender + delete the burst's messages + warn
   -> per-job temp dir (download, ffmpeg frame extraction for video/GIF)
   -> explicit-content detector (NudeNet, explicit body-region classes)
-  -> second-stage scene classifier (optional, one frame, REVIEW-only)
+  -> second-stage scene classifier (local, scene-level NSFW score)
   -> decision engine (SAFE / REVIEW / EXPLICIT)
   -> SAFE     -> allow (log only)
      REVIEW   -> allow (log only)
@@ -67,36 +67,59 @@ strongest detection per class is kept, so explicit content that only appears in
 one frame is still caught. Per-frame results are retained so the frame the
 decision was based on can be attached to the admin report.
 
-### Second-stage scene classifier (optional)
+### Second-stage scene classifier
 
 NudeNet sees explicit *body regions* only. It cannot see a sexual act when no
-genitalia are visible, so an optional local scene-level NSFW classifier scores
-the media on top of it and its score is used **only** to raise `REVIEW`.
+genitalia are visible - intimate/sexual interaction, an erotic scene, or an
+explicit scene where the anatomical class is simply missed. A local,
+image-level NSFW classifier
+([Falconsai/nsfw_image_detection](https://huggingface.co/Falconsai/nsfw_image_detection),
+a 224px ViT, CPU-only, ~330 MB) scores the scene on top of NudeNet so the
+overall sexual nature of the media is recognised, not just body parts.
 
-* It can **never** produce `EXPLICIT`, so it cannot cause a deletion by itself.
-* One frame is scored per media item, not one per frame.
-* It fails open: a missing model, a missing dependency or an inference error
-  simply leaves the score absent.
-* Measured cost on a 2-core VPS is roughly 1-2 s per media item.
-* Disable it with `GENERIC_NSFW_ENABLED=false`.
+Its score is graded, so only clearly sexual media deletes:
+
+| Scene score | Decision |
+|---|---|
+| `< SCENE_REVIEW_THRESHOLD` (0.60) | `SAFE` |
+| `>= SCENE_REVIEW_THRESHOLD` | `REVIEW` - logged only, never deletes |
+| `>= SCENE_DELETE_THRESHOLD` (0.95) | `EXPLICIT` - deletes the message |
+
+* A scene score at or above the delete threshold deletes **even when NudeNet
+  found nothing**. That is the point of the stage.
+* The delete threshold is deliberately high; the stage is not meant to turn
+  mildly suggestive media into deletions.
+* For video/GIF it scores up to `SCENE_MAX_FRAMES` (default 2) of the frames
+  that were **already** sampled for NudeNet - no extra ffmpeg work - and keeps
+  the highest score, because the sexual nature of a clip can be visible in a
+  single frame.
+* It fails open: a missing model, a missing dependency, an undecodable frame or
+  an inference error leaves the score absent, and an absent score never deletes.
+* Measured cost on this 2-core VPS: ~1.7 s per scored frame (the model is
+  loaded once at startup), so ~1.7 s per photo and ~3.4 s per video at the
+  default frame budget.
+* Disable it with `SCENE_ENABLED=false`.
 
 ### Decision policy
 
 | Decision | Meaning | Action |
 |---|---|---|
 | `SAFE` | normal / non-explicit | allow |
-| `REVIEW` | explicit class detected below the delete threshold, or a high scene score with no body-region evidence | allow + log |
-| `EXPLICIT` | explicit body-region class at >= `EXPLICIT_DELETE_THRESHOLD` | delete message |
+| `REVIEW` | explicit class below the delete threshold, or a scene score in the review band | allow + log |
+| `EXPLICIT` | an `EXPLICIT_CLASSES` detection at >= `EXPLICIT_DELETE_THRESHOLD`, **or** a scene score at >= `SCENE_DELETE_THRESHOLD` | delete message |
 
-* Only classes in `EXPLICIT_CLASSES` can ever produce `EXPLICIT`.
-* A generic NSFW score can only raise `REVIEW`, never `EXPLICIT`.
-* Any detector or decoding error fails open (`SAFE`) - uncertainty never
-  deletes anything.
+* Only classes in `EXPLICIT_CLASSES` can produce `EXPLICIT` from NudeNet.
+* The scene stage can produce `EXPLICIT` on its own, but only at or above
+  `SCENE_DELETE_THRESHOLD`.
+* Any detector or decoding error fails open (`SAFE`), and an absent scene score
+  is not zero - it never deletes.
 * Swimsuit, underwear, cleavage, gym, dancing, memes, cartoons and normal
   stickers/GIFs are **not** explicit evidence and are allowed.
 * Thresholds are calibrated for NudeNet 320n, whose own detection gate is 0.20
   and NMS threshold 0.25. Confirmed explicit media from live testing scored
-  0.50-0.67, which is why the default delete threshold is `0.45`.
+  0.50-0.67, which is why the default delete threshold is `0.45`. The scene
+  thresholds are conservative starting points to be tuned against real traffic,
+  not measured constants.
 
 ### Instant media flood
 
@@ -203,8 +226,13 @@ docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot \
   them there. GuardBot itself never keeps a permanent copy on the VPS.
 * The detector cannot determine age, so no age-based action is ever taken; the
   only member action is a timed restriction.
-* The scene classifier is REVIEW-only, so a sexual act with no visible
-  genitalia is logged but is not deleted.
+* The scene classifier is a general NSFW image classifier: it recognises
+  scene-level sexual content, but it is not an activity classifier and its
+  accuracy on this bot's traffic has **not** been measured against a labelled
+  set. `SCENE_DELETE_THRESHOLD` is a conservative starting point, not a
+  calibrated constant.
+* A scene score below the delete threshold is never a deletion, so a sexual
+  scene the classifier scores in the review band is logged but kept.
 * A flood is only detected when the threshold is crossed, so the messages sent
   before it are processed normally and only the burst's own messages are
   removed.

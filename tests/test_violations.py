@@ -124,7 +124,7 @@ def violation_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "WHITELIST_USER_IDS", set())
     monkeypatch.setattr(config, "MUTE_HOURS", 24)
     monkeypatch.setattr(config, "VIOLATION_MUTE_AFTER", 3)
-    monkeypatch.setattr(detector, "_generic_pipe", None)
+    monkeypatch.setattr(detector, "_scene_pipe", None)
     main._admin_cache.clear()
     db.init()  # a fresh in-memory database for each test
     yield tmp

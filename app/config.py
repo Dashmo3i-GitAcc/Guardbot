@@ -75,8 +75,6 @@ EXPLICIT_DELETE_THRESHOLD = _float("EXPLICIT_DELETE_THRESHOLD", 0.45)
 # deleted and never notified. Set to NudeNet's NMS floor so REVIEW stays a
 # meaningful state instead of a degenerate sliver just under the delete value.
 EXPLICIT_REVIEW_THRESHOLD = _float("EXPLICIT_REVIEW_THRESHOLD", 0.25)
-# A generic NSFW score may only ever raise REVIEW, never EXPLICIT.
-GENERIC_REVIEW_THRESHOLD = _float("GENERIC_REVIEW_THRESHOLD", 0.90)
 
 # Video / GIF / animated sticker: number of frames sampled
 VIDEO_FRAMES = _int("VIDEO_FRAMES", 4)
@@ -140,16 +138,37 @@ FLOOD_WARNING_TEXT = os.getenv(
     "به همین دلیل ارسال پیام برات {hours} ساعت محدود شد. لطفاً آرام‌تر بفرست.",
 )
 
-# ---------------- Second-stage (scene) classifier ----------------
-# NudeNet only sees explicit *body regions*; it cannot see a sexual act when
-# no genitalia are visible. This optional second stage adds a local
-# scene-level NSFW score on top of it.
+# ---------------- Second-stage scene classifier ----------------
+# NudeNet only sees explicit *body regions*; it cannot see a sexual act when no
+# genitalia are visible (intimate/sexual interaction, erotic scenes, explicit
+# scenes where the anatomical class is simply missed). This stage adds a local,
+# scene-level NSFW score on top of NudeNet, so the overall sexual nature of the
+# media is recognised and not just individual body parts.
 #
-# It is REVIEW-only by contract (see decision.py): it can raise REVIEW, never
-# EXPLICIT, so it can never cause a deletion on its own. It fails open - if
-# the model is missing or errors, the score is simply absent.
-GENERIC_NSFW_ENABLED = _bool("GENERIC_NSFW_ENABLED", True)
-GENERIC_NSFW_MODEL = os.getenv("GENERIC_NSFW_MODEL", "Falconsai/nsfw_image_detection")
+# Unlike the first version of this stage, a confident scene score CAN now
+# produce EXPLICIT and therefore a deletion - that is the whole point of the
+# stage. It is graded so that only clearly sexual media deletes:
+#
+#     score <  SCENE_REVIEW_THRESHOLD  -> SAFE
+#     score >= SCENE_REVIEW_THRESHOLD  -> REVIEW   (logged, never deletes)
+#     score >= SCENE_DELETE_THRESHOLD  -> EXPLICIT (delete)
+#
+# It still fails open: a missing model, a missing dependency or an inference
+# error leaves the score absent, and an absent score never deletes.
+SCENE_ENABLED = _bool("SCENE_ENABLED", True)
+SCENE_MODEL = os.getenv("SCENE_MODEL", "Falconsai/nsfw_image_detection")
+# Deliberately high: this threshold deletes media, so it is set where only a
+# clearly sexual scene reaches it. Like EXPLICIT_DELETE_THRESHOLD it is a
+# conservative starting point to be tuned against real traffic, not a measured
+# constant. Do not lower it to "catch more" without evidence.
+SCENE_DELETE_THRESHOLD = _float("SCENE_DELETE_THRESHOLD", 0.95)
+# Lower bound of the REVIEW band: mildly suggestive / ambiguous media.
+SCENE_REVIEW_THRESHOLD = _float("SCENE_REVIEW_THRESHOLD", 0.60)
+# How many of the already-sampled frames the scene stage scores. 1 reproduces
+# the old single-frame behaviour. Measured ~1.7 s per frame on the 2-core VPS,
+# so this is the knob that bounds the stage's cost on video/GIF - it is not
+# affected by raising VIDEO_FRAMES.
+SCENE_MAX_FRAMES = _int("SCENE_MAX_FRAMES", 2)
 
 DB_PATH = os.getenv("DB_PATH", "/data/guardbot.db")
 TMP_DIR = os.getenv("TMP_DIR", "/tmp/guardbot")

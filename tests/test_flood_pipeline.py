@@ -159,7 +159,7 @@ def flood_env(monkeypatch, tmp_path):
     main._admin_cache.clear()
     # keep the fall-through media path off the real model and ffmpeg
     monkeypatch.setattr(detector, "_detector", StubDetector([]))
-    monkeypatch.setattr(detector, "_generic_pipe", None)
+    monkeypatch.setattr(detector, "_scene_pipe", None)
 
     def _extract(video_path, out_dir, count):
         return []

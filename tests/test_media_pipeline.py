@@ -8,6 +8,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 from telegram.error import TelegramError
 
 from app import config, db, detector, main
@@ -19,8 +20,9 @@ ADMIN_CHAT_ID = -1009999999999
 # --------------------------------------------------------------- fakes
 class FakeFile:
     async def download_to_drive(self, path):
-        with open(path, "wb") as fh:
-            fh.write(b"fake-media")
+        # a real (tiny) PNG: the scene stage opens the downloaded file with PIL,
+        # so the fake download must produce something decodable
+        Image.new("RGB", (8, 8), (10, 20, 30)).save(path, "PNG")
 
 
 class FakeBot:
@@ -311,6 +313,78 @@ def test_oversized_media_without_thumbnail_is_skipped(monkeypatch, pipeline_env)
     monkeypatch.setattr(config, "MAX_DOWNLOAD_MB", 0)
     monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
     msg, bot = run_media(FakeBot(), photo=[photo_obj(size=10_000_000)])
+    assert msg.delete_calls == 0
+    assert_no_admin_message(bot)
+    assert_clean(pipeline_env)
+
+
+# ------------------------------------------------- scene-level detection
+class FakeScenePipe:
+    """Stands in for the local scene classifier (labels: normal / nsfw)."""
+
+    def __init__(self, score=0.99, error=None):
+        self.score = score
+        self.error = error
+
+    def __call__(self, img, top_k=None):
+        if self.error is not None:
+            raise RuntimeError(self.error)
+        return [
+            {"label": "normal", "score": 1.0 - self.score},
+            {"label": "nsfw", "score": self.score},
+        ]
+
+
+def test_scene_only_explicit_media_is_deleted_and_reported(monkeypatch, pipeline_env):
+    """NudeNet finds nothing at all - the scene score alone must delete."""
+    monkeypatch.setattr(detector, "_detector", StubDetector([]))
+    monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(score=0.99))
+
+    msg, bot = run_media(FakeBot(), photo=[photo_obj()])
+
+    assert msg.delete_calls == 1
+    assert len(bot.photos) == 1  # evidence frame + report, like any deletion
+    assert_clean(pipeline_env)
+
+
+def test_scene_only_deletion_records_a_confirmed_violation(monkeypatch, pipeline_env):
+    monkeypatch.setattr(detector, "_detector", StubDetector([]))
+    monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(score=0.99))
+    recorded = []
+    monkeypatch.setattr(db, "add_strike", lambda *a, **k: recorded.append(a) or 1)
+
+    run_media(FakeBot(), photo=[photo_obj()])
+
+    assert recorded == [(CHAT_ID, 7)]
+
+
+def test_borderline_scene_media_is_not_deleted_and_not_reported(monkeypatch, pipeline_env):
+    monkeypatch.setattr(detector, "_detector", StubDetector([]))
+    monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(score=0.75))
+
+    msg, bot = run_media(FakeBot(), photo=[photo_obj()])
+
+    assert msg.delete_calls == 0
+    assert_no_admin_message(bot)
+    assert_clean(pipeline_env)
+
+
+def test_low_scene_score_is_allowed(monkeypatch, pipeline_env):
+    monkeypatch.setattr(detector, "_detector", StubDetector([]))
+    monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(score=0.05))
+
+    msg, bot = run_media(FakeBot(), photo=[photo_obj()])
+
+    assert msg.delete_calls == 0
+    assert_no_admin_message(bot)
+
+
+def test_scene_stage_failure_fails_open(monkeypatch, pipeline_env):
+    monkeypatch.setattr(detector, "_detector", StubDetector([]))
+    monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(error="scene boom"))
+
+    msg, bot = run_media(FakeBot(), photo=[photo_obj()])
+
     assert msg.delete_calls == 0
     assert_no_admin_message(bot)
     assert_clean(pipeline_env)

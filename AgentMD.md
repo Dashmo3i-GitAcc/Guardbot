@@ -95,7 +95,7 @@ this file.
 - **Language / runtime:** Python 3.12, `python-telegram-bot[job-queue]==21.6`,
   `Pillow`, `nudenet==3.4.2` (bundles a small ONNX model; pulls
   `onnxruntime` + `opencv-python-headless`), and `transformers` + CPU-only
-  `torch` for the optional second-stage scene classifier. Tests need
+  `torch` for the second-stage scene classifier. Tests need
   `pytest` and the same runtime, so run them inside the image (see §11).
 - **Entry point:** `python -m app.main` (`app/main.py:main`). It creates the
   DB dir and temp dir, calls `db.init()`, loads the detector if
@@ -109,7 +109,7 @@ this file.
   | `app/config.py` | every setting, from environment variables |
   | `app/db.py` | SQLite: `users` (strikes/violations) and `captchas` |
   | `app/burst.py` | pure, bounded instant-flood tracker (no Telegram, no I/O) |
-  | `app/detector.py` | raw detections only; NudeNet + ffmpeg frame sampling + optional REVIEW-only scene stage |
+  | `app/detector.py` | raw detections only; NudeNet + ffmpeg frame sampling + the scene classifier |
   | `app/decision.py` | the policy: `MediaAnalysis` → `SAFE`/`REVIEW`/`EXPLICIT` |
   | `app/moderation.py` | executing a decision (delete); no Telegram import |
   | `app/main.py` | Telegram wiring: captcha handlers + the media/flood pipeline |
@@ -146,17 +146,29 @@ side effect of another change.
 | Decision | Meaning | Action |
 |---|---|---|
 | `SAFE` | normal / non-explicit | allow, log only |
-| `REVIEW` | an explicit class below the delete threshold, or ambiguous | allow, log only — **never** delete, **never** notify |
-| `EXPLICIT` | an explicit body-region class at ≥ `EXPLICIT_DELETE_THRESHOLD` | delete the Telegram message |
+| `REVIEW` | an explicit class below the delete threshold, or a scene score in the review band | allow, log only — **never** delete, **never** notify |
+| `EXPLICIT` | an `EXPLICIT_CLASSES` detection at ≥ `EXPLICIT_DELETE_THRESHOLD`, **or** a scene score at ≥ `SCENE_DELETE_THRESHOLD` | delete the Telegram message |
 
-- Only classes listed in `EXPLICIT_CLASSES` can ever produce `EXPLICIT`.
+- Only classes listed in `EXPLICIT_CLASSES` can ever produce `EXPLICIT` from
+  NudeNet.
 - `REVIEW` is a log-only state. It sends no admin message and applies no
   punishment. This is intentional, not an omission.
-- A **generic** NSFW score may only ever raise `REVIEW`, never `EXPLICIT`.
-  Note for accuracy: `MediaAnalysis.generic_nsfw` is currently never set by any
-  detector, so the generic branch in `decision.py` is dormant plumbing. Do not
-  describe it as an active classifier, and do not wire one in without an
-  explicit request.
+- There are **two** evidence sources and either can produce `EXPLICIT`:
+  1. **NudeNet anatomical evidence** — an `EXPLICIT_CLASSES` detection at or
+     above `EXPLICIT_DELETE_THRESHOLD`.
+  2. **Scene-level sexual content** — the second-stage classifier's NSFW score
+     at or above `SCENE_DELETE_THRESHOLD`, even when NudeNet found nothing.
+     This is deliberate: it is what catches a sexual act whose anatomical class
+     was not detected.
+- The scene score is **graded**: below `SCENE_REVIEW_THRESHOLD` it is `SAFE`,
+  at/above it the media is `REVIEW`, and at/above `SCENE_DELETE_THRESHOLD` it is
+  `EXPLICIT`. `SCENE_DELETE_THRESHOLD` (default 0.95) is deliberately high —
+  do not lower it to "catch more" without real evidence.
+- `DecisionResult.source` is `"nudenet"`, `"scene"` or `"none"` and records
+  which signal decided. Never merge the two signals into one score.
+- An **absent** scene score (`None`: stage disabled, model missing, decode or
+  inference error) is not zero and **never** deletes. Do not replace `None`
+  with a default score.
 
 ### 4.2 Fail open
 
@@ -188,11 +200,14 @@ side effect of another change.
   Telegram refused. `SAFE`, `REVIEW`, `DELETE_FAILED`, a *successful*
   restriction and every operational error are container-log only.
 - The report carries media type, user, user id, username, chat id, message id,
-  detected class, confidence, a reason line and a UTC timestamp, plus a
-  representative evidence frame (`MediaAnalysis.evidence_frame` — the frame
-  with the highest score for the matched class). The reason line is currently a
-  fixed explanatory sentence, not the engine's `result.reason` string; if you
-  change that, keep the report readable for a non-technical admin.
+  the detection that fired, its score, a reason line and a UTC timestamp, plus
+  an evidence frame. The evidence frame is
+  `MediaAnalysis.evidence_frame(result.matched.label)` for a NudeNet deletion,
+  and `MediaAnalysis.scene_frame` (the frame that produced the scene score) for
+  a scene-stage deletion — a scene-only deletion still gets an evidence image.
+  The reason sentence matches the source: it must **not** claim genital
+  evidence when the deletion came from the scene stage. Keep the report
+  readable for a non-technical admin.
 - Evidence upload falls back `send_photo` → `send_document` → text-only
   `send_message`. **The report itself must never be lost** because an upload
   failed. Keep that fallback order.
@@ -271,6 +286,13 @@ pre-building a future stage is a defect, not initiative.
 and its NMS threshold is 0.25, and confirmed explicit media from live testing
 scored 0.50–0.67. A previous 0.80 delete threshold never fired and sent
 everything to `REVIEW`.
+
+The scene thresholds are a different kind of number. `SCENE_REVIEW_THRESHOLD`
+(0.60) and `SCENE_DELETE_THRESHOLD` (0.95) are **conservative starting points,
+not measured constants** — the scene classifier's accuracy on this bot's
+traffic has not been measured against a labelled set. `SCENE_DELETE_THRESHOLD`
+deletes media, so it is set high on purpose. Do not present it as calibrated,
+and do not claim a detection-accuracy figure that was not measured.
 
 Therefore: **do not change a threshold to make a test or a scenario pass.**
 Thresholds are environment variables and are tuned from real traffic. If a
@@ -369,7 +391,7 @@ This is a small VPS. Disk leaks are production incidents.
 
   ```
   media chat=... user=... kind=... detector=... frames=... decision=...
-  class=... confidence=... detections=... generic=... reason=...
+  source=... class=... confidence=... detections=... scene=... scene_frames=... reason=...
   ```
 
   `detections=` comes from `MediaAnalysis.detections_summary()` and must keep
@@ -379,8 +401,9 @@ This is a small VPS. Disk leaks are production incidents.
   and for the new signals `FLOOD`, `FLOOD_RESTRICT`, `FLOOD_CLEARED`,
   `FLOOD_DELETE_FAILED`, `VIOLATION`, `VIOLATION_RESTRICT`. Do not rename or
   remove them; operators grep them.
-- The scene stage's score appears as `generic=` on the decision line. It is
-  auxiliary: it can raise `REVIEW` and never `EXPLICIT`.
+- `source=` is how an operator sees **which detector** caused the decision
+  (`nudenet` / `scene` / `none`). `scene=` is the scene score (`-` when
+  absent), `scene_frames=` how many frames the scene stage actually scored.
 - **Never log media content, file bytes, tokens or the bot token.** Class names
   and scores are fine; the media is not.
 - Add a log line only when it tells an operator something they cannot already
@@ -432,7 +455,8 @@ This is a small VPS. Disk leaks are production incidents.
 - `tests/conftest.py` sets safe defaults (`BOT_TOKEN`, `GROUP_IDS`, in-memory
   `DB_PATH`, a temp `TMP_DIR`) so tests import the app without a real `.env`.
 - The existing tests pin the safety contracts and must keep passing:
-  - `tests/test_decision.py` — the policy table, fail-open, generic-never-explicit.
+  - `tests/test_decision.py` — the policy table, fail-open, the scene bands,
+    and that a borderline NudeNet hit with a safe scene score stays `REVIEW`.
   - `tests/test_detector.py` — parsing, fail-open on decode error, media rules.
   - `tests/test_moderation.py` — delete success/failure, no-punishment-on-failure.
   - `tests/test_media_pipeline.py` — the real `on_media` handler end to end with
@@ -444,8 +468,9 @@ This is a small VPS. Disk leaks are production incidents.
     restrict, only-the-burst deletion, admin not exempt, owner exempt, fail-open.
   - `tests/test_violations.py` — the violation ladder: warn, count, restrict at
     the threshold, and everything that must not count.
-  - `tests/test_scene_stage.py` — the REVIEW-only scene stage: one frame per
-    item, fail-open, and it can never produce `EXPLICIT`.
+  - `tests/test_scene_stage.py` — the graded scene stage: `EXPLICIT` at high
+    confidence, `REVIEW` in the band, bounded frame sampling, fail-open, and
+    that a scene-stage load failure cannot stop startup.
 - **Do not weaken or delete a test to make a change pass.** If a contract
   genuinely changes, update the contract text here and in `README.md` and the
   test in the same commit.
@@ -576,10 +601,12 @@ Rules for the report:
    `work_dir`; the handler removes the whole directory in `finally`.
 5. **`.tgs` stickers are preview-only.** Do not claim animated stickers are
    fully analysed.
-6. **`generic_nsfw` is auxiliary, never a delete trigger.** When
-   `GENERIC_NSFW_ENABLED` is on, the scene stage fills it; the policy still only
-   lets it raise `REVIEW`. Turning it off or breaking it must leave the bot
-   working (it returns `None`).
+6. **The scene stage is a real, graded signal — not auxiliary plumbing.** When
+   `SCENE_ENABLED` is on, `MediaAnalysis.scene_nsfw` fills it and a score at or
+   above `SCENE_DELETE_THRESHOLD` deletes on its own (no NudeNet evidence
+   needed). Below `SCENE_REVIEW_THRESHOLD` it is ignored. `None` means "no
+   score" (disabled / failed) and must never be treated as `0.0` or as
+   evidence. Turning the stage off or breaking it must leave the bot working.
 7. **`db.add_strike` is now used for the violation ladder.** Do not add a second
    violation store, and remember it is only ever called after a *successful*
    deletion.
@@ -590,9 +617,11 @@ Rules for the report:
    the burst's own messages are deleted, and the window is then cleared so the
    next message starts a fresh burst. Do not "fix" this into waiting for the
    window to expire.
-10. **The scene classifier costs ~1-2 s per media item on a 2-core VPS.** It is
-    scored on exactly one frame per item on purpose. Scoring every frame would
-    multiply that cost; do not do it.
+10. **The scene classifier costs ~1.7 s per scored frame on a 2-core VPS.** The
+    frame budget is `SCENE_MAX_FRAMES` (default 2), which is what bounds the
+    stage's cost on video/GIF — it is deliberately independent of
+    `VIDEO_FRAMES`. Raising it improves recall at ~1.7 s per extra frame; do
+    not score every frame "just in case".
 11. **The live `.env` still contains first-generation leftovers** (`MAX_STRIKES`,
     `NSFW_DELETE_THRESHOLD`, `NSFW_BAN_THRESHOLD`, `HIGH_CONF_ACTION`,
     `TRUST_AFTER_MESSAGES`, `TRUSTED_EXTRA_MARGIN`). Nothing reads them. The

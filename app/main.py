@@ -310,9 +310,26 @@ def _analyze_blocking(path: str, is_video: bool, work_dir: str) -> detector.Medi
 
 
 def _explicit_report_text(chat, user, msg, kind, result, note) -> str:
+    """Persian admin report for one confirmed deletion.
+
+    The detection line reflects *which* signal fired: the anatomical NudeNet
+    class when there is one, otherwise the scene-level classifier. The reason
+    sentence matches too, so the report never claims genital evidence that the
+    detector did not actually find.
+    """
     matched = result.matched
-    label = matched.label if matched else "-"
-    score = matched.score if matched else 0.0
+    if matched is not None:
+        label = matched.label
+        score = matched.score
+        reason = "محتوای صریح بزرگسالان با نمایش واضح ناحیه تناسلی تشخیص داده شد."
+    else:
+        # scene-stage deletion: no anatomical class was detected
+        label = "SCENE_NSFW"
+        score = result.scene_nsfw if result.scene_nsfw is not None else 0.0
+        reason = (
+            "محتوای جنسی/صریح در صحنه تشخیص داده شد "
+            "(بدون شناسایی ناحیه تناسلی)."
+        )
     username = f"@{user.username}" if getattr(user, "username", None) else "-"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return (
@@ -326,7 +343,7 @@ def _explicit_report_text(chat, user, msg, kind, result, note) -> str:
         f"🔎 تشخیص: <b>{label}</b>\n"
         f"📊 امتیاز: <b>{score:.2f}</b>\n\n"
         f"⛔ دلیل:\n"
-        f"محتوای صریح بزرگسالان با نمایش واضح ناحیه تناسلی تشخیص داده شد.\n\n"
+        f"{reason}\n\n"
         f"✅ اقدام:\n"
         f"پیام از گروه حذف شد.\n\n"
         f"ℹ️ بررسی دستی:\n"
@@ -345,7 +362,13 @@ async def _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, no
         return
     text = _explicit_report_text(chat, user, msg, kind, result, note)
 
-    evidence = analysis.evidence_frame(result.matched.label) if result.matched else None
+    # Evidence frame: the frame behind the matched anatomical detection, or -
+    # for a scene-stage deletion, where there is no matched detection - the
+    # frame that produced the scene score.
+    if result.matched is not None:
+        evidence = analysis.evidence_frame(result.matched.label)
+    else:
+        evidence = analysis.scene_frame
     if evidence and os.path.exists(evidence):
         for method, field in (("send_photo", "photo"), ("send_document", "document")):
             try:
@@ -557,13 +580,16 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         log.info(
             "media chat=%s user=%s kind=%s detector=%s frames=%d decision=%s "
-            "class=%s confidence=%.2f detections=%s generic=%s reason=%s",
+            "source=%s class=%s confidence=%.2f detections=%s scene=%s "
+            "scene_frames=%d reason=%s",
             chat.id, user.id, kind, config.DETECTOR_BACKEND, analysis.frames_checked,
             result.decision.value,
+            result.source,
             result.matched.label if result.matched else "-",
             result.matched.score if result.matched else 0.0,
             analysis.detections_summary(),
-            f"{result.generic_nsfw:.2f}" if result.generic_nsfw is not None else "-",
+            f"{result.scene_nsfw:.2f}" if result.scene_nsfw is not None else "-",
+            analysis.scene_frames,
             result.reason,
         )
 

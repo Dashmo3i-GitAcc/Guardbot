@@ -3,7 +3,8 @@ Pillow>=10.0
 # Explicit body-region detector (bundled ONNX model, CPU-only).
 # Pulls onnxruntime + opencv-python-headless.
 nudenet==3.4.2
-# Second-stage scene classifier (REVIEW-only; it can never delete on its own).
+# Second-stage scene classifier (local, CPU). Its score is graded by the policy:
+# a confident score can delete on its own, a middling one only logs REVIEW.
 # CPU-only torch is installed separately in the Dockerfile from the pytorch CPU
 # index, so `pip install -r requirements.txt` here finds it already satisfied.
 # Installing this file on a machine without that step pulls the CUDA torch
