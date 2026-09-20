@@ -18,6 +18,19 @@ Those classes are the actual model outputs - they are not synthesised here.
 This module only produces raw detections. The moderation *policy* (which
 classes and which confidence count as EXPLICIT) lives in decision.py, so the
 detector can be swapped or extended without touching the policy.
+
+Second stage (optional, REVIEW-only)
+------------------------------------
+NudeNet sees explicit *body regions* only. It cannot see a sexual act when no
+genitalia are visible, which is a real gap. When ``GENERIC_NSFW_ENABLED`` is
+on, a local scene-level NSFW classifier scores the media on top of NudeNet and
+the result is put in ``MediaAnalysis.generic_nsfw``.
+
+That score is an auxiliary signal: decision.py can raise REVIEW with it but it
+can **never** produce EXPLICIT, so the second stage cannot cause a deletion.
+It is scored on exactly one frame per media item to bound the CPU cost, and it
+fails open - a missing model, a missing dependency or an inference error simply
+leaves ``generic_nsfw`` as None.
 """
 import logging
 import os
@@ -30,6 +43,8 @@ log = logging.getLogger("detector")
 
 _detector = None
 _load_error: str | None = None
+_generic_pipe = None
+_generic_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +122,7 @@ class MediaAnalysis:
 
 
 def load_model() -> None:
-    """Load the detector once at startup so the first media is not slow."""
+    """Load the detectors once at startup so the first media is not slow."""
     global _detector, _load_error
     from nudenet import NudeDetector
 
@@ -120,6 +135,71 @@ def load_model() -> None:
         _detector = None
         _load_error = str(e)
         log.exception("Detector failed to load; media checks will fail open")
+
+    _load_generic()
+
+
+def _load_generic() -> None:
+    """Load the optional second-stage scene classifier (REVIEW-only).
+
+    Never fatal: any failure leaves ``_generic_pipe`` as None and the stage is
+    skipped, exactly like a detector error failing open.
+    """
+    global _generic_pipe, _generic_error
+    if not config.GENERIC_NSFW_ENABLED:
+        _generic_pipe = None
+        _generic_error = None
+        log.info("Second-stage scene classifier disabled (GENERIC_NSFW_ENABLED=false)")
+        return
+    try:
+        import torch  # noqa: F401  (imported for the thread setting below)
+        from transformers import pipeline
+
+        # One thread per inference. With MEDIA_WORKERS workers this bounds the
+        # total CPU the auxiliary stage can take instead of letting every call
+        # spawn its own intra-op pool on a 2-core box.
+        try:
+            torch.set_num_threads(1)
+        except Exception:  # pragma: no cover - depends on build
+            pass
+
+        log.info(
+            "Loading second-stage scene classifier (%s, CPU) ...",
+            config.GENERIC_NSFW_MODEL,
+        )
+        _generic_pipe = pipeline(
+            "image-classification", model=config.GENERIC_NSFW_MODEL, device=-1
+        )
+        _generic_error = None
+        log.info("Scene classifier ready (REVIEW-only, never deletes).")
+    except Exception as e:
+        _generic_pipe = None
+        _generic_error = str(e)
+        log.exception(
+            "Scene classifier failed to load; the REVIEW-only stage will be skipped"
+        )
+
+
+def _generic_score(path: str) -> float | None:
+    """Scene-level NSFW probability for one frame, or None.
+
+    Auxiliary only: decision.py may raise REVIEW with it but it can never
+    produce EXPLICIT. Any failure returns None (fail open).
+    """
+    if _generic_pipe is None:
+        return None
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            results = _generic_pipe(img.convert("RGB"), top_k=None)
+        for r in results:
+            if str(r.get("label", "")).lower() == "nsfw":
+                return float(r["score"])
+        return 0.0
+    except Exception as e:
+        log.warning("scene classifier failed: %s", e)
+        return None
 
 
 def _detect_file(path: str) -> list[Detection]:
@@ -201,7 +281,23 @@ def analyze_image(path: str) -> MediaAnalysis:
         detections=found,
         frames_checked=1,
         frames=[FrameAnalysis(path, found)],
+        generic_nsfw=_generic_score(path),
     )
+
+
+def _representative_frame(frames: list[FrameAnalysis], paths: list[str]) -> str:
+    """The single frame worth spending the auxiliary stage on.
+
+    The frame with the strongest NudeNet detection is the most informative; if
+    no frame produced any detection, the first frame is used. Only one frame is
+    ever scored, so the second stage costs one inference per media item.
+    """
+    best_path, best_score = None, -1.0
+    for frame in frames:
+        top = max((d.score for d in frame.detections), default=0.0)
+        if top > best_score:
+            best_score, best_path = top, frame.path
+    return best_path or paths[0]
 
 
 def analyze_video(path: str, work_dir: str) -> MediaAnalysis:
@@ -238,6 +334,7 @@ def analyze_video(path: str, work_dir: str) -> MediaAnalysis:
             detections=list(best.values()),
             frames_checked=len(frames),
             frames=frame_results,
+            generic_nsfw=_generic_score(_representative_frame(frame_results, frames)),
         )
     except Exception as e:
         log.warning("video analysis failed: %s", e)

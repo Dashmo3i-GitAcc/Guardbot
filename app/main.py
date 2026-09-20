@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from telegram import (
     ChatPermissions,
@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import config, db, detector, moderation
+from . import burst, config, db, detector, moderation
 from .decision import Decision, default_engine
 
 logging.basicConfig(
@@ -38,6 +38,11 @@ log = logging.getLogger("guardbot")
 _pool = ThreadPoolExecutor(max_workers=config.MEDIA_WORKERS)
 _engine = default_engine()
 _admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
+# Instant-flood tracker. Bounded internally; see app/burst.py.
+_bursts = burst.BurstTracker(
+    window_seconds=config.BURST_WINDOW_SECONDS,
+    max_items=config.BURST_MAX_ITEMS,
+)
 
 MUTED = ChatPermissions(can_send_messages=False)
 FULL = ChatPermissions(
@@ -262,6 +267,120 @@ async def _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, no
     await report(ctx, text)
 
 
+# ------------------------------------------------- flood / violations
+def _burst_kind(msg) -> str | None:
+    """Burst-rule kind of a message, independent of whether it is decodable.
+
+    Ordinary photos are never counted, so sending several photos quickly is not
+    a flood; a photo is still checked by the sexual-content detector on its own.
+    The names returned here are the values used in ``BURST_MEDIA_KINDS``.
+    """
+    if msg.animation:
+        return "gif"
+    if msg.sticker:
+        st = msg.sticker
+        if getattr(st, "is_video", False):
+            return "video_sticker"
+        if getattr(st, "is_animated", False):
+            return "animated_sticker"
+        return "sticker"
+    if msg.video_note:
+        return "video_note"
+    return None
+
+
+def _format_notice(template: str, **kwargs) -> str | None:
+    """Format a configurable notice. Never raises."""
+    try:
+        return template.format(**kwargs)
+    except Exception:
+        log.exception("notice template formatting failed")
+        return None
+
+
+async def _restrict_user(ctx, chat_id: int, user_id: int) -> bool:
+    """Apply the configured timed restriction.
+
+    Returns True only when Telegram accepted it. A refusal (for example the
+    target is a chat administrator, or the bot lacks can_restrict_members) is
+    logged and returns False - it is never reported as a success.
+    """
+    until = None
+    if config.MUTE_HOURS > 0:
+        until = datetime.now(timezone.utc) + timedelta(hours=config.MUTE_HOURS)
+    try:
+        await ctx.bot.restrict_chat_member(
+            chat_id, user_id, permissions=MUTED, until_date=until
+        )
+        return True
+    except TelegramError as e:
+        log.warning("restrict failed chat=%s user=%s: %s", chat_id, user_id, e)
+        return False
+
+
+async def _send_user_notice(ctx, chat_id: int, text: str | None) -> None:
+    """Post a warning in the group. Fail-open: a rejected message changes nothing."""
+    if not text:
+        return
+    try:
+        await ctx.bot.send_message(chat_id, text, parse_mode="HTML")
+    except TelegramError as e:
+        log.warning("user notice failed: %s", e)
+
+
+async def _enforce_burst(ctx, chat, user, decision: burst.BurstDecision) -> None:
+    """A confirmed instant flood: stop the user, remove the burst, warn.
+
+    Only the messages recorded as belonging to this burst are touched - never
+    other history from the same user. Every Telegram call fails open.
+    """
+    log.warning(
+        "FLOOD chat=%s user=%s count=%d window=%ss messages=%s",
+        chat.id, user.id, decision.count, config.BURST_WINDOW_SECONDS,
+        decision.message_ids,
+    )
+
+    restricted = await _restrict_user(ctx, chat.id, user.id)
+    log.info(
+        "FLOOD_RESTRICT chat=%s user=%s hours=%s applied=%s",
+        chat.id, user.id, config.MUTE_HOURS, restricted,
+    )
+
+    deleted = 0
+    failed = 0
+    for mid in decision.message_ids:
+        try:
+            await ctx.bot.delete_message(chat.id, mid)
+            deleted += 1
+        except TelegramError as e:
+            failed += 1
+            log.warning("FLOOD_DELETE_FAILED chat=%s message=%s error=%s", chat.id, mid, e)
+    log.info(
+        "FLOOD_CLEARED chat=%s user=%s deleted=%d failed=%d",
+        chat.id, user.id, deleted, failed,
+    )
+
+    if restricted:
+        await _send_user_notice(
+            ctx,
+            chat.id,
+            _format_notice(
+                config.FLOOD_WARNING_TEXT, name=mention(user), hours=config.MUTE_HOURS
+            ),
+        )
+    else:
+        # The restriction was refused (for example an administrator). Say so
+        # rather than pretending it worked.
+        await report(
+            ctx,
+            "⚠️ <b>سیل مدیا</b>\n"
+            f"👤 کاربر: {mention(user)}\n"
+            f"🆔 <code>{user.id}</code>\n"
+            f"📊 تعداد: <b>{decision.count}</b>\n"
+            "❌ محدودسازی اعمال نشد (تلگرام اجازه نداد).",
+        )
+
+
 async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Media pipeline: download -> detect -> decide -> delete -> report -> cleanup."""
     msg = update.effective_message
@@ -269,8 +388,27 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not msg or chat.id not in config.GROUP_IDS or not user:
         return
-    if await is_admin(ctx, chat.id, user.id):
+    # Owner exemption only (WHITELIST_USER_IDS). Telegram admins are NOT
+    # exempt: both the sexual-content moderation and the anti-flood rule apply
+    # to them. Telegram itself decides whether the bot may act on an admin's
+    # message, and every failure is handled fail-open below.
+    if user.id in config.WHITELIST_USER_IDS:
         return
+
+    # ---- instant media flood: decided from message metadata, no download ----
+    bkind = _burst_kind(msg)
+    if config.BURST_ENABLED and bkind is not None:
+        decision = _bursts.record(
+            chat.id, user.id, getattr(msg, "message_id", 0), bkind,
+            kinds=config.BURST_MEDIA_KINDS,
+        )
+        if decision.is_burst:
+            try:
+                await _enforce_burst(ctx, chat, user, decision)
+            except Exception:
+                # fail open: a flood-handling error never escalates
+                log.exception("burst enforcement failed")
+            return
 
     picked = _pick_media(msg)
     if not picked:
@@ -338,9 +476,13 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             # borderline: logged only. No delete, no admin message, no punishment.
             return
 
-        # EXPLICIT -> delete the Telegram message. Nothing else: no strike,
-        # no mute, no ban, no kick, no restrict.
-        outcome = await moderation.enforce(result, delete_media=lambda: msg.delete())
+        # EXPLICIT -> delete the Telegram message. This is the only content
+        # action, and a successful deletion is one confirmed violation.
+        outcome = await moderation.enforce(
+            result,
+            delete_media=lambda: msg.delete(),
+            record_confirmed=lambda: db.add_strike(chat.id, user.id),
+        )
 
         if not outcome.deleted:
             log.error(
@@ -359,6 +501,30 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             result.matched.score if result.matched else 0.0,
         )
         await _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, note)
+
+        # A failed deletion returns above, so a strike is only ever recorded for
+        # content that was actually removed. A database error leaves
+        # outcome.strike as None and changes nothing else.
+        if outcome.strike is not None:
+            log.info(
+                "VIOLATION chat=%s user=%s count=%d", chat.id, user.id, outcome.strike
+            )
+            if outcome.strike >= config.VIOLATION_MUTE_AFTER:
+                restricted = await _restrict_user(ctx, chat.id, user.id)
+                log.info(
+                    "VIOLATION_RESTRICT chat=%s user=%s count=%d hours=%s applied=%s",
+                    chat.id, user.id, outcome.strike, config.MUTE_HOURS, restricted,
+                )
+            await _send_user_notice(
+                ctx,
+                chat.id,
+                _format_notice(
+                    config.VIOLATION_WARNING_TEXT,
+                    name=mention(user),
+                    count=outcome.strike,
+                    max=config.VIOLATION_MUTE_AFTER,
+                ),
+            )
     except Exception:
         # fail open: never delete or punish because of an internal error
         log.exception("media pipeline failed")

@@ -6,14 +6,16 @@ unit tested. The Telegram handler injects the real actions.
 Safety contract (this is the important part):
 
     EXPLICIT  -> attempt deletion
-                 -> deletion succeeded: record the confirmed moderation action
-                 -> deletion failed:  log it, apply NO strike / NO ban
+                 -> deletion succeeded: record the confirmed violation
+                 -> deletion failed:  log it, apply NO strike / NO restriction
     REVIEW    -> allow, no side effects
     SAFE      -> allow, no side effects
 
 A member is never punished because of an internal error or a failed delete.
-In this stage there is intentionally no ban/mute escalation at all: the only
-automatic action is removing the media.
+This module still performs no escalation itself: it deletes and reports whether
+a confirmed violation was recorded. The caller (app/main.py) owns what happens
+next - the warning, and the timed restriction once the configured violation
+count is reached.
 """
 import logging
 from dataclasses import dataclass
