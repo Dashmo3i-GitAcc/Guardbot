@@ -122,7 +122,7 @@ def violation_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TMP_DIR", str(tmp))
     monkeypatch.setattr(config, "MAX_DOWNLOAD_MB", 20)
     monkeypatch.setattr(config, "WHITELIST_USER_IDS", set())
-    monkeypatch.setattr(config, "MUTE_HOURS", 24)
+    monkeypatch.setattr(config, "MUTE_MINUTES", 15)
     monkeypatch.setattr(config, "VIOLATION_MUTE_AFTER", 3)
     monkeypatch.setattr(detector, "_scene_pipe", None)
     main._admin_cache.clear()

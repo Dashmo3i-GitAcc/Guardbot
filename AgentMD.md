@@ -229,8 +229,10 @@ side effect of another change.
 ### 4.5 Punishment is a timed restriction, never a ban
 
 - The only member action is `restrict_chat_member` with `MUTED` permissions and
-  an expiry of `MUTE_HOURS` (default 24). Telegram lifts a timed restriction
-  itself, so there is no reaper. `MUTE_HOURS=0` means no automatic expiry.
+  an expiry of `MUTE_MINUTES` (default 15). Telegram lifts a timed restriction
+  itself, so there is no reaper. `MUTE_MINUTES=0` means no automatic expiry.
+  The unit is **minutes**: the old `MUTE_HOURS` (24) is no longer read, and a
+  leftover `MUTE_HOURS` in a live `.env` must stay inert.
 - There is **no ban and no permanent punishment**. Do not add one.
 - One confirmed explicit deletion is one violation, recorded through the
   existing `db.add_strike` / `users.strikes` (do not add a second violation
@@ -243,6 +245,35 @@ side effect of another change.
 - `_restrict_user` returns True only when Telegram accepted the call. A refusal
   (an administrator target, missing `can_restrict_members`) is logged and
   reported, never claimed as a success.
+
+### 4.5.1 The test account exception
+
+`TEST_USER_ID` (default `8299811287`) is the owner's test account. It exists so
+the pipeline can be exercised repeatedly without a manual unrestrict.
+
+- It is **not exempt from anything**: detection, deletion, the strike, the
+  warning, the admin report and the real `restrict_chat_member` call all run
+  exactly as for anyone else. Do not add an exemption here, and do not let this
+  exception suppress the report, the deletion or the strike.
+- The **only** difference is post-restriction cleanup, in
+  `_schedule_test_unrestrict` / `_test_unrestrict_job`: after a *successful*
+  restriction, one `job_queue.run_once` job lifts the restriction again after
+  `TEST_USER_UNRESTRICT_SECONDS` (default 2 s) and deletes the warning message
+  that belonged to that restriction cycle.
+- The schedule happens only when the restrict actually succeeded. A refused
+  restrict schedules nothing.
+- `_test_unrestrict_jobs` / `_test_unrestrict_notices` are keyed by
+  `(chat_id, user_id)`: a new restriction cycle cancels the pending job instead
+  of stacking background tasks, and warnings from replaced cycles are still
+  cleaned up. Keep that bound — do not append jobs to a list.
+- The delayed unrestrict must never block the event loop (it is a job-queue
+  job, not a sleep) and must never raise: failures are logged as
+  `TEST_UNRESTRICT_FAILED` / `TEST_UNRESTRICT_NOTICE_KEPT` and nothing else
+  happens.
+- Cleanup only ever deletes the group warning message id. It must never delete
+  the admin report or the moderated message.
+- `TEST_USER_ID=0` disables the exception. A non-configured user must never get
+  the 2-second behaviour.
 
 ### 4.6 Instant media flood
 
@@ -399,7 +430,9 @@ This is a small VPS. Disk leaks are production incidents.
   `CLASS:score,...`.
 - The outcome lines are `DELETE_SUCCESS`, `DELETE_FAILED`, `media SKIPPED`,
   and for the new signals `FLOOD`, `FLOOD_RESTRICT`, `FLOOD_CLEARED`,
-  `FLOOD_DELETE_FAILED`, `VIOLATION`, `VIOLATION_RESTRICT`. Do not rename or
+  `FLOOD_DELETE_FAILED`, `VIOLATION`, `VIOLATION_RESTRICT`, plus the test-account
+  pair `TEST_UNRESTRICT_SCHEDULED` / `TEST_UNRESTRICT` and their failure lines
+  `TEST_UNRESTRICT_FAILED` / `TEST_UNRESTRICT_NOTICE_KEPT`. Do not rename or
   remove them; operators grep them.
 - `source=` is how an operator sees **which detector** caused the decision
   (`nudenet` / `scene` / `none`). `scene=` is the scene score (`-` when
@@ -468,6 +501,10 @@ This is a small VPS. Disk leaks are production incidents.
     restrict, only-the-burst deletion, admin not exempt, owner exempt, fail-open.
   - `tests/test_violations.py` — the violation ladder: warn, count, restrict at
     the threshold, and everything that must not count.
+  - `tests/test_test_user.py` — the test-account exception and the normal
+    restriction duration: 15-minute default, the restrict still happening, the
+    delayed unrestrict, the warning cleanup, the untouched admin report, and
+    that other users get none of it.
   - `tests/test_scene_stage.py` — the graded scene stage: `EXPLICIT` at high
     confidence, `REVIEW` in the band, bounded frame sampling, fail-open, and
     that a scene-stage load failure cannot stop startup.

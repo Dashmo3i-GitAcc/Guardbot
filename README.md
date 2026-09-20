@@ -148,9 +148,28 @@ existing `users.strikes` column.
 
 * Every violation sends the user a warning.
 * At `VIOLATION_MUTE_AFTER` (default 3) the user is restricted for
-  `MUTE_HOURS` (default 24). Telegram lifts a timed restriction itself.
+  `MUTE_MINUTES` (default 15). Telegram lifts a timed restriction itself.
 * A **failed deletion is never a violation** - it logs `DELETE_FAILED` and
   applies nothing.
+
+### Test account
+
+`TEST_USER_ID` (default `8299811287`) marks one account used to exercise the
+pipeline repeatedly in a test group. It is **not exempt from anything** -
+detection, deletion, the strike, the warning, the admin report and the real
+`restrict_chat_member` call all happen exactly as for any other user. The only
+difference is what happens *after* a successful restriction:
+
+1. the restriction is applied normally,
+2. the warning and admin report are sent normally,
+3. `TEST_USER_UNRESTRICT_SECONDS` (default 2) later the restriction is lifted,
+4. the warning message from that restriction cycle is deleted.
+
+So the account can send the next test violation immediately. The cleanup never
+touches the admin report or the moderated message. At most one delayed job
+exists per (chat, user), so repeated violations cannot pile up background tasks.
+A failure in the delayed unrestrict is logged and never crashes the bot. Set
+`TEST_USER_ID=0` to disable the exception.
 
 ### Admin chat
 

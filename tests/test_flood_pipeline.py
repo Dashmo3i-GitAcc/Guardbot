@@ -151,7 +151,7 @@ def flood_env(monkeypatch, tmp_path):
         config, "BURST_MEDIA_KINDS",
         {"gif", "sticker", "animated_sticker", "video_sticker", "video_note"},
     )
-    monkeypatch.setattr(config, "MUTE_HOURS", 24)
+    monkeypatch.setattr(config, "MUTE_MINUTES", 15)
     # a fresh tracker per test: the module-level one carries state
     monkeypatch.setattr(
         main, "_bursts", burst.BurstTracker(window_seconds=3.0, max_items=5)
@@ -293,7 +293,7 @@ def test_delete_failure_is_fail_open():
 
 
 def test_restrict_receives_the_configured_expiry(monkeypatch):
-    monkeypatch.setattr(config, "MUTE_HOURS", 24)
+    monkeypatch.setattr(config, "MUTE_MINUTES", 15)
     bot = FakeBot()
     for i in range(6):
         gif(100 + i, bot=bot)

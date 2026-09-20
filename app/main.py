@@ -427,8 +427,8 @@ async def _restrict_user(ctx, chat_id: int, user_id: int) -> bool:
     logged and returns False - it is never reported as a success.
     """
     until = None
-    if config.MUTE_HOURS > 0:
-        until = datetime.now(timezone.utc) + timedelta(hours=config.MUTE_HOURS)
+    if config.MUTE_MINUTES > 0:
+        until = datetime.now(timezone.utc) + timedelta(minutes=config.MUTE_MINUTES)
     try:
         await ctx.bot.restrict_chat_member(
             chat_id, user_id, permissions=MUTED, until_date=until
@@ -439,14 +439,115 @@ async def _restrict_user(ctx, chat_id: int, user_id: int) -> bool:
         return False
 
 
-async def _send_user_notice(ctx, chat_id: int, text: str | None) -> None:
-    """Post a warning in the group. Fail-open: a rejected message changes nothing."""
+async def _send_user_notice(ctx, chat_id: int, text: str | None) -> int | None:
+    """Post a warning in the group. Fail-open: a rejected message changes nothing.
+
+    Returns the sent message id (or None) so the caller can clean the warning up
+    later - the test account uses this so it does not accumulate warnings.
+    """
     if not text:
-        return
+        return None
     try:
-        await ctx.bot.send_message(chat_id, text, parse_mode="HTML")
+        msg = await ctx.bot.send_message(chat_id, text, parse_mode="HTML")
     except TelegramError as e:
         log.warning("user notice failed: %s", e)
+        return None
+    return getattr(msg, "message_id", None)
+
+
+# ------------------------------------------------- test account unrestrict
+# The test account is moderated exactly like everyone else; only the *cleanup*
+# after a successful restriction differs. These two maps keep that bounded: at
+# most one pending unrestrict job per (chat, user), and at most one list of
+# warning message ids waiting to be removed.
+_test_unrestrict_jobs: dict[tuple[int, int], object] = {}
+_test_unrestrict_notices: dict[tuple[int, int], list[int]] = {}
+
+
+def _schedule_test_unrestrict(
+    ctx, chat_id: int, user_id: int, notice_id: int | None
+) -> None:
+    """Test account only: lift a successful restriction again after a delay.
+
+    This is the *only* special behaviour for ``TEST_USER_ID``. Detection,
+    deletion, the strike, the admin report and the real ``restrict_chat_member``
+    call all happen normally first; the restriction is simply undone a moment
+    later so the next test violation can be sent without a manual unrestrict.
+
+    A no-op for every other user. At most one delayed job exists per
+    (chat, user): a new restriction cycle cancels the pending one instead of
+    stacking background tasks, and warnings from replaced cycles are still
+    cleaned up.
+    """
+    if not config.TEST_USER_ID or user_id != config.TEST_USER_ID:
+        return
+
+    job_queue = getattr(ctx, "job_queue", None)
+    if job_queue is None:  # pragma: no cover - the bot always builds one
+        log.warning("TEST_UNRESTRICT_SKIPPED chat=%s user=%s reason=no_job_queue",
+                    chat_id, user_id)
+        return
+
+    key = (chat_id, user_id)
+    previous = _test_unrestrict_jobs.pop(key, None)
+    if previous is not None:
+        try:
+            previous.schedule_removal()
+        except Exception:  # pragma: no cover - depends on the job queue
+            log.warning("could not cancel the pending test unrestrict for user=%s", user_id)
+    if notice_id is not None:
+        _test_unrestrict_notices.setdefault(key, []).append(notice_id)
+
+    delay = config.TEST_USER_UNRESTRICT_SECONDS
+    _test_unrestrict_jobs[key] = job_queue.run_once(
+        _test_unrestrict_job,
+        when=delay,
+        data={"chat_id": chat_id, "user_id": user_id},
+        name=f"test-unrestrict:{chat_id}:{user_id}",
+    )
+    log.info(
+        "TEST_UNRESTRICT_SCHEDULED chat=%s user=%s in=%ss", chat_id, user_id, delay
+    )
+
+
+async def _test_unrestrict_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lift the test account's restriction and clean up its warning message.
+
+    Never raises: a failure here must not take the bot down, must not affect any
+    other user, and must not leave a broken job behind.
+    """
+    job = getattr(ctx, "job", None)
+    data = getattr(job, "data", None) or {}
+    chat_id, user_id = data.get("chat_id"), data.get("user_id")
+    if chat_id is None or user_id is None:  # pragma: no cover - defensive
+        return
+    key = (chat_id, user_id)
+    if job is not None and _test_unrestrict_jobs.get(key) is not job:
+        # A newer restriction cycle replaced this job. It owns the unrestrict
+        # and the cleanup, so a stale job must not duplicate either.
+        log.info("TEST_UNRESTRICT_SUPERSEDED chat=%s user=%s", chat_id, user_id)
+        return
+    _test_unrestrict_jobs.pop(key, None)
+
+    try:
+        await ctx.bot.restrict_chat_member(chat_id, user_id, permissions=FULL)
+        log.info("TEST_UNRESTRICT chat=%s user=%s", chat_id, user_id)
+    except TelegramError as e:
+        log.warning("TEST_UNRESTRICT_FAILED chat=%s user=%s: %s", chat_id, user_id, e)
+    except Exception:
+        log.exception("TEST_UNRESTRICT_FAILED chat=%s user=%s", chat_id, user_id)
+
+    # The warning belonged to the restriction cycle that just ended. Cleaning it
+    # up (even when the unrestrict above failed) is what stops the test account
+    # from accumulating warnings; the failure is logged either way.
+    for message_id in _test_unrestrict_notices.pop(key, []):
+        try:
+            await ctx.bot.delete_message(chat_id, message_id)
+        except TelegramError as e:
+            log.warning(
+                "TEST_UNRESTRICT_NOTICE_KEPT chat=%s message=%s: %s",
+                chat_id, message_id, e,
+            )
 
 
 async def _enforce_burst(ctx, chat, user, decision: burst.BurstDecision) -> None:
@@ -463,8 +564,8 @@ async def _enforce_burst(ctx, chat, user, decision: burst.BurstDecision) -> None
 
     restricted = await _restrict_user(ctx, chat.id, user.id)
     log.info(
-        "FLOOD_RESTRICT chat=%s user=%s hours=%s applied=%s",
-        chat.id, user.id, config.MUTE_HOURS, restricted,
+        "FLOOD_RESTRICT chat=%s user=%s minutes=%s applied=%s",
+        chat.id, user.id, config.MUTE_MINUTES, restricted,
     )
 
     deleted = 0
@@ -482,13 +583,16 @@ async def _enforce_burst(ctx, chat, user, decision: burst.BurstDecision) -> None
     )
 
     if restricted:
-        await _send_user_notice(
+        notice_id = await _send_user_notice(
             ctx,
             chat.id,
             _format_notice(
-                config.FLOOD_WARNING_TEXT, name=mention(user), hours=config.MUTE_HOURS
+                config.FLOOD_WARNING_TEXT,
+                name=mention(user),
+                minutes=config.MUTE_MINUTES,
             ),
         )
+        _schedule_test_unrestrict(ctx, chat.id, user.id, notice_id)
     else:
         # The restriction was refused (for example an administrator). Say so
         # rather than pretending it worked.
@@ -633,13 +737,14 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             log.info(
                 "VIOLATION chat=%s user=%s count=%d", chat.id, user.id, outcome.strike
             )
+            restricted = False
             if outcome.strike >= config.VIOLATION_MUTE_AFTER:
                 restricted = await _restrict_user(ctx, chat.id, user.id)
                 log.info(
-                    "VIOLATION_RESTRICT chat=%s user=%s count=%d hours=%s applied=%s",
-                    chat.id, user.id, outcome.strike, config.MUTE_HOURS, restricted,
+                    "VIOLATION_RESTRICT chat=%s user=%s count=%d minutes=%s applied=%s",
+                    chat.id, user.id, outcome.strike, config.MUTE_MINUTES, restricted,
                 )
-            await _send_user_notice(
+            notice_id = await _send_user_notice(
                 ctx,
                 chat.id,
                 _format_notice(
@@ -649,6 +754,10 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     max=config.VIOLATION_MUTE_AFTER,
                 ),
             )
+            # The test account is restricted for real above; only then is the
+            # unrestrict scheduled, and only for that one user id.
+            if restricted:
+                _schedule_test_unrestrict(ctx, chat.id, user.id, notice_id)
     except Exception:
         # fail open: never delete or punish because of an internal error
         log.exception("media pipeline failed")

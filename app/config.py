@@ -120,9 +120,24 @@ BURST_MEDIA_KINDS = set(
 # not read anywhere any more. This setting keeps the documented three-strike
 # policy regardless of leftover environment.
 VIOLATION_MUTE_AFTER = _int("VIOLATION_MUTE_AFTER", 3)
-# Restriction length in hours. Telegram lifts the restriction itself when the
-# time is up, so no reaper is needed.
-MUTE_HOURS = _int("MUTE_HOURS", 24)
+# Restriction length in minutes. Telegram lifts a timed restriction itself when
+# the time is up, so no reaper is needed. 0 = no automatic expiry.
+#
+# Note: this is deliberately NOT named MUTE_HOURS. The live .env still carries a
+# stale MUTE_HOURS=24 from the previous 24-hour policy; that variable is not
+# read anywhere any more. This setting keeps the documented 15-minute policy
+# regardless of leftover environment.
+MUTE_MINUTES = _int("MUTE_MINUTES", 15)
+
+# ---------------- Test account ----------------
+# One user id used to exercise the moderation pipeline repeatedly in a test
+# group. It is NOT exempt from anything: detection, deletion, strikes, the admin
+# report and the real Telegram restrict call all run exactly as for anyone else.
+# The only difference is that a *successful* restriction is lifted again after
+# TEST_USER_UNRESTRICT_SECONDS, so the next test violation can be sent straight
+# away without a manual unrestrict. Set TEST_USER_ID=0 to disable the exception.
+TEST_USER_ID = _int("TEST_USER_ID", 8299811287)
+TEST_USER_UNRESTRICT_SECONDS = _float("TEST_USER_UNRESTRICT_SECONDS", 2.0)
 
 VIOLATION_WARNING_TEXT = os.getenv(
     "VIOLATION_WARNING_TEXT",
@@ -135,7 +150,7 @@ FLOOD_WARNING_TEXT = os.getenv(
     "FLOOD_WARNING_TEXT",
     "سلام {name} 🙏\n"
     "چند تا فایل/استیکر رو خیلی سریع پشت سر هم فرستادی و این باعث شلوغی گروه می‌شه.\n"
-    "به همین دلیل ارسال پیام برات {hours} ساعت محدود شد. لطفاً آرام‌تر بفرست.",
+    "به همین دلیل ارسال پیام برات {minutes} دقیقه محدود شد. لطفاً آرام‌تر بفرست.",
 )
 
 # ---------------- Second-stage scene classifier ----------------
