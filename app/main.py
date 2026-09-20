@@ -3,7 +3,6 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
 
 from telegram import (
     ChatPermissions,
@@ -22,7 +21,8 @@ from telegram.ext import (
     filters,
 )
 
-from . import config, db, detector
+from . import config, db, detector, moderation
+from .decision import Decision, default_engine
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -33,6 +33,7 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 log = logging.getLogger("guardbot")
 
 _pool = ThreadPoolExecutor(max_workers=config.MEDIA_WORKERS)
+_engine = default_engine()
 _admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 
 MUTED = ChatPermissions(can_send_messages=False)
@@ -175,7 +176,7 @@ def _pick_media(msg):
         return msg.video_note, "video_note", True
     if msg.sticker:
         st = msg.sticker
-        if st.is_animated:  # .tgs (Lottie) can't be decoded by ffmpeg -> check thumb
+        if st.is_animated:  # .tgs (Lottie) can't be decoded by ffmpeg -> skip
             return None
         return st, "sticker", bool(st.is_video)
     if msg.document and msg.document.mime_type:
@@ -191,11 +192,19 @@ def _thumb_of(obj):
     return getattr(obj, "thumbnail", None) or getattr(obj, "thumb", None)
 
 
-def _analyze_blocking(path: str, is_video: bool) -> detector.Verdict:
+def _analyze_blocking(path: str, is_video: bool) -> detector.MediaAnalysis:
     return detector.analyze_video(path) if is_video else detector.analyze_image(path)
 
 
+def _describe(result) -> str:
+    matched = result.matched
+    cls = matched.label if matched else "-"
+    score = matched.score if matched else 0.0
+    return f"class=<b>{cls}</b> score=<b>{score:.2f}</b>"
+
+
 async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Media pipeline: normalize -> detect -> decide -> enforce."""
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -211,7 +220,7 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     os.makedirs(config.TMP_DIR, exist_ok=True)
     path = None
-    verdict = None
+    analysis = None
     note = ""
 
     try:
@@ -235,7 +244,7 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await f.download_to_drive(path)
 
         loop = asyncio.get_running_loop()
-        verdict = await loop.run_in_executor(
+        analysis = await loop.run_in_executor(
             _pool, _analyze_blocking, path, target_is_video
         )
     except Exception as e:
@@ -244,78 +253,74 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await report(ctx, f"⚠️ خطا در بررسی مدیا: <code>{e}</code>")
         return
     finally:
+        # media is only kept for the duration of inference
         if path and os.path.exists(path):
             try:
                 os.remove(path)
             except OSError:
                 pass
 
-    if verdict.frames_checked == 0:
-        log.warning("no frames checked: %s", verdict.note)
-        return
-
-    trusted = db.is_trusted(chat.id, user.id)
-    margin = config.TRUSTED_EXTRA_MARGIN if trusted else 0.0
-    del_thr = min(config.NSFW_DELETE_THRESHOLD + margin, 0.99)
-    ban_thr = min(config.NSFW_BAN_THRESHOLD + margin, 0.99)
+    result = _engine.decide(analysis)
 
     log.info(
-        "media chat=%s user=%s kind=%s score=%.3f frames=%d",
-        chat.id, user.id, kind, verdict.score, verdict.frames_checked,
+        "media chat=%s user=%s kind=%s detector=%s frames=%d decision=%s "
+        "class=%s confidence=%.2f generic=%s reason=%s",
+        chat.id, user.id, kind, config.DETECTOR_BACKEND, analysis.frames_checked,
+        result.decision.value,
+        result.matched.label if result.matched else "-",
+        result.matched.score if result.matched else 0.0,
+        f"{result.generic_nsfw:.2f}" if result.generic_nsfw is not None else "-",
+        result.reason,
     )
 
-    if verdict.score < del_thr:
+    if result.decision is Decision.SAFE:
         return
 
-    # ---- bad content: delete first, ask questions later ----
-    try:
-        await msg.delete()
-    except TelegramError as e:
-        log.warning("delete failed: %s", e)
+    if result.decision is Decision.REVIEW:
+        # borderline: allowed, never deleted, never punished
+        await report(
+            ctx,
+            f"🔎 <b>REVIEW</b> (بررسی دستی، حذف نشد) {note}\n"
+            f"کاربر: {mention(user)} (<code>{user.id}</code>)\n"
+            f"نوع: {kind} | {_describe(result)} | فریم‌ها: {analysis.frames_checked}\n"
+            f"دلیل: <code>{result.reason}</code>",
+        )
+        return
 
-    strikes = db.add_strike(chat.id, user.id)
-    hard = strikes >= config.MAX_STRIKES
+    # EXPLICIT -> delete only. No ban/mute in this stage.
+    outcome = await moderation.enforce(
+        result,
+        delete_media=lambda: msg.delete(),
+        record_confirmed=lambda: db.add_strike(chat.id, user.id),
+    )
 
-    action = "حذف شد"
-    if hard:
-        if config.HIGH_CONF_ACTION == "ban":
-            try:
-                await ctx.bot.ban_chat_member(chat.id, user.id)
-                action = "حذف + بن"
-            except TelegramError as e:
-                log.warning("ban failed: %s", e)
-        else:
-            until = datetime.now(timezone.utc) + timedelta(hours=config.MUTE_HOURS)
-            try:
-                await ctx.bot.restrict_chat_member(
-                    chat.id, user.id, permissions=MUTED, until_date=until
-                )
-                action = f"حذف + میوت {config.MUTE_HOURS} ساعته"
-            except TelegramError as e:
-                log.warning("mute failed: %s", e)
+    if outcome.action == "delete_failed":
+        await report(
+            ctx,
+            f"⚠️ <b>حذف ناموفق</b> (هیچ اخطار/بنی اعمال نشد) {note}\n"
+            f"کاربر: {mention(user)} (<code>{user.id}</code>)\n"
+            f"نوع: {kind} | {_describe(result)}\n"
+            f"خطا: <code>{outcome.reason}</code>",
+        )
+        return
 
     await report(
         ctx,
-        f"🚫 <b>مدیای نامناسب</b> {note}\n"
+        f"🚫 <b>مدیای صریح حذف شد</b> {note}\n"
         f"کاربر: {mention(user)} (<code>{user.id}</code>)\n"
-        f"نوع: {kind} | امتیاز: <b>{verdict.score:.2f}</b> | فریم‌ها: {verdict.frames_checked}\n"
-        f"اخطار: {strikes} | اقدام: <b>{action}</b>",
+        f"نوع: {kind} | {_describe(result)} | فریم‌ها: {analysis.frames_checked}\n"
+        f"اخطار ثبت‌شده: {outcome.strike} | اقدام: <b>حذف مدیا</b>",
     )
-
-
-# ------------------------------------------------------------ counting
-async def on_any_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Counts messages for the trust system."""
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
-    if not msg or not user or chat.id not in config.GROUP_IDS:
-        return
-    db.bump_messages(chat.id, user.id)
 
 
 # ------------------------------------------------------------ wiring
 async def post_init(app: Application) -> None:
     app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
-    log.info("GuardBot started. Groups: %s", config.GROUP_IDS)
+    log.info(
+        "GuardBot started. Groups: %s | explicit classes: %s",
+        config.GROUP_IDS,
+        sorted(config.EXPLICIT_CLASSES),
+    )
 
 
 def main() -> None:
@@ -343,11 +348,6 @@ def main() -> None:
             | filters.Document.VIDEO
         ) & filters.ChatType.GROUPS
         app.add_handler(MessageHandler(media_filter, on_media), group=0)
-
-    app.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, on_any_message),
-        group=1,
-    )
 
     # chat_member updates must be requested explicitly
     app.run_polling(

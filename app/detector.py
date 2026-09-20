@@ -1,48 +1,107 @@
-"""Local NSFW detection. Nothing leaves the server.
+"""Local explicit-content detection. Nothing leaves the server.
 
-- Images: classified directly.
-- Video / GIF / animated stickers (webm/tgs-converted): N frames are pulled
-  with ffmpeg and the WORST (highest) score wins.
+Primary detector: NudeNet (YOLOv8-based ONNX model, 320px, CPU-only). It
+reports explicit *body-region* classes, including:
+
+    FEMALE_GENITALIA_EXPOSED
+    MALE_GENITALIA_EXPOSED
+    ANUS_EXPOSED
+
+Those classes are the actual model outputs - they are not synthesised here.
+
+- Images are classified directly.
+- Video / GIF / animated video stickers (mp4/webm) are decoded with ffmpeg,
+  N frames are sampled and every frame is scored. The strongest detection per
+  class across all frames is kept, so explicit content that only appears in
+  one frame is still seen, while a single weak frame cannot dominate.
+
+This module only produces raw detections. The moderation *policy* (which
+classes and which confidence count as EXPLICIT) lives in decision.py, so the
+detector can be swapped or extended without touching the policy.
 """
 import logging
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass
-
-from PIL import Image
+from dataclasses import dataclass, field
 
 from . import config
 
 log = logging.getLogger("detector")
 
-_pipe = None
+_detector = None
+_load_error: str | None = None
 
 
-def load_model() -> None:
-    """Load once at startup so the first media isn't slow."""
-    global _pipe
-    from transformers import pipeline
+@dataclass(frozen=True)
+class Detection:
+    """A single raw detection from the model."""
 
-    log.info("Loading NSFW model %s ...", config.NSFW_MODEL)
-    _pipe = pipeline("image-classification", model=config.NSFW_MODEL, device=-1)
-    log.info("Model ready.")
+    label: str
+    score: float
+    box: tuple[int, int, int, int] | None = None
 
 
 @dataclass
-class Verdict:
-    score: float          # 0..1, higher = more likely NSFW
-    frames_checked: int
+class MediaAnalysis:
+    """Aggregated detector output for one media item.
+
+    ``ok`` is False when the media could not be decoded or the detector
+    errored. Callers must treat ``ok=False`` as "unknown" and fail open.
+    """
+
+    ok: bool
+    detections: list[Detection] = field(default_factory=list)
+    frames_checked: int = 0
+    # Optional auxiliary signal. It is never a deletion trigger (see
+    # decision.py) and is None when no generic classifier is wired in.
+    generic_nsfw: float | None = None
+    error: str = ""
     note: str = ""
 
+    def strongest(self) -> Detection | None:
+        return max(self.detections, key=lambda d: d.score) if self.detections else None
 
-def _score_image(path: str) -> float:
-    img = Image.open(path).convert("RGB")
-    results = _pipe(img, top_k=None)
-    for r in results:
-        if r["label"].lower() == "nsfw":
-            return float(r["score"])
-    return 0.0
+
+def load_model() -> None:
+    """Load the detector once at startup so the first media is not slow."""
+    global _detector, _load_error
+    from nudenet import NudeDetector
+
+    log.info("Loading explicit-content detector (NudeNet 320n, CPU) ...")
+    try:
+        _detector = NudeDetector()
+        _load_error = None
+        log.info("Detector ready.")
+    except Exception as e:  # pragma: no cover - depends on environment
+        _detector = None
+        _load_error = str(e)
+        log.exception("Detector failed to load; media checks will fail open")
+
+
+def _detect_file(path: str) -> list[Detection]:
+    if _detector is None:
+        raise RuntimeError(_load_error or "detector not loaded")
+    raw = _detector.detect(path)
+    detections = []
+    for d in raw:
+        box = d.get("box")
+        detections.append(
+            Detection(
+                label=str(d["class"]),
+                score=float(d["score"]),
+                box=tuple(int(v) for v in box) if box else None,
+            )
+        )
+    return detections
+
+
+def _merge_best(best: dict[str, Detection], found: list[Detection]) -> None:
+    """Keep only the highest-scoring detection per class."""
+    for d in found:
+        cur = best.get(d.label)
+        if cur is None or d.score > cur.score:
+            best[d.label] = d
 
 
 def _duration(path: str) -> float:
@@ -87,24 +146,41 @@ def extract_frames(video_path: str, out_dir: str, n: int) -> list[str]:
     return frames
 
 
-def analyze_image(path: str) -> Verdict:
+def analyze_image(path: str) -> MediaAnalysis:
+    """Classify a still image (photo, static sticker, image document)."""
     try:
-        return Verdict(_score_image(path), 1)
+        found = _detect_file(path)
     except Exception as e:
-        log.exception("image analysis failed")
-        return Verdict(0.0, 0, note=f"error: {e}")
+        log.warning("image analysis failed: %s", e)
+        return MediaAnalysis(ok=False, error=str(e), note="image decode/detect failed")
+    return MediaAnalysis(ok=True, detections=found, frames_checked=1)
 
 
-def analyze_video(path: str) -> Verdict:
-    """Also used for GIFs (Telegram sends them as mp4) and webm stickers."""
-    with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as d:
-        frames = extract_frames(path, d, config.VIDEO_FRAMES)
-        if not frames:
-            return Verdict(0.0, 0, note="no frames extracted")
-        worst = 0.0
-        for f in frames:
-            try:
-                worst = max(worst, _score_image(f))
-            except Exception:
-                log.exception("frame scoring failed")
-        return Verdict(worst, len(frames))
+def analyze_video(path: str) -> MediaAnalysis:
+    """Classify a video / GIF / animated video sticker (mp4 or webm)."""
+    try:
+        os.makedirs(config.TMP_DIR, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as d:
+            frames = extract_frames(path, d, config.VIDEO_FRAMES)
+            if not frames:
+                return MediaAnalysis(
+                    ok=False, error="no frames extracted", note="video decode failed"
+                )
+            best: dict[str, Detection] = {}
+            failures = 0
+            for f in frames:
+                try:
+                    _merge_best(best, _detect_file(f))
+                except Exception as e:
+                    failures += 1
+                    log.warning("frame scoring failed: %s", e)
+            if failures == len(frames):
+                return MediaAnalysis(
+                    ok=False, error="all frames failed", note="detector error"
+                )
+            return MediaAnalysis(
+                ok=True, detections=list(best.values()), frames_checked=len(frames)
+            )
+    except Exception as e:
+        log.warning("video analysis failed: %s", e)
+        return MediaAnalysis(ok=False, error=str(e), note="video analysis failed")

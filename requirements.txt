@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue]==21.6
 Pillow>=10.0
-transformers>=4.40,<5
-torch>=2.2
+# Explicit body-region detector (bundled ONNX model, CPU-only).
+# Pulls onnxruntime + opencv-python-headless.
+nudenet==3.4.2

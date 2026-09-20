@@ -6,6 +6,10 @@ def _int_list(value: str) -> list[int]:
     return [int(x) for x in value.replace(" ", "").split(",") if x]
 
 
+def _str_list(value: str) -> list[str]:
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
 def _float(name: str, default: float) -> float:
     return float(os.getenv(name, default))
 
@@ -38,16 +42,31 @@ CAPTCHA_TEXT = os.getenv(
 )
 CAPTCHA_BUTTON = os.getenv("CAPTCHA_BUTTON", "✅ من ربات نیستم")
 
-# ---------------- Media moderation ----------------
+# ---------------- Explicit media moderation ----------------
 MEDIA_ENABLED = _bool("MEDIA_ENABLED", True)
 
-# NSFW score thresholds (0..1)
-NSFW_DELETE_THRESHOLD = _float("NSFW_DELETE_THRESHOLD", 0.60)  # delete + report
-NSFW_BAN_THRESHOLD = _float("NSFW_BAN_THRESHOLD", 0.90)        # delete + ban
+# Detector backend. NudeNet ships a small ONNX model with explicit
+# body-region classes (CPU friendly).
+DETECTOR_BACKEND = os.getenv("DETECTOR_BACKEND", "nudenet")
 
-# Action on high confidence: "ban" or "mute"
-HIGH_CONF_ACTION = os.getenv("HIGH_CONF_ACTION", "ban")
-MUTE_HOURS = _int("MUTE_HOURS", 24)
+# Body-region classes that count as *explicit evidence*. These are real
+# NudeNet classes. Anything not listed here can never trigger a deletion.
+EXPLICIT_CLASSES = set(
+    _str_list(
+        os.getenv(
+            "EXPLICIT_CLASSES",
+            "FEMALE_GENITALIA_EXPOSED,MALE_GENITALIA_EXPOSED,ANUS_EXPOSED",
+        )
+    )
+)
+
+# >= this confidence for an explicit class -> EXPLICIT (auto-delete).
+# Deliberately high: false positives are worse than missing borderline media.
+EXPLICIT_DELETE_THRESHOLD = _float("EXPLICIT_DELETE_THRESHOLD", 0.80)
+# >= this (but below delete) -> REVIEW: allowed and logged only, never deleted.
+EXPLICIT_REVIEW_THRESHOLD = _float("EXPLICIT_REVIEW_THRESHOLD", 0.40)
+# A generic NSFW score may only ever raise REVIEW, never EXPLICIT.
+GENERIC_REVIEW_THRESHOLD = _float("GENERIC_REVIEW_THRESHOLD", 0.90)
 
 # Video / GIF / animated sticker: number of frames sampled
 VIDEO_FRAMES = _int("VIDEO_FRAMES", 4)
@@ -57,18 +76,6 @@ MAX_DOWNLOAD_MB = _int("MAX_DOWNLOAD_MB", 20)
 
 # How many media items are analyzed in parallel
 MEDIA_WORKERS = _int("MEDIA_WORKERS", 2)
-
-# Classifier: "falconsai" (HF model, needs ~350MB) - runs locally on CPU
-NSFW_MODEL = os.getenv("NSFW_MODEL", "Falconsai/nsfw_image_detection")
-
-# ---------------- Trust levels ----------------
-# New users' media is checked strictly; after this many clean messages
-# the user is "trusted" and media checks use a higher delete threshold.
-TRUST_AFTER_MESSAGES = _int("TRUST_AFTER_MESSAGES", 30)
-TRUSTED_EXTRA_MARGIN = _float("TRUSTED_EXTRA_MARGIN", 0.10)
-
-# Repeated offenders: strikes before automatic ban (for delete-level hits)
-MAX_STRIKES = _int("MAX_STRIKES", 2)
 
 DB_PATH = os.getenv("DB_PATH", "/data/guardbot.db")
 TMP_DIR = os.getenv("TMP_DIR", "/tmp/guardbot")

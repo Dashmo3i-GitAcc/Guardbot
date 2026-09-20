@@ -1,4 +1,4 @@
-"""Tiny SQLite store: message counters (trust), strikes, pending captchas."""
+"""Tiny SQLite store: strikes (confirmed moderation actions) and captchas."""
 import sqlite3
 import threading
 import time
@@ -15,7 +15,6 @@ def init() -> None:
     _conn.execute(
         """CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER, user_id INTEGER,
-            messages INTEGER DEFAULT 0,
             strikes INTEGER DEFAULT 0,
             first_seen INTEGER,
             PRIMARY KEY (chat_id, user_id))"""
@@ -43,40 +42,23 @@ def _ensure_user(chat_id: int, user_id: int) -> None:
     )
 
 
-def bump_messages(chat_id: int, user_id: int) -> int:
-    _ensure_user(chat_id, user_id)
-    _exec(
-        "UPDATE users SET messages = messages + 1 WHERE chat_id=? AND user_id=?",
-        (chat_id, user_id),
-    )
-    return get_messages(chat_id, user_id)
-
-
-def get_messages(chat_id: int, user_id: int) -> int:
-    with _lock:
-        row = _conn.execute(
-            "SELECT messages FROM users WHERE chat_id=? AND user_id=?",
-            (chat_id, user_id),
-        ).fetchone()
-    return row[0] if row else 0
-
-
 def add_strike(chat_id: int, user_id: int) -> int:
+    """Record a confirmed moderation action. Only call after a successful delete."""
     _ensure_user(chat_id, user_id)
     _exec(
         "UPDATE users SET strikes = strikes + 1 WHERE chat_id=? AND user_id=?",
         (chat_id, user_id),
     )
+    return get_strikes(chat_id, user_id)
+
+
+def get_strikes(chat_id: int, user_id: int) -> int:
     with _lock:
         row = _conn.execute(
             "SELECT strikes FROM users WHERE chat_id=? AND user_id=?",
             (chat_id, user_id),
         ).fetchone()
-    return row[0]
-
-
-def is_trusted(chat_id: int, user_id: int) -> bool:
-    return get_messages(chat_id, user_id) >= config.TRUST_AFTER_MESSAGES
+    return row[0] if row else 0
 
 
 # ---- captcha ----
