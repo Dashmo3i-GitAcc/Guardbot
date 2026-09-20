@@ -76,11 +76,32 @@ async def is_admin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -
     return ok
 
 
+# Callback-data prefix for the admin-report self-delete button. Short and
+# unique so it can never collide with the captcha button ("cap:<id>").
+REPORT_DELETE_CALLBACK = "report_delete"
+
+
+def _report_keyboard() -> InlineKeyboardMarkup:
+    """The self-delete button attached to every admin report.
+
+    The original moderated message has already been deleted by the time a
+    report is sent, so this button only ever removes the report message itself.
+    """
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🗑 حذف گزارش", callback_data=REPORT_DELETE_CALLBACK)]]
+    )
+
+
 async def report(ctx: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if not config.ADMIN_LOG_CHAT:
         return
     try:
-        await ctx.bot.send_message(config.ADMIN_LOG_CHAT, text, parse_mode="HTML")
+        await ctx.bot.send_message(
+            config.ADMIN_LOG_CHAT,
+            text,
+            parse_mode="HTML",
+            reply_markup=_report_keyboard(),
+        )
     except TelegramError as e:
         log.warning("report failed: %s", e)
 
@@ -171,6 +192,82 @@ async def captcha_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             pass
 
 
+# ------------------------------------------------------ admin report button
+# The admin-report group is a private trusted team group. ANY current member
+# may delete a report, so Telegram administrator status is deliberately NOT
+# required and ``is_admin`` is deliberately NOT used here.
+_MEMBER_STATUSES = frozenset(
+    {
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.OWNER,
+        ChatMemberStatus.RESTRICTED,
+    }
+)
+
+
+async def _is_chat_member(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    """Is ``user_id`` currently a member of ``chat_id``?
+
+    Fails closed: if membership cannot be verified, the caller must not delete
+    anything. This is a fresh check on every press - a user who left or was
+    removed loses the ability immediately.
+    """
+    try:
+        member = await ctx.bot.get_chat_member(chat_id, user_id)
+    except TelegramError as e:
+        log.warning("membership check failed chat=%s user=%s: %s", chat_id, user_id, e)
+        return False
+    return member.status in _MEMBER_STATUSES
+
+
+async def on_report_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete an admin report when a member of the report group presses the button.
+
+    The original moderated message is already gone; only the report message is
+    removed. Anything that is not a member of the configured admin-report chat
+    is refused, and a callback from any other chat can never delete anything.
+    """
+    q = update.callback_query
+    chat = q.message.chat if q.message else None
+
+    # 1. the callback must belong to the configured admin-report chat
+    if not config.ADMIN_LOG_CHAT or chat is None or chat.id != config.ADMIN_LOG_CHAT:
+        log.warning(
+            "report delete refused chat=%s user=%s reason=wrong_chat",
+            getattr(chat, "id", None), q.from_user.id,
+        )
+        await q.answer("⛔ شما عضو این گپ نیستید.", show_alert=True)
+        return
+
+    # 2. the clicking user must currently be a member of that chat
+    if not await _is_chat_member(ctx, chat.id, q.from_user.id):
+        log.warning(
+            "report delete refused chat=%s user=%s reason=not_a_member",
+            chat.id, q.from_user.id,
+        )
+        await q.answer("⛔ شما عضو این گپ نیستید.", show_alert=True)
+        return
+
+    # 3. delete the report message itself (never the moderated message)
+    message_id = getattr(q.message, "message_id", "-")
+    try:
+        await q.message.delete()
+    except TelegramError as e:
+        # already deleted, or the bot lost the right: log and stay alive
+        log.warning(
+            "report delete failed chat=%s message=%s user=%s: %s",
+            chat.id, message_id, q.from_user.id, e,
+        )
+        await q.answer("گزارش قبلاً حذف شده است.")
+        return
+
+    log.info(
+        "REPORT_DELETED chat=%s message=%s user=%s", chat.id, message_id, q.from_user.id
+    )
+    await q.answer("🗑 گزارش حذف شد.")
+
+
 # ------------------------------------------------------------ media
 def _thumb_of(obj):
     return getattr(obj, "thumbnail", None) or getattr(obj, "thumb", None)
@@ -258,6 +355,7 @@ async def _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, no
                         **{field: fh},
                         caption=text,
                         parse_mode="HTML",
+                        reply_markup=_report_keyboard(),
                     )
                 return
             except TelegramError as e:
@@ -555,6 +653,9 @@ def main() -> None:
         ChatMemberHandler(on_member_update, ChatMemberHandler.CHAT_MEMBER)
     )
     app.add_handler(CallbackQueryHandler(on_captcha_click, pattern=r"^cap:\d+$"))
+    app.add_handler(
+        CallbackQueryHandler(on_report_delete, pattern=r"^report_delete$")
+    )
 
     if config.MEDIA_ENABLED:
         media_filter = (

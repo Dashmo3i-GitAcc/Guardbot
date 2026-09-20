@@ -139,6 +139,13 @@ detected class, confidence, reason and timestamp, plus a representative frame
 as evidence (photo, with document and text-only fallbacks if Telegram rejects
 the upload).
 
+Every report also carries a `🗑 حذف گزارش` inline button that deletes the
+**report message itself** (the moderated message is already gone). Any
+**current member** of the admin chat may use it — Telegram administrator status
+is not required, and it is not limited to the owner. A user who has left or was
+removed cannot use it, and a button press coming from any other chat deletes
+nothing. If the report was already deleted, the press is answered and ignored.
+
 ### What it does NOT do
 
 * No text/profanity/username/link moderation.

@@ -198,6 +198,18 @@ side effect of another change.
   failed. Keep that fallback order.
 - The report text is Persian and HTML-parse-mode. If you touch it, keep the
   same register and the same fields; do not machine-translate or restructure it.
+- Every report carries a single inline button (`REPORT_DELETE_CALLBACK =
+  "report_delete"`, label `🗑 حذف گزارش`). It removes **the report message
+  itself** — the moderated message is already gone. It is attached to all three
+  delivery paths (photo, document, text-only) and never sent as a separate
+  message. `app/main.py:on_report_delete` verifies
+  `callback_query.message.chat.id == config.ADMIN_LOG_CHAT` first, then that the
+  presser is a **current member** of that chat (`_is_chat_member`: MEMBER /
+  ADMINISTRATOR / OWNER / RESTRICTED), and only then deletes. Membership is
+  checked fresh on every press and fails closed. This path deliberately does
+  **not** use `is_admin` and does **not** require Telegram administrator
+  status: the report group is a private trusted team group, so any member may
+  clean up a report. A callback from any other chat deletes nothing.
 
 ### 4.5 Punishment is a timed restriction, never a ban
 
