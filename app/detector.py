@@ -62,6 +62,25 @@ class MediaAnalysis:
     def strongest(self) -> Detection | None:
         return max(self.detections, key=lambda d: d.score) if self.detections else None
 
+    def detections_summary(self) -> str:
+        """Compact metadata string of every detected class + score, for logging.
+
+        Only class names and scores are included - never media.
+
+            "n/a"   - analysis failed, so there is no detection data
+            "none"  - analysis ran and the detector returned nothing
+            "CLS:0.87,OTHER:0.42" - all detections, strongest first
+
+        This makes "no detections" distinguishable from "detections existed but
+        none belonged to the explicit classes".
+        """
+        if not self.ok:
+            return "n/a"
+        if not self.detections:
+            return "none"
+        ordered = sorted(self.detections, key=lambda d: d.score, reverse=True)
+        return ",".join(f"{d.label}:{d.score:.2f}" for d in ordered)
+
 
 def load_model() -> None:
     """Load the detector once at startup so the first media is not slow."""

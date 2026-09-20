@@ -120,6 +120,46 @@ def test_swimsuit_image_allowed(monkeypatch):
     assert default_engine().decide(analysis).decision is Decision.SAFE
 
 
+def test_detections_summary_none_when_no_detections():
+    assert MediaAnalysis(ok=True).detections_summary() == "none"
+
+
+def test_detections_summary_na_when_analysis_failed():
+    assert MediaAnalysis(ok=False, error="boom").detections_summary() == "n/a"
+
+
+def test_detections_summary_lists_all_classes_strongest_first():
+    analysis = MediaAnalysis(
+        ok=True,
+        detections=[
+            Detection("FACE_MALE", 0.42, None),
+            Detection("FEMALE_GENITALIA_COVERED", 0.87, None),
+            Detection("FEMALE_BREAST_COVERED", 0.55, None),
+        ],
+        frames_checked=1,
+    )
+    assert (
+        analysis.detections_summary()
+        == "FEMALE_GENITALIA_COVERED:0.87,FEMALE_BREAST_COVERED:0.55,FACE_MALE:0.42"
+    )
+
+
+def test_non_explicit_detections_are_distinguishable_from_no_detections():
+    """class=- / confidence=0.00 must not hide non-explicit detections."""
+    empty = MediaAnalysis(ok=True, detections=[], frames_checked=1)
+    covered = MediaAnalysis(
+        ok=True,
+        detections=[Detection("FEMALE_GENITALIA_COVERED", 0.71, None)],
+        frames_checked=1,
+    )
+    # both produce class=- / confidence=0.00 in the log line ...
+    assert empty.strongest() is None
+    assert default_engine().decide(covered).matched is None
+    # ... but the detections field tells them apart
+    assert empty.detections_summary() == "none"
+    assert covered.detections_summary() == "FEMALE_GENITALIA_COVERED:0.71"
+
+
 # end-to-end for the explicit case: detector -> decision -> delete
 def test_explicit_media_is_deleted_end_to_end(monkeypatch):
     raw = [{"class": "MALE_GENITALIA_EXPOSED", "score": 0.97, "box": [0, 0, 5, 5]}]

@@ -264,11 +264,12 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     log.info(
         "media chat=%s user=%s kind=%s detector=%s frames=%d decision=%s "
-        "class=%s confidence=%.2f generic=%s reason=%s",
+        "class=%s confidence=%.2f detections=%s generic=%s reason=%s",
         chat.id, user.id, kind, config.DETECTOR_BACKEND, analysis.frames_checked,
         result.decision.value,
         result.matched.label if result.matched else "-",
         result.matched.score if result.matched else 0.0,
+        analysis.detections_summary(),
         f"{result.generic_nsfw:.2f}" if result.generic_nsfw is not None else "-",
         result.reason,
     )
