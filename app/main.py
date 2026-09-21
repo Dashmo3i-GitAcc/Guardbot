@@ -411,7 +411,21 @@ def _pick_media(msg):
             if th:
                 return th, "animated_sticker", False
             return None
-        return st, "sticker", bool(st.is_video)
+        if getattr(st, "is_video", False):
+            # A .webm video sticker, and it must not be called "sticker".
+            #
+            # ``media.build_from_path`` takes the MIME type it declares to the
+            # API from the *kind*, and "sticker" means image/webp. A video
+            # sticker is a WebM, so labelling it "sticker" sent WebM bytes
+            # declared as an image — every model answered 400, and the
+            # moderation AI never saw the content at all while the pool burned
+            # its whole attempt budget on each one.
+            #
+            # ``_burst_kind`` below and ``media.describe`` already call this
+            # kind by its right name, and ``KINDS`` already carries the right
+            # MIME for it; this is the same rule, applied here.
+            return st, "video_sticker", True
+        return st, "sticker", False
     if msg.document and msg.document.mime_type:
         mt = msg.document.mime_type
         if mt.startswith("image/"):

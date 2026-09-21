@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 from telegram.error import TelegramError
 
-from app import config, db, detector, main
+from app import config, db, detector, main, media
 
 CHAT_ID = -1001234567890
 ADMIN_CHAT_ID = -1009999999999
@@ -231,6 +231,64 @@ def test_explicit_animated_sticker_uses_preview_thumbnail(monkeypatch, pipeline_
     assert msg.delete_calls == 1
     assert len(bot.photos) == 1
     assert_clean(pipeline_env)
+
+
+# ------------------------------------------- the kind a video sticker is given
+# The kind is not cosmetic: `media.build_from_path` takes the MIME type it
+# declares to the API from it. A .webm video sticker used to be labelled
+# "sticker", whose MIME is image/webp, so WebM bytes went out declared as an
+# image. Every model answered 400 — the moderation AI never saw the content,
+# and the pool spent its whole attempt budget on each one before giving up.
+def test_a_video_sticker_is_not_labelled_a_sticker():
+    obj, kind, is_video = main._pick_media(
+        FakeMessage(sticker=sticker_obj(is_video=True))
+    )
+    assert kind == "video_sticker"
+    # Still video for the detector, which is what makes it analyse frames.
+    assert is_video is True
+    assert obj is not None
+
+
+def test_a_static_sticker_is_still_a_sticker():
+    obj, kind, is_video = main._pick_media(FakeMessage(sticker=sticker_obj()))
+    assert kind == "sticker"
+    assert is_video is False
+
+
+def test_an_animated_sticker_still_uses_the_preview():
+    thumb = SimpleNamespace(file_id="thumb", file_size=400, thumbnail=None, thumb=None)
+    obj, kind, is_video = main._pick_media(
+        FakeMessage(sticker=sticker_obj(is_animated=True, thumbnail=thumb))
+    )
+    assert kind == "animated_sticker"
+    assert is_video is False
+    assert obj is thumb
+
+
+def test_a_video_stickers_declared_type_is_a_video_type(tmp_path):
+    """The consequence, stated as the property that was broken.
+
+    Whatever kind `_pick_media` hands the rest of the pipeline, the type
+    declared to the API must never claim an image when the bytes are a video
+    container. This drives the real label through the real builder, so it fails
+    if the label regresses.
+    """
+    obj, kind, is_video = main._pick_media(
+        FakeMessage(sticker=sticker_obj(is_video=True))
+    )
+    assert is_video is True
+
+    webm = tmp_path / "sticker.webm"
+    # Matroska/WebM magic, then filler — enough for the builder to classify it
+    # without needing a real encoder in the test.
+    webm.write_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 128)
+
+    bundle = media.build_from_path(str(webm), kind, work_dir=str(tmp_path))
+    assert bundle.ok, bundle.note
+    assert bundle.parts
+    declared = bundle.parts[0].mime_type
+    assert declared == "video/webm"
+    assert not declared.startswith("image/")
 
 
 # ------------------------------------------------- allowed media: untouched
