@@ -895,6 +895,32 @@ no rebuild.
 - Keep documentation honest. Do not describe a class, a behaviour or a
   capability the code does not have. If a limit exists, document it as a limit.
 
+### 15.1 Owner-facing guides live in `/root/project-guides/`
+
+The owner reads from the server, not from a chat window, and hands the text to
+another AI for Persian translation. So whenever a substantial explanation is
+needed — a testing procedure, a deployment runbook, a feature walkthrough, a
+troubleshooting guide, an operational how-to — the answer is a **file**, and the
+chat response is the path to it. This directory is shared with the VPN bot, so
+the same convention is recorded in `/opt/vpn-bot/AGENTS.md` §6.1.
+
+- Directory: `/root/project-guides/`.
+- Naming: one English `.txt` per topic, lowercase-hyphenated, topic-first —
+  `gemini-testing-guide.txt`, `guardbot-deployment.txt`.
+- Write it self-contained and in full. Assume the reader has only the file.
+- Include, as the topic requires: exact commands (copy-pasteable), absolute
+  paths, expected output, how to tell success from failure, troubleshooting
+  steps for the likely failures, safety notes (what is destructive, what must
+  never be printed), and enough explanation that the reader understands *why*
+  the step exists — not just what to type.
+- Never put a secret in a guide, and never print one while writing it. Show the
+  command that reads `GEMINI_API_KEY` or `VPNBOT_SHARED_SECRET` from `.env`
+  without echoing the value.
+- If the topic already has a file, update that file rather than creating a
+  second one.
+- Then, in the chat response, state the exact path so the owner can open it
+  (`nano /root/project-guides/<file>.txt`, or `cat`). Keep the chat reply short.
+
 ---
 
 ## 16. Final implementation report
