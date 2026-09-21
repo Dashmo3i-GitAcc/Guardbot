@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "notes": [
+    "Intent rules for the group acquisition flow.",
+    "",
+    "Patterns are ordinary Python regular expressions and are matched against",
+    "NORMALISED text (see app/intent.py). Write them in normal Persian: the",
+    "engine runs the same character unification over the patterns, so you do",
+    "not have to think about Arabic yeh/kaf, ZWNJ or Persian digits here.",
+    "",
+    "Use \\s* between the words of a phrase so one pattern covers 'فیلترشکن',",
+    "'فیلتر شکن' and 'فیلتر  شکن'. Whitespace is already collapsed to single",
+    "spaces before matching.",
+    "",
+    "The engine folds Arabic/Persian letter forms and digits in the patterns",
+    "too, and that includes punctuation: a Persian question mark becomes '?',",
+    "so a pattern that wants a literal question mark must escape it as \\?.",
+    "",
+    "How a message is judged:",
+    "  * topic + at least one of (request, problem, poor_internet)  -> intent",
+    "  * any standalone pattern                                     -> intent",
+    "  * any ignore pattern                                         -> never",
+    "A bare mention of a VPN with no request and no complaint is NOT intent,",
+    "which is what keeps ordinary chatter in the group from triggering.",
+    "",
+    "To extend: add patterns to a group. To add a new kind of supporting",
+    "signal, add a group under 'groups' with weight 1 and list its name in",
+    "'support_groups'. To change the balance, change 'topic_groups'."
+  ],
+
+  "topic_groups": ["topic"],
+  "support_groups": ["request", "problem", "poor_internet"],
+
+  "groups": {
+    "topic": {
+      "weight": 2,
+      "comment": "Signals that the message is about circumvention. Alone they prove nothing.",
+      "patterns": [
+        "\\bvpn\\b",
+        "\\bv\\s*p\\s*n\\b",
+        "وی\\s*پی\\s*ان",
+        "\\bv2ray\\b",
+        "\\bv2\\s*ray\\b",
+        "\\bxray\\b",
+        "\\bx\\s*ray\\b",
+        "\\bvmess\\b",
+        "\\bvless\\b",
+        "\\bv\\s*less\\b",
+        "\\btrojan\\b",
+        "\\bshadowsocks\\b",
+        "\\bsocks\\b",
+        "\\bss\\s*://",
+        "\\bwireguard\\b",
+        "\\bopenvpn\\b",
+        "\\bclash\\b",
+        "\\bnekobox\\b",
+        "\\bnekoray\\b",
+        "\\bsing\\s*box\\b",
+        "\\bhysteria\\b",
+        "\\boutline\\b",
+        "\\bproxy\\b",
+        "پروکسی",
+        "سوکسی",
+        "وی\\s*تو\\s*ری",
+        "فیلتر\\s*شکن",
+        "فیلتر\\s*شکنی",
+        "ضد\\s*فیلتر",
+        "عبور\\s*از\\s*فیلتر",
+        "دور\\s*زدن\\s*فیلتر",
+        "دور\\s*زدن\\s*سانسور",
+        "دور\\s*زدن\\s*تحریم",
+        "دور\\s*بزن\\b",
+        "تست\\s*رایگان",
+        "اشتراک\\s*فیلتر",
+        "کانفیگ\\s*فیلتر"
+      ]
+    },
+
+    "request": {
+      "weight": 1,
+      "comment": "Signals that the user wants something. Supporting signal only.",
+      "patterns": [
+        "می\\s*خوام",
+        "می\\s*خواستم",
+        "می\\s*خوای",
+        "لازم\\s*دارم",
+        "نیاز\\s*دارم",
+        "احتیاج\\s*دارم",
+        "معرفی\\s*کن",
+        "معرفی\\s*می\\s*کن",
+        "پیشنهاد",
+        "کمک",
+        "راهنمایی",
+        "چیکار\\s*کنم",
+        "چی\\s*کار\\s*کنم",
+        "چطور",
+        "چگونه",
+        "چطوری",
+        "دارید\\b",
+        "دارین\\b",
+        "داری\\b",
+        "می\\s*تونید",
+        "می\\s*شه\\b",
+        "می\\s*خواین",
+        "بدید\\b",
+        "بدین\\b",
+        "بفرست",
+        "هست\\s*\\?",
+        "قیمت",
+        "تعرفه",
+        "هزینه",
+        "چنده",
+        "چقدر",
+        "خرید",
+        "بخرم",
+        "بگیرم",
+        "می\\s*فروشید",
+        "می\\s*فروشین"
+      ]
+    },
+
+    "problem": {
+      "weight": 1,
+      "comment": "Signals that something is broken. Supporting signal only.",
+      "patterns": [
+        "وصل\\s*نمی\\s*شه",
+        "وصل\\s*نمی\\s*شود",
+        "وصل\\s*نمی\\s*شم",
+        "نمیتونم\\s*وصل",
+        "نمی\\s*تونم\\s*وصل",
+        "کار\\s*نمی\\s*کنه",
+        "کار\\s*نمی\\s*کنه",
+        "کارنمیکنه",
+        "باز\\s*نمی\\s*شه",
+        "باز\\s*نمی\\s*شود",
+        "بالا\\s*نمیاد",
+        "قطع\\s*و\\s*وصل",
+        "قطعی\\s*داره",
+        "قطعی\\s*دارد",
+        "فیلتر\\s*شده",
+        "فیلتره\\b",
+        "فیلتر\\s*کردن",
+        "کنده\\b",
+        "کند\\s*شده",
+        "کندی\\b",
+        "سرعت\\s*پایین",
+        "سرعت\\s*کم",
+        "ضعیف\\s*شده",
+        "پینگ",
+        "ارور",
+        "خطا\\s*می\\s*ده",
+        "لاگین\\s*نمی",
+        "\\btimeout\\b",
+        "\\berror\\b",
+        "\\bdisconnect",
+        "از\\s*دست\\s*دادم",
+        "پرواز\\s*نمی\\s*کنه"
+      ]
+    },
+
+    "poor_internet": {
+      "weight": 1,
+      "comment": [
+        "Complaints about connectivity in general. On their own they are NOT",
+        "enough — half the group complains about slow internet — so they only",
+        "count when the message is also about circumvention."
+      ],
+      "patterns": [
+        "اینترنتم",
+        "اینترنت\\s*من",
+        "اینترنت\\s*ضعیف",
+        "اینترنت\\s*کند",
+        "اینترنت\\s*قطع",
+        "نت\\s*ضعیف",
+        "نتم\\s*خراب",
+        "نت\\s*خراب",
+        "پهنای\\s*باند",
+        "اینترنت\\s*ملی",
+        "همه\\s*چی\\s*فیلتر",
+        "همه\\s*چیز\\s*فیلتر",
+        "شبکه\\s*قطع"
+      ]
+    }
+  },
+
+  "standalone": {
+    "comment": [
+      "Phrases that are unambiguous on their own: someone asking how to get",
+      "past a block without naming a tool. Keep this list tight — every entry",
+      "here bypasses the topic requirement."
+    ],
+    "patterns": [
+      "بدون\\s*فیلتر",
+      "بدون\\s*سانسور",
+      "بدون\\s*تحریم",
+      "اینستا\\s*باز\\s*شه",
+      "اینستاگرام\\s*باز\\s*شه",
+      "یوتیوب\\s*باز\\s*شه",
+      "می\\s*خوام\\s*اینستا\\s*باز",
+      "چطور\\s*اینستا\\s*باز",
+      "چطور\\s*یوتیوب\\s*باز",
+      "چطور\\s*فیلتر\\s*رو\\s*دور",
+      "فیلتر\\s*رو\\s*دور\\s*بزنم",
+      "از\\s*فیلتر\\s*عبور",
+      "دور\\s*زدن\\s*فیلتر\\s*چطور"
+    ]
+  },
+
+  "ignore": {
+    "comment": [
+      "Hard vetoes, checked first. A competing seller advertising in the group",
+      "is not a customer, and answering them with a trial link is noise."
+    ],
+    "patterns": [
+      "فیلتر\\s*شکن\\s*می\\s*فروشم",
+      "فیلتر\\s*شکن\\s*دارم\\s*می\\s*فروشم",
+      "\\bvpn\\s*می\\s*فروشم",
+      "می\\s*فروشم\\s*فیلتر"
+    ]
+  }
+}

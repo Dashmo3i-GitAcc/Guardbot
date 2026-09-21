@@ -188,3 +188,76 @@ SCENE_MAX_FRAMES = _int("SCENE_MAX_FRAMES", 2)
 DB_PATH = os.getenv("DB_PATH", "/data/guardbot.db")
 TMP_DIR = os.getenv("TMP_DIR", "/tmp/guardbot")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+
+# ---------------- Group acquisition (VPN trial invitations) ----------------
+# Someone asking about a VPN in the group is a customer the VPN bot has not met
+# yet. This bot notices, asks the VPN bot for a personal invitation link, and
+# posts that link in the group. It never sees a credential, a client or a
+# subscription link — the VPN bot owns all of that, and the actual test is
+# delivered in a private chat.
+GROUP_TRIAL_ENABLED = _bool("GROUP_TRIAL_ENABLED", True)
+
+# Where the rules live. Empty means the copy shipped next to app/intent.py,
+# which is the normal case; the override exists so the vocabulary can be
+# extended on a running deployment without rebuilding the image.
+INTENT_RULES_PATH = os.getenv("INTENT_RULES_PATH", "")
+
+# Whether a message must be *about* circumvention before it counts. Left on,
+# "اینترنتم ضعیفه" is not an intent. Turning it off makes the bot offer a test
+# to anyone complaining about their connection — occasionally useful, usually
+# noisy.
+INTENT_REQUIRE_TOPIC = _bool("INTENT_REQUIRE_TOPIC", True)
+
+# Shortest message worth looking at, in characters after normalisation.
+INTENT_MIN_LENGTH = _int("INTENT_MIN_LENGTH", 4)
+
+# How long a user is left alone after being offered a test, so the same person
+# asking three times in a row gets one reply and not three. Persisted in the
+# database, so a restart does not reset it.
+INTENT_COOLDOWN_SECONDS = _int("INTENT_COOLDOWN_SECONDS", 3600)
+
+# The VPN bot's internal service endpoint, e.g. http://172.21.0.1:8099
+# (the Docker bridge gateway of this container's network — see README).
+VPNBOT_API_URL = os.getenv("VPNBOT_API_URL", "").strip().rstrip("/")
+# Shared secret for signing those requests. Must match SERVICE_SHARED_SECRET in
+# the VPN bot's .env. Empty disables the feature rather than sending anything.
+VPNBOT_SHARED_SECRET = os.getenv("VPNBOT_SHARED_SECRET", "").strip()
+VPNBOT_TIMEOUT_SECONDS = _float("VPNBOT_TIMEOUT_SECONDS", 8.0)
+
+# The in-group reply. The group only ever sees this and the button — never a
+# configuration, a subscription link or a credential.
+GROUP_TRIAL_INVITE_TEXT = os.getenv(
+    "GROUP_TRIAL_INVITE_TEXT",
+    "سلام {name} 👋\n"
+    "برای تست رایگان VPN یه لینک اختصاصی برات ساختیم.\n"
+    "روی دکمه زیر بزن تا توی ربات برات فعالش کنیم. 🎁",
+)
+GROUP_TRIAL_BUTTON = os.getenv("GROUP_TRIAL_BUTTON", "🎁 دریافت تست رایگان")
+# Sent when the user was already offered a link recently. Deliberately quiet:
+# no second button, so the group does not fill up with invitations.
+GROUP_TRIAL_ALREADY_TEXT = os.getenv(
+    "GROUP_TRIAL_ALREADY_TEXT",
+    "{name} عزیز، لینک تستت رو قبلاً برات فرستادیم 👆\n"
+    "اگه پیداش نکردی، توی ربات دکمه «🎁 تست رایگان» رو بزن.",
+)
+# Sent when the user has already used their one free trial.
+GROUP_TRIAL_USED_TEXT = os.getenv(
+    "GROUP_TRIAL_USED_TEXT",
+    "{name} عزیز، تست رایگانت قبلاً فعال شده و هر کاربر یه‌بار می‌تونه "
+    "استفاده کنه. 🙏\n"
+    "برای ادامه، توی ربات از «🛒 خرید اشتراک» یه پلن انتخاب کن.",
+)
+# Sent when the VPN bot cannot be reached. Logged loudly as well, because it
+# means the integration is down rather than that the user did something wrong.
+GROUP_TRIAL_UNAVAILABLE_TEXT = os.getenv(
+    "GROUP_TRIAL_UNAVAILABLE_TEXT",
+    "الان نمی‌تونم لینک تست رو بسازم. 🙏\n"
+    "لطفاً چند دقیقه بعد دوباره امتحان کن.",
+)
+# Adds a small «قوانین» hint under the invitation, so the terms gate the user
+# meets inside the bot is not a surprise.
+GROUP_TRIAL_HINT = os.getenv(
+    "GROUP_TRIAL_HINT",
+    "تست ۵۰۰ مگابایت و ۱ روزه‌ست و فقط یک‌بار به هر کاربر داده می‌شه.",
+)
