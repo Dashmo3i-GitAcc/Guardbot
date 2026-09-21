@@ -849,16 +849,91 @@ every probe message correctly:
 
 | Message | Verdict |
 |---|---|
-| «اینترنت ایرانسل وصل نمیشه» | `connectivity_problem`, not relevant, no offer |
-| «سلام کسی میتونه کمک کنه یه وی پی ان خوب معرفی کنه؟» | `vpn_request`, **relevant, offer** |
+| «اینترنت ایرانسل وصل نمیشه» | `connectivity_problem`, **relevant**, `connectivity_offer` |
+| «سلام کسی میتونه کمک کنه یه وی پی ان خوب معرفی کنه؟» | `vpn_request`, **relevant, offer**, `vpn_offer` |
 | «سلام بچه ها، کی بازی دیشب رو دید؟» | `ordinary_conversation`, not relevant |
-| «قیمتتون چنده؟» | `pricing_question`, not relevant |
+| «قیمتتون چنده؟» | `pricing_question`, **relevant**, `pricing_offer` |
+
+Note the first and last rows. Both used to be `not relevant`: the prompt said a
+complaint about a slow or down connection "is NOT a request", and pricing was
+treated as a question rather than a lead. Both were changed on the owner's
+instruction — a poor connection is to be *answered*, because the test answers
+the question the person is actually asking ("is it my line or the route?"), and
+somebody asking the price is a buyer. A connectivity complaint about the
+speaker's own connection is now a lead. A general remark that the internet is
+bad today, with no connection to the speaker's own line, is still
+`ordinary_conversation`.
 
 So `GEMINI_MODEL` defaults to the lite alias. For judging one short message it is
 also the better tool — faster, which matters inside a 10-second message-handler
 budget, and cheaper against the daily quota. Availability is per key and moves,
 so **measure it again rather than assuming**; the model is one env var and needs
 no rebuild.
+
+### 13.8.1 The reply is chosen, not written
+
+The model returns two presentation hints beside the verdict, and the second one
+selects which of five fixed sentences the group sees:
+
+| `response_kind` | When | Copy lives in |
+|---|---|---|
+| `connectivity_offer` | their connection is slow, unstable or down | `GROUP_TRIAL_REPLY_CONNECTIVITY` |
+| `access_offer` | a named site or app will not open | `GROUP_TRIAL_REPLY_ACCESS` |
+| `vpn_offer` | they ask for a VPN, proxy or configuration | `GROUP_TRIAL_REPLY_VPN` |
+| `pricing_offer` | they ask what it costs | `GROUP_TRIAL_REPLY_PRICING` |
+| `generic_offer` | none of the above | `GROUP_TRIAL_INVITE_TEXT` |
+
+`problem_kind` is the coarser companion — `slow_or_unstable`, `blocked_service`,
+`no_connection`, `wants_access_tool`, `price_only`, `none`. It is for the log and
+for later analysis; nothing branches on it.
+
+**The model picks a key and never writes a sentence.** Every word the group reads
+is a constant in `app/config.py`, so a persuasive or confused answer can change
+*which* of five sentences is sent and nothing else. It cannot introduce a URL, a
+credential or an instruction, because there is no field to put one in —
+`test_the_schema_offers_no_field_a_message_could_be_written_into` asserts that as
+a *property* (exactly one free-text field, it is `reason`, it is truncated to 200
+characters and is only ever logged) rather than as a fixed list of names, so a
+future field cannot quietly become a channel.
+
+**Strict on the decision, forgiving on the presentation.** `is_relevant` and
+`needs_acquisition_offer` decide whether a stranger gets a trial, so a missing
+one of those is a failure to answer and the whole verdict is discarded.
+`problem_kind` and `response_kind` only choose between five sentences, so a
+missing or invented one is coerced to `none` / `generic_offer` instead. Throwing
+away a real lead because the model forgot a presentation hint would trade
+something valuable for something cheap.
+
+`responses.kind_for` re-checks the key against `RESPONSE_KINDS` even though
+`parse_verdict` already coerced it. Not redundancy for its own sake: that value
+is interpolated into a log line, and a string carrying a newline could forge one.
+
+When the rules decided the message themselves there is no AI verdict to ask, so
+the kind is derived from *which* patterns matched — `poor_internet` and `problem`
+give `connectivity_offer`, `request` gives `vpn_offer`, a bare topic match gives
+the generic wording. Coarser than the model and honest about it: the rules know a
+pattern fired, not what the person is complaining about. That path is what keeps
+the reply sensible with the AI layer off, out of quota or broken.
+
+### 13.8.2 The `[intent]` line, and the defect it hid
+
+One line per decision with both verdicts visible together, because the only
+question that matters afterwards is "why did this message get an offer".
+
+```
+[intent] user=… triggered=True source=ai score=2 rules=request,problem,candidate
+        ai_consulted=True ai_skip=- ai_error=- ai_category=vpn_request
+        ai_problem=blocked_service ai_response=access_offer ai_confidence=0.95
+        ai_reason=… text='…'
+```
+
+Every AI field is read through `ai is not None`, **never** `if ai`.
+`AiVerdict.__bool__` reports *relevance*, so truthiness blanked the whole AI half
+of the line on exactly the verdicts an investigation wants — the ones where the
+model was asked and said no. A live `200 OK` answering `ordinary_conversation`
+printed as `ai_consulted=False ai_category=-`, which reads as "never asked": the
+opposite of what had happened. It was found in production against a successful
+call, not by the suite, because the suite replaces `_request`.
 
 ---
 
