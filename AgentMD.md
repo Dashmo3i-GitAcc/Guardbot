@@ -1042,7 +1042,252 @@ Rules for the report:
 
 ---
 
-## 17. Gotchas learned the hard way
+## 17. The conversational assistant
+
+A second, entirely independent Gemini workload. It answers somebody who talks
+**to** the bot. It has nothing to do with deciding whether a group message is a
+lead, and the two must never trigger one another.
+
+### 17.1 The boundary, and why it is structural
+
+| | Acquisition (§13.8) | Assistant (§17) |
+|---|---|---|
+| Module | `app/ai_intent.py` + `app/classifier.py` | `app/chat.py` |
+| Triggered by | any group message, via the rules and the candidate gate | only an explicit address to the bot |
+| Output | a JSON verdict, closed enums | free text, sent as a message |
+| Key | `GEMINI_API_KEY` | `GEMINI_CHAT_API_KEY` |
+| Counters | `db.ai_usage` | `db.chat_usage` |
+| History | none | `db.chat_messages`, bounded |
+
+The boundary is enforced in two places, and both are needed:
+
+* `main._addressed_to_bot(msg, ctx)` is the **only** way into the assistant. It
+  is true for exactly two things, both unambiguous in Telegram's data — a reply
+  to a message this bot sent, or an `@mention` of this bot's own username. Not
+  the word «ربات», not a question the rules happen to like.
+* `main.on_group_text` returns before calling `classifier.classify` when the
+  assistant is enabled and the message addresses the bot. Without this the same
+  message would get a chat reply *and* a trial offer, because python-telegram-bot
+  runs every handler group and has no way to stop propagation.
+
+`on_group_text` binds a local named `chat` (its effective chat), which shadows
+the `chat` module for that whole function. That is why the guard goes through
+`main._chat_active()` rather than calling `chat.is_enabled()` directly.
+
+### 17.2 The quota question, answered
+
+**Gemini applies rate limits per Google Cloud project, not per API key.** This
+is the fact the whole design turns on: two keys in the same project share one
+allowance, so "a separate key" only buys a separate budget if it belongs to a
+**different project**. The requirement — that a chatty user cannot exhaust the
+acquisition classifier's daily quota — is only met if that holds.
+
+Verified against the official page on 2026-09-21
+(<https://ai.google.dev/gemini-api/docs/rate-limits>):
+
+> Rate limits are applied per project, not per API key. Requests per day (RPD)
+> quotas reset at midnight Pacific time.
+
+The same page confirms Google publishes **no static free-tier table** any more:
+limits depend on the project's usage tier (Free / Tier 1 / Tier 2 / Tier 3),
+the real numbers live in AI Studio, and "specified rate limits are not
+guaranteed and actual capacity may vary". So the defaults here are deliberately
+conservative and the real ceilings belong in `.env` once measured for the key in
+use. Do not assume the numbers in any blog post are yours.
+
+Two consequences worth stating plainly, because both are easy to get wrong:
+
+* **A Gemini app subscription is not an API quota.** A Google account can hold a
+  consumer Gemini subscription and a *free-tier* API project at the same time;
+  the API is still bounded by the API tier. Nothing here may assume otherwise.
+* **`db.ai_day()` measures the Pacific boundary, not UTC**, because RPD resets at
+  midnight Pacific. A UTC day counter would reset at the wrong moment and
+  over-spend by up to eight hours' worth of requests.
+
+### 17.2.1 Which model, measured
+
+Not assumed — measured with real calls on this deployment's key on 2026-09-21
+(`models.list()` for availability, one `generate_content` per candidate):
+
+| Model | Result |
+|---|---|
+| `gemini-flash-lite-latest` | answers, fluent Persian — **the default** |
+| `gemini-3.5-flash-lite` | answers, same quality |
+| `gemini-flash-latest` | answers, but **no visible text** at a small output budget |
+| `gemini-2.5-flash` | `404 ... no longer available` |
+| `gemini-2.5-flash-lite` | `404 ... no longer available` |
+
+Two things follow, and both are the kind of fact the unit suite cannot reach
+because it replaces `chat._request`:
+
+* The `-latest` alias is the durable choice and a pinned version number is the
+  fragile one — the whole 2.5 generation has already been retired.
+* `gemini-flash-latest` is a **thinking** model: it spends the output budget on
+  internal reasoning and `response.text` comes back empty. `chat.reply` reports
+  that as `empty_response` and sends nothing, which is the safe behaviour, but
+  an operator who switches to such a model must raise the output budget in
+  `chat._request` rather than edit the prompt.
+
+`models.list()` on this key returns ~41 `generateContent` models, including the
+3.x family (`gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`,
+…). There is **no separate "chat" endpoint or product** to reach for:
+conversational use is the same `generateContent` API and the same per-project
+limits as the classifier. That is precisely why the separation in this project
+is about keys, counters and breakers, not about a different API.
+
+### 17.3 Configuration
+
+Every setting is `GEMINI_CHAT_*`; see `.env.example` for the annotated list. The
+ones that matter:
+
+| Setting | Default | Why |
+|---|---|---|
+| `GEMINI_CHAT_ENABLED` | `0` | off until a key is supplied |
+| `GEMINI_CHAT_API_KEY` | empty | **must be a different project's key** |
+| `GEMINI_CHAT_MODEL` | `gemini-flash-lite-latest` | its own setting; a longer reply read by a human is a different job from a one-word classification. Measured options in §17.2.1 — the `-latest` alias is deliberate |
+| `GEMINI_CHAT_TIMEOUT_SECONDS` | `25.0` | longer than the classifier's 10s — a person will wait, a message handler cannot |
+| `GEMINI_CHAT_RATE_LIMIT` / `WINDOW` | `6` / `60s` | lower than the classifier's: each request is larger |
+| `GEMINI_CHAT_DAILY_LIMIT` | `200` | its own table, so the two can never be summed |
+| `GEMINI_CHAT_HISTORY_TURNS` | `8` | turns replayed to the model |
+| `GEMINI_CHAT_HISTORY_TTL` | `1800` | how long a quiet conversation is remembered |
+| `GEMINI_CHAT_REPLY_CHARS` | `3500` | Telegram's hard limit is 4096; the margin is for escaping |
+| `AI_PREFER_IPV6` | `1` | order AI hostnames IPv6-first (§18). A reorder, never a filter |
+
+### 17.4 Conversation memory
+
+Bounded from two directions, because either bound alone leaves a hole: a turn
+limit alone would let last week's conversation reappear, and an age cutoff alone
+would let one long session grow without limit.
+
+* `db.chat_history(chat_id, user_id, limit, ttl)` returns the newest turns,
+  oldest-first, and is the only reader.
+* `db.chat_trim()` runs after every append and keeps the newest N.
+* `db.chat_purge(ttl)` runs opportunistically after a successful reply and
+  drops abandoned conversations, which nothing else would ever come back to
+  trim.
+* Isolation is by `(chat_id, user_id)`, so one person's history can never be
+  shown to another, and a group conversation is separate from a private one with
+  the same person.
+* `/reset` clears the caller's own conversation and nothing else.
+
+Only **successful** turns are recorded. A failed call is not part of the
+conversation, so it is not replayed.
+
+### 17.5 Budgets and failure isolation
+
+`app/chat.py` holds its own rate window, its own consecutive-failure counter, its
+own circuit breaker, its own client cache and its own counters. It never reads
+`db.ai_*`; `ai_intent` never reads `db.chat_*`. That is asserted, not assumed —
+see the separation tests in `tests/test_chat.py`, including one that opens the
+chat breaker and checks the classifier's is still closed.
+
+A chat failure is contained: `reply()` never raises, and every path that is not a
+clean answer returns `answered=False` with a reason. A model outage means the
+assistant goes quiet; moderation and acquisition are untouched.
+
+### 17.6 Output safety
+
+The model has no tools, no function calling and no reachable reference to the
+database, the shell, the panel or the internal API. Its output is text, and the
+only thing that ever happens to it is that it is HTML-escaped and sent to
+Telegram. There is no code path from a reply to an action.
+
+The prompt requires it to say plainly that it is an AI when asked, and forbids
+stating prices, plan details, links or credentials — those it cannot know, and a
+confident wrong price in a private chat is a commercial problem, not a cosmetic
+one.
+
+### 17.7 Verifying it
+
+```bash
+# Is it armed, and does it have a key? Never prints the key.
+docker compose exec -T guardbot python -c \
+  "import app.db as db, app.chat as c; db.init(); print(c.status())"
+
+# Its counters, separate from the classifier's.
+docker compose exec -T guardbot python -c \
+  "import app.db as db; db.init(); print('chat', db.chat_usage()); print('intent', db.ai_usage())"
+
+# The startup line.
+docker compose logs | grep -i "Conversational AI"
+```
+
+### 17.8 Known limitations
+
+* **Runs on the classifier's key on this deployment.** `GEMINI_CHAT_API_KEY` is
+  empty here and `GEMINI_CHAT_ALLOW_SHARED_KEY=1`, so the two workloads draw on
+  **one Google allowance** even though this application's counters, windows and
+  breakers are separate. The startup log says so once, as a warning. Supplying a
+  key from a second Google Cloud project is the one thing that makes the quotas
+  genuinely independent, and it is the only outstanding item for this feature.
+* **The live behaviour is verified; the quota ceilings are not.** A real call
+  answers (§17.2.1) and the assistant has replied in the production group, but
+  the project's actual RPM/RPD numbers have to be read from AI Studio for the
+  account — Google does not publish them.
+* **No streaming.** The reply arrives as one message after a typing indicator.
+* **Truncation, not splitting.** An over-long reply is cut with an ellipsis
+  rather than split across messages, because a late second message reads like a
+  duplicate.
+* **A thinking model would need a bigger output budget.** See §17.2.1; the
+  default is not one, so this only bites an operator who changes it.
+
+---
+
+## 18. Outbound AI connectivity: which IP family
+
+The AI calls leave this host over **IPv6 first, IPv4 as a fallback**. That is
+not an accident of the kernel's address selection — `app/net.py` makes it an
+explicit, reported, reversible decision. The requirement behind it was
+unreliable IPv4 connectivity from this server to the AI APIs.
+
+### 18.1 What the module does, and what it refuses to do
+
+Three steps, and it deliberately stops there:
+
+1. **Report.** `describe()` says whether IPv6 is actually usable (a *global*
+   address, not the `fe80::` every interface has), what each family costs to
+   reach, and which family a connector will try first. Logged once at startup as
+   `AI egress: ipv6_usable=… order=… prefer=… global_v6=…`, so "the AI calls are
+   flaky" can be diagnosed as an address-family problem instead of guessed at.
+2. **Prefer.** `install_preference()` orders resolved addresses IPv6-first for
+   the AI hosts. This is a **reorder, never a filter**: every IPv4 address stays
+   in the list, so a connector that walks it gets IPv6 when it works and IPv4
+   when it does not. That is the safe fallback, and it is why being wrong here
+   costs a slower call rather than a call that cannot be made.
+3. **Scope.** `getaddrinfo` has no per-call hook, so the wrapper is
+   process-wide — and is therefore restricted to a hard-coded set of AI host
+   names, returning everything else untouched. An explicit family request
+   (`AF_INET`) is passed straight through, unsorted, because a caller that asked
+   has already decided.
+
+It does **not** bind a source address, disable IPv4, or add a third-party
+resolver. Each of those would turn a preference into a dependency.
+
+`install_preference()` is called from `main()` *before* anything opens a socket,
+and it declines rather than guesses: with `AI_PREFER_IPV6=0`, or on a host with
+no global IPv6 address, it does nothing and says which. The failure mode of
+being wrong is a slower call.
+
+### 18.2 Verifying it
+
+```bash
+# The startup line: is the preference installed, and what order will be used?
+docker compose logs | grep "AI egress"
+
+# A live probe: both families, in milliseconds. null means that family failed.
+docker compose exec -T guardbot python -c \
+  "import sys; sys.path.insert(0,'/srv'); from app import net; \
+   print(net.describe()); print(net.probe('generativelanguage.googleapis.com'))"
+```
+
+Measured on this host 2026-09-21: `ipv6_usable=True`, `order=['IPv6','IPv4']`,
+`prefer=installed`, and both families connect (`IPv6` 6.3 ms, `IPv4` 5.2 ms).
+The host holds one global address, `2a14:7c0:1742:3be0::/64`, and the container
+runs `network_mode: host`, so the container sees it too.
+
+---
+
+## 19. Gotchas learned the hard way
 
 1. **A threshold that looks safe can mean the feature never fires.** The first
    delete threshold was 0.80; confirmed explicit media scored 0.50–0.67, so
