@@ -134,12 +134,20 @@ class MediaAnalysis:
 
 
 def load_model() -> None:
-    """Load the detectors once at startup so the first media is not slow."""
-    global _detector, _load_error
-    from nudenet import NudeDetector
+    """Load the detectors once at startup so the first media is not slow.
 
+    Never raises. The import is inside the guard, not above it: ``nudenet`` is a
+    heavy optional dependency, and a deployment that is missing it must still
+    moderate text rather than fail to boot. Raising here would take the whole
+    bot down — captcha, flood control and every text rule — over an image
+    detector that is documented to fail open anyway. The scene stage below has
+    always been written this way; this is the same contract for the same reason.
+    """
+    global _detector, _load_error
     log.info("Loading explicit-content detector (NudeNet 320n, CPU) ...")
     try:
+        from nudenet import NudeDetector
+
         _detector = NudeDetector()
         _load_error = None
         log.info("Detector ready.")
