@@ -6,6 +6,32 @@ services:
     env_file: .env
     volumes:
       - ./data:/data          # sqlite db + downloaded model cache
+
+    # Host networking, on purpose.
+    #
+    # The VPN bot is a systemd service on the host, not part of this compose
+    # project, so this container has to reach a process outside Docker. The
+    # obvious way — `extra_hosts: host.docker.internal:host-gateway` and then
+    # connect to the bridge gateway — does not work on this host: the gateway
+    # address is the host itself, so the packet lands on the host's INPUT
+    # chain, and ufw's default-deny drops it (the firewall allow-list carries
+    # only the service ports). The connection does not fail fast either, it
+    # times out, which reads like the VPN bot being down.
+    #
+    # Sharing the host's network namespace makes the VPN bot reachable on
+    # 127.0.0.1:8099 instead, where nothing has to be opened to the outside.
+    # The internal API is bound to loopback to match (INTERNAL_API_HOST in
+    # /opt/vpn-bot/.env) — see /opt/vpn-bot/AGENTS.md §13.9.
+    #
+    # If you would rather keep the container on a bridge network, the flow
+    # also works over the gateway address, but the host firewall must allow
+    # the Docker bridge range to reach the port:
+    #     ufw allow from 172.16.0.0/12 to any port 8099 proto tcp
+    # and INTERNAL_API_HOST must go back to 0.0.0.0.
+    #
+    # Nothing is published either way; the bot only makes outbound connections.
+    network_mode: host
+
     deploy:
       resources:
         limits:

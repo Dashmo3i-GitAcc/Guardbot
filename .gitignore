@@ -17,6 +17,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+# Lightweight local venv for the fast unit tests (no torch / nudenet).
+.venv-test/
 
 # model cache
 hf/
