@@ -439,6 +439,21 @@ This is a small VPS. Disk leaks are production incidents.
   absent), `scene_frames=` how many frames the scene stage actually scored.
 - **Never log media content, file bytes, tokens or the bot token.** Class names
   and scores are fine; the media is not.
+- The acquisition decision has its own single line, emitted once whenever the
+  message was *acted on* or was worth a second look — a message the rules
+  silently ignored logs nothing, deliberately, because that is the common case.
+  It is written by `app/classifier.py`:
+
+  ```
+  [intent] user=... triggered=... source=... score=... rules=...
+  ai_consulted=... ai_skip=... ai_error=... ai_category=... ai_confidence=...
+  ai_reason=... text=...
+  ```
+
+  `source=` is `rules` / `ai` / `none` and is the field to grep when asking
+  "did the model decide this, or did the rules?". `ai_*` are empty when the AI
+  layer was not consulted, which is the common case. `text=` is the *normalised*
+  message, never the raw one. See §13.8.
 - Add a log line only when it tells an operator something they cannot already
   see. No debug spam on the hot path.
 
@@ -454,6 +469,12 @@ This is a small VPS. Disk leaks are production incidents.
 - Never commit `.env`, `data/`, `*.db`, tokens or keys. They are gitignored;
   do not remove or weaken `.gitignore`.
 - Never print a secret. The admin report and logs must not contain one.
+- `GEMINI_API_KEY` is a secret on the same footing as `BOT_TOKEN`. It lives in
+  the environment, is read once in `app/config.py`, and must never appear in a
+  log line, an exception message, a database row, a report or a document. There
+  is a test that asserts it cannot reach a log line, and
+  `git grep -i gemini_api_key` must never match a committed file other than
+  `app/config.py` and `.env.example` (both of which only name the variable).
 
 ---
 
@@ -487,6 +508,10 @@ This is a small VPS. Disk leaks are production incidents.
 
 - `tests/conftest.py` sets safe defaults (`BOT_TOKEN`, `GROUP_IDS`, in-memory
   `DB_PATH`, a temp `TMP_DIR`) so tests import the app without a real `.env`.
+- `google-genai` is imported lazily inside `app/ai_intent.py`, so a test
+  environment without it still runs the whole suite: the AI layer reports
+  `sdk_missing` and the rules carry on. Never move that import to module scope —
+  it would make an optional dependency mandatory at import time.
 - The existing tests pin the safety contracts and must keep passing:
   - `tests/test_decision.py` — the policy table, fail-open, the scene bands,
     and that a borderline NudeNet hit with a safe scene score stays `REVIEW`.
@@ -508,6 +533,23 @@ This is a small VPS. Disk leaks are production incidents.
   - `tests/test_scene_stage.py` — the graded scene stage: `EXPLICIT` at high
     confidence, `REVIEW` in the band, bounded frame sampling, fail-open, and
     that a scene-stage load failure cannot stop startup.
+  - `tests/test_ai_intent.py` — the Gemini layer on its own: config on/off/no
+    key, the structured contract (malformed, missing field, wrong type,
+    invented category, clamped confidence), the prompt's own guarantees, the
+    timeout, the retry policy, the rate window, the persisted daily cap, the
+    circuit breaker, truncation, and that the key never reaches a log line.
+  - `tests/test_classifier.py` — the policy between the two layers: a rule
+    match is free, the model cannot overturn a match or a veto, ordinary
+    chatter is never escalated, the model can promote and can decline, and
+    every failure mode degrades to the rules.
+  - `tests/test_acquisition.py` (extended) — the AI layer end to end through
+    the real group handler: the model's yes becomes the usual invitation, its
+    no leaves the group alone, a Gemini outage does not break the handler, and
+    with no key the handler behaves exactly as it did before.
+- **The AI tests never touch Google.** `app/ai_intent.py` has exactly one
+  network seam, `_request`, and the tests replace it. If you add a code path
+  that talks to the API outside `_request`, the tests will silently stop
+  covering it — keep the seam.
 - **Do not weaken or delete a test to make a change pass.** If a contract
   genuinely changes, update the contract text here and in `README.md` and the
   test in the same commit.
@@ -685,6 +727,93 @@ The full suite needs `nudenet` and `torch`; a light venv (`.venv-test/`,
 gitignored) runs everything except the media stages, where one test fails for the
 missing module. That failure is environmental — verify it is the *same* failure
 before calling it unrelated.
+
+### 13.8 The AI second opinion
+
+The rules decide. This section is about the layer that exists because they
+cannot decide *everything*, and about the constraints that keep it from becoming
+the thing that decides.
+
+**Why it exists.** `app/intent_rules.json` is a list of patterns someone wrote
+down. A member can ask for a VPN in a sentence no pattern describes — «یه چیزی
+میخوام که بشه باهاش رفت» — and the rules, correctly, stay silent. The layer
+closes that gap. It is an addition to the rules, never a replacement: with it
+switched off, on a keyless deployment, or with Google unreachable, the bot
+behaves exactly as it did before the layer existed.
+
+**The decision order.** `app/classifier.py` is the only place the two meet, and
+its four steps are the design, not an optimisation:
+
+1. **A veto is final.** An `ignore` match (a rival seller advertising) is
+   decided and the model is never asked. A guard that a persuasive message can
+   talk out of a veto is not a guard.
+2. **A rule match is a decision.** It is acted on immediately. No call, no
+   quota, no latency.
+3. **No subject signal means ordinary.** Silence from the rules is only
+   ambiguous when the message was *about* circumvention or connectivity.
+   `intent.is_candidate(match)` is the gate; everything else stays silent and
+   costs nothing.
+4. **Only then, the model** — the genuinely uncertain middle.
+
+**The candidate gate.** A message is a candidate when the rules found a
+`topic` hit or one of the weight-0 patterns in the `ai_candidates` group of
+`app/intent_rules.json` (`"candidate_group": "ai_candidates"`). Weight 0 is
+deliberate: the group marks a message as *worth a second look* without moving
+the score, so it cannot by itself produce an offer. Pricing words live there
+because «قیمتتون چنده» and «قیمت گوشی چنده» are lexically identical and only
+the model can tell them apart.
+
+**The contract.** `app/ai_intent.py` asks one bounded, structured question:
+`response_mime_type="application/json"` with a `response_json_schema`, and the
+schema has fields for `is_relevant`, `intent_category`, `confidence`,
+`needs_acquisition_offer`, `reason` and `signals` — and **no field for a
+message**. The model is a classifier; it cannot address a user, and `reason` /
+`signals` are for the log only. `parse_verdict` validates strictly: a blank
+answer is `empty_response`, non-JSON is `malformed_json`, a non-object is
+`malformed_shape`, a missing or wrongly-typed field is `malformed_missing` /
+`malformed_type`, an unknown category is folded to `other`, and confidence is
+clamped. Anything malformed is *unknown*, which is the same as "the rules'
+silence stands".
+
+**Failure is contained, in this order.** A timeout (`asyncio.wait_for`) or an
+unexpected exception is caught; transient failures get one retry with backoff,
+permanent ones (a `400`, an empty answer) do not; a rate window caps how often
+we ask; a persisted daily cap stops us at the day boundary; and a run of
+consecutive transport failures opens a circuit breaker for five minutes. The
+daily counter is keyed to the API's own day — midnight **Pacific**
+(`db.ai_day`, `_API_DAY_OFFSET = 8 * 3600`) — and it is pinned so that it can
+never roll over *before* Google's does. In summer that means we are an hour
+stricter than the API, which is the safe direction: the failure worth avoiding
+is believing we have allowance the API still considers spent.
+`classify()` never raises, and `app/main.py` never awaits it in a way that can
+fail a handler.
+
+**What it can and cannot change.** It can promote a message the rules missed
+and it can decline a candidate. It cannot overturn a rule match or a veto, and
+it cannot change eligibility, provisioning or what is sent: the offer is the
+same invitation from §13.1, sent to the same place, through the same VPN bot
+endpoint. Nothing about the security model changes — the VPN bot still decides
+who gets a test.
+
+**Observability.** One `[intent]` line per decision (§8) with `source=` telling
+you which layer decided. `ai_usage` in `app/db.py` keeps per-day counters for
+`calls`, `relevant`, `irrelevant`, `malformed`, `errors` and `skipped` — and a
+skip (a rate-limit, a circuit, a missing key) deliberately does **not** consume
+the day's allowance, because we did not ask.
+
+**Configuration.** The whole block is in `.env.example` under "the AI second
+opinion". `GEMINI_ENABLED=false` or an empty `GEMINI_API_KEY` disables it
+without touching anything else, and that is the supported way to take it out of
+service.
+
+**External limits you cannot code around.** The free tier's requests-per-minute
+and requests-per-day are per project, are not guaranteed, and are only visible
+in AI Studio — the numbers in `.env.example` are deliberately set *below* them.
+Over quota is a `429 RESOURCE_EXHAUSTED`, which this layer treats as a transient
+failure and then a skip. `gemini-flash-latest` is an alias, so the model behind
+it can change without a deploy; that is the intended trade against a pinned
+version being retired. None of this can be verified from inside the bot, so
+treat the counters as the real ceiling and watch `ai_usage`.
 
 ---
 
