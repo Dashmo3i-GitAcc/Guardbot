@@ -292,14 +292,32 @@ GEMINI_ENABLED = _bool("GEMINI_ENABLED", True)
 # bot behaves exactly as it did before it existed.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
+# The model, chosen from measurement rather than from documentation.
+#
 # `gemini-flash-latest` is the SDK's documented stable alias for the current
-# Flash model — a versioned id would eventually be retired out from under a
-# deployment that nobody rebuilt.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
+# Flash model, and it was the first choice. Against this deployment's free-tier
+# key it answered 0 times out of 8 with `503 UNAVAILABLE ... currently
+# experiencing high demand` and `504 DEADLINE_EXCEEDED`, sustained over ~25
+# attempts — so the layer reported itself active and classified nothing.
+#
+# `gemini-flash-lite-latest` answered 8 of 8 with no errors and classified every
+# probe message correctly. For a binary judgement about one short message it is
+# also the right tool: faster (which matters inside a 10-second message-handler
+# budget) and cheaper against the daily quota.
+#
+# This is one env var, so it can be changed on a running deployment without a
+# rebuild. If availability shifts, measure again — do not assume.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest").strip()
 
 # The authoritative bound on one call. `asyncio.wait_for` enforces it, so a
 # stalled socket can never hold up a group message handler.
-GEMINI_TIMEOUT_SECONDS = _float("GEMINI_TIMEOUT_SECONDS", 6.0)
+#
+# 10 is a floor, not a preference: the API rejects a manually-set deadline below
+# 10 seconds outright ("400 INVALID_ARGUMENT ... Minimum allowed deadline is
+# 10s"), so anything smaller makes every call fail. `app/ai_intent.py` clamps to
+# that floor rather than trusting this value, because a silently dead
+# integration is far worse than a slightly longer timeout.
+GEMINI_TIMEOUT_SECONDS = _float("GEMINI_TIMEOUT_SECONDS", 10.0)
 
 # One retry, with exponential backoff, and only for transient failures. A 429 or
 # a 5xx is worth one more try; a malformed answer is not (it will be malformed

@@ -305,6 +305,26 @@ def _note_success() -> None:
 
 
 # ── The seam ──────────────────────────────────────────────────────────────
+# The API's own hard floor on a manually-set deadline. Learned the expensive
+# way: with a 6-second deadline the transport is configured happily, the request
+# goes out, and Google answers
+#
+#   400 INVALID_ARGUMENT  Manually set deadline 6s is too short.
+#                        Minimum allowed deadline is 10s.
+#
+# on *every* call. The layer looked active and classified nothing, which is the
+# worst failure mode available: silent, total, and invisible to a test that
+# replaces `_request`. So the value is clamped here rather than trusted, and
+# `tests/test_ai_intent.py` asserts the floor without touching the network.
+MIN_DEADLINE_SECONDS = 10.0
+
+
+def timeout_seconds() -> float:
+    """The effective bound on one call: the configured value, never below the
+    API's floor."""
+    return max(MIN_DEADLINE_SECONDS, float(config.GEMINI_TIMEOUT_SECONDS))
+
+
 def _build_client():
     """Create the SDK client, or explain why it cannot be created.
 
@@ -326,9 +346,7 @@ def _build_client():
 
     client = genai.Client(
         api_key=config.GEMINI_API_KEY,
-        http_options=types.HttpOptions(
-            timeout=int(max(1.0, float(config.GEMINI_TIMEOUT_SECONDS)) * 1000)
-        ),
+        http_options=types.HttpOptions(timeout=int(timeout_seconds() * 1000)),
     )
     return client, types
 
@@ -370,15 +388,20 @@ async def _request(text: str) -> str:
                 # short JSON object, and letting the model think at length would
                 # spend the latency budget of a group message handler.
                 max_output_tokens=256,
+                # We give the model no tools, so function calling has nothing to
+                # call. Left on, the SDK logs a warning on every request and
+                # advertises a capability this integration does not want.
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
             ),
         )
 
     # The authoritative timeout. `asyncio.wait_for` is unit-unambiguous, unlike
     # a transport-level millisecond setting, and it is what actually bounds the
-    # handler when a socket stalls.
-    response = await asyncio.wait_for(
-        _call(), timeout=max(1.0, float(config.GEMINI_TIMEOUT_SECONDS))
-    )
+    # handler when a socket stalls. Both bounds come from `timeout_seconds()`, so
+    # they cannot disagree and neither can be set below the API's floor.
+    response = await asyncio.wait_for(_call(), timeout=timeout_seconds())
 
     text_out = getattr(response, "text", None)
     if not text_out or not str(text_out).strip():
