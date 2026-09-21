@@ -1133,6 +1133,32 @@ def test_a_successful_action_is_audited_with_both_interfaces_marked():
     assert row["actor_id"] == OWNER
     assert row["target_id"] == MEMBER
     assert row["chat_id"] == CHAT
+    # Which front door. Recorded in the row itself, not only in the log line,
+    # because "was this the assistant or a person?" is the first question asked
+    # about an action somebody disagrees with.
+    assert row["interface"] == admin_service.INTERFACE_AI
+
+
+def test_a_request_from_the_command_path_is_marked_as_python():
+    """The other half of the same fact, written by main._audit."""
+    main._audit(OWNER, "moderation.ban", "ok", target_id=MEMBER, chat_id=CHAT)
+
+    row = db.audit_recent(1)[0]
+
+    assert row["interface"] == admin_service.INTERFACE_PYTHON
+    assert row["interface"] != admin_service.INTERFACE_AI
+
+
+def test_the_two_interfaces_cannot_be_confused_for_one_another():
+    """One row each, and the record tells them apart."""
+    execute("ban_member", target_id=MEMBER)
+    main._audit(OWNER, "moderation.ban", "ok", target_id=HELPER, chat_id=CHAT)
+
+    rows = db.audit_recent(2)
+    by_target = {r["target_id"]: r["interface"] for r in rows}
+
+    assert by_target[MEMBER] == admin_service.INTERFACE_AI
+    assert by_target[HELPER] == admin_service.INTERFACE_PYTHON
 
 
 def test_a_refusal_is_audited_too():
@@ -1144,6 +1170,61 @@ def test_a_refusal_is_audited_too():
     assert row["action"] == "moderation.ban"
     assert row["outcome"] == admin_service.OUTCOME_DENIED
     assert row["actor_id"] == MEMBER
+
+
+def test_the_recent_admin_context_carries_the_interface():
+    """The assistant may see which door past actions came through."""
+    execute("ban_member", target_id=MEMBER)
+
+    events = admin_tools.recent_admin_context(CHAT)
+
+    assert events
+    assert events[0]["interface"] == admin_service.INTERFACE_AI
+
+
+def test_recent_refusals_lists_only_the_ones_that_did_not_happen():
+    execute("ban_member", target_id=MEMBER)          # ok
+    execute("ban_member", actor_id=MEMBER, target_id=HELPER)   # denied
+
+    refusals = admin_service.recent_refusals(5)
+
+    assert [r["outcome"] for r in refusals] == [admin_service.OUTCOME_DENIED]
+    assert all(r["outcome"] != admin_service.OUTCOME_OK for r in refusals)
+
+
+def test_a_duplicate_is_not_counted_as_a_refusal():
+    """The desired state holds; it was simply reached earlier.
+
+    Counting it would send an operator chasing a problem that is not there.
+    """
+    gateway = FakeGateway()
+    req = request("ban_member", target_id=MEMBER)
+    run(admin_service.execute(req, gateway, bot_id=BOT_ID))
+    run(admin_service.execute(req, gateway, bot_id=BOT_ID))
+
+    assert admin_service.recent_refusals(5) == []
+
+
+def test_the_status_report_says_which_mode_is_live():
+    report = admin_service.status_report()
+
+    assert report.startswith(admin_service.mode_line())
+    assert "AI ADMIN MODE:" in report
+
+
+def test_the_status_report_lists_a_refusal_when_there_is_one():
+    execute("ban_member", actor_id=MEMBER, target_id=HELPER)
+
+    report = admin_service.status_report()
+
+    assert "Recent refusals" in report
+    assert admin_service.OUTCOME_DENIED in report
+    # And which door it came through, in the same line.
+    assert f"via={admin_service.INTERFACE_AI}" in report
+
+
+def test_the_status_report_is_honest_when_there_is_nothing_to_report():
+    assert "No administrative refusals on record." in admin_service.status_report()
 
 
 def test_a_duplicate_is_audited_once():

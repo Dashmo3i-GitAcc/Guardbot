@@ -735,6 +735,11 @@ def recent_admin_context(chat_id: int, *, limit: int = 0) -> list[dict]:
             "operation": row["action"],
             "target_id": row["target_id"],
             "outcome": row["outcome"],
+            # Which front door the past action came through. Useful to the model
+            # for the same reason it is useful to an operator: "who did this" is
+            # ambiguous between the person and the assistant when the assistant
+            # is the one that asked.
+            "interface": row.get("interface", ""),
         }
         for row in rows
     ]

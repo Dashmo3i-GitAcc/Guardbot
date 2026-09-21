@@ -9,6 +9,24 @@ _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
 
+def _ensure_column(table: str, column: str, declaration: str) -> None:
+    """Add a column to an existing table, once. A no-op if it is already there.
+
+    SQLite has no `ADD COLUMN IF NOT EXISTS`, and `CREATE TABLE IF NOT EXISTS`
+    does nothing at all to a table that already exists — so a column added to a
+    schema after the first deploy reaches fresh installs and never reaches the
+    one running in production. This is the missing half.
+
+    Only ever additive, and only ever called from ``init()``: the alternative,
+    rebuilding the table, would mean dropping and recreating a table whose whole
+    purpose is to be an append-only record of who did what.
+    """
+    cols = {row[1] for row in _conn.execute(f"PRAGMA table_info({table})")}
+    if column in cols:
+        return
+    _conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
 def init() -> None:
     global _conn
     _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
@@ -147,8 +165,16 @@ def init() -> None:
             target_id INTEGER,
             chat_id INTEGER,
             outcome TEXT NOT NULL,
-            detail TEXT NOT NULL DEFAULT '')"""
+            detail TEXT NOT NULL DEFAULT '',
+            interface TEXT NOT NULL DEFAULT '')"""
     )
+    # `interface` was added after the table was already in production, so it
+    # needs a migration rather than only a CREATE TABLE: `IF NOT EXISTS` leaves
+    # an existing table exactly as it was, which would mean the column silently
+    # existed on fresh installs and not on the one that matters. Idempotent, and
+    # additive — the column is what makes "was this the assistant or a person?"
+    # answerable from the record itself rather than only from the log line.
+    _ensure_column("admin_audit", "interface", "TEXT NOT NULL DEFAULT ''")
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_admin_audit_at ON admin_audit(at)"
     )
@@ -798,16 +824,23 @@ def audit_write(
     target_id: int | None = None,
     chat_id: int | None = None,
     detail: str = "",
+    interface: str = "",
 ) -> None:
     """Record one administrative decision, allowed or refused.
 
     Never raises into a handler: an audit row that cannot be written must not be
     the reason a moderation action fails. The exception is logged by the caller's
     logger, which is the same place every other failure goes.
+
+    ``interface`` is ``ai`` or ``python`` and says which of the two front doors
+    the request came through. It is recorded here rather than only in the log
+    line because "was this the assistant or a person?" is the first question
+    asked about an action somebody disagrees with, and a log file is not a place
+    to answer it from.
     """
     _exec(
         "INSERT INTO admin_audit (at, actor_id, action, target_id, chat_id, "
-        "outcome, detail) VALUES (?,?,?,?,?,?,?)",
+        "outcome, detail, interface) VALUES (?,?,?,?,?,?,?,?)",
         (
             int(time.time()),
             int(actor_id),
@@ -816,30 +849,37 @@ def audit_write(
             int(chat_id) if chat_id is not None else None,
             str(outcome)[:40],
             str(detail)[:300],
+            str(interface)[:16],
         ),
     )
+
+
+_AUDIT_COLS = (
+    "at, actor_id, action, target_id, chat_id, outcome, detail, interface"
+)
+
+
+def _audit_row(r) -> dict:
+    return {
+        "at": int(r[0]),
+        "actor_id": int(r[1]),
+        "action": r[2],
+        "target_id": int(r[3]) if r[3] is not None else None,
+        "chat_id": int(r[4]) if r[4] is not None else None,
+        "outcome": r[5],
+        "detail": r[6] or "",
+        "interface": r[7] or "",
+    }
 
 
 def audit_recent(limit: int = 20) -> list[dict]:
     """The newest audit rows, newest first. For the operator's own inspection."""
     with _lock:
         rows = _conn.execute(
-            "SELECT at, actor_id, action, target_id, chat_id, outcome, detail "
-            "FROM admin_audit ORDER BY id DESC LIMIT ?",
+            f"SELECT {_AUDIT_COLS} FROM admin_audit ORDER BY id DESC LIMIT ?",
             (max(1, int(limit)),),
         ).fetchall()
-    return [
-        {
-            "at": int(r[0]),
-            "actor_id": int(r[1]),
-            "action": r[2],
-            "target_id": int(r[3]) if r[3] is not None else None,
-            "chat_id": int(r[4]) if r[4] is not None else None,
-            "outcome": r[5],
-            "detail": r[6] or "",
-        }
-        for r in rows
-    ]
+    return [_audit_row(r) for r in rows]
 
 
 def audit_since(
@@ -853,10 +893,7 @@ def audit_since(
     window rather than the whole record. The brief's rule is bounded,
     privacy-conscious context — not a copy of the audit table in a prompt.
     """
-    sql = (
-        "SELECT at, actor_id, action, target_id, chat_id, outcome, detail "
-        "FROM admin_audit WHERE at >= ?"
-    )
+    sql = f"SELECT {_AUDIT_COLS} FROM admin_audit WHERE at >= ?"
     args: list = [int(since)]
     if chat_id is not None:
         sql += " AND chat_id = ?"
@@ -865,18 +902,7 @@ def audit_since(
     args.append(max(1, int(limit)))
     with _lock:
         rows = _conn.execute(sql, tuple(args)).fetchall()
-    return [
-        {
-            "at": int(r[0]),
-            "actor_id": int(r[1]),
-            "action": r[2],
-            "target_id": int(r[3]) if r[3] is not None else None,
-            "chat_id": int(r[4]) if r[4] is not None else None,
-            "outcome": r[5],
-            "detail": r[6] or "",
-        }
-        for r in rows
-    ]
+    return [_audit_row(r) for r in rows]
 
 
 def audit_prune(keep_seconds: int) -> int:

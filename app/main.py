@@ -37,6 +37,7 @@ from . import (
     classifier,
     config,
     db,
+    decision,
     detector,
     gemini_pool,
     media,
@@ -45,6 +46,7 @@ from . import (
     net,
     rbac,
     responses,
+    text_filters,
     transcribe,
     vpnbot,
 )
@@ -766,6 +768,53 @@ def _schedule_test_unrestrict(
     )
 
 
+async def _apply_strike_ladder(
+    ctx, chat_id: int, user, *, strike: int, source: str
+) -> None:
+    """Warn the person, and restrict them once the configured count is reached.
+
+    One implementation, because there is one ladder. The media pipeline and the
+    text pipeline used to carry a copy each, and two copies of a punishment rule
+    is how a group ends up punishing the same behaviour two different ways
+    depending on whether the violation arrived as a photo or as a sentence.
+
+    The order matters and is deliberate: restrict first, then say so. The
+    restriction is the fact and the notice is the explanation, and a notice that
+    arrives before the restriction is a promise the bot might then fail to keep.
+
+    ``strike`` is passed in rather than read here, so the caller records it —
+    which is what keeps "a strike is only ever recorded for content that was
+    actually removed" a property of the caller that did the deleting.
+
+    A restriction failure is not an error: it is logged, the warning still goes
+    out, and nothing else changes. ``_schedule_test_unrestrict`` is reached only
+    when the restriction actually applied.
+    """
+    restricted = False
+    if strike >= config.VIOLATION_MUTE_AFTER:
+        restricted = await _restrict_user(ctx, chat_id, user.id)
+        log.info(
+            "VIOLATION_RESTRICT chat=%s user=%s count=%d minutes=%s applied=%s "
+            "source=%s",
+            chat_id, user.id, strike, config.MUTE_MINUTES, restricted, source,
+        )
+
+    notice_id = await _send_user_notice(
+        ctx,
+        chat_id,
+        _format_notice(
+            config.VIOLATION_WARNING_TEXT,
+            name=mention(user),
+            count=strike,
+            max=config.VIOLATION_MUTE_AFTER,
+        ),
+    )
+    # The test account is restricted for real above; only then is the unrestrict
+    # scheduled, and only for that one user id.
+    if restricted:
+        _schedule_test_unrestrict(ctx, chat_id, user.id, notice_id)
+
+
 async def _test_unrestrict_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Lift the test account's restriction and clean up its warning message.
 
@@ -1028,28 +1077,11 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 "VIOLATION chat=%s user=%s count=%d",
                 chat.id, user.id, outcome_enforced.strike,
             )
-            restricted = False
-            if outcome_enforced.strike >= config.VIOLATION_MUTE_AFTER:
-                restricted = await _restrict_user(ctx, chat.id, user.id)
-                log.info(
-                    "VIOLATION_RESTRICT chat=%s user=%s count=%d minutes=%s applied=%s",
-                    chat.id, user.id, outcome_enforced.strike, config.MUTE_MINUTES,
-                    restricted,
-                )
-            notice_id = await _send_user_notice(
-                ctx,
-                chat.id,
-                _format_notice(
-                    config.VIOLATION_WARNING_TEXT,
-                    name=mention(user),
-                    count=outcome_enforced.strike,
-                    max=config.VIOLATION_MUTE_AFTER,
-                ),
+            await _apply_strike_ladder(
+                ctx, chat.id, user,
+                strike=outcome_enforced.strike,
+                source="media",
             )
-            # The test account is restricted for real above; only then is the
-            # unrestrict scheduled, and only for that one user id.
-            if restricted:
-                _schedule_test_unrestrict(ctx, chat.id, user.id, notice_id)
     except Exception:
         # fail open: never delete or punish because of an internal error
         log.exception("media pipeline failed")
@@ -1824,11 +1856,16 @@ def _audit(
     chat_id: int | None = None,
     detail: str = "",
 ) -> None:
-    """Write one audit row. Never raises into the handler.
+    """Write one audit row for the command path. Never raises into the handler.
 
     An audit row that cannot be written must not be the reason a moderation
     action fails, and it must not be the reason one *succeeds* either — so this
     logs the failure and returns.
+
+    Everything written here came through a typed command, so the interface is
+    ``python`` by construction. The assistant's requests are audited by
+    ``app/admin_service.py`` instead, which stamps ``ai``. Between the two, every
+    administrative row says which front door it came through.
     """
     try:
         db.audit_write(
@@ -1838,6 +1875,7 @@ def _audit(
             target_id=target_id,
             chat_id=chat_id,
             detail=detail,
+            interface=admin_service.INTERFACE_PYTHON,
         )
     except Exception:  # noqa: BLE001
         log.exception("audit write failed action=%s outcome=%s", action, outcome)
@@ -2055,8 +2093,15 @@ async def cmd_pool(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                               reply_to=msg.message_id)
         return
     _audit(actor.user_id, "pool.status", "ok", chat_id=room.id)
-    await _reply_in_group(ctx, room.id, gemini_pool.status_report(),
-                          reply_to=msg.message_id)
+    await _reply_in_group(
+        ctx,
+        room.id,
+        gemini_pool.status_report()
+        + "\n\n"
+        + "— AI administration —\n"
+        + admin_service.status_report(),
+        reply_to=msg.message_id,
+    )
 
 
 def _promote_keyboard(actor_id: int, target_id: int, role: str, mask: int):
@@ -2618,24 +2663,14 @@ async def on_group_text_moderation(
         chat.id, getattr(msg, "message_id", "-"), outcome.reason,
     )
     await _send_text_deletion_report(ctx, chat, user, msg, verdict, outcome)
-    notice_id = await _send_user_notice(
-        ctx,
-        chat.id,
-        _format_notice(
-            config.VIOLATION_WARNING_TEXT,
-            name=mention(user),
-            count=db.get_strikes(chat.id, user.id),
-            max=config.VIOLATION_MUTE_AFTER,
-        ),
-    )
-    if result.strike is not None and result.strike >= config.VIOLATION_MUTE_AFTER:
-        # The same escalation the media path uses. It is *not* an automatic ban
-        # and not an automatic long mute: it is the configured, documented,
-        # timed restriction, applied only to a message that was actually
-        # deleted — and only because the AI confirmed it.
-        restricted = await _restrict_user(ctx, chat.id, user.id)
-        if restricted:
-            _schedule_test_unrestrict(ctx, chat.id, user.id, notice_id)
+    if result.strike is not None:
+        # The same ladder the media path uses, through the same function. It is
+        # *not* an automatic ban and not an automatic long mute: it is the
+        # configured, documented, timed restriction, applied only to a message
+        # that was actually deleted — and only because the AI confirmed it.
+        await _apply_strike_ladder(
+            ctx, chat.id, user, strike=result.strike, source="text"
+        )
 
 
 async def _send_text_deletion_report(ctx, chat, user, msg, verdict, outcome) -> None:
@@ -2668,6 +2703,115 @@ async def _send_text_deletion_report(ctx, chat, user, msg, verdict, outcome) -> 
         await report(ctx, text)
     except TelegramError as e:
         log.warning("text deletion report failed: %s", e)
+
+
+async def _send_filter_report(
+    ctx, chat, user, msg, hit, *, deleted: bool
+) -> None:
+    """The admin report for a pattern-filter hit. Carries no excerpt of the message.
+
+    The rule and the action are what an operator needs in order to judge the
+    decision — and, when the filter is new, to decide whether the rule should
+    exist at all. The message itself is what this project spends the most effort
+    not copying into a log, so it is not here either.
+    """
+    if not config.ADMIN_LOG_CHAT:
+        return
+    action = "پیام حذف شد." if deleted else "فقط برای بازبینی ثبت شد."
+    text = (
+        f"🧹 <b>فیلتر پیام</b>\n\n"
+        f"👤 {mention(user)} (<code>{user.id}</code>)\n"
+        f"💬 Chat ID: <code>{chat.id}</code>\n"
+        f"📩 Message ID: <code>{getattr(msg, 'message_id', '-')}</code>\n\n"
+        f"🔎 قاعده: <code>{hit.kind}/{hit.label}</code>\n"
+        f"✅ اقدام: {action}\n"
+    )
+    try:
+        await report(ctx, text)
+    except TelegramError as e:
+        log.warning("filter report failed: %s", e)
+
+
+async def on_group_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The pattern rules: links, banned words, and the shapes a scam takes.
+
+    Runs *before* any model is consulted, and consults none. A rule that can be
+    a pattern should not be a request against a shared Gemini quota, and these
+    are the rules that can be.
+
+    The enforcement is not reimplemented here. A hit becomes a
+    ``DecisionResult`` and goes to ``app/moderation.py`` — the same executor, and
+    the same strike ladder through ``_apply_strike_ladder``, that every other
+    violation goes through. The only thing this function decides is *whether*
+    there was a violation, which is what a filter is for.
+
+    Off unless ``FILTER_ENABLED`` is set. That is deliberate: these rules delete
+    somebody's message and a false positive cannot be undone, so switching them
+    on is a decision an operator makes after reading the review log, not one
+    this code makes for them.
+    """
+    if not config.FILTER_ENABLED:
+        return
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user or user.is_bot:
+        return
+    if chat.id not in config.GROUP_IDS:
+        return
+    if user.id in config.WHITELIST_USER_IDS:
+        return
+    if was_deleted(chat.id, msg.message_id):
+        return
+
+    # Staff are exempt by default, for the same reason the moderation layer
+    # skips them: a filter that argues with its own operators is one they turn
+    # off. The exemption is configuration, and it is checked before the rules.
+    staff = await is_admin(ctx, chat.id, user.id)
+    hit = text_filters.inspect(_message_text(msg), is_admin=staff)
+    if hit is None:
+        return
+
+    log.info(
+        "filter chat=%s user=%s %s", chat.id, user.id, text_filters.describe(hit)
+    )
+
+    if hit.reviews:
+        await _send_filter_report(ctx, chat, user, msg, hit, deleted=False)
+        return
+
+    enforced = decision.DecisionResult(
+        decision.Decision.EXPLICIT, reason=f"filter:{hit.label}"
+    )
+    result = await moderation.enforce(
+        enforced,
+        delete_media=lambda: msg.delete(),
+        # A filter hit only counts as a violation when the operator says so. A
+        # deleted link and a deleted explicit image are not the same offence,
+        # and conflating them would mute somebody for posting a URL once.
+        record_confirmed=(
+            (lambda: db.add_strike(chat.id, user.id))
+            if config.FILTER_COUNTS_AS_VIOLATION
+            else None
+        ),
+    )
+    if not result.deleted:
+        log.error(
+            "FILTER_DELETE_FAILED chat=%s message=%s rule=%s error=%s",
+            chat.id, getattr(msg, "message_id", "-"), hit.label, result.reason,
+        )
+        return
+
+    mark_deleted(chat.id, getattr(msg, "message_id", 0))
+    log.info(
+        "FILTER_DELETE_SUCCESS chat=%s message=%s rule=%s",
+        chat.id, getattr(msg, "message_id", "-"), hit.label,
+    )
+    await _send_filter_report(ctx, chat, user, msg, hit, deleted=True)
+    if result.strike is not None:
+        await _apply_strike_ladder(
+            ctx, chat.id, user, strike=result.strike, source="filter"
+        )
 
 
 async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3027,6 +3171,13 @@ async def post_init(app: Application) -> None:
             "Set it to your own Telegram user id to enable them."
         )
 
+    # Which of the two front doors is live. Said out loud at startup because the
+    # failure it describes is silent by nature: with the AI down, administration
+    # still works perfectly through the commands, and nothing about that looks
+    # wrong until somebody tries to talk to it and gets no answer. "DEGRADED" is
+    # the word that makes the difference visible.
+    log.info("%s", admin_service.mode_line())
+
 
 def main() -> None:
     os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
@@ -3128,6 +3279,21 @@ def main() -> None:
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
                 on_group_text_moderation,
+                block=False,
+            ),
+            group=4,
+        )
+
+    # The pattern rules. Registered independently of the moderation layer on
+    # purpose: they need no model, so they must keep working when the text
+    # moderation AI is switched off, out of quota, or unreachable. Group 4, the
+    # last group, so that a message already handled — or already deleted — by an
+    # earlier handler is not acted on twice.
+    if config.FILTER_ENABLED:
+        app.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+                on_group_filter,
                 block=False,
             ),
             group=4,

@@ -239,6 +239,11 @@ side effect of another change.
   store). Every violation warns the user; at `VIOLATION_MUTE_AFTER` (default 3)
   the timed restriction is applied. Every violation at or after the threshold
   re-applies it, which extends the restriction.
+- **The ladder itself lives in exactly one place**: `_apply_strike_ladder` in
+  `main.py`. It used to be duplicated — once on the media path and once on the
+  text path — which is how a fix lands on one path and not the other. It now
+  restricts *then* notices, so the warning reflects what actually happened. Do
+  not re-inline it.
 - **A failed deletion, a detector error or a database error never punishes
   anyone.** If recording the violation fails, the deletion still stands and
   `outcome.strike` is `None`, so nothing else happens.
@@ -305,10 +310,17 @@ the pipeline can be exercised repeatedly without a manual unrestrict.
 
 ### 4.8 Out of scope by default
 
-Text/profanity/username/link moderation, raid detection, bans, a dashboard and
-unrelated Telegram features do **not** exist. Do not add any of them unless the
-current stage explicitly asks. The project advances one narrow stage at a time;
-pre-building a future stage is a defect, not initiative.
+Raid detection, bans, a dashboard and unrelated Telegram features do **not**
+exist. Do not add any of them unless the current stage explicitly asks. The
+project advances one narrow stage at a time; pre-building a future stage is a
+defect, not initiative.
+
+Pattern-based inbound filtering (banned words, links, phishing shapes) now
+exists as `app/text_filters.py`, but it is **off by default** and is deliberately
+not a moderation authority: it returns a verdict, and `main.on_group_filter`
+routes that verdict through the same `moderation.enforce` executor every other
+violation uses. It does not consult a model, it cannot ban, and it counts as a
+violation only when `FILTER_COUNTS_AS_VIOLATION` is set. See §32.
 
 ### 4.9 Thresholds are calibrated evidence, not guesses
 
@@ -546,6 +558,16 @@ This is a small VPS. Disk leaks are production incidents.
     the real group handler: the model's yes becomes the usual invitation, its
     no leaves the group alone, a Gemini outage does not break the handler, and
     with no key the handler behaves exactly as it did before.
+  - `tests/test_text_filters.py` — the pattern filter on its own: the master
+    switch, the minimum length, each family, the allow-list, word boundaries,
+    each phishing label, and that the log never leaks the matched word.
+  - `tests/test_filter_pipeline.py` — the filter through the real
+    `main.on_group_filter`: a hit reaches the same executor and ladder as every
+    other violation, a failed deletion never strikes, and the filter module
+    cannot reach Telegram or the database.
+  - `tests/test_db_migration.py` — the `admin_audit.interface` column added to
+    a table built with the old schema, idempotently, with old rows still
+    readable.
 - **The AI tests never touch Google.** `app/ai_intent.py` has exactly one
   network seam, `_request`, and the tests replace it. If you add a code path
   that talks to the API outside `_request`, the tests will silently stop
@@ -1855,6 +1877,11 @@ that only records successes cannot answer it. The row carries the actor, the
 action, the target, the chat, an outcome key and a short detail. It never carries
 message content, and an audit write that fails does not break the command.
 
+Since §30 the row also carries an **`interface`** column — `python` or `ai` —
+recording which of the two interfaces asked for the action. The action vocabulary
+is deliberately *not* forked: an operator searching for `moderation.ban` still
+finds every ban, whichever interface requested it.
+
 ---
 
 ## 26. Four AI workloads, four budgets
@@ -2603,6 +2630,13 @@ The action names are the ones the trail already used — `moderation.ban`,
 so that adding the AI path did not fork the vocabulary. An operator searching the
 audit for `moderation.ban` finds every ban, whichever interface asked for it.
 
+What the trail *does* distinguish is **who asked**. The `interface` column holds
+`python` for the direct commands and `ai` for the model-mediated path, so "did a
+person do this, or did the assistant?" is a `WHERE` clause rather than an
+inference from the actor id. That column was added to a table that already
+existed in production, which is why `db.py` grew an idempotent
+`_ensure_column` — see §30.
+
 The detail column holds ids, keys and short machine strings. It never holds a
 message body, and the tests assert that: `test_the_audit_row_never_contains_a_message_body`.
 
@@ -2769,3 +2803,216 @@ from app import db, gemini_pool; db.init()
 p = gemini_pool.pool_for('chat')
 print(p.daily_remaining(), 'of', p.daily_budget * len(p.accounts))"
 ```
+
+---
+
+## 30. The audit trail says which interface acted
+
+`admin_audit` records every administrative decision from both interfaces. The
+action vocabulary is shared on purpose (§29.11) — an operator searching for
+`moderation.ban` finds every ban — but the two interfaces are *not* the same
+thing, and an incident review needs to tell them apart: "an administrator ran
+`/ban`" and "the assistant was talked into banning someone" are different
+findings with the same action name.
+
+So the row carries an `interface` column: `python` for the direct commands, `ai`
+for the model-mediated path. It is written by `admin_service._record()` from the
+request's own `interface` field, and by `main._audit()` as `python`, because the
+command path is the python path. The two constants are `INTERFACE_AI` and
+`INTERFACE_PYTHON` in `app/admin_service.py`; nothing else may invent a value, and
+`_record()` coerces anything unrecognised back to `python` so a bad caller cannot
+write a third interface into the trail.
+
+### 30.1 The column had to be added to a table that already existed
+
+This codebase had **no migration pattern** — every table is `CREATE TABLE IF NOT
+EXISTS`, which is fine for a new table and useless for a new column on a table
+that is already in production. `admin_audit` in the live database was created
+before this column existed, and `CREATE TABLE IF NOT EXISTS` would have left it
+alone.
+
+Rather than a one-off script, `db.py` grew one small primitive:
+
+```python
+def _ensure_column(table: str, column: str, declaration: str) -> None:
+    cols = {row[1] for row in _conn.execute(f"PRAGMA table_info({table})")}
+    if column in cols:
+        return
+    _conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+```
+
+It is idempotent by construction: it reads `PRAGMA table_info`, returns early if
+the column is present, and only then issues the `ALTER TABLE`. It is called for
+`admin_audit.interface` immediately after the schema is created, so a fresh
+database gets the column from the `CREATE` and a live one gets it from the
+`ALTER`, and neither path is special-cased. The declaration carries
+`NOT NULL DEFAULT ''`, so the rows that predate the column read back as empty
+rather than as a value nobody wrote.
+
+`tests/test_db_migration.py` is the test that makes this a guarantee rather than
+a hope: it builds an `admin_audit` table with the **old** schema, runs `db.init()`
+over it, and asserts the column appears, that old rows are still readable, that
+running init twice changes nothing, and that new rows carry the interface.
+
+### 30.2 Reading it back
+
+`db.audit_recent()` and `db.audit_since()` return rows through a single
+`_audit_row()` projection built from `_AUDIT_COLS`, so the `interface` key is
+present on every row the application reads. `admin_tools.recent_admin_context()`
+passes it through to the model's trusted context, which is how the assistant can
+answer "what did *I* do" as distinct from "what was done".
+
+## 31. The administration mode is observable
+
+`admin_service.mode_line()` reports which of the two interfaces is currently
+able to act — `AVAILABLE`, `DEGRADED — PYTHON FALLBACK ACTIVE`, or `OFF —
+PYTHON COMMANDS ONLY`. The function existed; it was never called. A mode line
+nobody reads is not observability, so it is now wired in two places:
+
+* `post_init` logs it once at startup, next to the pool and workload lines. This
+  is the line that tells an operator, before anything is asked of the bot,
+  whether the assistant will answer at all.
+* `cmd_pool` appends an **AI administration** section to the pool report. `/pool`
+  is where an operator already goes when the AI is misbehaving, so the mode and
+  the pool's health arrive together.
+
+That section is `admin_service.status_report()`, and it answers two questions
+that look identical from inside a group and are completely different problems:
+
+1. **The mode.** "The assistant never answers" is a configuration or provider
+   problem.
+2. **The recent refusals.** "The assistant answers and is refused every time" is
+   a permissions problem. `recent_refusals()` reads them from the audit table —
+   not from an in-memory counter, because the question is usually asked after a
+   restart and a counter that resets would answer it with a confident zero. The
+   scan is bounded: `db.audit_recent(limit * 6)` and the refusals inside that
+   window.
+
+A **duplicate** is deliberately not a refusal (`_REFUSAL_OUTCOMES` omits
+`OUTCOME_DUPLICATE`): the desired state does hold, it was simply reached earlier,
+and listing it would send an operator chasing a problem that does not exist. Each
+refusal line ends with `via=<interface>`, so the report itself demonstrates §30.
+
+## 32. The inbound text filter
+
+The brief asked for link filtering, a banned-word blacklist, phishing/scam
+protection and bulk cleanup. What the repository actually contained was different
+from what the words suggest, and that was checked before anything was written:
+the `purge` that exists is chat-history TTL cleanup, and the `phishing` that
+exists is a guard on the bot's own *outbound* replies. The inbound capability was
+genuinely absent.
+
+`app/text_filters.py` is that capability, and its shape is the point.
+
+### 32.1 It returns a verdict, and nothing else
+
+The module never imports Telegram, never imports the database, and never calls
+`moderation.enforce`, `add_strike` or any executor. It is a pure function from
+text to `Hit | None`, and `tests/test_filter_pipeline.py` asserts that as a
+property of the source, not as a convention:
+
+```python
+def test_the_filter_module_cannot_reach_telegram_or_the_database():
+    source = open("app/text_filters.py").read()
+    assert "import telegram" not in source
+    assert "app.db" not in source and "from . import db" not in source
+    assert "moderation.enforce" not in source
+    assert "add_strike" not in source
+```
+
+The consequence is that there is **one** enforcement path. `main.on_group_filter`
+turns a hit into a `decision.DecisionResult(decision.Decision.EXPLICIT,
+reason=f"filter:{hit.label}")` and hands it to `moderation.enforce` — the same
+executor every other violation goes through, with the same "a failed delete means
+no strike" contract and the same shared ladder (§33). The filter decides *whether*
+there was a violation. It decides nothing about what happens next.
+
+### 32.2 Three families, each independently controllable
+
+| Family | Constant | Default action | What it matches |
+|---|---|---|---|
+| link | `FILTER_LINK_ACTION` | `review` | a URL whose host is not on `FILTER_ALLOWED_DOMAINS` |
+| word | `FILTER_WORD_ACTION` | `delete` | `FILTER_BANNED_WORDS`, on word boundaries |
+| phishing | `FILTER_PHISHING_ACTION` | `delete` | labelled scam shapes (below) |
+
+Each family's action is `off | review | delete`, so the phishing rules can run
+without the link rules. An unknown action string resolves to `off`, never to
+`delete`: a typo in a `.env` must fail toward doing nothing.
+
+The phishing rules are labelled so the log and the admin report can name the
+reason without quoting the message — `ip_literal_url`, `punycode_host`,
+`url_shortener`, `seed_phrase_lure`, `airdrop_lure`, `code_lure`,
+`doubling_scam`. Banned-word rules are labelled `banned_word_<index>` for the
+same reason: the admin report names the rule, never the word, and
+`test_the_report_names_the_rule_but_not_the_message` asserts exactly that.
+
+### 32.3 The switch, and why it defaults off
+
+`text_filters.inspect()` checks `config.FILTER_ENABLED` **first**, before the
+minimum-length check and before the admin exemption. This is not decoration: the
+first version did not, and the test suite caught it — the filter would have
+filtered with the feature switched off. Checking the master switch at the top of
+the one function that produces a verdict means there is no path into the rules
+that skips it.
+
+`FILTER_ENABLED` defaults to `false`. These rules delete somebody's message, and
+a false positive cannot be undone. The capability is implemented, wired and
+tested; enabling it is a decision an operator makes after reading the review log,
+not a default this code imposes. `review` exists precisely so that decision can
+be made from evidence: run with `FILTER_LINK_ACTION=review`, read what the filter
+*would* have deleted, then decide.
+
+### 32.4 Two decisions worth stating
+
+* **Administrators are exempt by default** (`FILTER_EXEMPT_ADMINS=true`). A
+  filter that mutes the moderation team is a filter that gets switched off. The
+  exemption is configuration and can be turned off.
+* **A hit does not count as a violation by default**
+  (`FILTER_COUNTS_AS_VIOLATION=false`). A deleted link and a deleted explicit
+  image are not the same offence, and conflating them would mute somebody for
+  posting a URL once. When it *is* set, the hit goes through the same ladder and
+  the third counted hit restricts — `test_the_third_counted_hit_restricts` drives
+  that end to end.
+
+### 32.5 Why it does not call a model
+
+A rule that can be a pattern should not be a request against a shared Gemini
+quota. The filter runs before any model is consulted, consults none, and
+`test_the_filter_never_consults_a_model` proves it by replacing the moderation
+workload's `assess_text` with a function that raises if it is ever reached. This
+is also what keeps the filter's cost at zero: it is regex over a string.
+
+### 32.6 The module is named `text_filters`, not `filters`
+
+`from telegram.ext import ... filters` is used throughout `main.py`. A local
+module named `filters` would shadow it, and the failure would be subtle rather
+than loud. The project module is therefore `text_filters`, and the reason is
+recorded here so nobody "tidies" the name back.
+
+## 33. One strike ladder
+
+The escalation rule — warn, and restrict at `VIOLATION_MUTE_AFTER` — used to
+exist twice: once in the media pipeline and once in the text pipeline. Two copies
+of a punishment rule is how a group ends up punishing the same behaviour two
+different ways depending on whether the violation arrived as a photo or as a
+sentence, and it is how a fix lands on one path and not the other.
+
+`_apply_strike_ladder(ctx, chat_id, user, *, strike, source)` in `main.py` is now
+the only implementation. Three properties are deliberate:
+
+* **The order is restrict, then notice.** The restriction is the fact and the
+  notice is the explanation; a notice that arrives before the restriction is a
+  promise the bot might then fail to keep.
+* **`strike` is passed in, not read here.** The caller records it, which is what
+  keeps "a strike is only ever recorded for content that was actually removed" a
+  property of the caller that did the deleting. `moderation.enforce` only calls
+  `record_confirmed` after a successful delete; the ladder then only runs when
+  `result.strike` is not `None`.
+* **A restriction failure is not an error.** It is logged with its `source`, the
+  warning still goes out, and `_schedule_test_unrestrict` is reached only when
+  the restriction actually applied.
+
+The `source` argument (`media`, `text`, `filter`) is what makes the ladder's
+decisions attributable in the log without the ladder needing to know what a
+filter is. The three callers are the media path, the text path, and
+`on_group_filter` (§32).

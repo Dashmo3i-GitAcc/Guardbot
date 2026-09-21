@@ -710,6 +710,7 @@ def _record(
                 if decision is not None and not decision.allowed
                 else result.detail
             ),
+            interface=request.interface,
         )
     except Exception:  # noqa: BLE001
         log.exception("audit write failed action=%s", request.operation)
@@ -848,6 +849,76 @@ def mode_line() -> str:
     if state["mode"] == "degraded":
         return "AI ADMIN MODE: DEGRADED — PYTHON FALLBACK ACTIVE"
     return "AI ADMIN MODE: OFF — PYTHON COMMANDS ONLY"
+
+
+# Outcomes that mean "nothing happened, and here is why". A duplicate is
+# deliberately absent: the desired state does hold, it was simply reached
+# earlier, and counting it as a failure would make an operator chase a problem
+# that does not exist.
+_REFUSAL_OUTCOMES = frozenset({
+    OUTCOME_DENIED,
+    OUTCOME_BOT_LACKS_RIGHT,
+    OUTCOME_TELEGRAM_ERROR,
+    OUTCOME_MALFORMED,
+    OUTCOME_STALE,
+    OUTCOME_BAD_TARGET,
+    OUTCOME_TARGET_IS_BOT,
+    OUTCOME_UNKNOWN_ROLE,
+    OUTCOME_UNKNOWN_OPERATION,
+})
+
+
+def recent_refusals(limit: int = 5) -> list[dict]:
+    """Recent administrative requests that did not happen, newest first.
+
+    Read from the audit table rather than kept in memory, because the question
+    this answers — "why has nothing been working?" — is usually asked after a
+    restart, and a counter that resets with the process would answer it with a
+    confident zero.
+
+    The scan is bounded: the audit table is ordered by id, so a window of recent
+    rows is enough, and it is the refusals inside that window that matter.
+    """
+    window = max(1, int(limit))
+    rows = db.audit_recent(window * 6)
+    return [r for r in rows if r.get("outcome") in _REFUSAL_OUTCOMES][:window]
+
+
+def status_report() -> str:
+    """The operator's view of AI administration: the mode, and what was refused.
+
+    Both halves are needed to tell the two failure shapes apart. "The assistant
+    never answers" and "the assistant answers and is refused every time" look
+    identical from inside a group and are completely different problems; the
+    first is this mode line, the second is the refusal list.
+    """
+    state = mode_status()
+    if state["mode"] == "ai":
+        headline = "Conversational administration is answering."
+    elif state["mode"] == "degraded":
+        headline = (
+            "Gemini is configured but not answering, so the commands are the "
+            "way in. They work; nothing here is broken."
+        )
+    else:
+        headline = "AI administration is switched off. Use the commands."
+
+    lines = [mode_line(), headline]
+
+    refusals = recent_refusals()
+    lines.append("")
+    if not refusals:
+        lines.append("No administrative refusals on record.")
+        return "\n".join(lines)
+
+    lines.append(f"Recent refusals ({len(refusals)}):")
+    for row in refusals:
+        via = row.get("interface") or "-"
+        lines.append(
+            f"  • {row['action']} actor={row['actor_id']} "
+            f"outcome={row['outcome']} via={via}"
+        )
+    return "\n".join(lines)
 
 
 def reset_state() -> None:

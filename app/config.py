@@ -897,6 +897,52 @@ MODERATION_MEDIA_ENABLED = _bool("MODERATION_MEDIA_ENABLED", True)
 MODERATION_REVIEW_NOTIFY = _bool("MODERATION_REVIEW_NOTIFY", True)
 
 
+# ---------------- Inbound text filters (links, words, phishing) --------------
+# The rules that do not need a model: a banned word, a link, the shapes a scam
+# message takes. Deterministic, cheap, and applied before anything is sent to
+# Gemini — a rule that can be a regex should not be a request against a shared
+# quota.
+#
+# OFF by default, and that is the whole safety argument. These rules delete
+# somebody's message, and a false positive cannot be undone. The capability is
+# implemented and tested; turning it on is a decision to make after reading the
+# review log, not a default this file imposes.
+FILTER_ENABLED = _bool("FILTER_ENABLED", False)
+
+# What to do about each family. "off" disables that family even when the filter
+# as a whole is on, which is what makes it possible to run the phishing rules
+# without running the link rules.
+#   off | review | delete
+FILTER_LINK_ACTION = os.getenv("FILTER_LINK_ACTION", "review").strip().lower()
+FILTER_WORD_ACTION = os.getenv("FILTER_WORD_ACTION", "delete").strip().lower()
+FILTER_PHISHING_ACTION = os.getenv("FILTER_PHISHING_ACTION", "delete").strip().lower()
+
+# The banned words, comma-separated. Matched on word boundaries, so a short word
+# cannot fire from inside a longer one — "ass" must not match "class". Persian
+# and English entries are both fine; matching is case-folded for Latin text.
+FILTER_BANNED_WORDS = _str_list(os.getenv("FILTER_BANNED_WORDS", ""))
+
+# Domains that are always allowed, comma-separated, matched on the host and its
+# subdomains. This is what keeps a legitimate link from a banned-word rule from
+# firing, and it is the escape hatch an operator needs on day one.
+FILTER_ALLOWED_DOMAINS = _str_list(os.getenv("FILTER_ALLOWED_DOMAINS", ""))
+
+# Whether administrators are exempt. On by default: an administrator posting a
+# link is usually doing it on purpose, and a filter that mutes the moderation
+# team is a filter that gets switched off.
+FILTER_EXEMPT_ADMINS = _bool("FILTER_EXEMPT_ADMINS", True)
+
+# Messages shorter than this are not filtered at all, for the same reason the
+# text moderation layer has a floor: a two-character line carries no signal.
+FILTER_MIN_CHARS = _int("FILTER_MIN_CHARS", 4)
+
+# Whether a filter hit also counts as a violation (a strike, and eventually the
+# timed restriction). Off by default: a deleted link and a deleted explicit
+# image are not the same offence, and conflating them would mute somebody for
+# posting a URL once.
+FILTER_COUNTS_AS_VIOLATION = _bool("FILTER_COUNTS_AS_VIOLATION", False)
+
+
 # ---------------- Speech to text (the fourth workload) -----------------------
 # Its own workload with its own key, model, limits and breaker, for the same
 # isolation reasons as the other three.
