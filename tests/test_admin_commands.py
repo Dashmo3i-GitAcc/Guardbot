@@ -655,3 +655,78 @@ def test_a_display_name_that_looks_like_an_admin_grants_nothing():
     asyncio.run(main.cmd_ban(update, ctx_for(bot)))
 
     assert bot.banned == []
+
+
+# ── /pool ─────────────────────────────────────────────────────────────────
+# The Gemini account pool, as the owner sees it. Owner-only, because the report
+# describes the operator's own Google projects — how many independent accounts
+# the deployment has and how close each is to its limit.
+KEY = "AIzaSyFAKE000000000000000000000000000000000Z"
+
+
+def _install_pool(monkeypatch):
+    from app import gemini_pool
+
+    pool = gemini_pool.Pool(
+        "intent",
+        [("1", KEY), ("2", "AIzaSyFAKE000000000000000000000000000000000Y")],
+        ["gemini-flash-lite-latest", "gemini-flash-latest"],
+        frozenset({"text"}),
+        retries=0,
+        backoff=0.0,
+        timeout=10.0,
+    )
+    monkeypatch.setitem(gemini_pool._pools, "intent", pool)
+    return pool
+
+
+def test_a_stranger_cannot_read_the_pool(monkeypatch):
+    _install_pool(monkeypatch)
+    bot = FakeBot()
+
+    run(main.cmd_pool, bot, actor=MEMBER)
+
+    assert bot.sent == [config.ADMIN_DENIED_TEXT]
+
+
+def test_a_moderator_cannot_read_the_pool(monkeypatch):
+    _install_pool(monkeypatch)
+    bot = FakeBot()
+
+    run(main.cmd_pool, bot, actor=MODERATOR)
+
+    assert bot.sent == [config.ADMIN_DENIED_TEXT]
+
+
+def test_the_owner_gets_the_pool_report(monkeypatch):
+    _install_pool(monkeypatch)
+    bot = FakeBot()
+
+    run(main.cmd_pool, bot, actor=OWNER)
+
+    assert len(bot.sent) == 1
+    report = bot.sent[0]
+    assert "GEMINI API POOL" in report
+    assert "Accounts: 2" in report
+    assert "Remaining: Not exposed by provider" in report
+
+
+def test_the_pool_report_never_contains_a_credential(monkeypatch):
+    _install_pool(monkeypatch)
+    bot = FakeBot()
+
+    run(main.cmd_pool, bot, actor=OWNER)
+
+    assert KEY not in bot.sent[0]
+    assert "****000Z" in bot.sent[0]
+
+
+def test_reading_the_pool_is_audited(monkeypatch):
+    _install_pool(monkeypatch)
+    bot = FakeBot()
+
+    run(main.cmd_pool, bot, actor=OWNER)
+
+    row = db.audit_recent(1)[0]
+    assert row["action"] == "pool.status"
+    assert row["outcome"] == "ok"

@@ -42,7 +42,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from . import config, db
+from . import config, db, gemini_pool
 
 log = logging.getLogger("guardbot.mod")
 
@@ -311,17 +311,22 @@ def shares_google_project() -> bool:
 
 def is_enabled() -> bool:
     """Whether a moderation verdict is possible at all."""
-    return bool(config.GEMINI_MOD_ENABLED and api_key())
+    return bool(
+        config.GEMINI_MOD_ENABLED
+        and (api_key() or gemini_pool.has_accounts("moderation"))
+    )
 
 
 def status() -> dict:
     """A description safe to log or show an operator. The key is never in here."""
+    pool = gemini_pool.pool_for("moderation")
     return {
         "enabled": bool(config.GEMINI_MOD_ENABLED),
-        "configured": bool(api_key()),
+        "configured": bool(api_key() or gemini_pool.has_accounts("moderation")),
         "active": is_enabled(),
         "shares_google_project": shares_google_project(),
         "model": config.GEMINI_MOD_MODEL,
+        "pool": pool.status() if pool is not None else None,
         "daily_limit": int(config.GEMINI_MOD_DAILY_LIMIT),
         "used_today": db.mod_calls_today(),
         "delete_confidence": float(config.MODERATION_DELETE_CONFIDENCE),
@@ -412,27 +417,26 @@ def _client_or_raise():
     return _client
 
 
-async def _request(parts: list) -> str:
-    """The single network seam. Tests replace exactly this.
+def _contents(parts: list, types) -> list:
+    """The payload, as the SDK's own types.
 
-    ``parts`` is a list of ``{"mime_type": ..., "data": ...}`` dicts followed by
-    one prompt string — the shape ``app/media.py`` produces. Keeping the seam in
-    one function is what lets the whole module be tested without a network, and
-    it is the same seam style the other two AI modules use.
+    Split out of ``_request`` so the pooled and single-key paths send byte-for-
+    byte the same thing. A media part that reached one path but not the other
+    would be a moderation decision made on different evidence.
     """
-    from google.genai import types
-
-    client = _client_or_raise()
-    contents: list = []
+    out: list = []
     for part in parts:
         if isinstance(part, str):
-            contents.append(part)
+            out.append(part)
         else:
-            contents.append(
+            out.append(
                 types.Part.from_bytes(data=part["data"], mime_type=part["mime_type"])
             )
+    return out
 
-    config_ = types.GenerateContentConfig(
+
+def _generation_config(types):
+    return types.GenerateContentConfig(
         # Low temperature on purpose. This is a classification, not a
         # composition: the same content should get the same verdict, and
         # creativity here only adds variance to a decision about deleting
@@ -444,6 +448,47 @@ async def _request(parts: list) -> str:
         response_schema=RESPONSE_SCHEMA,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
+
+
+async def _pooled_request(pool, parts: list) -> str:
+    """One moderation call, through the pool.
+
+    The pool's capability filter is what keeps this safe: the moderation
+    workload demands ``text``, ``image`` and ``video`` of every model it is
+    offered, so a failover can never land on a model that would silently ignore
+    the image and answer about the caption instead.
+    """
+    try:
+        raw = await gemini_pool.generate(
+            pool,
+            build_contents=lambda types: _contents(parts, types),
+            build_config=_generation_config,
+        )
+    except gemini_pool.PoolUnavailable as exc:
+        raise ModUnavailable(exc.kind, exc.detail) from exc
+    return raw or ""
+
+
+async def _request(parts: list) -> str:
+    """The single network seam. Tests replace exactly this.
+
+    ``parts`` is a list of ``{"mime_type": ..., "data": ...}`` dicts followed by
+    one prompt string — the shape ``app/media.py`` produces. Keeping the seam in
+    one function is what lets the whole module be tested without a network, and
+    it is the same seam style the other two AI modules use.
+
+    When a pool is configured the call goes through it; the single-key path
+    below remains for a deployment with one credential for this workload.
+    """
+    pool = gemini_pool.pool_for("moderation")
+    if pool is not None and pool.enabled:
+        return await _pooled_request(pool, parts)
+
+    from google.genai import types
+
+    client = _client_or_raise()
+    contents = _contents(parts, types)
+    config_ = _generation_config(types)
 
     async def _call():
         return await client.aio.models.generate_content(
@@ -629,7 +674,7 @@ async def assess(
     """
     if not config.GEMINI_MOD_ENABLED:
         return _skipped("disabled")
-    if not api_key():
+    if not (api_key() or gemini_pool.has_accounts("moderation")):
         return ModerationVerdict(skipped="no_key", model=config.GEMINI_MOD_MODEL,
                                  subject=subject)
 
@@ -655,7 +700,10 @@ async def assess(
     payload: list = list(parts or [])
     payload.append(_prompt(body, has_media=has_media, context=context))
 
-    attempts = max(0, int(config.GEMINI_MOD_MAX_RETRIES)) + 1
+    # The pool owns retries when it is in use; a second loop here would multiply
+    # the two budgets and re-walk an exhausted pool on every media item.
+    pooled = gemini_pool.has_accounts("moderation")
+    attempts = 1 if pooled else max(0, int(config.GEMINI_MOD_MAX_RETRIES)) + 1
     backoff = max(0.0, float(config.GEMINI_MOD_BACKOFF_SECONDS))
     last: ModUnavailable | None = None
 

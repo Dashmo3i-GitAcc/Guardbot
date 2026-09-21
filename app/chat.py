@@ -33,7 +33,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from . import config, db
+from . import config, db, gemini_pool
 
 log = logging.getLogger("guardbot.chat")
 
@@ -330,7 +330,10 @@ def shares_google_project() -> bool:
 
 def is_enabled() -> bool:
     """Whether a conversational reply is possible at all."""
-    return bool(config.GEMINI_CHAT_ENABLED and api_key())
+    return bool(
+        config.GEMINI_CHAT_ENABLED
+        and (api_key() or gemini_pool.has_accounts("chat"))
+    )
 
 
 def status() -> dict:
@@ -339,12 +342,14 @@ def status() -> dict:
     The key is never in here — not masked, not truncated, absent. There is no
     code path that puts it in, which is stronger than remembering not to.
     """
+    pool = gemini_pool.pool_for("chat")
     return {
         "enabled": bool(config.GEMINI_CHAT_ENABLED),
-        "configured": bool(api_key()),
+        "configured": bool(api_key() or gemini_pool.has_accounts("chat")),
         "active": is_enabled(),
         "shares_google_project": shares_google_project(),
         "model": config.GEMINI_CHAT_MODEL,
+        "pool": pool.status() if pool is not None else None,
         "daily_limit": int(config.GEMINI_CHAT_DAILY_LIMIT),
         "used_today": db.chat_calls_today(),
         "history_turns": int(config.GEMINI_CHAT_HISTORY_TURNS),
@@ -498,6 +503,37 @@ def _wire(contents: list) -> list:
     return wire
 
 
+def _generation_config(types):
+    """The chat request shape, shared by both transports."""
+    return types.GenerateContentConfig(
+        temperature=0.8,
+        max_output_tokens=1024,
+        system_instruction=SYSTEM_INSTRUCTION,
+        # No tools are given, so a request to call one is a bug in the prompt
+        # rather than a feature. Disabling it keeps the wire traffic honest.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
+
+
+async def _pooled_request(pool, contents: list) -> str:
+    """One conversational call, through the pool.
+
+    The conversation workload needs ``text`` only, which is the weakest
+    requirement of the four — and deliberately so: an image attached to a
+    conversation is analysed by the moderation workload, never answered about
+    here, so a text model is the correct model for this call.
+    """
+    try:
+        raw = await gemini_pool.generate(
+            pool,
+            build_contents=lambda types: _wire(contents),
+            build_config=_generation_config,
+        )
+    except gemini_pool.PoolUnavailable as exc:
+        raise ChatUnavailable(exc.kind, exc.detail) from exc
+    return raw or ""
+
+
 async def _request(contents: list) -> str:
     """The single network seam. Tests replace exactly this.
 
@@ -509,17 +545,14 @@ async def _request(contents: list) -> str:
     ``{"mime_type", "data"}`` dict produced by ``app/media.py``. The conversion
     to the SDK's own types lives in ``_wire``, which is tested directly.
     """
+    pool = gemini_pool.pool_for("chat")
+    if pool is not None and pool.enabled:
+        return await _pooled_request(pool, contents)
+
     from google.genai import types
 
     client = _client_or_raise()
-    config_ = types.GenerateContentConfig(
-        temperature=0.8,
-        max_output_tokens=1024,
-        system_instruction=SYSTEM_INSTRUCTION,
-        # No tools are given, so a request to call one is a bug in the prompt
-        # rather than a feature. Disabling it keeps the wire traffic honest.
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-    )
+    config_ = _generation_config(types)
     wire = _wire(contents)
 
     async def _call():
@@ -533,19 +566,8 @@ async def _request(contents: list) -> str:
     return getattr(response, "text", "") or ""
 
 
-async def _tts_request(text: str) -> bytes:
-    """The text-to-speech seam, separate from ``_request``. Tests replace this.
-
-    A separate seam rather than a mode of the one above, because it is a
-    different model, a different response shape (audio, not text) and a
-    different failure meaning: a failed synthesis costs a voice reply, not the
-    reply itself. Keeping them apart is what lets the caller fall back to text
-    without losing the answer.
-    """
-    from google.genai import types
-
-    client = _client_or_raise()
-    config_ = types.GenerateContentConfig(
+def _tts_config(types):
+    return types.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
@@ -557,14 +579,9 @@ async def _tts_request(text: str) -> bytes:
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
-    async def _call():
-        return await client.aio.models.generate_content(
-            model=config.GEMINI_CHAT_TTS_MODEL,
-            contents=text,
-            config=config_,
-        )
 
-    response = await asyncio.wait_for(_call(), timeout=timeout_seconds())
+def _pcm_from(response) -> bytes:
+    """The raw PCM out of a TTS response. Empty when there is none."""
     pcm = b""
     for candidate in getattr(response, "candidates", None) or []:
         content = getattr(candidate, "content", None)
@@ -574,6 +591,54 @@ async def _tts_request(text: str) -> bytes:
             if data:
                 pcm += data
     return pcm
+
+
+async def _pooled_tts_request(pool, text: str) -> bytes:
+    """One synthesis, through the TTS pool.
+
+    Its own pool, and the only one that opts into preview models, because speech
+    synthesis has no stable model to fall back to. A failure here costs a voice
+    reply and nothing else — the caller falls back to text — which is exactly
+    why it is allowed to be the least reliable pool.
+    """
+    try:
+        return await gemini_pool.generate(
+            pool,
+            build_contents=lambda types: text,
+            build_config=_tts_config,
+            extract=_pcm_from,
+        )
+    except gemini_pool.PoolUnavailable as exc:
+        raise ChatUnavailable(exc.kind, exc.detail) from exc
+
+
+async def _tts_request(text: str) -> bytes:
+    """The text-to-speech seam, separate from ``_request``. Tests replace this.
+
+    A separate seam rather than a mode of the one above, because it is a
+    different model, a different response shape (audio, not text) and a
+    different failure meaning: a failed synthesis costs a voice reply, not the
+    reply itself. Keeping them apart is what lets the caller fall back to text
+    without losing the answer.
+    """
+    pool = gemini_pool.pool_for("tts")
+    if pool is not None and pool.enabled:
+        return await _pooled_tts_request(pool, text)
+
+    from google.genai import types
+
+    client = _client_or_raise()
+    config_ = _tts_config(types)
+
+    async def _call():
+        return await client.aio.models.generate_content(
+            model=config.GEMINI_CHAT_TTS_MODEL,
+            contents=text,
+            config=config_,
+        )
+
+    response = await asyncio.wait_for(_call(), timeout=timeout_seconds())
+    return _pcm_from(response)
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -803,7 +868,7 @@ async def synthesize(text: str) -> bytes | None:
     """
     if not config.GEMINI_CHAT_VOICE_REPLY:
         return None
-    if not api_key():
+    if not (api_key() or gemini_pool.has_accounts("tts")):
         return None
     body = (text or "").strip()
     if not body or len(body) > max(1, int(config.GEMINI_CHAT_VOICE_MAX_CHARS)):
@@ -847,7 +912,7 @@ async def reply(
     """
     if not config.GEMINI_CHAT_ENABLED:
         return _skip("disabled")
-    if not api_key():
+    if not (api_key() or gemini_pool.has_accounts("chat")):
         # Not logged per-message: with no key every greeting would print a line,
         # and the startup log already says the feature is inert.
         return ChatReply(skipped="no_key", model=config.GEMINI_CHAT_MODEL)
@@ -880,7 +945,10 @@ async def reply(
     contents = _contents(history, payload, parts=parts, kind=kind)
     turns = len(contents)
 
-    attempts = max(0, int(config.GEMINI_CHAT_MAX_RETRIES)) + 1
+    # The pool owns retries when it is in use. A second loop here would multiply
+    # the two budgets, and the repetition nudge below is already a separate one.
+    pooled = gemini_pool.has_accounts("chat")
+    attempts = 1 if pooled else max(0, int(config.GEMINI_CHAT_MAX_RETRIES)) + 1
     backoff = max(0.0, float(config.GEMINI_CHAT_BACKOFF_SECONDS))
     last: ChatUnavailable | None = None
     nudged = False

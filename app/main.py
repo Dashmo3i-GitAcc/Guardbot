@@ -36,6 +36,7 @@ from . import (
     config,
     db,
     detector,
+    gemini_pool,
     media,
     mod_policy,
     moderation,
@@ -103,6 +104,33 @@ _DELETED_TTL = 120.0
 def bot_identity() -> dict:
     """A copy of what we know about ourselves. Never contains a secret."""
     return dict(_bot_identity)
+
+
+# The Application handle, kept for one purpose: the Gemini pool has to be able
+# to reach the owner from inside a request that no handler is running. Set once
+# in `post_init`. A missing handle means "say nothing" rather than an error —
+# an undeliverable notice must never become a failed AI request.
+_pool_bot = None
+
+
+async def notify_owner(text: str) -> None:
+    """Deliver one pool notice to the owner. Never raises.
+
+    The admin log chat is the first choice, because the bot has already been
+    proven able to write there. The owner's private chat is the fallback for a
+    deployment that keeps no log group. With neither configured the notice is
+    dropped — and the event is still in the database, because the pool records
+    the event before it decides whether to speak.
+    """
+    if _pool_bot is None:
+        return
+    chat = config.ADMIN_LOG_CHAT or rbac.owner_id()
+    if not chat:
+        return
+    try:
+        await _pool_bot.send_message(chat, text, parse_mode="HTML")
+    except TelegramError as e:
+        log.warning("[pool] owner notice failed: %s", e)
 
 
 async def load_identity(app: Application) -> None:
@@ -1737,6 +1765,34 @@ async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply_in_group(ctx, room.id, "\n".join(lines), reply_to=msg.message_id)
 
 
+async def cmd_pool(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The Gemini account pool. Owner-only.
+
+    Owner-only rather than visible to every admin, because the report is about
+    the operator's own Google projects: how many independent accounts the
+    deployment has, which one is answering, and how close each is to its limit.
+    That is operational information about somebody's billing relationship with
+    Google, and it is not what a helper needs to moderate a group.
+
+    It never contains a credential. Accounts are named by slot and by a masked
+    tail, and the pool module has no code path that could render a key.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    if not actor.is_owner:
+        _audit(actor.user_id, "pool.status", rbac.REASON_NOT_ADMIN,
+               chat_id=room.id)
+        await _reply_in_group(ctx, room.id, config.ADMIN_DENIED_TEXT,
+                              reply_to=msg.message_id)
+        return
+    _audit(actor.user_id, "pool.status", "ok", chat_id=room.id)
+    await _reply_in_group(ctx, room.id, gemini_pool.status_report(),
+                          reply_to=msg.message_id)
+
+
 def _promote_keyboard(actor_id: int, target_id: int, role: str, mask: int):
     """The permission-selection keyboard.
 
@@ -2536,6 +2592,8 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ------------------------------------------------------------ wiring
 async def post_init(app: Application) -> None:
+    global _pool_bot
+    _pool_bot = app.bot
     app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
     # Who we are, from Telegram rather than from configuration. Done first,
     # because the alias matching that decides whether the assistant answers
@@ -2689,6 +2747,50 @@ async def post_init(app: Application) -> None:
             "addressed to the assistant are reported as unreadable."
         )
 
+    # ── The Gemini account pool ───────────────────────────────────────────
+    #
+    # Built here, and told how to reach the owner. Each workload above already
+    # asked for its pool while reporting itself, so by now the registry exists;
+    # this is the point at which the notifier becomes available to all of them
+    # and the operator gets one line per workload saying how deep the pool is.
+    #
+    # The lines never contain a credential — accounts are named by slot and by
+    # a masked tail — which is what makes them safe to leave in a log.
+    gemini_pool.build_pools()
+    gemini_pool.set_notifier(notify_owner)
+    for line in gemini_pool.startup_lines():
+        log.info(line)
+    # One key reaching two workloads is one Google project and therefore one
+    # allowance, however separately the two workloads count their own calls.
+    # Said out loud once at boot, because the alternative is discovering it as
+    # an unexplained 429 on whichever workload happens to be busy.
+    for masked, workloads in gemini_pool.shared_credentials():
+        log.warning(
+            "Gemini credential %s is used by more than one workload (%s). "
+            "Google applies limits per project, so these share one allowance "
+            "even though each workload keeps its own counters. Use a key from "
+            "a different project for each workload to keep them independent.",
+            masked,
+            ", ".join(workloads),
+        )
+    for pool in gemini_pool.pools():
+        health = pool.health()
+        if not health["accounts"]:
+            continue
+        if health["empty"]:
+            log.warning(
+                "Gemini pool '%s' has no usable account (%d configured); this "
+                "workload is on its safe fallback until one recovers.",
+                pool.workload,
+                health["accounts"],
+            )
+        elif health["critical"]:
+            log.warning(
+                "Gemini pool '%s' is down to one usable account of %d.",
+                pool.workload,
+                health["accounts"],
+            )
+
     # The authorization model. The owner line is the one that matters: with no
     # owner every administrative command is refused, which is the correct
     # fail-closed behaviour and looks exactly like a broken feature unless it is
@@ -2785,6 +2887,7 @@ def main() -> None:
     for command, handler in (
         ("whoami", cmd_whoami),
         ("admins", cmd_admins),
+        ("pool", cmd_pool),
         ("promote", cmd_promote),
         ("demote", cmd_demote),
         ("ban", cmd_ban),

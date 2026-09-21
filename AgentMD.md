@@ -1811,6 +1811,7 @@ mystery. Telegram still enforces it; the check only makes the message useful.
 | `/mute` `/unmute` | `moderation.mute` | timed restriction |
 | `/warn [reason]` | `moderation.warn` | |
 | `/del` | `moderation.delete` | deletes the replied-to message |
+| `/pool` | owner only | the Gemini account pool — accounts, states, counters (§28.8) |
 | `/transcribe` | any | the transcription-only interface (§24.1) |
 
 Every one of them: resolve the actor → ask `rbac` → check the bot's Telegram
@@ -1881,6 +1882,11 @@ keys in one project is still one allowance, and the shared-key fallbacks
 (`*_ALLOW_SHARED_KEY`) are explicit opt-ins rather than automatic. The startup
 log says which workloads are sharing, once, so a 429 on the classifier that
 appears the first time the group is busy has a visible explanation.
+
+Since §28 each workload is backed by a *pool* rather than a single credential.
+That does not change this rule — it is built on it. Every pooled key is treated
+as its own account with its own state, and a key that reaches two workloads is
+reported at boot as one shared allowance, because that is what it is.
 
 ---
 
@@ -1996,3 +2002,295 @@ appears the first time the group is busy has a visible explanation.
     meanings.** They share nothing — not a key, not a window, not a breaker —
     because otherwise "the transcript was wrong" and "the reply was wrong" arrive
     as the same counter, and a busy voice chat can silence the assistant.
+
+---
+
+## 28. The Gemini account pool: many keys, one AI service
+
+Until this section, each of the four AI workloads had exactly one credential, and
+a credential whose quota ran out was the end of that workload until an operator
+edited `.env` and restarted the container. `app/gemini_pool.py` replaces that
+with a pool: several credentials per workload, each tracked as its own account,
+and a request that survives one of them running out.
+
+The Telegram layer does not know any of this happened. `ai_intent._request`,
+`chat._request`, `ai_moderation._request` and `transcribe._request` each ask for
+one answer and get one, exactly as before. Failover lives in the provider layer
+because that is the only place it can live without being repeated four times and
+getting it wrong in one of them.
+
+### 28.1 Every key is a separate account — the rule that shapes the design
+
+The brief is explicit, and the implementation takes it literally: **each
+configured key is a separate Google account and a separate project, with its own
+quota.** Two keys are not one bigger allowance.
+
+Three things follow, and each is load-bearing:
+
+1. `gemini_accounts` is keyed by `(workload, slot)`. The same key serving two
+   workloads is two rows with two counters, two cooldowns and two failure states.
+   Workload isolation is then a property of the schema rather than a promise
+   about how the code happens to call things.
+2. A key written into two slots of one workload is collapsed to **one** account,
+   by truncated-SHA-256 fingerprint. Counting it twice would invent a quota that
+   does not exist.
+3. Where the provider does *not* prove two credentials are independent, the pool
+   does not claim they are. Google publishes no API that maps a key to its
+   project (verified — see §28.5), so "are these the same project?" is answered
+   by what *can* be observed: two slots holding the identical key are one
+   project, and that is detected, recorded, and reported at boot by
+   `gemini_pool.shared_credentials()`.
+
+`chat` and `tts` share a credential on purpose — speech synthesis is a mode of
+the conversation feature, not a peer of it — so that pairing is excluded from the
+warning. Crying wolf about a deliberate configuration is how an operator learns
+to ignore the warning that matters.
+
+### 28.2 The two levels of failover, and why conflating them is the bug
+
+Google enforces limits at more than one granularity. Treating them as one thing
+is the mistake this module is written to avoid:
+
+| | level 1 — model | level 2 — account/project |
+|---|---|---|
+| example | `gemini-flash-lite-latest` is rate-limited | the project's quota is gone, or the key is revoked |
+| right response | another compatible model, **same account** | the next account |
+| wrong response | abandon the account | try another model |
+| cost of the wrong response | a healthy account benched for the cooldown | quota spent on calls that cannot succeed |
+
+So a model failure never disables an account, and an account failure is never
+treated as a model problem. `Account` and `ModelState` are separate objects with
+separate states and separate persisted rows.
+
+`classify_error()` reads the failure from the **response body** rather than the
+exception class, because the SDK's exception types have moved between versions
+and the JSON has not. The shapes below were captured from the live API, not
+guessed:
+
+* an unknown model answers `404 NOT_FOUND` — *"is not found for API version
+  v1beta, or is not supported for generateContent"*
+* a bad key answers `401 UNAUTHENTICATED`
+* a per-model limit names the model in `quotaId`; a project-wide one names the
+  project or the free tier
+
+When the provider names neither, the conservative reading is a **model** limit:
+it costs one wasted call on a sibling model, where the opposite mistake costs the
+whole account for the cooldown.
+
+### 28.3 Capability, not just availability
+
+"Use all models of an API until it is limited" means all *compatible* models.
+The distinction matters because the failure modes are asymmetric:
+
+* A **text-only** model handed an audio clip does not error. It invents a
+  transcript, and an invented transcript is indistinguishable from a real one
+  downstream. That is the worst available failure for the transcription
+  workload.
+* A **text-only** model handed an image in moderation answers about the caption
+  instead of the picture. A moderation decision made on different evidence than
+  the operator believes is a safety problem, not a quality problem.
+* An **image-generation** model, or a video/music/embedding model, would either
+  fail outright or answer a different question than the one asked.
+
+So every workload declares what it needs a model to be able to do, and the pool
+never offers a model that does not satisfy it *in full*:
+
+| workload | needs |
+|---|---|
+| intent | `text` |
+| chat | `text` |
+| moderation | `text`, `image`, `video` |
+| transcribe | `audio_in` |
+| tts | `audio_out` |
+
+Two mechanisms answer two different questions:
+
+* **Availability** comes from discovery: `models.list` against the credential,
+  filtered to models that advertise `generateContent`. A model the provider does
+  not list for this key is never tried.
+* **Capability** comes from a curated table in the module, because the provider
+  publishes no modality metadata at all. That table is deliberately
+  conservative: an unrecognised name returns `None` rather than being
+  optimistically assumed multimodal.
+
+Discovery failing means *do not filter*, never *no models*. Losing an
+optimisation must not lose the request. The result is cached per credential
+fingerprint for `GEMINI_MODEL_DISCOVERY_TTL` seconds, in the database, so a
+restart does not re-ask.
+
+### 28.4 The state machines
+
+Accounts:
+
+```
+ACTIVE ──429 (project)──► QUOTA_EXHAUSTED ──reset passes──► ACTIVE
+ACTIVE ──401/403────────► INVALID            (terminal: never retried)
+ACTIVE ──5xx/network────► UNAVAILABLE ──cooldown──► ACTIVE
+ACTIVE ──success────────► ACTIVE  (a recovery is announced to the owner)
+```
+
+Models, independently:
+
+```
+ACTIVE ──429 (model)────► RATE_LIMITED ──cooldown──► ACTIVE
+ACTIVE ──404────────────► DISABLED        (terminal: it will not start existing)
+ACTIVE ──5xx/network────► ACTIVE + short cooldown
+```
+
+The last line is deliberate. A brief provider wobble says nothing about the
+model, so it is *not* benched for the model cooldown — a short one keeps the next
+request trying it, instead of the model being wrongly written off for minutes.
+
+A state of `RECOVERING` becomes `ACTIVE` on load: the process that was going to
+prove recovery is gone, and the next request is itself the proof.
+
+### 28.5 What the provider does not tell us
+
+Verified against the live API rather than assumed:
+
+* `models.list` returns `name`, `version`, `displayName`, `description`,
+  `inputTokenLimit`, `outputTokenLimit` and `supportedGenerationMethods` — and
+  nothing else. In particular it does **not** report input or output modalities.
+* No response header or body exposes the Google Cloud project behind a key.
+* Google does not publish remaining quota or reset times for these keys.
+
+Three consequences, and they are deliberate rather than gaps:
+
+* Capability is a curated table (§28.3).
+* The project behind a key is inferred only where inference is sound (§28.1).
+* **There is no "requests remaining" figure anywhere in this codebase.** The
+  status report prints `Not exposed by provider` and reports the bot's own
+  observed counters separately, labelled as observations. A reset time is shown
+  only when an error response actually carried a `retryDelay`.
+
+### 28.6 Retries, cooldowns and the attempt budget
+
+Retries are bounded on three axes, because any one of them alone can be
+circumvented by a large enough pool:
+
+* `retries + 1` attempts per model;
+* `GEMINI_POOL_MAX_ATTEMPTS` provider calls for one logical request — the hard
+  ceiling that stops a pathological pool spending a minute on one message;
+* exponential backoff with jitter (`_backoff`). The jitter is not politeness: the
+  four workloads share one process, and without it a rate-limited provider gets
+  every workload's retries in lockstep.
+
+When the pool is in use it **owns** the retry policy, and the per-workload retry
+loops run exactly once (`attempts = 1 if pooled else ...`). Two loops would
+multiply the two budgets and re-walk a pool that had already given up, spending
+real quota to learn what the first pass already knew.
+
+A `SCOPE_REQUEST` failure — a 400 that is not a capability mismatch — stops
+immediately without trying another account: the payload is wrong, every account
+would answer identically, and the rest of the pool would be pure waste.
+
+### 28.7 Selection: least-recently-successful, not "first until it dies"
+
+`ordered_accounts()` sorts by `last_success` ascending. Staying on API #1 until
+it dies is the policy that leaves four configured accounts unused, which is the
+opposite of the point. Spreading the load is what makes the pool's *total*
+capacity available rather than only its first account's.
+
+Within an account, the configured preference order is preserved: the primary
+model is tried first and fallbacks only when it is unavailable. Nothing rotates
+randomly.
+
+### 28.8 Owner notifications
+
+Meaningful transitions only, deduplicated on `(workload, kind, slot, model)`
+against `GEMINI_POOL_NOTIFY_COOLDOWN`, so a hundred consecutive 429s are one
+message. The event row is written **before** the decision to speak, so the
+owner's silence never costs the operator their history.
+
+| event | when |
+|---|---|
+| `model_failover` | a model failed and a sibling is being tried |
+| `account_failover` | an account left the pool |
+| `account_recovered` | an account came back |
+| `pool_critical` | exactly one usable account remains |
+| `pool_empty` | no usable account remains |
+
+Notices go to `ADMIN_LOG_CHAT`, falling back to the owner's private chat. An
+undeliverable notice is never fatal — a Telegram outage must not become a failed
+AI request.
+
+`/pool`, owner-only, renders the full report: per-workload account counts by
+state, the active account and model, and per-account requests, successes,
+failures, rate limits, quota events, cooldown, and the honest `Not exposed by
+provider` for remaining quota and reset. It is owner-only because it describes
+the operator's own Google projects; it is audited either way.
+
+### 28.9 Configuration
+
+```dotenv
+# shared accounts, drawn on by any workload whose opt-in allows it
+GEMINI_KEY_1=...          # ... up to GEMINI_KEY_20
+GEMINI_POOL_KEYS=...      # or one comma-separated list
+
+# extra accounts for one workload only
+GEMINI_MOD_API_KEY_2=...  # ..._2 through ..._20
+
+GEMINI_MODEL_DISCOVERY_ENABLED=true
+GEMINI_POOL_MODEL_COOLDOWN=120
+GEMINI_POOL_QUOTA_COOLDOWN=900
+GEMINI_POOL_TRANSIENT_COOLDOWN=15
+GEMINI_POOL_NOTIFY_COOLDOWN=900
+GEMINI_POOL_MAX_ATTEMPTS=12
+```
+
+The number of accounts is not hard-coded: 1, 5, 20 or more need no redesign.
+A shared-pool key is used only when the workload's existing opt-in is on
+(`GEMINI_CHAT_ALLOW_SHARED_KEY` and friends) — that flag is the operator saying
+"these workloads may share one Google allowance", and the pool must not make that
+decision for them.
+
+### 28.10 What did not change
+
+* **Four workloads, four budgets.** The pool adds accounts behind each workload;
+  it does not merge them. `tests/test_ai_isolation.py` still asserts the
+  structural separation, and `tests/test_gemini_pool.py` asserts the new rows are
+  per workload.
+* **Voice-to-text is still not a conversation.** Transcription reaches the pool
+  through `transcribe._request` only, with `audio_in` required of every model.
+* **Moderation is still fail-safe.** A pool failure produces `decided=False`,
+  which the policy engine reads as "not confirmed" — the direction that deletes
+  nothing. No failover can produce a ban, a mute or a deletion.
+* **Gemini still executes nothing.** The pool returns text, or PCM. It has no
+  tools, no function calling, no database handle and no Telegram client.
+* **The single-key path still works.** A deployment with one credential per
+  workload is a pool of one and behaves exactly as it did.
+
+### 28.11 Verifying it
+
+```bash
+# What the pool looks like from inside the container. Never contains a key.
+docker exec guardbot python -c "
+from app import db, gemini_pool; db.init(); gemini_pool.build_pools()
+print('\n'.join(gemini_pool.startup_lines()))"
+
+# The same report the owner sees, in Telegram.
+/pool
+
+# The pool's own suite, with a scripted provider and no network.
+.venv-test/bin/python -m pytest tests/test_gemini_pool.py -q
+```
+
+### 28.12 Known limitations
+
+1. **Discovery answers availability, not capability.** A model the provider lists
+   and that the curated table calls multimodal can still reject a specific
+   payload; that arrives as a 400, which `classify_error` reads as
+   `unsupported_input` and treats as a model problem, so the next model is tried.
+2. **`Transcript.model` names the workload's configured model**, not the model
+   that actually answered after a failover. The per-model counters in the pool
+   are the authoritative record of what served what. Making the field exact would
+   mean threading the served model back through `_request`, whose two-argument
+   signature the existing suite replaces.
+3. **The pool does not schedule a recovery probe.** An account returns to
+   rotation when its cooldown expires and a real request tries it, which is
+   deliberate — a health-check loop is a second source of provider calls that
+   nobody asked for.
+4. **Concurrency is bounded by one process.** Counters use the database's own
+   lock and atomic `UPDATE ... SET x = x + 1`, so concurrent requests inside the
+   container cannot corrupt them; two containers sharing one SQLite file is not a
+   configuration this deployment has and is not supported.

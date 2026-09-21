@@ -192,8 +192,13 @@ def test_status_never_carries_the_key(monkeypatch):
         "model",
         "daily_limit",
         "used_today",
+        # The pool's own summary. Present so an operator can see how many
+        # accounts this workload has without a second command; it describes
+        # accounts by workload and model and never by credential.
+        "pool",
     }
     assert state["configured"] is True
+    assert "super-secret-value" not in json.dumps(state["pool"], ensure_ascii=False)
 
 
 def test_the_key_never_reaches_a_log_line(monkeypatch, caplog):

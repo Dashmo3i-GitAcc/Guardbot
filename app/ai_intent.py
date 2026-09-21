@@ -46,7 +46,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from . import config, db
+from . import config, db, gemini_pool
 
 log = logging.getLogger("guardbot.ai")
 
@@ -325,20 +325,27 @@ def is_enabled() -> bool:
     """Whether the layer could run at all.
 
     Deliberately says nothing about the key's *value* — only whether one is
-    present — so this can be logged and asserted freely.
+    present — so this can be logged and asserted freely. A credential may come
+    from the pool rather than from ``GEMINI_API_KEY``, which is why the pool is
+    asked as well: an operator who moves this workload onto a pool key and
+    clears the old variable must not find the layer reporting itself off.
     """
-    return bool(config.GEMINI_ENABLED and config.GEMINI_API_KEY)
+    if not config.GEMINI_ENABLED:
+        return False
+    return bool(config.GEMINI_API_KEY) or gemini_pool.has_accounts("intent")
 
 
 def status() -> dict:
     """A description safe to log and to show an operator. No secrets, ever."""
+    pool = gemini_pool.pool_for("intent")
     return {
         "enabled": bool(config.GEMINI_ENABLED),
-        "configured": bool(config.GEMINI_API_KEY),
+        "configured": bool(config.GEMINI_API_KEY) or gemini_pool.has_accounts("intent"),
         "active": is_enabled(),
         "model": config.GEMINI_MODEL,
         "daily_limit": int(config.GEMINI_DAILY_LIMIT),
         "used_today": db.ai_calls_today(),
+        "pool": pool.status() if pool is not None else None,
     }
 
 
@@ -443,35 +450,76 @@ def _client_or_raise():
     return _client, types
 
 
+def _generation_config(types):
+    """The one request shape this workload ever sends.
+
+    Shared by the pooled path and the single-key path so the two cannot drift:
+    the pool changes *which* account answers, never *what* is asked.
+    """
+    return types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        response_mime_type="application/json",
+        response_json_schema=RESPONSE_SCHEMA,
+        temperature=0.0,
+        # This is a classification, not a composition: the answer is one
+        # short JSON object, and letting the model think at length would
+        # spend the latency budget of a group message handler.
+        max_output_tokens=256,
+        # We give the model no tools, so function calling has nothing to
+        # call. Left on, the SDK logs a warning on every request and
+        # advertises a capability this integration does not want.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            disable=True
+        ),
+    )
+
+
+async def _pooled_request(pool, text: str) -> str:
+    """One call, through the pool.
+
+    The pool owns account selection, model fallback, retries and cooldowns. All
+    this function does is translate its exception vocabulary into this module's,
+    so that everything above — the circuit breaker, the daily cap, the parse —
+    is unchanged and does not learn that a pool exists.
+    """
+    try:
+        raw = await gemini_pool.generate(
+            pool,
+            build_contents=lambda types: text,
+            build_config=_generation_config,
+        )
+    except gemini_pool.PoolUnavailable as exc:
+        raise AiUnavailable(exc.kind, exc.detail) from exc
+    if not raw or not str(raw).strip():
+        raise AiUnavailable("empty_response")
+    return str(raw)
+
+
 async def _request(text: str) -> str:
     """Ask the model one question and return its raw answer.
 
     **This is the only place the network is touched, and the only thing the
     tests replace.** Everything above it is quota, validation and policy;
     everything below it is a string that has not been trusted yet.
+
+    Two transports, one seam. When this workload has a pool — which is the
+    normal case — the call goes through it and failover is invisible from here.
+    The single-key path below is kept for the deployment that has exactly one
+    credential configured for this workload, which is a pool of one and does not
+    need the machinery.
     """
+    pool = gemini_pool.pool_for("intent")
+    if pool is not None and pool.enabled:
+        return await _pooled_request(pool, text)
+
     client, types = _client_or_raise()
+    config_ = _generation_config(types)
 
     async def _call():
         return await client.aio.models.generate_content(
             model=config.GEMINI_MODEL,
             contents=text,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_json_schema=RESPONSE_SCHEMA,
-                temperature=0.0,
-                # This is a classification, not a composition: the answer is one
-                # short JSON object, and letting the model think at length would
-                # spend the latency budget of a group message handler.
-                max_output_tokens=256,
-                # We give the model no tools, so function calling has nothing to
-                # call. Left on, the SDK logs a warning on every request and
-                # advertises a capability this integration does not want.
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True
-                ),
-            ),
+            config=config_,
         )
 
     # The authoritative timeout. `asyncio.wait_for` is unit-unambiguous, unlike
@@ -657,7 +705,7 @@ async def classify(text: str) -> AiVerdict:
     """
     if not config.GEMINI_ENABLED:
         return _skipped("disabled")
-    if not config.GEMINI_API_KEY:
+    if not (config.GEMINI_API_KEY or gemini_pool.has_accounts("intent")):
         # Not logged as a skip: with no key every candidate would print a line,
         # and the startup log already says the layer is inert.
         return _skipped("no_key")
@@ -674,7 +722,13 @@ async def classify(text: str) -> AiVerdict:
     if not payload:
         return _skipped("empty")
 
-    attempts = max(0, int(config.GEMINI_MAX_RETRIES)) + 1
+    # Retrying here as well as inside the pool would multiply the two budgets
+    # and spend real quota re-walking a pool that has already given up. When the
+    # pool is in use it owns the retry policy, so this loop runs exactly once.
+    pooled = gemini_pool.pool_for("intent") is not None and gemini_pool.has_accounts(
+        "intent"
+    )
+    attempts = 1 if pooled else max(0, int(config.GEMINI_MAX_RETRIES)) + 1
     backoff = max(0.0, float(config.GEMINI_BACKOFF_SECONDS))
     last: AiUnavailable | None = None
 

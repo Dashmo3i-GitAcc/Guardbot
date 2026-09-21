@@ -34,7 +34,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from . import config, db
+from . import config, db, gemini_pool
 
 log = logging.getLogger("guardbot.transcribe")
 
@@ -128,17 +128,22 @@ def shares_google_project() -> bool:
 
 
 def is_enabled() -> bool:
-    return bool(config.TRANSCRIBE_ENABLED and api_key())
+    return bool(
+        config.TRANSCRIBE_ENABLED
+        and (api_key() or gemini_pool.has_accounts("transcribe"))
+    )
 
 
 def status() -> dict:
     """Safe to log. The key is never in here."""
+    pool = gemini_pool.pool_for("transcribe")
     return {
         "enabled": bool(config.TRANSCRIBE_ENABLED),
-        "configured": bool(api_key()),
+        "configured": bool(api_key() or gemini_pool.has_accounts("transcribe")),
         "active": is_enabled(),
         "shares_google_project": shares_google_project(),
         "model": config.TRANSCRIBE_MODEL,
+        "pool": pool.status() if pool is not None else None,
         "daily_limit": int(config.TRANSCRIBE_DAILY_LIMIT),
         "used_today": db.transcript_calls_today(),
         "max_seconds": float(config.TRANSCRIBE_MAX_SECONDS),
@@ -221,12 +226,8 @@ def _client_or_raise():
     return _client
 
 
-async def _request(data: bytes, mime_type: str) -> str:
-    """The single network seam. Tests replace exactly this."""
-    from google.genai import types
-
-    client = _client_or_raise()
-    config_ = types.GenerateContentConfig(
+def _generation_config(types):
+    return types.GenerateContentConfig(
         # Temperature 0: this is transcription, and variance is error.
         temperature=0.0,
         max_output_tokens=1024,
@@ -234,13 +235,48 @@ async def _request(data: bytes, mime_type: str) -> str:
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
+
+def _contents(data: bytes, mime_type: str, types) -> list:
+    return [
+        types.Part.from_bytes(data=data, mime_type=mime_type),
+        "Transcribe this audio.",
+    ]
+
+
+async def _pooled_request(pool, data: bytes, mime_type: str) -> str:
+    """One transcription, through the pool.
+
+    The workload demands ``audio_in`` of every model it is offered. That is the
+    requirement that must never be relaxed: a text-only model handed audio would
+    not error, it would invent a plausible transcript, and an invented
+    transcript is indistinguishable from a real one downstream.
+    """
+    try:
+        raw = await gemini_pool.generate(
+            pool,
+            build_contents=lambda types: _contents(data, mime_type, types),
+            build_config=_generation_config,
+        )
+    except gemini_pool.PoolUnavailable as exc:
+        raise TranscribeUnavailable(exc.kind, exc.detail) from exc
+    return raw or ""
+
+
+async def _request(data: bytes, mime_type: str) -> str:
+    """The single network seam. Tests replace exactly this."""
+    pool = gemini_pool.pool_for("transcribe")
+    if pool is not None and pool.enabled:
+        return await _pooled_request(pool, data, mime_type)
+
+    from google.genai import types
+
+    client = _client_or_raise()
+    config_ = _generation_config(types)
+
     async def _call():
         return await client.aio.models.generate_content(
             model=config.TRANSCRIBE_MODEL,
-            contents=[
-                types.Part.from_bytes(data=data, mime_type=mime_type),
-                "Transcribe this audio.",
-            ],
+            contents=_contents(data, mime_type, types),
             config=config_,
         )
 
@@ -302,7 +338,7 @@ async def transcribe(
     """
     if not config.TRANSCRIBE_ENABLED:
         return _skipped("disabled")
-    if not api_key():
+    if not (api_key() or gemini_pool.has_accounts("transcribe")):
         return Transcript(skipped="no_key", model=config.TRANSCRIBE_MODEL)
 
     if duration is not None and float(duration) > float(config.TRANSCRIBE_MAX_SECONDS):
@@ -322,7 +358,11 @@ async def transcribe(
     if db.transcript_calls_today() >= max(1, int(config.TRANSCRIBE_DAILY_LIMIT)):
         return _skipped("daily_cap")
 
-    attempts = max(0, int(config.TRANSCRIBE_MAX_RETRIES)) + 1
+    # The pool owns retries when it is in use. A voice note is the most
+    # expensive call in the bot, so re-walking an exhausted pool here would be
+    # the worst place to double the budget.
+    pooled = gemini_pool.has_accounts("transcribe")
+    attempts = 1 if pooled else max(0, int(config.TRANSCRIBE_MAX_RETRIES)) + 1
     backoff = max(0.0, float(config.TRANSCRIBE_BACKOFF_SECONDS))
     last: TranscribeUnavailable | None = None
 
