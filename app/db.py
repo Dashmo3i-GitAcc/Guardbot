@@ -209,10 +209,20 @@ def init() -> None:
             models TEXT NOT NULL DEFAULT '',
             at INTEGER NOT NULL DEFAULT 0)"""
     )
-    # Every meaningful pool event, and whether the owner has been told about it.
-    # The `notified` flag is what makes notification deduplication a database
-    # fact rather than a timer in one process: a restart cannot re-announce a
-    # failover that the owner has already read about.
+    # Every meaningful pool event: a failover, a recovery, a pool that has run
+    # out. Structured rows for diagnostics — this is what an operator reads when
+    # they want to know what the pool has been doing, and it is deliberately not
+    # a message queue.
+    #
+    # These events do **not** reach Telegram. Nothing in this bot sends pool
+    # state to a chat automatically; the operator asks, with `/pool` or by
+    # reading this table. That is a deliberate boundary rather than an omission
+    # — a failover notice arriving in a group is noise nobody asked for, and it
+    # puts operational detail where the group can see it.
+    #
+    # `notified` is a leftover from when this table drove a Telegram notice. It
+    # is no longer read or written, and it is left in the schema only because
+    # deployments already have the column and SQLite cannot drop one in place.
     _conn.execute(
         """CREATE TABLE IF NOT EXISTS gemini_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -964,39 +974,42 @@ def pool_event_add(
 
 
 def pool_events(limit: int = 20) -> list[dict]:
-    """The newest pool events, newest first."""
+    """The newest pool events, newest first. For diagnostics, not for sending."""
     with _lock:
         rows = _conn.execute(
-            "SELECT id, at, workload, kind, slot, model, reason, detail, notified "
+            "SELECT id, at, workload, kind, slot, model, reason, detail "
             "FROM gemini_events ORDER BY id DESC LIMIT ?",
             (max(1, int(limit)),),
         ).fetchall()
-    names = ("id", "at", "workload", "kind", "slot", "model", "reason",
-             "detail", "notified")
+    names = ("id", "at", "workload", "kind", "slot", "model", "reason", "detail")
     return [dict(zip(names, row)) for row in rows]
 
 
-def pool_last_notified(
+def pool_last_event(
     workload: str, kind: str, slot: str = "", model: str = ""
 ) -> int:
-    """When the owner was last told about this exact event, or 0.
+    """When this exact event was last *recorded*, or 0.
 
     The deduplication key is ``(workload, kind, slot, model)``: one hundred
-    consecutive 429s on one model are one notification, but the same event on a
-    second account is its own message, because that is the one that says the
-    pool is shrinking.
+    consecutive 429s on one model are one row, but the same event on a second
+    account is its own row, because that is the one that says the pool is
+    shrinking.
+
+    This used to be ``pool_last_notified`` and filtered on a ``notified`` flag,
+    because it existed to decide whether to send the owner a Telegram message.
+    Nothing sends a message any more, so the question it answers is now simply
+    "have we already written this event down recently" — which is what keeps the
+    events table a record of transitions rather than of every request. The
+    counts live on the account and model rows; this table is the qualitative
+    half, and deduplicating it is what keeps the two from being the same thing.
     """
     with _lock:
         row = _conn.execute(
             "SELECT MAX(at) FROM gemini_events "
-            "WHERE workload=? AND kind=? AND slot=? AND model=? AND notified=1",
+            "WHERE workload=? AND kind=? AND slot=? AND model=?",
             (str(workload), str(kind), str(slot), str(model)),
         ).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
-
-
-def pool_event_mark_notified(event_id: int) -> None:
-    _exec("UPDATE gemini_events SET notified=1 WHERE id=?", (int(event_id),))
 
 
 def pool_counts(workload: str | None = None) -> dict:

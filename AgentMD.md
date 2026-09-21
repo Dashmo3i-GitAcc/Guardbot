@@ -2195,30 +2195,48 @@ Within an account, the configured preference order is preserved: the primary
 model is tried first and fallbacks only when it is unavailable. Nothing rotates
 randomly.
 
-### 28.8 Owner notifications
+### 28.8 Pool events — recorded, never announced
 
-Meaningful transitions only, deduplicated on `(workload, kind, slot, model)`
-against `GEMINI_POOL_NOTIFY_COOLDOWN`, so a hundred consecutive 429s are one
-message. The event row is written **before** the decision to speak, so the
-owner's silence never costs the operator their history.
+Meaningful transitions are written to `gemini_events` as structured rows,
+deduplicated on `(workload, kind, slot, model)` against
+`GEMINI_POOL_EVENT_COOLDOWN`, so a hundred consecutive 429s are one row.
 
 | event | when |
 |---|---|
 | `model_failover` | a model failed and a sibling is being tried |
 | `account_failover` | an account left the pool |
 | `account_recovered` | an account came back |
-| `pool_critical` | exactly one usable account remains |
+| `pool_critical` | the pool shrank to exactly one usable account |
 | `pool_empty` | no usable account remains |
 
-Notices go to `ADMIN_LOG_CHAT`, falling back to the owner's private chat. An
-undeliverable notice is never fatal — a Telegram outage must not become a failed
-AI request.
+**These events do not reach Telegram, and there is no path by which they could.**
+The pool module does not import `telegram`, `Pool.record()` is synchronous — so
+there is no `await` in it and nothing it could call that would touch a network —
+and there is no notifier to register: `set_notifier`, the module-level
+`_notifier` slot, and `main.notify_owner` were all removed, along with the
+`_pool_bot` handle that let the pool reach a chat from inside a request no
+handler was running.
 
-`/pool`, owner-only, renders the full report: per-workload account counts by
+This was a deliberate reversal. The pool used to deliver failover and health
+notices to `ADMIN_LOG_CHAT`, falling back to the owner's private chat, and in
+production that put `GEMINI MODEL FAILOVER`, `rate_limited` and
+`unsupported_input` in front of a group of members every time a retry happened.
+Operational detail about the AI provider belongs to the operator who asks for
+it. Nothing replaces the notices — no queue, no digest, no "only the important
+ones" filter — because a filter would be a promise about which messages matter,
+and the requirement is that none are sent.
+
+The deduplication is kept even though nothing is delivered, because it is what
+makes this table a record of *transitions*. The quantitative history — requests,
+successes, failures, rate limits, quota events — already lives on the account
+and model rows; a table that repeated it would be larger and less readable.
+
+`/pool`, owner-only, renders the live report: per-workload account counts by
 state, the active account and model, and per-account requests, successes,
 failures, rate limits, quota events, cooldown, and the honest `Not exposed by
 provider` for remaining quota and reset. It is owner-only because it describes
-the operator's own Google projects; it is audited either way.
+the operator's own Google projects; it is audited either way. **It is also the
+only way pool state reaches a human** — on request, never on a timer.
 
 ### 28.9 Configuration
 
@@ -2234,7 +2252,7 @@ GEMINI_MODEL_DISCOVERY_ENABLED=true
 GEMINI_POOL_MODEL_COOLDOWN=120
 GEMINI_POOL_QUOTA_COOLDOWN=900
 GEMINI_POOL_TRANSIENT_COOLDOWN=15
-GEMINI_POOL_NOTIFY_COOLDOWN=900
+GEMINI_POOL_EVENT_COOLDOWN=900
 GEMINI_POOL_MAX_ATTEMPTS=12
 ```
 

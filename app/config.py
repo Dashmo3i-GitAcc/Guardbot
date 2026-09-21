@@ -1030,9 +1030,16 @@ GEMINI_POOL_MODEL_COOLDOWN = _int("GEMINI_POOL_MODEL_COOLDOWN", 120)
 GEMINI_POOL_QUOTA_COOLDOWN = _int("GEMINI_POOL_QUOTA_COOLDOWN", 900)
 GEMINI_POOL_TRANSIENT_COOLDOWN = _int("GEMINI_POOL_TRANSIENT_COOLDOWN", 15)
 
-# Owner notifications are deduplicated per (workload, event, account, model)
-# against this window, so a hundred consecutive 429s produce one message.
-GEMINI_POOL_NOTIFY_COOLDOWN = _int("GEMINI_POOL_NOTIFY_COOLDOWN", 900)
+# Pool events are deduplicated per (workload, event, account, model) against
+# this window, so a hundred consecutive 429s produce one row rather than a
+# hundred.
+#
+# This was ``GEMINI_POOL_NOTIFY_COOLDOWN`` and it gated a Telegram message. The
+# message is gone; the deduplication is not, because it is what keeps the events
+# table a record of transitions instead of a copy of the counters. The variable
+# was renamed rather than quietly reinterpreted, so a deployment that still sets
+# the old name is not left believing it configured something.
+GEMINI_POOL_EVENT_COOLDOWN = _int("GEMINI_POOL_EVENT_COOLDOWN", 900)
 
 # A hard ceiling on provider calls for one logical request. Without it a large
 # pool with retries could spend a minute of wall clock on a single message.

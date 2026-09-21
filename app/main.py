@@ -106,31 +106,24 @@ def bot_identity() -> dict:
     return dict(_bot_identity)
 
 
-# The Application handle, kept for one purpose: the Gemini pool has to be able
-# to reach the owner from inside a request that no handler is running. Set once
-# in `post_init`. A missing handle means "say nothing" rather than an error —
-# an undeliverable notice must never become a failed AI request.
-_pool_bot = None
-
-
-async def notify_owner(text: str) -> None:
-    """Deliver one pool notice to the owner. Never raises.
-
-    The admin log chat is the first choice, because the bot has already been
-    proven able to write there. The owner's private chat is the fallback for a
-    deployment that keeps no log group. With neither configured the notice is
-    dropped — and the event is still in the database, because the pool records
-    the event before it decides whether to speak.
-    """
-    if _pool_bot is None:
-        return
-    chat = config.ADMIN_LOG_CHAT or rbac.owner_id()
-    if not chat:
-        return
-    try:
-        await _pool_bot.send_message(chat, text, parse_mode="HTML")
-    except TelegramError as e:
-        log.warning("[pool] owner notice failed: %s", e)
+# There is deliberately no pool-notification helper here.
+#
+# This module used to carry `notify_owner`, which delivered pool failover and
+# health notices to ADMIN_LOG_CHAT with the owner's private chat as a fallback,
+# and a `_pool_bot` handle so the pool could reach Telegram from inside a request
+# no handler was running. Both are gone.
+#
+# The reason is not that the notices were broken — they worked, and they were
+# the reason a group full of members was reading `GEMINI MODEL FAILOVER` and
+# `rate_limited` while the pool quietly did its job. Operational detail about
+# the AI provider belongs to the operator who asks for it, not to a chat that
+# receives it because a retry happened. The pool still records every event; a
+# human reads them from `/pool` or the events table.
+#
+# Nothing replaces this. There is no queue, no digest, no "only the important
+# ones" filter — because the requirement is that no automatic pool message
+# reaches Telegram at all, and a filter would be a promise about which messages
+# matter rather than a guarantee that none are sent.
 
 
 async def load_identity(app: Application) -> None:
@@ -2592,8 +2585,6 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ------------------------------------------------------------ wiring
 async def post_init(app: Application) -> None:
-    global _pool_bot
-    _pool_bot = app.bot
     app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
     # Who we are, from Telegram rather than from configuration. Done first,
     # because the alias matching that decides whether the assistant answers
@@ -2749,15 +2740,14 @@ async def post_init(app: Application) -> None:
 
     # ── The Gemini account pool ───────────────────────────────────────────
     #
-    # Built here, and told how to reach the owner. Each workload above already
-    # asked for its pool while reporting itself, so by now the registry exists;
-    # this is the point at which the notifier becomes available to all of them
-    # and the operator gets one line per workload saying how deep the pool is.
-    #
-    # The lines never contain a credential — accounts are named by slot and by
-    # a masked tail — which is what makes them safe to leave in a log.
+    # Built here, after each workload above already asked for its pool while
+    # reporting itself, so the operator gets one line per workload saying how
+    # deep the pool is. Nothing is registered and nothing is handed over: the
+    # pool has no way to reach Telegram, which is the point. The lines never
+    # contain a credential — accounts are named by slot and by a masked tail —
+    # which is what makes them safe to leave in a log, and the log is the only
+    # place they go.
     gemini_pool.build_pools()
-    gemini_pool.set_notifier(notify_owner)
     for line in gemini_pool.startup_lines():
         log.info(line)
     # One key reaching two workloads is one Google project and therefore one

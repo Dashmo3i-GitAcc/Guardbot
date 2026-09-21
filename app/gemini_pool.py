@@ -797,7 +797,6 @@ class Pool:
         self.backoff = max(0.0, float(backoff))
         self.timeout = max(1.0, float(timeout))
         self.accounts: list[Account] = []
-        self._notifier = None
         self._discovery: dict[str, list[str] | None] = {}
         seen: set[str] = set()
         for slot, key in keys:
@@ -810,11 +809,6 @@ class Pool:
                 continue
             seen.add(fp)
             self.accounts.append(Account(workload, str(slot), key).load())
-
-    # -- setup --
-    def set_notifier(self, notifier) -> None:
-        """Register the async callable that reaches the owner."""
-        self._notifier = notifier
 
     @property
     def enabled(self) -> bool:
@@ -939,41 +933,50 @@ class Pool:
             "empty": accounts > 0 and usable == 0,
         }
 
-    # -- notifications --
-    async def notify(
+    # -- events --
+    def record(
         self,
         kind: str,
         *,
         slot: str = "",
         model: str = "",
         reason: str = "",
-        text: str,
+        detail: str = "",
         now: float | None = None,
     ) -> bool:
-        """Record an event and, if it is not a repeat, tell the owner.
+        """Write one structured pool event. Returns whether a row was written.
 
         Deduplicated on ``(workload, kind, slot, model)`` against a cooldown, so
-        a hundred consecutive 429s on one model produce one message. The event
-        row is written either way: the owner's silence must not cost the
-        operator their history.
+        a hundred consecutive 429s on one model are one row rather than a
+        hundred. That is what keeps this table a record of *transitions*: the
+        quantitative history — how many requests, how many failures, how many
+        rate limits — already lives on the account and model rows, and a table
+        that duplicated it would be both larger and less readable.
+
+        **This never contacts Telegram, and there is no way to make it.** There
+        is no notifier to register, no callback to install, and no message text
+        to send: the method records a row and returns. Pool state reaches a
+        human when a human asks for it — `/pool`, or this table — and never
+        because the pool decided to speak.
+
+        This is not ``async`` any more, and that is the point: it was async only
+        because it awaited a delivery, and the ``await`` was the thing that made
+        "the pool can send a message" look like an ordinary consequence of
+        recording an event. Removing it removes the shape of the mistake.
         """
         moment = int(time.time() if now is None else now)
-        event_id = db.pool_event_add(
-            self.workload, kind, slot=slot, model=model, reason=reason, at=moment
+        last = db.pool_last_event(self.workload, kind, slot=slot, model=model)
+        if last and moment - last < max(0, int(config.GEMINI_POOL_EVENT_COOLDOWN)):
+            return False
+        db.pool_event_add(
+            self.workload,
+            kind,
+            slot=slot,
+            model=model,
+            reason=reason,
+            detail=detail,
+            at=moment,
         )
-        last = db.pool_last_notified(self.workload, kind, slot=slot, model=model)
-        if last and moment - last < max(0, int(config.GEMINI_POOL_NOTIFY_COOLDOWN)):
-            return False
-        db.pool_event_mark_notified(event_id)
-        if self._notifier is None:
-            return False
-        try:
-            await self._notifier(text)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:  # noqa: BLE001 - a notice is never fatal
-            log.warning("[pool] owner notice failed: %s", type(exc).__name__)
-            return False
         return True
 
     # -- status --
@@ -1157,18 +1160,11 @@ async def generate(
                 "UNAVAILABLE", reason="no_compatible_model", now=now,
                 cooldown=int(config.GEMINI_POOL_MODEL_COOLDOWN),
             )
-            await pool.notify(
+            pool.record(
                 "no_compatible_model",
                 slot=account.slot,
                 reason="no compatible model",
-                text=(
-                    f"⚠️ <b>GEMINI POOL</b>\n\n"
-                    f"Workload: <b>{pool.workload}</b>\n"
-                    f"{account.label} ({account.masked})\n"
-                    f"Reason: no model compatible with this workload\n\n"
-                    f"Action: this account is out of rotation until the "
-                    f"configuration changes."
-                ),
+                detail="account out of rotation until the configuration changes",
                 now=now,
             )
             continue
@@ -1225,14 +1221,13 @@ async def generate(
                     )
 
                     if failure.scope == SCOPE_MODEL:
-                        await _notify_model_failure(
+                        _record_model_failure(
                             pool, account, model, failure, candidates, now
                         )
                         break  # next model, same account
                     if failure.scope == SCOPE_ACCOUNT:
                         account.trip(failure, now)
-                        await _notify_account_failure(pool, account, model,
-                                                      failure, now)
+                        _record_account_failure(pool, account, model, failure, now)
                         account_dead = True
                         break
                     if failure.scope == SCOPE_REQUEST:
@@ -1249,19 +1244,14 @@ async def generate(
                     was_down = account.note_success(now)
                     state.note_success(now)
                     if was_down:
-                        await pool.notify(
+                        pool.record(
                             "account_recovered",
                             slot=account.slot,
                             reason="recovered",
-                            text=(
-                                f"✅ <b>GEMINI ACCOUNT RECOVERED</b>\n\n"
-                                f"Workload: <b>{pool.workload}</b>\n"
-                                f"{account.label} ({account.masked})\n\n"
-                                f"Action: returned to the pool."
-                            ),
+                            detail="returned to the pool",
                             now=now,
                         )
-                    await _notify_pool_health(pool, now)
+                    _record_pool_health(pool, now)
                     return _extract(response, extract)
             if account_dead:
                 break
@@ -1316,116 +1306,86 @@ def _extract(response, extract):
     return extract(response)
 
 
-async def _notify_model_failure(pool, account, model, failure, candidates, now):
-    """Tell the owner a model failed, and what is being done about it."""
+# The three recorders below used to build a Telegram message and hand it to the
+# pool to deliver. They now write a structured row and stop there. What is kept
+# is the *reason* and the *detail* — the parts an operator reads in the events
+# table — and what is gone is the presentation, because presentation with no
+# audience is just a string nobody reads.
+def _record_model_failure(pool, account, model, failure, candidates, now) -> None:
+    """Note that a model failed on one account, and what was tried next."""
     remaining = [m for m in candidates if m != model]
     if failure.kind == "unsupported_model":
-        action = "Model removed from this account's rotation."
+        action = "model disabled on this account"
     elif remaining:
-        action = f"Trying another compatible model: {remaining[0]}"
+        action = f"tried {remaining[0]}"
     else:
-        action = "No compatible model left on this account; moving to the next account."
-    await pool.notify(
+        action = "no compatible model left on this account; next account"
+    pool.record(
         "model_failover",
         slot=account.slot,
         model=model,
         reason=failure.kind,
-        text=(
-            f"🔄 <b>GEMINI MODEL FAILOVER</b>\n\n"
-            f"Workload: <b>{pool.workload}</b>\n"
-            f"{account.label} ({account.masked})\n"
-            f"Model: <code>{model}</code>\n"
-            f"Reason: {failure.kind}\n\n"
-            f"Requests attempted: {account.requests}\n"
-            f"Successful: {account.successes}\n"
-            f"Failed: {account.failures}\n\n"
-            f"Action:\n{action}"
-        ),
+        detail=action,
         now=now,
     )
 
 
-async def _notify_account_failure(pool, account, model, failure, now):
-    """Tell the owner an account left the pool, and what the pool looks like."""
+def _record_account_failure(pool, account, model, failure, now) -> None:
+    """Note that an account left the pool, and how many are left."""
     health = pool.health()
     reset = (
         time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(failure.reset_at))
         if failure.reset_at
-        else "Not exposed by provider"
+        else "not exposed by provider"
     )
-    await pool.notify(
+    pool.record(
         "account_failover",
         slot=account.slot,
         model=model,
         reason=failure.kind,
-        text=(
-            f"🚨 <b>GEMINI ACCOUNT FAILOVER</b>\n\n"
-            f"Workload: <b>{pool.workload}</b>\n"
-            f"{account.label} ({account.masked})\n"
-            f"Reason: {failure.kind}\n\n"
-            f"Requests attempted: {account.requests}\n"
-            f"Successful: {account.successes}\n"
-            f"Failed: {account.failures}\n\n"
-            f"Action: switched to the next account.\n\n"
-            f"Official remaining quota:\nNot exposed by provider\n"
-            f"Reset: {reset}\n\n"
-            f"Pool status:\n"
-            f"{health['accounts'] - health['usable']} unavailable\n"
-            f"{health['usable']} available"
+        detail=(
+            f"usable={health['usable']}/{health['accounts']} reset={reset}"
         ),
         now=now,
     )
-    await _notify_pool_health(pool, now)
+    _record_pool_health(pool, now)
 
 
-async def _notify_pool_health(pool, now):
-    """Warn when the pool is nearly or entirely out.
+def _record_pool_health(pool, now) -> None:
+    """Note that the pool is nearly or entirely out.
 
     Deduplicated like everything else, and keyed on the state rather than the
-    event, so the owner hears "one account left" once and not once per request.
+    event, so the table gains one row when the pool degrades and not one per
+    request. The state itself is always available from ``health()`` and from
+    ``/pool`` — this is the history, not the status.
     """
     health = pool.health()
     if not pool.accounts:
         return
     if health["empty"]:
-        await pool.notify(
+        pool.record(
             "pool_empty",
             reason="no usable accounts",
-            text=(
-                f"🛑 <b>GEMINI POOL EXHAUSTED</b>\n\n"
-                f"Workload: <b>{pool.workload}</b>\n"
-                f"Accounts: {health['accounts']}\n"
-                f"Usable: 0\n\n"
-                f"Action: this workload is using its safe fallback until an "
-                f"account recovers. The bot is still running."
-            ),
+            detail=f"usable=0/{health['accounts']}",
             now=now,
         )
     elif health["degraded"]:
-        await pool.notify(
+        pool.record(
             "pool_critical",
             reason="one usable account",
-            text=(
-                f"⚠️ <b>GEMINI POOL WARNING</b>\n\n"
-                f"Workload: <b>{pool.workload}</b>\n"
-                f"Only one usable account remains "
-                f"({health['accounts']} configured)."
-            ),
+            detail=f"usable={health['usable']}/{health['accounts']}",
             now=now,
         )
 
 
 # ── The registry ──────────────────────────────────────────────────────────
+# There is deliberately no notifier here, and no way to add one. This registry
+# used to carry a callback that every pool was handed so it could reach the
+# owner's chat; that callback is gone, and with it the only path from a pool
+# event to Telegram. A future change that wants the pool to speak will have to
+# add that path back deliberately, in the open, rather than find a hook already
+# waiting for it.
 _pools: dict[str, Pool] = {}
-_notifier = None
-
-
-def set_notifier(notifier) -> None:
-    """Register the async callable that reaches the owner, for every pool."""
-    global _notifier
-    _notifier = notifier
-    for pool in _pools.values():
-        pool.set_notifier(notifier)
 
 
 def build_pools() -> dict[str, Pool]:
@@ -1447,7 +1407,6 @@ def build_pools() -> dict[str, Pool]:
             backoff=spec["backoff"],
             timeout=spec["timeout"],
         )
-        pool.set_notifier(_notifier)
         _pools[spec["workload"]] = pool
     return _pools
 

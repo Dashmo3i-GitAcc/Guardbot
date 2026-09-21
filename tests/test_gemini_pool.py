@@ -19,13 +19,15 @@ turns on:
   one workload's exhaustion must not silence another.
 """
 import asyncio
+import inspect
 import json
 import logging
+import pathlib
 import time
 
 import pytest
 
-from app import config, db, gemini_pool
+from app import config, db, gemini_pool, main
 
 # The credentials used throughout. Obviously fake, and shaped like the real
 # thing only in length. They are literals in a test file on purpose: a test that
@@ -377,8 +379,6 @@ def test_an_account_recovers_and_reports_it(provider):
     provider.then(KEY_A, TEXT_MODELS[0], project_quota_exhausted())
     provider.answers(KEY_B, "b")
     pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
-    notices = []
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     call(pool)
 
@@ -391,11 +391,19 @@ def test_an_account_recovers_and_reports_it(provider):
     assert call(pool) == "a again"
 
     assert first.state == "ACTIVE"
-    assert any("RECOVERED" in n for n in notices)
+    assert [e["kind"] for e in events("account_recovered")] == ["account_recovered"]
 
 
-async def _collect(sink, text):
-    sink.append(text)
+def events(kind: str = "", limit: int = 50) -> list[dict]:
+    """The recorded pool events, oldest first, optionally of one kind.
+
+    There is no ``_collect`` notifier helper any more. The pool used to take an
+    async callback that a test could hand a list to, and that callback was the
+    Telegram send; with it gone, the only way to observe what the pool did is to
+    read what it wrote down — which is also the only way an operator does it.
+    """
+    rows = [e for e in db.pool_events(limit) if not kind or e["kind"] == kind]
+    return sorted(rows, key=lambda e: e["id"])
 
 
 def test_persistence_across_a_restart(provider):
@@ -698,22 +706,31 @@ def test_a_key_never_reaches_a_log_line(provider, caplog):
         assert key not in caplog.text
 
 
-def test_a_key_never_reaches_an_owner_notification(provider):
-    notices = []
+def test_a_key_never_reaches_a_recorded_event(provider):
+    """The events table is read by operators, so it is a place a key must not be.
+
+    This used to assert the same thing about a Telegram message. The message is
+    gone; the events are not, and they are now the only artefact a failover
+    leaves behind — which makes this check more load-bearing than it was, not
+    less.
+    """
     for model in TEXT_MODELS:
         provider.then(KEY_A, model, project_quota_exhausted())
     provider.answers(KEY_B, "b")
     pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     call(pool)
 
-    assert notices
-    blob = "\n".join(notices)
+    rows = events()
+    assert rows
+    blob = "\n".join(
+        f"{e['kind']} {e['slot']} {e['model']} {e['reason']} {e['detail']}"
+        for e in rows
+    )
     assert KEY_A not in blob and KEY_B not in blob
-    # The masked tail is what the owner gets instead, and it is enough to
-    # recognise a key in the Google console.
-    assert gemini_pool.mask(KEY_A) in blob
+    # The slot is what an operator gets instead, and it is enough to tell one
+    # configured key from another without being enough to use one.
+    assert any(e["slot"] == "1" for e in rows)
 
 
 def test_a_key_never_reaches_the_status_report(provider):
@@ -765,126 +782,199 @@ def test_the_masked_form_never_reveals_more_than_four_characters():
     assert KEY_A not in masked
 
 
-# ══ OWNER TESTS ═══════════════════════════════════════════════════════════
-def test_a_model_failover_notifies_the_owner(provider):
-    notices = []
+# ══ EVENT TESTS ═══════════════════════════════════════════════════════════
+# What used to be "does the owner get told" is now "is it written down". The
+# observable behaviour of a failover is a row in `gemini_events` and a counter
+# on the account, and those are what these assert.
+def test_a_model_failover_is_recorded(provider):
     provider.then(KEY_A, TEXT_MODELS[0], rate_limited(TEXT_MODELS[0]))
     provider.always(KEY_A, TEXT_MODELS[1], "ok")
     pool = make_pool()
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     call(pool)
 
-    assert any("MODEL FAILOVER" in n for n in notices)
-    assert any(TEXT_MODELS[1] in n for n in notices)
+    rows = events("model_failover")
+    assert len(rows) == 1
+    assert rows[0]["model"] == TEXT_MODELS[0]
+    assert rows[0]["reason"] == "rate_limited"
+    assert rows[0]["slot"] == "1"
+    # The action taken is kept, because "what did the pool do about it" is the
+    # question the row exists to answer.
+    assert TEXT_MODELS[1] in rows[0]["detail"]
 
 
-def test_an_account_failover_notifies_the_owner(provider):
-    notices = []
+def test_an_account_failover_is_recorded(provider):
     for model in TEXT_MODELS:
         provider.then(KEY_A, model, project_quota_exhausted())
     provider.answers(KEY_B, "b")
     pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     call(pool)
 
-    blob = "\n".join(notices)
-    assert "ACCOUNT FAILOVER" in blob
-    assert "Not exposed by provider" in blob
-    assert "Pool status" in blob
+    rows = events("account_failover")
+    assert len(rows) == 1
+    assert rows[0]["slot"] == "1"
+    assert rows[0]["reason"] == "quota_exhausted"
+    # How much pool is left, which is the fact that makes the row worth having.
+    assert "usable=" in rows[0]["detail"]
 
 
-def test_the_owner_is_warned_when_one_account_is_left(provider):
-    notices = []
+def test_the_pool_degrading_is_recorded(provider):
     provider.answers(KEY_A, "a")
     pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
     pool.accounts[1].mark("INVALID", reason="revoked", now=time.time())
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     call(pool)
 
-    assert any("POOL WARNING" in n for n in notices)
+    rows = events("pool_critical")
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "one usable account"
 
 
-def test_the_owner_is_told_immediately_when_the_pool_is_empty(provider):
-    notices = []
+def test_the_pool_emptying_is_recorded(provider):
     for model in TEXT_MODELS:
         provider.then(KEY_A, model, project_quota_exhausted())
     pool = make_pool()
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     with pytest.raises(gemini_pool.PoolUnavailable):
         call(pool)
 
-    assert any("POOL EXHAUSTED" in n for n in notices)
+    assert [e["kind"] for e in events("pool_empty")] == ["pool_empty"]
 
 
-def test_notifications_are_deduplicated(provider):
-    """A hundred consecutive 429s are one message, not a hundred."""
-    notices = []
+def test_events_are_deduplicated(provider):
+    """A hundred consecutive 429s are one row, not a hundred."""
     provider.then(KEY_A, TEXT_MODELS[0], rate_limited(TEXT_MODELS[0]))
     provider.always(KEY_A, TEXT_MODELS[1], "ok")
     pool = make_pool()
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     for _ in range(20):
         call(pool)
 
-    failovers = [n for n in notices if "MODEL FAILOVER" in n]
-    assert len(failovers) == 1
+    assert len(events("model_failover")) == 1
 
 
 def test_deduplication_is_per_account_not_global(provider):
     """The second account failing is the one that says the pool is shrinking."""
-    notices = []
     for model in TEXT_MODELS:
         provider.then(KEY_A, model, project_quota_exhausted())
         provider.then(KEY_B, model, project_quota_exhausted())
     pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     with pytest.raises(gemini_pool.PoolUnavailable):
         call(pool)
 
-    failovers = [n for n in notices if "ACCOUNT FAILOVER" in n]
-    assert len(failovers) == 2
+    assert len(events("account_failover")) == 2
 
 
-def test_an_undeliverable_notice_is_never_fatal(provider):
-    async def broken(_text):
-        raise RuntimeError("telegram is down")
+def test_recording_an_event_never_calls_out_to_anything(provider):
+    """The pool's event recorder is synchronous and touches nothing external.
+
+    This is the structural half of "no automatic Telegram notifications". A test
+    that only asserted "no message was sent" would pass against an implementation
+    that *could* send one; this asserts the shape — ``Pool.record`` is not a
+    coroutine, so there is no ``await`` inside it, so there is nothing it can
+    call that would reach a network.
+    """
+    pool = make_pool()
+
+    assert not inspect.iscoroutinefunction(gemini_pool.Pool.record)
+    assert pool.record("model_failover", slot="1", reason="test") is True
+    assert len(events("model_failover")) == 1
+
+
+def test_the_pool_has_no_way_to_reach_telegram():
+    """There is no notifier to register, and no module-level hook to set.
+
+    The old design gave every pool a callback that reached a chat, and the
+    registry kept the last one so a rebuild would not lose it. Both are gone.
+    This test is the guard against them coming back by accident: if somebody
+    re-adds a delivery path, these attributes reappear and this fails.
+    """
+    assert not hasattr(gemini_pool, "set_notifier")
+    assert not hasattr(gemini_pool, "_notifier")
+    assert not hasattr(gemini_pool.Pool, "set_notifier")
+    assert not hasattr(gemini_pool.Pool, "notify")
+
+
+def test_the_pool_module_does_not_import_telegram():
+    """The pool cannot message a chat, and does not know what one is."""
+    source = pathlib.Path(gemini_pool.__file__).read_text(encoding="utf-8")
+    assert "import telegram" not in source
+    assert "from telegram" not in source
+    assert "send_message" not in source
+
+
+def test_admin_log_chat_is_never_a_pool_destination(provider, monkeypatch):
+    """Configuring an admin log chat changes nothing a failover does.
+
+    The old design read ``ADMIN_LOG_CHAT`` first and the owner's private chat as
+    a fallback, so a deployment with a log group received every failover notice
+    whether or not anybody wanted them. Both destinations are checked here: the
+    pool module must not read either setting, and a complete failover with both
+    configured must produce nothing but an event row.
+    """
+    monkeypatch.setattr(config, "ADMIN_LOG_CHAT", -1009999999999)
+    monkeypatch.setattr(config, "OWNER_USER_ID", 424242)
 
     for model in TEXT_MODELS:
         provider.then(KEY_A, model, project_quota_exhausted())
     provider.answers(KEY_B, "b")
     pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
-    pool.set_notifier(broken)
 
     assert call(pool) == "b"
 
+    # It did the work...
+    assert events("account_failover")
+    assert pool.accounts[0].state == "QUOTA_EXHAUSTED"
+    assert pool.accounts[1].successes == 1
 
-def test_the_event_is_recorded_even_when_the_notice_is_suppressed(provider):
-    provider.then(
-        KEY_A, TEXT_MODELS[0], rate_limited(TEXT_MODELS[0]), rate_limited(TEXT_MODELS[0])
-    )
+    # ...and there was nowhere for a message to go, because the pool has no
+    # notion of a chat. This is a structural fact, not a coincidence of
+    # configuration: the module does not import telegram, and no function in
+    # the application hands it anything that could send.
+    source = pathlib.Path(gemini_pool.__file__).read_text(encoding="utf-8")
+    assert "ADMIN_LOG_CHAT" not in source
+    assert "owner_id" not in source
+    assert not hasattr(main, "notify_owner")
+
+
+def test_the_owner_private_chat_is_not_a_pool_fallback(provider, monkeypatch):
+    """The owner's private chat is not a notification destination either.
+
+    The brief is explicit that removing the group message must not be answered
+    by sending it somewhere quieter. There is no fallback, no digest and no
+    "only the important ones" filter — the event is written down and that is
+    all that happens.
+    """
+    monkeypatch.setattr(config, "OWNER_USER_ID", 424242)
+    monkeypatch.setattr(config, "ADMIN_LOG_CHAT", None)
+
+    provider.then(KEY_A, TEXT_MODELS[0], rate_limited(TEXT_MODELS[0]))
     provider.always(KEY_A, TEXT_MODELS[1], "ok")
     pool = make_pool()
-    pool.set_notifier(lambda text: _collect([], text))
 
     call(pool)
-    # The benched model is only retried once its cooldown has passed. The event
-    # log has to be a record of what was attempted, not of what the owner
-    # happened to be told about, or the history has holes in it exactly when it
-    # is most needed.
-    pool.accounts[0].model(TEXT_MODELS[0]).cooldown_until = 0
-    call(pool)
 
-    events = sorted(
-        (e for e in db.pool_events(50) if e["kind"] == "model_failover"),
-        key=lambda e: e["id"],
-    )
-    assert [e["notified"] for e in events] == [1, 0]
+    assert events("model_failover")
+    assert not hasattr(main, "notify_owner")
+    assert not hasattr(gemini_pool, "_notifier")
+    # The owner id is not even a name the pool module knows.
+    source = pathlib.Path(gemini_pool.__file__).read_text(encoding="utf-8")
+    assert "OWNER_USER_ID" not in source
+
+
+def test_the_application_registers_no_pool_notifier():
+    """``main`` has no owner-notification helper and no bot handle to give it.
+
+    Checked against the imported module rather than its text, so a comment
+    mentioning the old design does not fail the test and a live attribute
+    cannot hide behind one. If a delivery path were reintroduced in
+    ``post_init`` it would need a function to call and a bot to call it with,
+    and both would have to exist here.
+    """
+    assert not hasattr(main, "notify_owner")
+    assert not hasattr(main, "_pool_bot")
 
 
 def test_the_status_report_names_the_pool_and_never_a_credential(provider):
@@ -936,15 +1026,21 @@ def test_a_pool_of_one_is_critical_but_not_degraded(provider):
     assert health["degraded"] is False
 
 
-def test_a_pool_of_one_does_not_warn_the_owner(provider):
-    notices = []
+def test_a_pool_of_one_records_no_degradation(provider):
+    """A one-account pool is not degraded, so nothing is written down.
+
+    The point is unchanged from when this asserted silence: a pool of one is
+    *always* at one usable account, and recording that on every request would
+    fill the events table with a fact that was true when it was configured. The
+    row has to mean something for the table to be worth reading.
+    """
     provider.answers(KEY_A, "a")
     pool = make_pool(keys=(("1", KEY_A),))
-    pool.set_notifier(lambda text: _collect(notices, text))
 
     call(pool)
 
-    assert not [n for n in notices if "POOL WARNING" in n]
+    assert not events("pool_critical")
+    assert not events("pool_empty")
 
 
 # ══ ISOLATION TESTS ═══════════════════════════════════════════════════════
