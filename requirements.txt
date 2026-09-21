@@ -1,4 +1,9 @@
 python-telegram-bot[job-queue]==21.6
+# Used directly by app/vpnbot.py to call the VPN bot's internal service API.
+# python-telegram-bot already pulls httpx in, but a direct import deserves a
+# direct declaration - otherwise a future PTB release could drop it and the
+# acquisition flow would break at import time.
+httpx>=0.27,<0.29
 Pillow>=10.0
 # Explicit body-region detector (bundled ONNX model, CPU-only).
 # Pulls onnxruntime + opencv-python-headless.

@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import burst, config, db, detector, moderation
+from . import burst, config, db, detector, intent, moderation, vpnbot
 from .decision import Decision, default_engine
 
 logging.basicConfig(
@@ -765,6 +765,175 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+# ------------------------------------------------------------ acquisition
+def acquisition_message_filter():
+    """Ordinary group text, and nothing else.
+
+    No captions (the media pipeline owns those), no commands, and no edited
+    messages — the last is belt and braces, since edited updates are not
+    requested from Telegram at all, so editing a message into an intent can
+    never produce a second invitation.
+    """
+    return (
+        filters.TEXT
+        & ~filters.COMMAND
+        & filters.ChatType.GROUPS
+        & ~filters.UpdateType.EDITED_MESSAGE
+    )
+
+
+def _intent_reply_keyboard(deep_link: str | None) -> InlineKeyboardMarkup | None:
+    """The invitation button, or nothing.
+
+    Only ever a link *into the VPN bot*. The group never sees a configuration,
+    a subscription link or a credential — those are delivered in a private chat
+    by the bot that owns them.
+    """
+    if not deep_link:
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(config.GROUP_TRIAL_BUTTON, url=deep_link)]]
+    )
+
+
+async def _reply_in_group(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None,
+    reply_to: int | None = None,
+) -> None:
+    """Reply in the group, falling back if the original message is gone.
+
+    The user may have deleted the message between sending it and our reply, and
+    a reply to a deleted message is an error — losing the invitation over that
+    would be silly, so it is retried as a plain message.
+    """
+    try:
+        await ctx.bot.send_message(
+            chat_id,
+            text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            reply_to_message_id=reply_to,
+            disable_web_page_preview=True,
+        )
+    except TelegramError:
+        try:
+            await ctx.bot.send_message(
+                chat_id,
+                text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+        except TelegramError as e:
+            log.warning("acquisition reply failed: %s", e)
+
+
+async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Offer a VPN test to someone who has just asked for one.
+
+    Runs on ordinary group text only. Edited messages are not requested from
+    Telegram at all and are filtered out below as well, so editing a message
+    into an intent cannot produce a second reply.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user or not msg.text:
+        return
+    if user.is_bot or chat.id not in config.GROUP_IDS:
+        return
+
+    match = intent.detect(msg.text)
+    if not match:
+        return
+
+    # Never offer anything to the group's own staff.
+    if await is_admin(ctx, chat.id, user.id):
+        return
+
+    # Persisted, not in memory: a restart must not reset this and hand the same
+    # person a second invitation.
+    elapsed = db.seconds_since_offer(chat.id, user.id)
+    if elapsed is not None and elapsed < config.INTENT_COOLDOWN_SECONDS:
+        log.info(
+            "intent from %s suppressed (%ss into a %ss cooldown)",
+            user.id,
+            elapsed,
+            config.INTENT_COOLDOWN_SECONDS,
+        )
+        return
+
+    log.info(
+        "intent detected from %s: %s | %r",
+        user.id,
+        ",".join(match.reasons),
+        match.normalised[:120],
+    )
+
+    name = mention(user)
+    try:
+        result = await vpnbot.request_invite(
+            user.id, chat_id=chat.id, message_id=msg.message_id
+        )
+    except vpnbot.VpnBotError as exc:
+        if exc.code == vpnbot.ERR_NOT_CONFIGURED:
+            # The integration is switched off. Stay silent: there is nothing
+            # useful to say to the group, and saying it repeatedly is worse.
+            log.warning("acquisition is not configured: %s", exc)
+            return
+        log.error("invite request failed: %s", exc)
+        db.mark_offered(chat.id, user.id, "unavailable")
+        await _reply_in_group(
+            ctx,
+            chat.id,
+            config.GROUP_TRIAL_UNAVAILABLE_TEXT,
+            None,
+            reply_to=msg.message_id,
+        )
+        return
+
+    if result.get("ok") and result.get("deep_link"):
+        db.mark_offered(chat.id, user.id, "invited")
+        text = f"{config.GROUP_TRIAL_INVITE_TEXT.format(name=name)}\n\n{config.GROUP_TRIAL_HINT}"
+        await _reply_in_group(
+            ctx,
+            chat.id,
+            text,
+            _intent_reply_keyboard(result["deep_link"]),
+            reply_to=msg.message_id,
+        )
+        return
+
+    reason = result.get("reason")
+    if reason == "already_used":
+        # They have had their one free trial. Point at the shop instead of
+        # leaving them with nothing.
+        db.mark_offered(chat.id, user.id, "used")
+        await _reply_in_group(
+            ctx,
+            chat.id,
+            config.GROUP_TRIAL_USED_TEXT.format(name=name),
+            None,
+            reply_to=msg.message_id,
+        )
+    elif reason == "already_invited":
+        db.mark_offered(chat.id, user.id, "already_invited")
+        await _reply_in_group(
+            ctx,
+            chat.id,
+            config.GROUP_TRIAL_ALREADY_TEXT.format(name=name),
+            None,
+            reply_to=msg.message_id,
+        )
+    else:
+        # not_configured, disabled, or something new. Log it and stay quiet:
+        # an unexplained apology in the group is worse than silence.
+        log.warning("invite refused for %s: %s", user.id, reason)
+
+
 # ------------------------------------------------------------ wiring
 async def post_init(app: Application) -> None:
     app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
@@ -773,6 +942,14 @@ async def post_init(app: Application) -> None:
         config.GROUP_IDS,
         sorted(config.EXPLICIT_CLASSES),
     )
+    if config.GROUP_TRIAL_ENABLED:
+        if vpnbot.is_configured():
+            log.info("Group acquisition enabled, VPN bot at %s", config.VPNBOT_API_URL)
+        else:
+            log.warning(
+                "GROUP_TRIAL_ENABLED is on but VPNBOT_API_URL / "
+                "VPNBOT_SHARED_SECRET are not set; no invitations will be sent."
+            )
 
 
 def main() -> None:
@@ -803,6 +980,13 @@ def main() -> None:
             | filters.Document.VIDEO
         ) & filters.ChatType.GROUPS
         app.add_handler(MessageHandler(media_filter, on_media), group=0)
+
+    if config.GROUP_TRIAL_ENABLED:
+        # Its own group so it can never be skipped because a media handler in
+        # group 0 happened to match first.
+        app.add_handler(
+            MessageHandler(acquisition_message_filter(), on_group_text), group=1
+        )
 
     # chat_member updates must be requested explicitly
     app.run_polling(
