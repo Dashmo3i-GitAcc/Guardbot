@@ -261,3 +261,76 @@ GROUP_TRIAL_HINT = os.getenv(
     "GROUP_TRIAL_HINT",
     "تست ۵۰۰ مگابایت و ۱ روزه‌ست و فقط یک‌بار به هر کاربر داده می‌شه.",
 )
+
+
+# ---------------- Gemini: the second opinion on an ambiguous message ----------
+# The rule engine in app/intent.py is fast, free, offline and explainable, and it
+# stays the first and last word on anything it is sure about. What it cannot do
+# is recognise a phrasing nobody wrote a pattern for. This layer covers that
+# gap: when — and only when — the rules come back unsure, the message is sent to
+# Gemini for a structured yes/no.
+#
+# Four things it deliberately is not:
+#
+#   * It is not a replacement. A rule match is a decision, not a suggestion, and
+#     the rules' `ignore` veto is final — an LLM must not be arguable out of the
+#     guard that stops us advertising at a competitor.
+#   * It is not an author. The model returns a classification and nothing else.
+#     Every word the group sees comes from GROUP_TRIAL_* above, owned by this
+#     application. Model output is logged, never sent.
+#   * It is not authoritative. Anything it cannot do — no key, no quota, no
+#     network, a malformed answer — resolves to "not a lead", which is exactly
+#     how the bot behaved before this layer existed.
+#   * It is not free. The free tier is rate-limited per project and its exact
+#     RPM/RPD are not published and not guaranteed, so the quota is bounded on
+#     our side too (rate window + a persisted daily cap) rather than discovered
+#     by getting a 429 in the middle of a busy group.
+GEMINI_ENABLED = _bool("GEMINI_ENABLED", True)
+
+# The API key. Read from the environment only: never logged, never echoed in an
+# error, never written to the database. Empty means the layer is inert and the
+# bot behaves exactly as it did before it existed.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+# `gemini-flash-latest` is the SDK's documented stable alias for the current
+# Flash model — a versioned id would eventually be retired out from under a
+# deployment that nobody rebuilt.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
+
+# The authoritative bound on one call. `asyncio.wait_for` enforces it, so a
+# stalled socket can never hold up a group message handler.
+GEMINI_TIMEOUT_SECONDS = _float("GEMINI_TIMEOUT_SECONDS", 6.0)
+
+# One retry, with exponential backoff, and only for transient failures. A 429 or
+# a 5xx is worth one more try; a malformed answer is not (it will be malformed
+# again, and it is already counted).
+GEMINI_MAX_RETRIES = _int("GEMINI_MAX_RETRIES", 1)
+GEMINI_BACKOFF_SECONDS = _float("GEMINI_BACKOFF_SECONDS", 1.5)
+
+# Our own ceiling on how often we are willing to ask: at most GEMINI_RATE_LIMIT
+# calls in any GEMINI_RATE_WINDOW seconds. Deliberately below the published free
+# tier so a burst of group chatter degrades to the rule engine instead of
+# earning a 429 that would also break the calls we actually wanted.
+GEMINI_RATE_LIMIT = _int("GEMINI_RATE_LIMIT", 10)
+GEMINI_RATE_WINDOW = _float("GEMINI_RATE_WINDOW", 60.0)
+
+# A hard daily ceiling, counted against the API's own day (see app/db.ai_day)
+# and persisted, so a restart cannot hand us a fresh allowance. The free tier's
+# RPD resets at midnight Pacific; ours resets no later than that.
+GEMINI_DAILY_LIMIT = _int("GEMINI_DAILY_LIMIT", 400)
+
+# How many consecutive transport failures open the circuit, and for how long.
+# A group does not need an offer every minute, so going quiet for five minutes
+# after a run of timeouts is cheaper than hammering a service that is down.
+GEMINI_CIRCUIT_FAILURES = _int("GEMINI_CIRCUIT_FAILURES", 5)
+GEMINI_CIRCUIT_SECONDS = _float("GEMINI_CIRCUIT_SECONDS", 300.0)
+
+# The confidence below which the model's own "yes" is not acted on. The prompt
+# asks for a number; this is where we decide what it has to be worth.
+GEMINI_MIN_CONFIDENCE = _float("GEMINI_MIN_CONFIDENCE", 0.55)
+
+# The message is truncated to this many characters before it is sent. A group
+# message is short; a pasted wall of text is not worth the tokens, and this is
+# also the bound on what leaves the server.
+GEMINI_MAX_CHARS = _int("GEMINI_MAX_CHARS", 600)
+

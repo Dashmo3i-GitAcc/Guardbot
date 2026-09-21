@@ -16,3 +16,9 @@ nudenet==3.4.2
 # build instead, which is much larger - use Docker for the real environment.
 transformers>=4.40,<5
 torch>=2.2
+# Second opinion on group messages that the deterministic rules could not
+# settle (app/ai_intent.py). The SDK README asks to pin below the next major,
+# so the upper bound is deliberate - the response-schema API is the contract.
+# The import is lazy: with the package missing the bot still runs, it just
+# keeps using the rules alone.
+google-genai>=2,<3

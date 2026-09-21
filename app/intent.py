@@ -19,7 +19,11 @@ for collapsing runs, and patterns use ``\\s*`` between words so one rule covers
 ``فیلترشکن``, ``فیلتر شکن`` and ``فیلتر  شکن``.
 
 Everything here is pure: no Telegram, no database, no network. That is what
-makes it testable against a realistic corpus.
+makes it testable against a realistic corpus — and it is also why the optional
+Gemini second opinion lives in ``app/ai_intent.py`` and is composed with this
+module in ``app/classifier.py`` rather than being wired in here. This module
+only reports how sure it is; deciding what to do about that is somebody else's
+job (``intent.is_candidate``).
 """
 from __future__ import annotations
 
@@ -109,6 +113,7 @@ class RuleSet:
     support: dict
     standalone: tuple
     ignore: tuple
+    candidates: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -167,10 +172,14 @@ def _load(path: str) -> RuleSet:
     }
     standalone = _compile((raw.get("standalone") or {}).get("patterns"))
     ignore = _compile((raw.get("ignore") or {}).get("patterns"))
+    # The plausibility gate for the AI layer (see app/classifier.py). Optional:
+    # a deployment that supplies its own rules file without this group simply
+    # never escalates anything, which is the pre-Gemini behaviour.
+    candidates = _compile(patterns_of(raw.get("candidate_group") or "ai_candidates"))
 
     if not topic:
         raise ValueError(f"{path}: no topic patterns configured")
-    return RuleSet(topic, support, standalone, ignore)
+    return RuleSet(topic, support, standalone, ignore, candidates)
 
 
 def load_rules(path: str | None = None) -> RuleSet:
@@ -219,6 +228,7 @@ def detect(
     }
     support_hits = {name: hits for name, hits in support_hits.items() if hits}
     standalone_hits = [p.pattern for p in rules.standalone if p.search(normalised)]
+    candidate_hits = [p.pattern for p in rules.candidates if p.search(normalised)]
 
     reasons: list[str] = []
     score = 0
@@ -231,6 +241,12 @@ def detect(
     if standalone_hits:
         reasons.append("standalone")
         score += 3
+    if candidate_hits:
+        # Weight 0 on purpose. This is not evidence, it is permission to go and
+        # look for evidence — it marks the message as worth an AI call without
+        # changing the verdict here. A rule that could match on its own would
+        # be a topic rule, and this list is deliberately much looser than that.
+        reasons.append("candidate")
 
     if standalone_hits:
         matched = True
@@ -242,3 +258,25 @@ def detect(
         matched = bool(support_hits) and not require_topic
 
     return IntentMatch(matched, score, tuple(reasons), normalised)
+
+
+def is_candidate(match: IntentMatch) -> bool:
+    """Whether this message is worth a second, slower opinion.
+
+    True when the message touched the *subject* — a topic word, or one of the
+    loose ``ai_candidates`` terms — but the rules did not feel sure enough to
+    decide. False for a confident match (already decided), for a veto (decided
+    the other way, and the veto is final), and for a message whose only hit was
+    a supporting signal.
+
+    That last exclusion is the one worth explaining. "بفرست", "کمک", "قیمت" and
+    "چطور" are among the most common words in a group and mean nothing without a
+    subject, so a message that hit only those is not ambiguous — it is ordinary.
+    Spending a Gemini call on "لینک گروه رو بفرست" would burn the daily quota on
+    the messages least likely to be leads. The AI layer is for the messages that
+    are *about* circumvention in a way no pattern caught.
+    """
+    reasons = match.reasons
+    if match.matched or "ignore" in reasons:
+        return False
+    return "topic" in reasons or "candidate" in reasons

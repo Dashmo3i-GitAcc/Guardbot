@@ -6,12 +6,13 @@ explicitly: the group never receives anything but the invitation, and a repeat
 ask inside the cooldown produces nothing at all.
 """
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 from telegram import Chat, Message, User
 
-from app import config, db, main, vpnbot
+from app import ai_intent, config, db, intent, main, vpnbot
 
 GROUP_ID = -1001234567890
 
@@ -311,3 +312,106 @@ def _ptb_update(text, private=False):
         entities=entities or None,
     )
     return Update(update_id=1, message=message)
+
+
+# ── The Gemini layer, seen from the handler ───────────────────────────────
+# These are the only tests in this file that give the AI layer a key. With no
+# key (the default, and what the rest of the suite runs with) the layer is inert
+# and the handler behaves exactly as it did before it existed — which is itself
+# the property the last test here pins.
+def _says(**overrides):
+    payload = {
+        "is_relevant": True,
+        "intent_category": "connectivity_problem",
+        "confidence": 0.9,
+        "needs_acquisition_offer": True,
+        "reason": "Looking for a way around a blocked connection.",
+    }
+    payload.update(overrides)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.fixture
+def ai_layer(monkeypatch):
+    """A configured, in-process AI layer with the network replaced."""
+    monkeypatch.setattr(config, "GEMINI_ENABLED", True)
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key-not-a-real-one")
+    monkeypatch.setattr(config, "GEMINI_MAX_RETRIES", 0)
+    ai_intent.reset_state()
+    yield
+    ai_intent.reset_state()
+
+
+def test_an_ambiguous_message_the_rules_missed_can_still_get_an_invitation(
+    monkeypatch, ai_layer
+):
+    """The whole point of the second layer: a phrasing no pattern covers, that a
+    person really did mean as a request, still reaches them."""
+    text = "اینترنت ایرانسل وصل نمیشه"
+    assert intent.detect(text).matched is False, "the rules must miss this one"
+
+    async def _relevant(_text):
+        return _says()
+
+    monkeypatch.setattr(ai_intent, "_request", _relevant)
+    monkeypatch.setattr(vpnbot, "request_invite", _invited())
+    bot = FakeBot()
+
+    _run(main.on_group_text(_update(text), SimpleNamespace(bot=bot)))
+
+    assert len(bot.sent) == 1, "the AI's yes must reach the group as an invitation"
+    assert bot.sent[0]["reply_markup"].inline_keyboard[0][0].url.startswith("https://t.me/")
+
+
+def test_the_ai_saying_no_leaves_the_group_alone(monkeypatch, ai_layer):
+    async def _irrelevant(_text):
+        return _says(is_relevant=False, needs_acquisition_offer=False)
+
+    monkeypatch.setattr(ai_intent, "_request", _irrelevant)
+
+    async def _explode(*args, **kwargs):
+        raise AssertionError("the VPN bot must not be called")
+
+    monkeypatch.setattr(vpnbot, "request_invite", _explode)
+    bot = FakeBot()
+
+    _run(main.on_group_text(_update("اینترنت ایرانسل وصل نمیشه"), SimpleNamespace(bot=bot)))
+
+    assert bot.sent == []
+
+
+def test_a_gemini_outage_does_not_break_the_group_handler(monkeypatch, ai_layer):
+    """A classifier that can fail a message handler is worse than one that misses
+    a lead. The rules keep working, and the handler keeps working."""
+    async def _down(_text):
+        raise RuntimeError("the network is gone")
+
+    monkeypatch.setattr(ai_intent, "_request", _down)
+    monkeypatch.setattr(vpnbot, "request_invite", _invited())
+    bot = FakeBot()
+
+    # The rule engine's own verdict is untouched by the outage.
+    _run(main.on_group_text(_update("فیلترشکن میخوام"), SimpleNamespace(bot=bot)))
+    assert len(bot.sent) == 1
+
+    # And an ambiguous message simply produces nothing, rather than an error.
+    _run(main.on_group_text(_update("اینترنت ایرانسل وصل نمیشه"), SimpleNamespace(bot=bot)))
+    assert len(bot.sent) == 1
+
+
+def test_without_a_key_the_handler_behaves_exactly_as_before(monkeypatch):
+    """The default deployment: no key, no Gemini, and the rules decide alone."""
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "")
+
+    async def _explode(*args, **kwargs):
+        raise AssertionError("no key must mean no request")
+
+    monkeypatch.setattr(ai_intent, "_request", _explode)
+    monkeypatch.setattr(vpnbot, "request_invite", _invited())
+    bot = FakeBot()
+
+    _run(main.on_group_text(_update("فیلترشکن میخوام"), SimpleNamespace(bot=bot)))
+    assert len(bot.sent) == 1
+
+    _run(main.on_group_text(_update("اینترنت ایرانسل وصل نمیشه"), SimpleNamespace(bot=bot)))
+    assert len(bot.sent) == 1, "an ambiguous message stays quiet without a key"

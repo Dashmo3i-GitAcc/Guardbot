@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import burst, config, db, detector, intent, moderation, vpnbot
+from . import ai_intent, burst, classifier, config, db, detector, moderation, vpnbot
 from .decision import Decision, default_engine
 
 logging.basicConfig(
@@ -846,7 +846,11 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if user.is_bot or chat.id not in config.GROUP_IDS:
         return
 
-    match = intent.detect(msg.text)
+    # The layered decision: the rule engine first, and Gemini only for the
+    # messages the rules were not sure about. `match` is truthy exactly when the
+    # message is a lead, so nothing below this line changed when the second
+    # layer was added — including the cooldown, the invitation and the replies.
+    match = await classifier.classify(msg.text, user_id=user.id)
     if not match:
         return
 
@@ -950,6 +954,23 @@ async def post_init(app: Application) -> None:
                 "GROUP_TRIAL_ENABLED is on but VPNBOT_API_URL / "
                 "VPNBOT_SHARED_SECRET are not set; no invitations will be sent."
             )
+        # The AI layer is optional and degrades to the rule engine, so this is
+        # reported rather than fatal. `status()` never contains the key itself.
+        state = ai_intent.status()
+        if state["active"]:
+            log.info(
+                "Intent AI layer active: model=%s daily_limit=%d used_today=%d",
+                state["model"],
+                state["daily_limit"],
+                state["used_today"],
+            )
+        elif state["enabled"]:
+            log.warning(
+                "GEMINI_ENABLED is on but GEMINI_API_KEY is not set; ambiguous "
+                "messages will fall back to the rule engine alone."
+            )
+        else:
+            log.info("Intent AI layer disabled (GEMINI_ENABLED=0); rules only.")
 
 
 def main() -> None:
