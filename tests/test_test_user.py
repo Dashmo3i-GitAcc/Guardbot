@@ -18,6 +18,7 @@ import pytest
 from telegram.error import TelegramError
 
 from app import config, db, detector, main
+from conftest import local_only_moderation
 
 CHAT_ID = -1001234567890
 ADMIN_CHAT_ID = -1009999999999
@@ -195,9 +196,13 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TEST_USER_ID", TEST_USER_ID)
     monkeypatch.setattr(config, "TEST_USER_UNRESTRICT_SECONDS", 2.0)
     monkeypatch.setattr(detector, "_scene_pipe", None)
+    # This suite tests the test account's auto-unrestrict cycle, which only
+    # begins after a confirmed deletion. See the helper.
+    local_only_moderation(monkeypatch)
     main._test_unrestrict_jobs.clear()
     main._test_unrestrict_notices.clear()
     main._admin_cache.clear()
+    main._recently_deleted.clear()
     db.init()  # a fresh in-memory database for each test
     yield tmp
     main._test_unrestrict_jobs.clear()

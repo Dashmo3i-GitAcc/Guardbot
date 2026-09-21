@@ -11,6 +11,7 @@ import pytest
 from telegram.error import TelegramError
 
 from app import config, db, detector, main
+from conftest import local_only_moderation
 
 CHAT_ID = -1001234567890
 ADMIN_CHAT_ID = -1009999999999
@@ -125,7 +126,11 @@ def violation_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "MUTE_MINUTES", 15)
     monkeypatch.setattr(config, "VIOLATION_MUTE_AFTER", 3)
     monkeypatch.setattr(detector, "_scene_pipe", None)
+    # This suite tests the ladder that runs after a confirmed deletion, so it
+    # runs in the mode where a deletion can still happen. See the helper.
+    local_only_moderation(monkeypatch)
     main._admin_cache.clear()
+    main._recently_deleted.clear()
     db.init()  # a fresh in-memory database for each test
     yield tmp
     if db._conn is not None:

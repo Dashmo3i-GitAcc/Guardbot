@@ -136,7 +136,24 @@ def pipeline_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "ADMIN_LOG_CHAT", ADMIN_CHAT_ID)
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_dir))
     monkeypatch.setattr(config, "MAX_DOWNLOAD_MB", 20)
+    # These tests are about the *pipeline* — download, detect, delete, report,
+    # cleanup — not about the policy that decides whether to delete. So they run
+    # in the local-only mode, which is the deployment configuration in which the
+    # local detector is allowed to act on its own, and the threshold is set to
+    # the fixture score so the plumbing is what is being exercised.
+    #
+    # The policy itself has its own suites: tests/test_mod_policy.py for the
+    # rules and tests/test_moderation_ai.py for the AI layer. The default mode
+    # (MODERATION_REQUIRE_AI_CONFIRM=True) is deliberately *not* what these
+    # tests run under, because in that mode a local-only signal never deletes
+    # and there would be no deletion path left to test here.
+    monkeypatch.setattr(config, "MODERATION_REQUIRE_AI_CONFIRM", False)
+    monkeypatch.setattr(config, "MODERATION_LOCAL_HARD_THRESHOLD", 0.45)
+    # The moderation AI is not configured in tests, and must not be reached:
+    # nothing here may make a network call.
+    monkeypatch.setattr(config, "GEMINI_MOD_ENABLED", False)
     main._admin_cache.clear()
+    main._recently_deleted.clear()
     yield tmp_dir
 
 
@@ -146,6 +163,13 @@ def assert_clean(tmp_dir):
 
 def assert_no_admin_message(bot):
     assert bot.messages == [] and bot.photos == [] and bot.documents == []
+
+
+def assert_review_notice(bot):
+    """A REVIEW now tells the operator. It carries no media and no message text."""
+    assert bot.photos == [] and bot.documents == []
+    assert len(bot.messages) == 1, bot.messages
+    assert "نیازمند بررسی دستی" in bot.messages[0]
 
 
 # ------------------------------------------------- explicit media: deleted
@@ -244,12 +268,15 @@ def test_normal_gif_is_allowed(monkeypatch, pipeline_env):
     assert_no_admin_message(bot)
 
 
-def test_borderline_media_is_not_deleted_and_not_reported(monkeypatch, pipeline_env):
-    # REVIEW band (0.25 <= score < 0.45): logged only, no admin message
+def test_borderline_media_is_not_deleted_but_is_reported_for_review(
+    monkeypatch, pipeline_env
+):
+    # REVIEW band (0.25 <= score < 0.45): nothing is deleted, and the operator
+    # is told so they can look. The report carries no media and no message text.
     monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw(score=0.30)))
     msg, bot = run_media(FakeBot(), photo=[photo_obj()])
     assert msg.delete_calls == 0
-    assert_no_admin_message(bot)
+    assert_review_notice(bot)
     assert_clean(pipeline_env)
 
 
@@ -335,19 +362,27 @@ class FakeScenePipe:
         ]
 
 
-def test_scene_only_explicit_media_is_deleted_and_reported(monkeypatch, pipeline_env):
-    """NudeNet finds nothing at all - the scene score alone must delete."""
+def test_scene_only_explicit_media_is_reviewed_not_deleted(monkeypatch, pipeline_env):
+    """NudeNet finds nothing; only the scene score is high.
+
+    This used to delete, and it deliberately no longer does. The scene
+    classifier is the less interpretable of the two local signals, and the case
+    it was added for — a sexual act with no exposed anatomy — is now handled by
+    the moderation AI, which can attach a reason. A scene score is therefore
+    evidence for a human, not a verdict, in every mode.
+    """
     monkeypatch.setattr(detector, "_detector", StubDetector([]))
     monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(score=0.99))
 
     msg, bot = run_media(FakeBot(), photo=[photo_obj()])
 
-    assert msg.delete_calls == 1
-    assert len(bot.photos) == 1  # evidence frame + report, like any deletion
+    assert msg.delete_calls == 0
+    assert_review_notice(bot)
     assert_clean(pipeline_env)
 
 
-def test_scene_only_deletion_records_a_confirmed_violation(monkeypatch, pipeline_env):
+def test_scene_only_media_records_no_confirmed_violation(monkeypatch, pipeline_env):
+    """Nothing was deleted, so nothing may count as a violation."""
     monkeypatch.setattr(detector, "_detector", StubDetector([]))
     monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(score=0.99))
     recorded = []
@@ -355,17 +390,17 @@ def test_scene_only_deletion_records_a_confirmed_violation(monkeypatch, pipeline
 
     run_media(FakeBot(), photo=[photo_obj()])
 
-    assert recorded == [(CHAT_ID, 7)]
+    assert recorded == []
 
 
-def test_borderline_scene_media_is_not_deleted_and_not_reported(monkeypatch, pipeline_env):
+def test_borderline_scene_media_is_not_deleted_and_is_reported(monkeypatch, pipeline_env):
     monkeypatch.setattr(detector, "_detector", StubDetector([]))
     monkeypatch.setattr(detector, "_scene_pipe", FakeScenePipe(score=0.75))
 
     msg, bot = run_media(FakeBot(), photo=[photo_obj()])
 
     assert msg.delete_calls == 0
-    assert_no_admin_message(bot)
+    assert_review_notice(bot)
     assert_clean(pipeline_env)
 
 

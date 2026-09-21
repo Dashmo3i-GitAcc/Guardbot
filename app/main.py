@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -28,18 +29,23 @@ from telegram.ext import (
 
 from . import (
     ai_intent,
+    ai_moderation,
     burst,
     chat,
     classifier,
     config,
     db,
     detector,
+    media,
+    mod_policy,
     moderation,
     net,
+    rbac,
     responses,
+    transcribe,
     vpnbot,
 )
-from .decision import Decision, default_engine
+from .decision import Decision, DecisionResult, default_engine
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -71,6 +77,81 @@ FULL = ChatPermissions(
     can_send_other_messages=True,
     can_add_web_page_previews=True,
 )
+
+# ── The bot's own identity ────────────────────────────────────────────────
+# Resolved from Telegram at startup with getMe, plus the operator's configured
+# aliases. Kept in a dict rather than a module of constants because it is only
+# known once the network answers, and because a failed getMe must leave the bot
+# running with the identity it can still infer (the token's own username is not
+# readable, but `ctx.bot.id`/`username` are populated by the Application).
+_bot_identity: dict = {
+    "id": 0,
+    "username": "",
+    "name": "",
+    "aliases": (),
+    "resolved": False,
+}
+
+# Messages this process has just deleted, so the conversational handler does not
+# answer a message that no longer exists. Bounded, and in-process only: a
+# restart loses it, which is correct because the messages are gone either way.
+# The value is a timestamp; entries older than a few minutes are dropped.
+_recently_deleted: dict[tuple[int, int], float] = {}
+_DELETED_TTL = 120.0
+
+
+def bot_identity() -> dict:
+    """A copy of what we know about ourselves. Never contains a secret."""
+    return dict(_bot_identity)
+
+
+async def load_identity(app: Application) -> None:
+    """Ask Telegram who we are. Never fatal.
+
+    getMe is the authoritative source for the id and the username, and both are
+    what reply-to-bot and @mention matching depend on — inferring them from
+    configuration would be a second, possibly wrong answer to a question
+    Telegram already answers.
+    """
+    try:
+        me = await app.bot.get_me()
+    except TelegramError as e:
+        log.warning("getMe failed; alias matching will be limited: %s", e)
+        return
+    _bot_identity.update(
+        id=int(me.id),
+        username=(me.username or "").lower(),
+        name=(me.first_name or "").strip(),
+        aliases=tuple(a.strip().lower() for a in config.BOT_ALIASES if a.strip()),
+        resolved=True,
+    )
+    log.info(
+        "Bot identity: id=%s username=%s name=%s aliases=%d",
+        _bot_identity["id"],
+        f"@{_bot_identity['username']}" if _bot_identity["username"] else "-",
+        _bot_identity["name"] or "-",
+        len(_bot_identity["aliases"]),
+    )
+
+
+def mark_deleted(chat_id: int, message_id: int) -> None:
+    """Remember that a message was just removed, so nothing tries to answer it."""
+    now = time.monotonic()
+    _recently_deleted[(int(chat_id), int(message_id))] = now
+    if len(_recently_deleted) > 500:
+        cutoff = now - _DELETED_TTL
+        for key in [k for k, at in _recently_deleted.items() if at < cutoff]:
+            _recently_deleted.pop(key, None)
+
+
+def was_deleted(chat_id: int, message_id: int) -> bool:
+    at = _recently_deleted.get((int(chat_id), int(message_id)))
+    if at is None:
+        return False
+    if time.monotonic() - at > _DELETED_TTL:
+        _recently_deleted.pop((int(chat_id), int(message_id)), None)
+        return False
+    return True
 
 
 # ------------------------------------------------------------ helpers
@@ -323,13 +404,18 @@ def _analyze_blocking(path: str, is_video: bool, work_dir: str) -> detector.Medi
     return detector.analyze_image(path)
 
 
-def _explicit_report_text(chat, user, msg, kind, result, note) -> str:
+def _explicit_report_text(chat, user, msg, kind, result, note, verdict=None, outcome=None) -> str:
     """Persian admin report for one confirmed deletion.
 
     The detection line reflects *which* signal fired: the anatomical NudeNet
     class when there is one, otherwise the scene-level classifier. The reason
     sentence matches too, so the report never claims genital evidence that the
     detector did not actually find.
+
+    When the moderation AI confirmed the deletion its own classification and
+    confidence are shown as well, because "who decided this" is the first
+    question an operator asks about a deletion they disagree with — and with two
+    signals in the pipeline the answer is no longer obvious from the score.
     """
     matched = result.matched
     if matched is not None:
@@ -346,6 +432,18 @@ def _explicit_report_text(chat, user, msg, kind, result, note) -> str:
         )
     username = f"@{user.username}" if getattr(user, "username", None) else "-"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    ai_line = ""
+    if verdict is not None and verdict.decided:
+        ai_line = (
+            f"🤖 تأیید هوش مصنوعی: <b>{verdict.classification}</b> "
+            f"({verdict.confidence:.2f})\n"
+            f"   دسته: {verdict.category or '-'}\n"
+        )
+    policy_line = ""
+    if outcome is not None:
+        policy_line = f"⚖️ سیاست: <code>{outcome.reason}</code>\n"
+
     return (
         f"🚨 <b>حذف محتوای صریح</b>\n\n"
         f"👤 کاربر: {mention(user)}\n"
@@ -354,8 +452,10 @@ def _explicit_report_text(chat, user, msg, kind, result, note) -> str:
         f"💬 Chat ID: <code>{chat.id}</code>\n"
         f"📩 Message ID: <code>{msg.message_id}</code>\n\n"
         f"📦 نوع محتوا: <b>{kind}</b> {note}\n"
-        f"🔎 تشخیص: <b>{label}</b>\n"
-        f"📊 امتیاز: <b>{score:.2f}</b>\n\n"
+        f"🔎 تشخیص محلی: <b>{label}</b>\n"
+        f"📊 امتیاز: <b>{score:.2f}</b>\n"
+        f"{ai_line}"
+        f"{policy_line}\n"
         f"⛔ دلیل:\n"
         f"{reason}\n\n"
         f"✅ اقدام:\n"
@@ -366,15 +466,18 @@ def _explicit_report_text(chat, user, msg, kind, result, note) -> str:
     )
 
 
-async def _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, note) -> None:
+async def _send_explicit_report(
+    ctx, chat, user, msg, kind, analysis, result, note, verdict=None, outcome=None
+) -> None:
     """Admin report for a confirmed deletion, with a representative frame.
 
-    Only EXPLICIT + DELETE_SUCCESS reaches this function. Evidence is uploaded
-    from the per-job temp dir and the file is removed by the caller's finally.
+    Only a DELETE_WARN outcome that actually deleted reaches this function.
+    Evidence is uploaded from the per-job temp dir and the file is removed by the
+    caller's finally.
     """
     if not config.ADMIN_LOG_CHAT:
         return
-    text = _explicit_report_text(chat, user, msg, kind, result, note)
+    text = _explicit_report_text(chat, user, msg, kind, result, note, verdict, outcome)
 
     # Evidence frame: the frame behind the matched anatomical detection, or -
     # for a scene-stage deletion, where there is no matched detection - the
@@ -400,6 +503,108 @@ async def _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, no
 
     # never leave the admin without the report itself
     await report(ctx, text)
+
+
+# ------------------------------------------------- AI moderation
+async def _assess_media_with_ai(
+    path: str, work_dir: str, kind: str, result, note: str
+) -> ai_moderation.ModerationVerdict | None:
+    """The moderation AI's opinion on this media, or None.
+
+    **When it is asked**, and why that condition is the whole design: only when
+    the local stage has something to say — a REVIEW or an EXPLICIT. That is both
+    the cheapest rule (an ordinary photo costs nothing) and the one that matters,
+    because the AI's value here is that it can *disagree*. Asking it about
+    content nobody doubted would spend the quota to confirm the obvious.
+
+    It is also why a local EXPLICIT that the AI declines now ends in REVIEW
+    rather than a deletion: this function is the second opinion that can say no.
+
+    The file is already on disk — the local detector downloaded it — so the parts
+    are built from the path rather than fetched from Telegram a second time.
+
+    Never raises, and returns None on any failure, which the policy reads as
+    "not confirmed" and therefore does not delete.
+    """
+    if not config.MODERATION_MEDIA_ENABLED:
+        return None
+    if not ai_moderation.is_enabled():
+        return None
+    if result.decision is Decision.SAFE and result.scene_nsfw is None:
+        return None
+
+    try:
+        bundle = media.build_from_path(path, kind, work_dir=work_dir)
+    except Exception as e:  # noqa: BLE001 - never let this break the pipeline
+        log.warning("media preparation for the moderation AI failed: %s", e)
+        return None
+
+    if not bundle.ok:
+        # The media could not be prepared. That is a reason to leave the content
+        # alone, not a reason to delete it, and the log line says which.
+        log.info(
+            "moderation AI skipped kind=%s: %s", kind, bundle.note or "not preparable"
+        )
+        return None
+
+    parts = [{"mime_type": p.mime_type, "data": p.data} for p in bundle.parts]
+    try:
+        verdict = await ai_moderation.assess_media(parts, kind)
+    except Exception as e:  # noqa: BLE001
+        log.warning("moderation AI call failed: %s", e)
+        return None
+    if bundle.reduced_to_frames or bundle.thumbnail_only:
+        # The verdict was formed from a reduction of the media, and the report
+        # has to say so — an operator deciding whether a deletion was right must
+        # know it was made on frames or a preview rather than the file.
+        log.info(
+            "moderation AI verdict is about a reduction of the media: %s",
+            bundle.note,
+        )
+    return verdict
+
+
+async def _notify_review(
+    ctx, chat, user, msg, kind, result, verdict, outcome
+) -> None:
+    """Tell the operator about something the policy declined to act on.
+
+    REVIEW is where every disputed and every uncertain case now lands, so this
+    is the channel that makes the new policy observable: without it, "the bot
+    stopped deleting" and "the bot stopped working" would look the same from the
+    outside. It carries no media and no message text — an identifier, the two
+    signals, and the reason.
+    """
+    if not config.MODERATION_REVIEW_NOTIFY or not config.ADMIN_LOG_CHAT:
+        return
+    ai_line = (
+        f"🤖 هوش مصنوعی: <b>{verdict.classification}</b> ({verdict.confidence:.2f})"
+        f"{' ⚠️ نامطمئن' if verdict.uncertain else ''}\n"
+        if verdict is not None and verdict.decided
+        else "🤖 هوش مصنوعی: پاسخی نداد\n"
+    )
+    local_line = (
+        f"🔎 محلی: <b>{result.matched.label}</b> ({result.matched.score:.2f})\n"
+        if result.matched is not None
+        else f"🔎 محلی: صحنه ({result.scene_nsfw:.2f})\n"
+        if result.scene_nsfw is not None
+        else "🔎 محلی: -\n"
+    )
+    text = (
+        f"👀 <b>نیازمند بررسی دستی</b>\n\n"
+        f"👤 {mention(user)} (<code>{user.id}</code>)\n"
+        f"💬 Chat ID: <code>{chat.id}</code>\n"
+        f"📩 Message ID: <code>{getattr(msg, 'message_id', '-')}</code>\n"
+        f"📦 نوع: <b>{kind}</b>\n"
+        f"{local_line}"
+        f"{ai_line}"
+        f"⚖️ سیاست: <code>{outcome.reason}</code>\n"
+        f"✅ اقدام: هیچ‌چیز حذف نشد.\n"
+    )
+    try:
+        await report(ctx, text)
+    except TelegramError as e:
+        log.warning("review notice failed: %s", e)
 
 
 # ------------------------------------------------- flood / violations
@@ -696,10 +901,28 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         result = _engine.decide(analysis)
 
+        # The moderation AI's second opinion, when there is something for it to
+        # have an opinion about. `_assess_media_with_ai` explains the condition;
+        # the short version is that it is asked exactly when the local stage has
+        # something to say, which is both the cheapest rule and the one that
+        # matters — it is the *disagreement* that stops a false positive.
+        verdict = await _assess_media_with_ai(
+            path, work_dir, kind, result, note
+        )
+
+        outcome = mod_policy.decide(
+            mod_policy.PolicyInput(
+                local=result,
+                ai=verdict,
+                media_kind=kind,
+                is_media=True,
+            )
+        )
+
         log.info(
             "media chat=%s user=%s kind=%s detector=%s frames=%d decision=%s "
             "source=%s class=%s confidence=%.2f detections=%s scene=%s "
-            "scene_frames=%d reason=%s",
+            "scene_frames=%d reason=%s | policy=%s",
             chat.id, user.id, kind, config.DETECTOR_BACKEND, analysis.frames_checked,
             result.decision.value,
             result.source,
@@ -709,54 +932,72 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"{result.scene_nsfw:.2f}" if result.scene_nsfw is not None else "-",
             analysis.scene_frames,
             result.reason,
+            mod_policy.describe(outcome),
         )
 
-        if result.decision is Decision.SAFE:
+        if outcome.allows:
             return
 
-        if result.decision is Decision.REVIEW:
-            # borderline: logged only. No delete, no admin message, no punishment.
+        if outcome.reviews:
+            # Ambiguous, disputed, or unconfirmed: logged and reported, never
+            # acted on. This is where every false positive now lands — the
+            # content stays, a human can look, and nobody is punished for a
+            # score crossing a line.
+            await _notify_review(ctx, chat, user, msg, kind, result, verdict, outcome)
             return
 
-        # EXPLICIT -> delete the Telegram message. This is the only content
-        # action, and a successful deletion is one confirmed violation.
-        outcome = await moderation.enforce(
+        # The only branch that destroys anything. `enforce_result` is what keeps
+        # the executor's safety contract — a failed delete applies no strike and
+        # no restriction — and the policy outcome is the only thing that can
+        # reach it.
+        enforced = mod_policy.enforce_result(outcome, result)
+        result = enforced
+
+        outcome_enforced = await moderation.enforce(
             result,
             delete_media=lambda: msg.delete(),
             record_confirmed=lambda: db.add_strike(chat.id, user.id),
         )
 
-        if not outcome.deleted:
+        if not outcome_enforced.deleted:
             log.error(
                 "DELETE_FAILED chat=%s message=%s class=%s confidence=%.2f error=%s",
                 chat.id, getattr(msg, "message_id", "-"),
                 result.matched.label if result.matched else "-",
                 result.matched.score if result.matched else 0.0,
-                outcome.reason,
+                outcome_enforced.reason,
             )
             return
 
+        mark_deleted(chat.id, getattr(msg, "message_id", 0))
         log.info(
-            "DELETE_SUCCESS chat=%s message=%s class=%s confidence=%.2f",
+            "DELETE_SUCCESS chat=%s message=%s class=%s confidence=%.2f policy=%s",
             chat.id, getattr(msg, "message_id", "-"),
             result.matched.label if result.matched else "-",
             result.matched.score if result.matched else 0.0,
+            outcome.reason,
         )
-        await _send_explicit_report(ctx, chat, user, msg, kind, analysis, result, note)
+        await _send_explicit_report(
+            ctx, chat, user, msg, kind, analysis, result, note, verdict, outcome
+        )
 
         # A failed deletion returns above, so a strike is only ever recorded for
         # content that was actually removed. A database error leaves
-        # outcome.strike as None and changes nothing else.
-        if outcome.strike is not None:
+        # `strike` as None and changes nothing else. Note `outcome_enforced` is
+        # the *executor's* result, not the policy's — the policy decided to
+        # delete, and this is what actually happened when it tried.
+        if outcome_enforced.strike is not None:
             log.info(
-                "VIOLATION chat=%s user=%s count=%d", chat.id, user.id, outcome.strike
+                "VIOLATION chat=%s user=%s count=%d",
+                chat.id, user.id, outcome_enforced.strike,
             )
             restricted = False
-            if outcome.strike >= config.VIOLATION_MUTE_AFTER:
+            if outcome_enforced.strike >= config.VIOLATION_MUTE_AFTER:
                 restricted = await _restrict_user(ctx, chat.id, user.id)
                 log.info(
                     "VIOLATION_RESTRICT chat=%s user=%s count=%d minutes=%s applied=%s",
-                    chat.id, user.id, outcome.strike, config.MUTE_MINUTES, restricted,
+                    chat.id, user.id, outcome_enforced.strike, config.MUTE_MINUTES,
+                    restricted,
                 )
             notice_id = await _send_user_notice(
                 ctx,
@@ -764,7 +1005,7 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 _format_notice(
                     config.VIOLATION_WARNING_TEXT,
                     name=mention(user),
-                    count=outcome.strike,
+                    count=outcome_enforced.strike,
                     max=config.VIOLATION_MUTE_AFTER,
                 ),
             )
@@ -814,7 +1055,7 @@ async def _reply_in_group(
     ctx: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     text: str,
-    keyboard: InlineKeyboardMarkup | None,
+    keyboard: InlineKeyboardMarkup | None = None,
     reply_to: int | None = None,
 ) -> None:
     """Reply in the group, falling back if the original message is gone.
@@ -822,6 +1063,9 @@ async def _reply_in_group(
     The user may have deleted the message between sending it and our reply, and
     a reply to a deleted message is an error — losing the invitation over that
     would be silly, so it is retried as a plain message.
+
+    ``keyboard`` defaults to None so the administrative replies, which mostly
+    carry no markup, do not have to pass one explicitly.
     """
     try:
         await ctx.bot.send_message(
@@ -857,15 +1101,26 @@ async def _reply_in_group(
 def _addressed_to_bot(msg, ctx) -> bool:
     """Whether this message is aimed at the bot rather than at the room.
 
-    Exactly two things count, and both are unambiguous in Telegram's own data:
+    Telegram gives exactly two unambiguous signals, and they are the first two
+    checked:
 
     * a reply to a message this bot sent, and
     * an @mention of this bot's own username.
 
-    Nothing else. A message that merely contains the word «ربات», or a question
-    the rules happen to like, is ordinary conversation and stays in the
+    The third is the operator's own list of aliases (``BOT_ALIASES``), which
+    exists because a group often calls the bot something other than its
+    username. It is empty by default and matched as a whole word, because
+    matching a bare word is a heuristic — and a heuristic that decides whether
+    the bot speaks is a decision the operator should make explicitly rather than
+    one this file should assume.
+
+    Nothing else counts. A message that merely contains the word «ربات», or a
+    question the rules happen to like, is ordinary conversation and stays in the
     acquisition pipeline. The brief is explicit that seeing a group message is
     not an invitation to start chatting.
+
+    A caption counts as text here as well as in the handlers: somebody who
+    addresses the bot while sending a photo has addressed the bot.
     """
     replied = getattr(msg, "reply_to_message", None)
     if replied is not None:
@@ -873,33 +1128,84 @@ def _addressed_to_bot(msg, ctx) -> bool:
         if author is not None and getattr(author, "id", None) == ctx.bot.id:
             return True
 
+    text = _message_text(msg).lower()
+    if not text:
+        return False
+
     username = (getattr(ctx.bot, "username", "") or "").strip().lower()
-    if username and f"@{username}" in (msg.text or "").lower():
+    if username and f"@{username}" in text:
         return True
+
+    for alias in _bot_identity.get("aliases", ()):
+        if _mentions_alias(text, alias):
+            return True
     return False
 
 
-def private_text_filter():
-    """Ordinary private text: not a command, not an edited message."""
+def _message_text(msg) -> str:
+    """The text of a message, whether it is a body or a caption.
+
+    One helper rather than ``msg.text or msg.caption`` at every call site: a
+    media message carries its words in ``caption``, and forgetting that is how a
+    photo with "سلام ربات" on it silently stops being addressed to the bot.
+    """
+    return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+
+
+def _mentions_alias(text: str, alias: str) -> bool:
+    """Whole-word, case-insensitive match of a configured alias.
+
+    Escaped before it becomes a pattern even though the alias comes from
+    configuration rather than from a user: an operator typing ``.`` should get a
+    literal dot, not a wildcard, and getting that wrong is a silent widening of
+    what the bot answers to.
+    """
+    if not alias:
+        return False
+    try:
+        return re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text) is not None
+    except re.error:
+        return False
+
+
+# Media the assistant will look at when somebody addresses it with an
+# attachment. Deliberately the same set ``app/media.py`` can describe, minus
+# nothing: a sticker the moderator can see is a sticker the assistant can see.
+#
+# Note what this filter does *not* do: it does not make the assistant answer
+# unattended media. `on_group_chat` still requires `_addressed_to_bot`, so an
+# ordinary photo in the group goes through moderation and nothing else.
+def conversation_media_filter():
     return (
-        filters.TEXT
+        filters.PHOTO
+        | filters.VIDEO
+        | filters.ANIMATION
+        | filters.VIDEO_NOTE
+        | filters.VOICE
+        | filters.AUDIO
+        | filters.Sticker.ALL
+        | filters.Document.IMAGE
+        | filters.Document.VIDEO
+        | filters.Document.AUDIO
+    )
+
+
+def group_chat_filter():
+    """Group text or media, for the assistant's handler."""
+    return (
+        (filters.TEXT | conversation_media_filter())
         & ~filters.COMMAND
-        & filters.ChatType.PRIVATE
+        & filters.ChatType.GROUPS
         & ~filters.UpdateType.EDITED_MESSAGE
     )
 
 
-def group_text_filter():
-    """Ordinary group text, used by the assistant's own handler.
-
-    The same shape as the acquisition filter on purpose: the two handlers see
-    the same messages and decide between them, rather than one being able to
-    reach traffic the other cannot.
-    """
+def private_chat_filter():
+    """Private text or media, for the assistant's handler."""
     return (
-        filters.TEXT
+        (filters.TEXT | conversation_media_filter())
         & ~filters.COMMAND
-        & filters.ChatType.GROUPS
+        & filters.ChatType.PRIVATE
         & ~filters.UpdateType.EDITED_MESSAGE
     )
 
@@ -934,26 +1240,170 @@ async def _send_chat(
         log.warning("chat reply failed: %s", exc)
 
 
+async def _download_file(ctx: ContextTypes.DEFAULT_TYPE, file_id: str) -> bytes:
+    """Fetch one Telegram file into memory.
+
+    In memory rather than to disk because everything that uses it is about to
+    be sent straight to the API as inline bytes, and a file that is never
+    written is a file that cannot be left behind. The bound is Telegram's own
+    download ceiling and the media builder's size check, both applied before
+    this is called.
+    """
+    f = await ctx.bot.get_file(file_id)
+    return bytes(await f.download_as_bytearray())
+
+
+# The reasons `_prepare_conversation_media` can come back with nothing to send.
+# They are separate strings rather than a boolean because they are separate
+# sentences to the person waiting: "I heard nothing in that" and "I could not
+# open that" are not the same thing to say, and collapsing them is how a bot
+# ends up telling somebody their voice note was unreadable when it was silent.
+PREPARE_OK = ""
+PREPARE_NO_SPEECH = "no_speech"
+PREPARE_UNREADABLE = "unreadable"
+
+
+async def _prepare_conversation_media(
+    ctx: ContextTypes.DEFAULT_TYPE, msg, work_dir: str
+) -> tuple[list | None, str, str, bool, str]:
+    """Turn this message's attachment into (parts, kind, text, want_voice, why).
+
+    The outcomes, and they are genuinely different to the person waiting:
+
+    * **Voice** is transcribed. The transcript becomes the turn's text, so the
+      conversation carries on as if they had typed it — which is the whole point
+      of the brief's "preserve the same conversational context as text
+      messages". ``want_voice`` is set so the reply can come back in kind.
+    * **Anything visual** is prepared by the shared media builder and sent as
+      parts, so a sticker is read as a sticker rather than acknowledged as a
+      MIME type.
+    * **Anything else** — a format the API cannot take, a file too large, a
+      download that failed — returns no parts and a reason, and the caller says
+      which. Nothing here ever guesses what an unreadable attachment was.
+
+    Never raises.
+    """
+    ref = media.describe(msg)
+    if ref is None:
+        return None, "", _message_text(msg), False, PREPARE_OK
+
+    if ref.is_transcribable:
+        transcript = await transcribe.transcribe_ref(
+            ref, download=lambda fid: _download_file(ctx, fid)
+        )
+        if transcript.ok:
+            return None, ref.kind, transcript.text, True, PREPARE_OK
+        if transcript.no_speech:
+            return None, ref.kind, "", False, PREPARE_NO_SPEECH
+        log.info(
+            "conversation: could not transcribe (%s)",
+            transcript.error or transcript.skipped,
+        )
+        return None, ref.kind, "", False, PREPARE_UNREADABLE
+
+    if not ref.is_visual:
+        # A document we can neither read nor transcribe. Not a failure of ours,
+        # but there is nothing to send either.
+        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE
+
+    try:
+        bundle = await media.build(
+            ref,
+            download=lambda fid: _download_file(ctx, fid),
+            work_dir=work_dir,
+            max_parts=int(config.GEMINI_CHAT_MEDIA_MAX_PARTS),
+        )
+    except Exception as e:  # noqa: BLE001 - never break the handler
+        log.warning("conversation media preparation failed: %s", e)
+        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE
+
+    if not bundle.ok:
+        log.info("conversation media unreadable kind=%s: %s", ref.kind, bundle.note)
+        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE
+
+    parts = [{"mime_type": p.mime_type, "data": p.data} for p in bundle.parts]
+    return parts, ref.kind, _message_text(msg), False, PREPARE_OK
+
+
 async def _answer_conversationally(
     update: Update, ctx: ContextTypes.DEFAULT_TYPE, reply_to: int | None = None
 ) -> None:
-    """The whole conversational policy, in one place."""
+    """The whole conversational policy, in one place.
+
+    Text and media take the same road once the message has been prepared: the
+    only difference is that an attachment contributes parts and, for voice, a
+    transcript instead of a body.
+    """
     msg = update.effective_message
     room = update.effective_chat
     user = update.effective_user
-    if not msg or not room or not user or not msg.text or user.is_bot:
+    if not msg or not room or not user or user.is_bot:
         return
 
-    result = await chat.reply(room.id, user.id, msg.text)
+    # A message the moderator just deleted must not be answered. Without this
+    # an explicit photo addressed to the bot would be removed and then replied
+    # to, which is both confusing and a reference to content that is gone.
+    if was_deleted(room.id, getattr(msg, "message_id", 0)):
+        log.info("chat skipped: the message was just deleted by moderation")
+        return
+
+    parts: list | None = None
+    kind = ""
+    text = _message_text(msg)
+    want_voice = False
+    problem = PREPARE_OK
+
+    if media.describe(msg) is not None:
+        work_dir = tempfile.mkdtemp(
+            prefix=f"chat_{room.id}_{getattr(msg, 'message_id', 0)}_",
+            dir=config.TMP_DIR,
+        )
+        try:
+            parts, kind, text, want_voice, problem = await _prepare_conversation_media(
+                ctx, msg, work_dir
+            )
+        finally:
+            # The bytes that matter are already in memory. Nothing on disk
+            # outlives this turn, which is the same rule the moderation path
+            # follows.
+            shutil.rmtree(work_dir, ignore_errors=True)
+        if parts is None and not text and problem:
+            # Nothing readable, and nothing to say about it either. The two
+            # reasons get different sentences: a silent clip is not an
+            # unreadable file, and telling somebody their voice note could not
+            # be opened when it was simply silent is a small lie that costs
+            # them a second attempt.
+            await _send_chat(
+                ctx,
+                room.id,
+                config.TRANSCRIBE_EMPTY_TEXT
+                if problem == PREPARE_NO_SPEECH
+                else config.GEMINI_CHAT_UNREADABLE_TEXT,
+                reply_to,
+            )
+            return
+
+    result = await chat.reply(
+        room.id, user.id, text, parts=parts, kind=kind, want_voice=want_voice
+    )
     if result:
         log.info(
-            "chat reply to %s in %s turns=%d chars=%d truncated=%s",
+            "chat reply to %s in %s turns=%d chars=%d truncated=%s repeated=%s "
+            "voice=%s kind=%s",
             user.id,
             room.id,
             result.turns,
             len(result.text),
             result.truncated,
+            result.repeated,
+            bool(result.voice),
+            kind or "text",
         )
+        if result.voice:
+            if await _send_voice(ctx, room.id, result.voice, reply_to):
+                return
+            # The upload failed; the text is still the answer and is sent below.
+            log.warning("voice reply failed; falling back to text")
         await _send_chat(ctx, room.id, result.text, reply_to)
         return
 
@@ -969,6 +1419,30 @@ async def _answer_conversationally(
         await _send_chat(ctx, room.id, result.message, reply_to)
 
 
+async def _send_voice(
+    ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, ogg: bytes, reply_to: int | None
+) -> bool:
+    """Send a synthesised voice note. False if Telegram refused it.
+
+    The caller falls back to text on False, so this never raises and never
+    reports success it did not get.
+    """
+    try:
+        await ctx.bot.send_chat_action(chat_id, ChatAction.RECORD_VOICE)
+    except TelegramError:
+        pass
+    try:
+        await ctx.bot.send_voice(
+            chat_id,
+            voice=ogg,
+            reply_to_message_id=reply_to,
+        )
+        return True
+    except TelegramError as exc:
+        log.warning("send_voice failed: %s", exc)
+        return False
+
+
 async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """The assistant, in a group. Reached only by an explicit address."""
     msg = update.effective_message
@@ -980,6 +1454,43 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """A private message to the bot is a conversation, by definition."""
     await _answer_conversationally(update, ctx)
+
+
+async def on_transcribe_command(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """The transcription-only interface: the words, and nothing else.
+
+    This exists so the speech pipeline can be used and verified on its own,
+    without the assistant being involved — the brief asks for a dedicated
+    voice-to-text interface separate from the conversational one, and this is
+    it. It never replies conversationally and never reaches acquisition.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    ref = media.describe(msg)
+    if ref is None or not ref.is_transcribable:
+        await _send_chat(ctx, room.id, config.TRANSCRIBE_NEED_AUDIO_TEXT, msg.message_id)
+        return
+    if not transcribe.is_enabled():
+        await _send_chat(
+            ctx, room.id, config.TRANSCRIBE_UNAVAILABLE_TEXT, msg.message_id
+        )
+        return
+    result = await transcribe.transcribe_ref(
+        ref, download=lambda fid: _download_file(ctx, fid)
+    )
+    if result.ok:
+        # Escaped by _send_chat, like every other model output.
+        await _send_chat(ctx, room.id, result.text, msg.message_id)
+    elif result.no_speech:
+        await _send_chat(ctx, room.id, config.TRANSCRIBE_EMPTY_TEXT, msg.message_id)
+    else:
+        await _send_chat(
+            ctx, room.id, config.TRANSCRIBE_UNAVAILABLE_TEXT, msg.message_id
+        )
 
 
 async def on_chat_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1027,6 +1538,742 @@ async def on_chat_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_chat(ctx, room.id, config.GEMINI_CHAT_START_TEXT.format(name=name))
 
 
+# ------------------------------------------------- administration
+# The application-level administration surface: who may do what, and on whom.
+#
+# Every handler here follows the same three steps, in this order, and the order
+# is the security property:
+#
+#   1. resolve the actor with rbac.resolve() — from the owner id in the
+#      environment, then the configured admins, then the database;
+#   2. ask rbac whether the action is allowed, passing the target's principal
+#      when there is one;
+#   3. only then do anything, and audit whatever happened either way.
+#
+# Nothing here trusts a display name, a username, a message body or a callback
+# payload. Callback data in particular is fully attacker-controlled — a client
+# can send any bytes it likes — so the promote dialog re-authorises from scratch
+# on every press and treats its own payload as a *suggestion* of what to show,
+# never as a grant.
+ADMIN_CALLBACK_PREFIX = "adm:"
+_ROLE_CODES = {
+    "h": rbac.ROLE_HELPER,
+    "m": rbac.ROLE_MODERATOR,
+    "s": rbac.ROLE_SENIOR_ADMIN,
+}
+_CODE_ROLES = {role: code for code, role in _ROLE_CODES.items()}
+# A stable, ordered list for the bitmask in the callback payload. The order is
+# the vocabulary order in rbac and must not be reordered casually: it is the
+# wire format of a dialog that may be open across a deploy.
+_MASK_PERMISSIONS = tuple(rbac.PERMISSIONS)
+
+_ROLE_ALIASES = {
+    "helper": rbac.ROLE_HELPER,
+    "moderator": rbac.ROLE_MODERATOR,
+    "senior": rbac.ROLE_SENIOR_ADMIN,
+    "senior_admin": rbac.ROLE_SENIOR_ADMIN,
+}
+
+
+def _mask(permissions) -> int:
+    chosen = set(permissions or ())
+    value = 0
+    for index, permission in enumerate(_MASK_PERMISSIONS):
+        if permission in chosen:
+            value |= 1 << index
+    return value
+
+
+def _unmask(value: int) -> frozenset[str]:
+    """Decode a bitmask into permissions, dropping anything out of range.
+
+    A mask is attacker-supplied, so an out-of-range bit is discarded rather than
+    indexed — and the result is still only ever fed to ``authorize_grant``,
+    which checks it against the role bundle and the actor's own authority. This
+    function decodes; it does not authorise.
+    """
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return frozenset()
+    return frozenset(
+        permission
+        for index, permission in enumerate(_MASK_PERMISSIONS)
+        if value & (1 << index)
+    )
+
+
+def _actor(update: Update) -> rbac.Principal:
+    user = update.effective_user
+    return rbac.resolve(getattr(user, "id", 0) or 0)
+
+
+def _target_from(update: Update, ctx, args) -> tuple[int, str] | None:
+    """Who the command is about: a replied-to user, or a numeric id.
+
+    A reply is the primary mechanism because it is unambiguous — the person the
+    operator pointed at. A bare id is accepted as a fallback for a user who is
+    not in the room, and only if it is actually a number: a name is never
+    resolved, because resolving names is how an impersonator gets promoted.
+    """
+    msg = update.effective_message
+    replied = getattr(msg, "reply_to_message", None)
+    if replied is not None:
+        author = getattr(replied, "from_user", None)
+        if author is not None:
+            return int(author.id), (getattr(author, "full_name", "") or str(author.id))
+    for arg in args or ():
+        candidate = str(arg).lstrip("+")
+        if candidate.lstrip("-").isdigit():
+            return int(candidate), candidate
+    return None
+
+
+def _audit(
+    actor_id: int,
+    action: str,
+    outcome: str,
+    *,
+    target_id: int | None = None,
+    chat_id: int | None = None,
+    detail: str = "",
+) -> None:
+    """Write one audit row. Never raises into the handler.
+
+    An audit row that cannot be written must not be the reason a moderation
+    action fails, and it must not be the reason one *succeeds* either — so this
+    logs the failure and returns.
+    """
+    try:
+        db.audit_write(
+            actor_id,
+            action,
+            outcome=outcome,
+            target_id=target_id,
+            chat_id=chat_id,
+            detail=detail,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("audit write failed action=%s outcome=%s", action, outcome)
+
+
+def _deny_text(decision: rbac.Decision) -> str:
+    """The Persian sentence for a refusal. One key, one sentence."""
+    return {
+        rbac.REASON_NO_OWNER: config.ADMIN_NOT_CONFIGURED_TEXT,
+        rbac.REASON_OWNER_PROTECTED: config.ADMIN_OWNER_PROTECTED_TEXT,
+        rbac.REASON_HIGHER_RANK: config.ADMIN_HIGHER_RANK_TEXT,
+    }.get(decision.reason, config.ADMIN_DENIED_TEXT)
+
+
+async def _bot_right(ctx, chat_id: int, right: str) -> bool:
+    """Whether the bot itself holds a Telegram administrator right in a chat.
+
+    Checked before attempting an operation the API will refuse, so a refusal can
+    be reported as "I do not have the permission here" rather than as a generic
+    failure. Telegram still enforces it; this only makes the message useful.
+    """
+    try:
+        me = await ctx.bot.get_chat_member(chat_id, ctx.bot.id)
+    except TelegramError as e:
+        log.warning("could not read my own chat member status: %s", e)
+        return False
+    return bool(getattr(me, right, False))
+
+
+async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """What this bot thinks you are. The answer to "why was I refused?"."""
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    if not rbac.has_owner():
+        await _reply_in_group(ctx, room.id, config.ADMIN_NOT_CONFIGURED_TEXT,
+                              reply_to=msg.message_id)
+        return
+    actor = _actor(update)
+    perms = "، ".join(rbac.permission_labels(actor.permissions)) or "—"
+    await _reply_in_group(
+        ctx,
+        room.id,
+        config.ADMIN_WHOAMI_TEXT.format(
+            user_id=actor.user_id, role=actor.label, perms=perms
+        ),
+        reply_to=msg.message_id,
+    )
+
+
+async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """List the application administrators."""
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    decision = rbac.authorize(actor, "moderation.review")
+    if not decision:
+        _audit(actor.user_id, "admin.list", decision.reason, chat_id=room.id)
+        await _reply_in_group(ctx, room.id, _deny_text(decision),
+                              reply_to=msg.message_id)
+        return
+    lines = [config.ADMIN_LIST_TITLE]
+    if rbac.has_owner():
+        lines.append(
+            config.ADMIN_LIST_LINE.format(
+                name=f"<code>{rbac.owner_id()}</code>",
+                role=rbac.ROLE_LABELS[rbac.ROLE_OWNER],
+            )
+        )
+    for row in db.admin_list():
+        lines.append(
+            config.ADMIN_LIST_LINE.format(
+                name=f"<code>{row['user_id']}</code>",
+                role=rbac.ROLE_LABELS.get(row["role"], row["role"]),
+            )
+        )
+    if len(lines) == 1:
+        lines.append(config.ADMIN_LIST_EMPTY)
+    _audit(actor.user_id, "admin.list", "ok", chat_id=room.id)
+    await _reply_in_group(ctx, room.id, "\n".join(lines), reply_to=msg.message_id)
+
+
+def _promote_keyboard(actor_id: int, target_id: int, role: str, mask: int):
+    """The permission-selection keyboard.
+
+    One button per permission the role carries, each showing its own state, then
+    confirm and cancel. The buttons carry a *mask*, and the handler re-authorises
+    from scratch on every press — so the worst a crafted payload can do is show
+    a different set of ticks to the person who crafted it.
+    """
+    code = _CODE_ROLES.get(role, "m")
+    bundle = rbac.ROLE_PERMISSIONS.get(role, frozenset())
+    rows = []
+    for index, permission in enumerate(_MASK_PERMISSIONS):
+        if permission not in bundle:
+            continue
+        on = bool(mask & (1 << index))
+        label = rbac.PERMISSION_LABELS.get(permission, permission)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{'✅' if on else '⬜️'} {label}",
+                    callback_data=(
+                        f"{ADMIN_CALLBACK_PREFIX}t:{actor_id}:{target_id}:"
+                        f"{code}:{mask}:{index}"
+                    ),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                config.ADMIN_PROMOTE_CONFIRM_BUTTON,
+                callback_data=(
+                    f"{ADMIN_CALLBACK_PREFIX}c:{actor_id}:{target_id}:{code}:{mask}"
+                ),
+            ),
+            InlineKeyboardButton(
+                config.ADMIN_PROMOTE_CANCEL_BUTTON,
+                callback_data=f"{ADMIN_CALLBACK_PREFIX}x:{actor_id}",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_promote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/promote [role]` — reply to somebody to make them an administrator.
+
+    The whole flow, and every step is a check rather than an assumption:
+
+    1. the actor must hold ``admins.manage`` *and* be allowed to act on the
+       target, which ``authorize`` decides (owner protection and rank included);
+    2. the requested role must be one the actor may assign at all;
+    3. the bot must itself hold ``can_promote_members`` in this chat before it
+       offers to change anything in Telegram;
+    4. the keyboard is shown, and nothing is written until it is confirmed.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    found = _target_from(update, ctx, ctx.args)
+    if found is None:
+        await _reply_in_group(ctx, room.id, config.ADMIN_TARGET_NOT_FOUND_TEXT,
+                              reply_to=msg.message_id)
+        return
+    target_id, target_name = found
+    if target_id == getattr(ctx.bot, "id", 0):
+        _audit(actor.user_id, "admin.promote", "bot_target", target_id=target_id,
+               chat_id=room.id)
+        await _reply_in_group(ctx, room.id, config.ADMIN_TARGET_IS_BOT_TEXT,
+                              reply_to=msg.message_id)
+        return
+
+    target = rbac.resolve(target_id)
+    args = list(ctx.args or ())
+    named = args[0].lower() if args and args[0].lower() in _ROLE_ALIASES else ""
+    requested = _ROLE_ALIASES.get(named, rbac.ROLE_MODERATOR)
+
+    grantable = rbac.grantable_roles(actor)
+    if requested not in grantable:
+        if not grantable:
+            # Nothing this actor may assign at all. Refused with the permission
+            # reason rather than a role reason: the missing thing is the
+            # authority, not the choice of role.
+            decision = rbac.Decision(
+                False, rbac.REASON_MISSING_PERMISSION, "admins.manage"
+            )
+            _audit(actor.user_id, "admin.promote", decision.reason,
+                   target_id=target_id, chat_id=room.id)
+            await _reply_in_group(ctx, room.id, _deny_text(decision),
+                                  reply_to=msg.message_id)
+            return
+        # Asked for more than they may give. The question was "promote this
+        # person", and the only open question is how far, so the highest role
+        # they may assign is used rather than the command being refused.
+        requested = grantable[-1]
+
+    decision = rbac.authorize_grant(
+        actor, requested, rbac.ROLE_PERMISSIONS[requested], target=target
+    )
+    if not decision:
+        _audit(actor.user_id, "admin.promote", decision.reason, target_id=target_id,
+               chat_id=room.id, detail=decision.detail)
+        await _reply_in_group(ctx, room.id, _deny_text(decision),
+                              reply_to=msg.message_id)
+        return
+
+    mask = _mask(rbac.ROLE_PERMISSIONS[requested])
+    # Told, not assumed: if the bot cannot promote in Telegram the operator is
+    # about to grant an application role with no Telegram effect, and that has
+    # to be visible before they confirm rather than discovered afterwards.
+    can_telegram = await _bot_right(ctx, room.id, "can_promote_members")
+    note = "" if can_telegram else f"\n{config.ADMIN_PROMOTE_NO_TELEGRAM_TEXT}"
+    await _reply_in_group(
+        ctx,
+        room.id,
+        config.ADMIN_PROMOTE_TITLE.format(name=html.escape(target_name)) + note,
+        keyboard=_promote_keyboard(actor.user_id, target_id, requested, mask),
+        reply_to=msg.message_id,
+    )
+
+
+async def on_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle a press on the promote dialog.
+
+    Re-authorises everything from scratch. The callback payload is fully
+    attacker-controlled, so it is parsed for *intent* and then run through the
+    same checks the original command ran — a lower administrator cannot confirm
+    a promotion they could not have requested, and a crafted mask cannot grant
+    a permission the actor does not hold.
+    """
+    q = update.callback_query
+    if q is None or not q.data or not q.data.startswith(ADMIN_CALLBACK_PREFIX):
+        return
+    parts = q.data.split(":")
+    kind = parts[1] if len(parts) > 1 else ""
+    presser = _actor(update)
+    room = update.effective_chat
+    chat_id = getattr(room, "id", None)
+
+    if kind == "x":
+        await q.answer(config.ADMIN_CANCELLED_TEXT)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+        return
+
+    try:
+        actor_id = int(parts[2])
+    except (IndexError, ValueError):
+        await q.answer(config.ADMIN_STALE_BUTTON_TEXT)
+        return
+
+    if presser.user_id != actor_id:
+        # The dialog belongs to whoever opened it. Another administrator can run
+        # the command themselves; they cannot confirm somebody else's.
+        _audit(presser.user_id, "admin.promote", "not_the_requester", chat_id=chat_id)
+        await q.answer(config.ADMIN_DENIED_TEXT)
+        return
+
+    try:
+        target_id = int(parts[3])
+        role = _ROLE_CODES.get(parts[4], "")
+        mask = int(parts[5])
+    except (IndexError, ValueError):
+        await q.answer(config.ADMIN_STALE_BUTTON_TEXT)
+        return
+
+    target = rbac.resolve(target_id)
+
+    if kind == "t":
+        # A toggle changes only what is displayed. It still has to be a change
+        # this actor is allowed to make, so a crafted payload cannot even show
+        # them a set they could not confirm.
+        try:
+            bit = int(parts[6])
+        except (IndexError, ValueError):
+            await q.answer(config.ADMIN_STALE_BUTTON_TEXT)
+            return
+        if bit < 0 or bit >= len(_MASK_PERMISSIONS):
+            await q.answer(config.ADMIN_STALE_BUTTON_TEXT)
+            return
+        new_mask = mask ^ (1 << bit)
+        decision = rbac.authorize_grant(
+            presser, role, _unmask(new_mask), target=target
+        )
+        if not decision:
+            _audit(presser.user_id, "admin.promote", decision.reason,
+                   target_id=target_id, chat_id=chat_id)
+            await q.answer(_deny_text(decision))
+            return
+        await q.answer()
+        try:
+            await q.edit_message_reply_markup(
+                reply_markup=_promote_keyboard(actor_id, target_id, role, new_mask)
+            )
+        except TelegramError:
+            pass
+        return
+
+    if kind != "c":
+        await q.answer(config.ADMIN_STALE_BUTTON_TEXT)
+        return
+
+    permissions = _unmask(mask)
+    decision = rbac.authorize_grant(presser, role, permissions, target=target)
+    if not decision:
+        _audit(presser.user_id, "admin.promote", decision.reason, target_id=target_id,
+               chat_id=chat_id, detail=decision.detail)
+        await q.answer(_deny_text(decision))
+        return
+
+    # ── Everything is authorised. Now write, then tell the truth about it.
+    db.admin_set(target_id, role, permissions, granted_by=presser.user_id)
+
+    telegram_note = ""
+    if chat_id is not None:
+        telegram_note = await _apply_telegram_promotion(
+            ctx, chat_id, target_id, permissions
+        )
+
+    _audit(presser.user_id, "admin.promote", "ok", target_id=target_id,
+           chat_id=chat_id,
+           detail=f"role={role} perms={','.join(sorted(permissions))}")
+    label = rbac.ROLE_LABELS.get(role, role)
+    perms_text = "، ".join(rbac.permission_labels(permissions)) or "—"
+    body = (
+        config.ADMIN_PROMOTE_DONE_TEXT.format(
+            name=f"<code>{target_id}</code>", perms=perms_text
+        )
+        + f"\n({label})"
+    )
+    if telegram_note:
+        body += f"\n{telegram_note}"
+    try:
+        await q.edit_message_text(body, parse_mode="HTML")
+    except TelegramError:
+        try:
+            await q.answer(body[:180])
+        except TelegramError:
+            pass
+
+
+async def _apply_telegram_promotion(ctx, chat_id: int, user_id: int, permissions) -> str:
+    """Promote in Telegram as well, and say exactly what happened.
+
+    Returns the sentence to append to the confirmation. It reports three
+    distinct outcomes rather than two, because "the API refused" and "we chose
+    not to ask" are different facts and an operator acting on the first would be
+    chasing a problem that does not exist.
+    """
+    rights = rbac.telegram_rights_for(permissions)
+    if not rights:
+        return config.ADMIN_PROMOTE_NO_TELEGRAM_TEXT
+    if not await _bot_right(ctx, chat_id, "can_promote_members"):
+        log.warning("cannot promote in %s: the bot lacks can_promote_members", chat_id)
+        return config.ADMIN_BOT_LACKS_RIGHT_TEXT
+    try:
+        await ctx.bot.promote_chat_member(chat_id, user_id, **rights)
+    except Exception as e:  # noqa: BLE001
+        # Reported, never swallowed: the application role was stored, and the
+        # operator has to know that Telegram did not follow.
+        log.warning("promote_chat_member failed: %s", e)
+        return config.ADMIN_TELEGRAM_FAILED_TEXT
+    return config.ADMIN_PROMOTE_TELEGRAM_TEXT
+
+
+async def cmd_demote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/demote` — reply to an administrator to revoke the application role."""
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    found = _target_from(update, ctx, ctx.args)
+    if found is None:
+        await _reply_in_group(ctx, room.id, config.ADMIN_TARGET_NOT_FOUND_TEXT,
+                              reply_to=msg.message_id)
+        return
+    target_id, _name = found
+    target = rbac.resolve(target_id)
+    decision = rbac.authorize(actor, "admins.manage", target=target)
+    if not decision:
+        _audit(actor.user_id, "admin.demote", decision.reason, target_id=target_id,
+               chat_id=room.id)
+        await _reply_in_group(ctx, room.id, _deny_text(decision),
+                              reply_to=msg.message_id)
+        return
+
+    removed = db.admin_remove(target_id)
+    if not removed:
+        _audit(actor.user_id, "admin.demote", "not_an_admin", target_id=target_id,
+               chat_id=room.id)
+        await _reply_in_group(ctx, room.id, config.ADMIN_DEMOTE_NOTHING_TEXT,
+                              reply_to=msg.message_id)
+        return
+
+    telegram_note = await _apply_telegram_demotion(ctx, room.id, target_id)
+    _audit(actor.user_id, "admin.demote", "ok", target_id=target_id, chat_id=room.id)
+    body = config.ADMIN_DEMOTE_DONE_TEXT.format(name=f"<code>{target_id}</code>")
+    if telegram_note:
+        body += f"\n{telegram_note}"
+    await _reply_in_group(ctx, room.id, body, reply_to=msg.message_id)
+
+
+async def _apply_telegram_demotion(ctx, chat_id: int, user_id: int) -> str:
+    """Remove the Telegram administrator rights this bot could have granted.
+
+    All rights are set to False rather than a selective demotion: the bot does
+    not know which rights were there before it touched the account, and guessing
+    would be a way to leave somebody holding a capability nobody meant to leave
+    them. The operator is told when Telegram refused.
+    """
+    if not await _bot_right(ctx, chat_id, "can_promote_members"):
+        return config.ADMIN_PROMOTE_NO_TELEGRAM_TEXT
+    try:
+        await ctx.bot.promote_chat_member(
+            chat_id, user_id, **{right: False for right in rbac.TELEGRAM_RIGHTS}
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("demotion in Telegram failed: %s", e)
+        return config.ADMIN_TELEGRAM_FAILED_TEXT
+    return ""
+
+
+def _command_done_text(action: str, name: str) -> str:
+    safe = html.escape(name)
+    if action == "moderation.ban":
+        return config.MOD_BAN_DONE_TEXT.format(name=safe)
+    if action == "moderation.unban":
+        return config.MOD_UNBAN_DONE_TEXT.format(name=safe)
+    if action == "moderation.mute":
+        return config.MOD_MUTE_DONE_TEXT.format(name=safe, minutes=config.MUTE_MINUTES)
+    if action == "moderation.unmute":
+        return config.MOD_UNMUTE_DONE_TEXT.format(name=safe)
+    if action == "moderation.warn":
+        return config.MOD_WARN_DONE_TEXT.format(name=safe)
+    if action == "moderation.delete":
+        return config.MOD_DELETE_DONE_TEXT
+    return config.ADMIN_DENIED_TEXT
+
+
+async def _moderation_command(
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+    *,
+    permission: str,
+    action: str,
+    verb,
+) -> None:
+    """The shared body of every moderation command.
+
+    One function rather than five, because the five differ only in the
+    permission they require and the Telegram call they make — and the checks
+    that must happen first are exactly the part that must not be duplicated. The
+    sequence is the brief's list: who asked, are they registered, what may they
+    do, is the target protected, does Telegram permit it, then act.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    found = _target_from(update, ctx, ctx.args)
+    if found is None:
+        await _reply_in_group(ctx, room.id, config.MOD_TARGET_REQUIRED_TEXT,
+                              reply_to=msg.message_id)
+        return
+    target_id, target_name = found
+    target = rbac.resolve(target_id)
+
+    decision = rbac.authorize(actor, permission, target=target)
+    if not decision:
+        _audit(actor.user_id, action, decision.reason, target_id=target_id,
+               chat_id=room.id)
+        await _reply_in_group(ctx, room.id, _deny_text(decision),
+                              reply_to=msg.message_id)
+        return
+
+    # Telegram's own permission for this action, checked before attempting it so
+    # a refusal is reported as a permission problem rather than a mystery.
+    needed = rbac.TELEGRAM_RIGHTS_FOR_ACTION.get(permission)
+    if needed and not await _bot_right(ctx, room.id, needed):
+        _audit(actor.user_id, action, "bot_lacks_right", target_id=target_id,
+               chat_id=room.id, detail=needed)
+        await _reply_in_group(ctx, room.id, config.ADMIN_BOT_LACKS_RIGHT_TEXT,
+                              reply_to=msg.message_id)
+        return
+
+    try:
+        await verb(target_id)
+    except Exception as e:  # noqa: BLE001 - any failure is reported, not raised
+        # TelegramError is the expected one; anything else is a surprise, and a
+        # surprise that crashes a handler is worse than a surprise that is
+        # logged and reported as a failure.
+        log.warning("%s failed: %s", action, e)
+        _audit(actor.user_id, action, "telegram_error", target_id=target_id,
+               chat_id=room.id, detail=str(e)[:120])
+        await _reply_in_group(ctx, room.id, config.MOD_COMMAND_FAILED_TEXT,
+                              reply_to=msg.message_id)
+        return
+
+    _audit(actor.user_id, action, "ok", target_id=target_id, chat_id=room.id)
+    log.info(
+        "admin action=%s actor=%s target=%s chat=%s",
+        action, actor.user_id, target_id, room.id,
+    )
+    await _reply_in_group(
+        ctx, room.id, _command_done_text(action, target_name),
+        reply_to=msg.message_id,
+    )
+
+
+async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    room = update.effective_chat
+    if room is None:
+        return
+    await _moderation_command(
+        update, ctx, permission="moderation.ban", action="moderation.ban",
+        verb=lambda uid: ctx.bot.ban_chat_member(room.id, uid),
+    )
+
+
+async def cmd_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    room = update.effective_chat
+    if room is None:
+        return
+    await _moderation_command(
+        update, ctx, permission="moderation.ban", action="moderation.unban",
+        verb=lambda uid: ctx.bot.unban_chat_member(room.id, uid),
+    )
+
+
+async def cmd_mute(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    room = update.effective_chat
+    if room is None:
+        return
+    until = datetime.now(timezone.utc) + timedelta(minutes=max(1, int(config.MUTE_MINUTES)))
+
+    async def _mute(uid: int) -> None:
+        await ctx.bot.restrict_chat_member(
+            room.id, uid, permissions=MUTED, until_date=until
+        )
+
+    await _moderation_command(
+        update, ctx, permission="moderation.mute", action="moderation.mute",
+        verb=_mute,
+    )
+
+
+async def cmd_unmute(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    room = update.effective_chat
+    if room is None:
+        return
+
+    async def _unmute(uid: int) -> None:
+        await ctx.bot.restrict_chat_member(room.id, uid, permissions=FULL)
+
+    await _moderation_command(
+        update, ctx, permission="moderation.mute", action="moderation.unmute",
+        verb=_unmute,
+    )
+
+
+async def cmd_warn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Warn a user. The only command that addresses the person being actioned."""
+    room = update.effective_chat
+    msg = update.effective_message
+    if room is None or msg is None:
+        return
+    reason = " ".join(ctx.args or ()) or "لطفاً قوانین گروه رو رعایت کن."
+
+    async def _warn(uid: int) -> None:
+        replied = getattr(msg, "reply_to_message", None)
+        who = getattr(replied, "from_user", None) if replied else None
+        await _send_user_notice(
+            ctx,
+            room.id,
+            config.MOD_WARN_USER_TEXT.format(
+                name=mention(who) if who is not None else "",
+                reason=html.escape(reason),
+            ),
+        )
+
+    await _moderation_command(
+        update, ctx, permission="moderation.warn", action="moderation.warn",
+        verb=_warn,
+    )
+
+
+async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete the replied-to message."""
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    replied = getattr(msg, "reply_to_message", None)
+    if replied is None:
+        await _reply_in_group(ctx, room.id, config.MOD_TARGET_REQUIRED_TEXT,
+                              reply_to=msg.message_id)
+        return
+    actor = _actor(update)
+    author = getattr(replied, "from_user", None)
+    target_id = int(getattr(author, "id", 0) or 0)
+    target = rbac.resolve(target_id) if target_id else None
+
+    decision = rbac.authorize(actor, "moderation.delete", target=target)
+    if not decision:
+        _audit(actor.user_id, "moderation.delete", decision.reason,
+               target_id=target_id, chat_id=room.id)
+        await _reply_in_group(ctx, room.id, _deny_text(decision),
+                              reply_to=msg.message_id)
+        return
+    if not await _bot_right(ctx, room.id, "can_delete_messages"):
+        _audit(actor.user_id, "moderation.delete", "bot_lacks_right",
+               target_id=target_id, chat_id=room.id)
+        await _reply_in_group(ctx, room.id, config.ADMIN_BOT_LACKS_RIGHT_TEXT,
+                              reply_to=msg.message_id)
+        return
+    try:
+        await replied.delete()
+    except Exception as e:  # noqa: BLE001 - reported, never raised
+        log.warning("command delete failed: %s", e)
+        _audit(actor.user_id, "moderation.delete", "telegram_error",
+               target_id=target_id, chat_id=room.id)
+        await _reply_in_group(ctx, room.id, config.MOD_DELETE_FAILED_TEXT,
+                              reply_to=msg.message_id)
+        return
+    mark_deleted(room.id, getattr(replied, "message_id", 0))
+    _audit(actor.user_id, "moderation.delete", "ok", target_id=target_id,
+           chat_id=room.id)
+    await _reply_in_group(ctx, room.id, config.MOD_DELETE_DONE_TEXT,
+                          reply_to=msg.message_id)
+
+
 def _chat_active() -> bool:
     """Whether the conversational assistant can answer at all.
 
@@ -1036,6 +2283,130 @@ def _chat_active() -> bool:
     truth for the policy without a rename that would touch unrelated handlers.
     """
     return chat.is_enabled()
+
+
+# ------------------------------------------------- text moderation
+# The local detectors see images only, so without this there is no content
+# moderation for text at all. It is off by default (see
+# MODERATION_TEXT_ENABLED) and it is deliberately the last handler group: it
+# must never run before acquisition or conversation have had their say, because
+# it is the only path that can delete a person's words.
+#
+# There is no local signal for text, so the policy's `local` input is None. The
+# rule that follows from that is worth stating: with no local evidence, the only
+# thing that can produce a deletion is a confident AI verdict, which is exactly
+# the same bar media has to clear when the AI confirms it.
+_NO_LOCAL = DecisionResult(Decision.SAFE, "no local stage for text")
+
+
+async def on_group_text_moderation(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """The moderation AI's opinion on one group message, and the policy on it."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user or user.is_bot:
+        return
+    if chat.id not in config.GROUP_IDS:
+        return
+    if user.id in config.WHITELIST_USER_IDS:
+        return
+    # Staff are not moderated by their own bot. Checked here rather than left to
+    # the AI, because a moderation system that argues with its operators is one
+    # they will turn off.
+    if await is_admin(ctx, chat.id, user.id):
+        return
+    if was_deleted(chat.id, msg.message_id):
+        return
+
+    text = _message_text(msg)
+    if len(text) < max(1, int(config.MODERATION_TEXT_MIN_CHARS)):
+        return
+
+    verdict = await ai_moderation.assess_text(text)
+    outcome = mod_policy.decide(
+        mod_policy.PolicyInput(local=None, ai=verdict, is_media=False)
+    )
+    log.info(
+        "text moderation chat=%s user=%s policy=%s",
+        chat.id, user.id, mod_policy.describe(outcome),
+    )
+
+    if outcome.allows:
+        return
+    if outcome.reviews:
+        await _notify_review(ctx, chat, user, msg, "text", _NO_LOCAL, verdict, outcome)
+        return
+
+    enforced = mod_policy.enforce_result(outcome, None)
+    result = await moderation.enforce(
+        enforced,
+        delete_media=lambda: msg.delete(),
+        record_confirmed=lambda: db.add_strike(chat.id, user.id),
+    )
+    if not result.deleted:
+        log.error(
+            "TEXT_DELETE_FAILED chat=%s message=%s error=%s",
+            chat.id, getattr(msg, "message_id", "-"), result.reason,
+        )
+        return
+    mark_deleted(chat.id, getattr(msg, "message_id", 0))
+    log.info(
+        "TEXT_DELETE_SUCCESS chat=%s message=%s policy=%s",
+        chat.id, getattr(msg, "message_id", "-"), outcome.reason,
+    )
+    await _send_text_deletion_report(ctx, chat, user, msg, verdict, outcome)
+    notice_id = await _send_user_notice(
+        ctx,
+        chat.id,
+        _format_notice(
+            config.VIOLATION_WARNING_TEXT,
+            name=mention(user),
+            count=db.get_strikes(chat.id, user.id),
+            max=config.VIOLATION_MUTE_AFTER,
+        ),
+    )
+    if result.strike is not None and result.strike >= config.VIOLATION_MUTE_AFTER:
+        # The same escalation the media path uses. It is *not* an automatic ban
+        # and not an automatic long mute: it is the configured, documented,
+        # timed restriction, applied only to a message that was actually
+        # deleted — and only because the AI confirmed it.
+        restricted = await _restrict_user(ctx, chat.id, user.id)
+        if restricted:
+            _schedule_test_unrestrict(ctx, chat.id, user.id, notice_id)
+
+
+async def _send_text_deletion_report(ctx, chat, user, msg, verdict, outcome) -> None:
+    """The admin report for a deleted text message.
+
+    Carries no excerpt of the message. The classification, the confidence and
+    the policy reason are what an operator needs to judge the decision; the
+    message itself is what this project spends the most effort not copying into
+    a log.
+    """
+    if not config.ADMIN_LOG_CHAT:
+        return
+    ai_line = (
+        f"🤖 <b>{verdict.classification}</b> ({verdict.confidence:.2f})"
+        f"{' ⚠️ نامطمئن' if verdict.uncertain else ''}\n"
+        f"   دسته: {verdict.category or '-'}\n"
+        if verdict is not None and verdict.decided
+        else "🤖 پاسخی نداد\n"
+    )
+    text = (
+        f"🚨 <b>حذف پیام متنی</b>\n\n"
+        f"👤 {mention(user)} (<code>{user.id}</code>)\n"
+        f"💬 Chat ID: <code>{chat.id}</code>\n"
+        f"📩 Message ID: <code>{getattr(msg, 'message_id', '-')}</code>\n\n"
+        f"{ai_line}"
+        f"⚖️ سیاست: <code>{outcome.reason}</code>\n"
+        f"✅ اقدام: پیام حذف شد.\n"
+    )
+    try:
+        await report(ctx, text)
+    except TelegramError as e:
+        log.warning("text deletion report failed: %s", e)
 
 
 async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1166,6 +2537,11 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ------------------------------------------------------------ wiring
 async def post_init(app: Application) -> None:
     app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
+    # Who we are, from Telegram rather than from configuration. Done first,
+    # because the alias matching that decides whether the assistant answers
+    # depends on it and a failed getMe must be visible in the log rather than
+    # discovered as "the bot stopped responding to mentions".
+    await load_identity(app)
     log.info(
         "GuardBot started. Groups: %s | explicit classes: %s",
         config.GROUP_IDS,
@@ -1244,6 +2620,93 @@ async def post_init(app: Application) -> None:
     else:
         log.info("Conversational AI disabled (GEMINI_CHAT_ENABLED=0).")
 
+    # The moderation layer, reported on its own for the same reason. What an
+    # operator most needs from this line is the *policy mode*, because that is
+    # what decides whether anything is deleted at all.
+    mod_state = ai_moderation.status()
+    if mod_state["active"]:
+        log.info(
+            "Moderation AI active: model=%s daily_limit=%d used_today=%d "
+            "delete_confidence=%.2f review_confidence=%.2f text=%s media=%s",
+            mod_state["model"],
+            mod_state["daily_limit"],
+            mod_state["used_today"],
+            mod_state["delete_confidence"],
+            mod_state["review_confidence"],
+            "on" if mod_state["text_enabled"] else "off",
+            "on" if mod_state["media_enabled"] else "off",
+        )
+        if mod_state["shares_google_project"]:
+            log.warning(
+                "Moderation AI is using the classifier's key "
+                "(GEMINI_MOD_ALLOW_SHARED_KEY=1). This is the heaviest of the "
+                "four workloads, so a busy group can push acquisition and chat "
+                "into a 429. Set GEMINI_MOD_API_KEY from a different Google "
+                "Cloud project for an independent quota."
+            )
+    else:
+        log.info(
+            "Moderation AI is not active (GEMINI_MOD_ENABLED=%s, key=%s). "
+            "Media deletions require AI confirmation, so nothing is deleted "
+            "automatically until this is configured — content that would have "
+            "been deleted is reported for review instead.",
+            "on" if mod_state["enabled"] else "off",
+            "set" if mod_state["configured"] else "missing",
+        )
+
+    if not config.MODERATION_REQUIRE_AI_CONFIRM:
+        # A loud line, because this is the one configuration in which an
+        # uncalibrated local score can still destroy somebody's message.
+        log.warning(
+            "MODERATION_REQUIRE_AI_CONFIRM is OFF: the local detector may "
+            "delete on its own at MODERATION_LOCAL_HARD_THRESHOLD=%.2f. This is "
+            "the configuration that produced the false positives; the default "
+            "requires the moderation AI to agree.",
+            float(config.MODERATION_LOCAL_HARD_THRESHOLD),
+        )
+
+    # The speech pipeline, its own line again.
+    tr_state = transcribe.status()
+    if tr_state["active"]:
+        log.info(
+            "Transcription active: model=%s daily_limit=%d used_today=%d "
+            "command=/%s max_seconds=%d",
+            tr_state["model"],
+            tr_state["daily_limit"],
+            tr_state["used_today"],
+            config.TRANSCRIBE_COMMAND or "-",
+            int(tr_state["max_seconds"]),
+        )
+    elif tr_state["enabled"]:
+        log.warning(
+            "TRANSCRIBE_ENABLED is on but no transcription key is available; "
+            "voice messages addressed to the assistant will be answered with "
+            "'I could not listen to that'."
+        )
+    else:
+        log.info(
+            "Transcription disabled (TRANSCRIBE_ENABLED=0); voice messages "
+            "addressed to the assistant are reported as unreadable."
+        )
+
+    # The authorization model. The owner line is the one that matters: with no
+    # owner every administrative command is refused, which is the correct
+    # fail-closed behaviour and looks exactly like a broken feature unless it is
+    # said out loud.
+    if rbac.has_owner():
+        log.info(
+            "Authorization: owner=%s configured_admins=%d stored_admins=%d",
+            rbac.owner_id(),
+            rbac.configured_admin_count(),
+            len(db.admin_list()),
+        )
+    else:
+        log.warning(
+            "OWNER_USER_ID is not set. Every administrative command "
+            "(/promote, /demote, /ban, /mute, /warn, /del) will be refused. "
+            "Set it to your own Telegram user id to enable them."
+        )
+
 
 def main() -> None:
     os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
@@ -1268,7 +2731,9 @@ def main() -> None:
     )
 
     if config.MEDIA_ENABLED:
-        media_filter = (
+        # Named `visual_media_filter`, not `media_filter`: a local called
+        # `media` would shadow the app.media module for the whole of main().
+        visual_media_filter = (
             filters.PHOTO
             | filters.VIDEO
             | filters.ANIMATION
@@ -1277,7 +2742,7 @@ def main() -> None:
             | filters.Document.IMAGE
             | filters.Document.VIDEO
         ) & filters.ChatType.GROUPS
-        app.add_handler(MessageHandler(media_filter, on_media), group=0)
+        app.add_handler(MessageHandler(visual_media_filter, on_media), group=0)
 
     if config.GROUP_TRIAL_ENABLED:
         # Its own group so it can never be skipped because a media handler in
@@ -1301,11 +2766,50 @@ def main() -> None:
         app.add_handler(CommandHandler("start", on_chat_start))
         app.add_handler(CommandHandler("reset", on_chat_reset))
         app.add_handler(
-            MessageHandler(group_text_filter(), on_group_chat, block=False), group=2
+            MessageHandler(group_chat_filter(), on_group_chat, block=False), group=2
         )
         app.add_handler(
-            MessageHandler(private_text_filter(), on_private_text, block=False),
+            MessageHandler(private_chat_filter(), on_private_text, block=False),
             group=2,
+        )
+
+    # ── Administration. Its own groups, after everything else.
+    #
+    # Group 3 holds the commands. Group 4 holds text moderation, which is
+    # non-blocking and last on purpose: it is the only path that can delete a
+    # person's words, so it must never be reached before acquisition and
+    # conversation have had their say.
+    app.add_handler(
+        CallbackQueryHandler(on_admin_callback, pattern=r"^adm:")
+    )
+    for command, handler in (
+        ("whoami", cmd_whoami),
+        ("admins", cmd_admins),
+        ("promote", cmd_promote),
+        ("demote", cmd_demote),
+        ("ban", cmd_ban),
+        ("unban", cmd_unban),
+        ("mute", cmd_mute),
+        ("unmute", cmd_unmute),
+        ("warn", cmd_warn),
+        ("del", cmd_delete),
+    ):
+        app.add_handler(CommandHandler(command, handler), group=3)
+
+    if config.TRANSCRIBE_COMMAND:
+        app.add_handler(
+            CommandHandler(config.TRANSCRIBE_COMMAND, on_transcribe_command),
+            group=3,
+        )
+
+    if config.MODERATION_ENABLED and config.MODERATION_TEXT_ENABLED:
+        app.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+                on_group_text_moderation,
+                block=False,
+            ),
+            group=4,
         )
 
     # chat_member updates must be requested explicitly

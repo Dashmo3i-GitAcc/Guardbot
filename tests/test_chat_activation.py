@@ -112,8 +112,14 @@ def test_the_guard_is_wired_into_the_acquisition_handler():
 
 
 def test_both_filters_see_the_same_kind_of_message():
-    """The two handlers must not be able to reach different traffic."""
-    assert main.group_text_filter() is not None
+    """The two handlers must not be able to reach different traffic.
+
+    The assistant's filter is now the media-inclusive one, because an addressed
+    sticker or voice note is still an addressed message. The property this
+    asserts is unchanged: both handlers see ordinary group traffic and decide
+    between them, rather than one being able to reach messages the other cannot.
+    """
+    assert main.group_chat_filter() is not None
     assert main.acquisition_message_filter() is not None
 
 

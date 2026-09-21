@@ -80,6 +80,78 @@ def init() -> None:
             errors INTEGER NOT NULL DEFAULT 0,
             skipped INTEGER NOT NULL DEFAULT 0)"""
     )
+    # The moderation workload's counters, and the transcription workload's.
+    # Two more separate tables rather than two more columns, for the same reason
+    # the chat table is separate: four workloads with four keys and four
+    # allowances, and a shared counter would let one of them read — or exhaust —
+    # another's budget.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS moderation_usage (
+            day TEXT PRIMARY KEY,
+            calls INTEGER NOT NULL DEFAULT 0,
+            flagged INTEGER NOT NULL DEFAULT 0,
+            allowed INTEGER NOT NULL DEFAULT 0,
+            malformed INTEGER NOT NULL DEFAULT 0,
+            errors INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0)"""
+    )
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS transcript_usage (
+            day TEXT PRIMARY KEY,
+            calls INTEGER NOT NULL DEFAULT 0,
+            transcripts INTEGER NOT NULL DEFAULT 0,
+            malformed INTEGER NOT NULL DEFAULT 0,
+            errors INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0)"""
+    )
+    # Who is allowed to do what, at the application level.
+    #
+    # Global rather than per-chat, because the authority this models is
+    # "administrator of this bot" and the bot protects several groups. A
+    # per-chat table would let the same person be a senior admin in one room and
+    # a stranger in another, which is not a distinction the owner asked for and
+    # is one more thing to get wrong.
+    #
+    # `permissions` is a comma-separated list of application permission keys,
+    # validated against app/rbac.py's vocabulary on both write and read: an
+    # unknown key is dropped, never honoured. Stored as text rather than a join
+    # table because the set is small, read on every administrative action, and
+    # the whole row is what the audit trail refers to.
+    #
+    # The owner is deliberately **not** stored here. The owner is
+    # OWNER_USER_ID from the environment, so no row in this table can create,
+    # modify or remove the primary authority — a privilege that lives in a
+    # writable table is a privilege an attacker can ask for.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            role TEXT NOT NULL,
+            permissions TEXT NOT NULL,
+            granted_by INTEGER NOT NULL,
+            granted_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            note TEXT NOT NULL DEFAULT '')"""
+    )
+    # Every sensitive administrative decision, allowed or refused.
+    #
+    # Written for refusals as well as successes, because "who tried" is the
+    # question an operator asks after an incident, and a log that only records
+    # successes cannot answer it. No secrets, no message content — identifiers,
+    # an action name, an outcome, and a short reason.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS admin_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at INTEGER NOT NULL,
+            actor_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            target_id INTEGER,
+            chat_id INTEGER,
+            outcome TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '')"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_at ON admin_audit(at)"
+    )
     _conn.commit()
 
 
@@ -397,3 +469,234 @@ def record_chat_skip() -> int:
         (ai_day(),),
     )
     return chat_calls_today()
+
+
+# ---- the moderation and transcription workloads: their own counters ----
+# Two more tables, and one shared implementation rather than two more copies of
+# the same INSERT. The tables stay separate — that is the isolation — but the
+# SQL is the same shape, so it lives in one place.
+#
+# The outcome is looked up in the table's own tuple and never interpolated from
+# the caller, because it becomes a column name and a column name cannot be a
+# bound parameter.
+MOD_OUTCOMES = ("flagged", "allowed", "malformed", "errors")
+TRANSCRIPT_OUTCOMES = ("transcripts", "malformed", "errors")
+
+# The column order used by the read functions below, so the dict a caller gets
+# back always has the same keys.
+_MOD_COLUMNS = ("calls", "flagged", "allowed", "malformed", "errors", "skipped")
+_TRANSCRIPT_COLUMNS = ("calls", "transcripts", "malformed", "errors", "skipped")
+
+
+def _usage(table: str, columns: tuple[str, ...], day: str | None) -> dict:
+    key = day or ai_day()
+    with _lock:
+        row = _conn.execute(
+            f"SELECT {', '.join(columns)} FROM {table} WHERE day=?", (key,)
+        ).fetchone()
+    return dict(zip(columns, row or (0,) * len(columns)))
+
+
+def _calls_today(table: str, day: str | None = None) -> int:
+    key = day or ai_day()
+    with _lock:
+        row = _conn.execute(
+            f"SELECT calls FROM {table} WHERE day=?", (key,)
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _attempt(table: str, outcomes: tuple[str, ...], outcome: str) -> int:
+    key = ai_day()
+    outcome = outcome if outcome in outcomes else "errors"
+    _exec(
+        f"""INSERT INTO {table} (day, calls, {outcome}) VALUES (?, 1, 1)
+            ON CONFLICT(day) DO UPDATE SET
+                calls = calls + 1,
+                {outcome} = {outcome} + 1""",
+        (key,),
+    )
+    return _calls_today(table, key)
+
+
+def _skip(table: str) -> int:
+    _exec(
+        f"""INSERT INTO {table} (day, calls, skipped) VALUES (?, 0, 1)
+           ON CONFLICT(day) DO UPDATE SET skipped = skipped + 1""",
+        (ai_day(),),
+    )
+    return _calls_today(table)
+
+
+def mod_calls_today(day: str | None = None) -> int:
+    return _calls_today("moderation_usage", day)
+
+
+def mod_usage(day: str | None = None) -> dict:
+    return _usage("moderation_usage", _MOD_COLUMNS, day)
+
+
+def record_mod_attempt(outcome: str) -> int:
+    """Count one moderation request that was actually sent.
+
+    ``flagged`` means the model returned a deletable classification at or above
+    the configured confidence — it is *not* the same as "something was deleted",
+    because the policy engine decides that separately and may still choose to
+    allow. ``allowed`` is every other answer, including a clean one.
+    """
+    return _attempt("moderation_usage", MOD_OUTCOMES, outcome)
+
+
+def record_mod_skip() -> int:
+    """Count a moderation request we chose not to send."""
+    return _skip("moderation_usage")
+
+
+def transcript_calls_today(day: str | None = None) -> int:
+    return _calls_today("transcript_usage", day)
+
+
+def transcript_usage(day: str | None = None) -> dict:
+    return _usage("transcript_usage", _TRANSCRIPT_COLUMNS, day)
+
+
+def record_transcript_attempt(outcome: str) -> int:
+    return _attempt("transcript_usage", TRANSCRIPT_OUTCOMES, outcome)
+
+
+def record_transcript_skip() -> int:
+    return _skip("transcript_usage")
+
+
+# ---- application administrators and the audit trail ----
+def admin_get(user_id: int) -> dict | None:
+    """One stored administrator, or None. The owner is not in this table."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT user_id, role, permissions, granted_by, granted_at, "
+            "updated_at, note FROM admins WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "user_id": int(row[0]),
+        "role": row[1],
+        "permissions": _split_perms(row[2]),
+        "granted_by": int(row[3]),
+        "granted_at": int(row[4]),
+        "updated_at": int(row[5]),
+        "note": row[6] or "",
+    }
+
+
+def admin_list() -> list[dict]:
+    """Every stored administrator, newest grant first."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT user_id, role, permissions, granted_by, granted_at, "
+            "updated_at, note FROM admins ORDER BY granted_at DESC, user_id"
+        ).fetchall()
+    return [
+        {
+            "user_id": int(r[0]),
+            "role": r[1],
+            "permissions": _split_perms(r[2]),
+            "granted_by": int(r[3]),
+            "granted_at": int(r[4]),
+            "updated_at": int(r[5]),
+            "note": r[6] or "",
+        }
+        for r in rows
+    ]
+
+
+def admin_set(
+    user_id: int, role: str, permissions, *, granted_by: int, note: str = ""
+) -> None:
+    """Create or replace one administrator's application permissions.
+
+    Upsert rather than insert: promoting somebody who is already an admin is a
+    permission change, not a duplicate. ``granted_by`` records who did it, and
+    on an update the original ``granted_at`` is kept while ``updated_at`` moves —
+    so the audit trail keeps both "when did this start" and "when did it last
+    change".
+    """
+    now = int(time.time())
+    joined = ",".join(sorted({str(p) for p in permissions if p}))
+    _exec(
+        """INSERT INTO admins
+               (user_id, role, permissions, granted_by, granted_at, updated_at, note)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(user_id) DO UPDATE SET
+               role=excluded.role,
+               permissions=excluded.permissions,
+               granted_by=excluded.granted_by,
+               updated_at=excluded.updated_at,
+               note=excluded.note""",
+        (int(user_id), str(role), joined, int(granted_by), now, now, str(note)[:200]),
+    )
+
+
+def admin_remove(user_id: int) -> int:
+    """Revoke one administrator. Returns how many rows were removed."""
+    with _lock:
+        cur = _conn.execute("DELETE FROM admins WHERE user_id=?", (int(user_id),))
+        _conn.commit()
+        return cur.rowcount
+
+
+def _split_perms(value: str) -> list[str]:
+    return [p for p in (value or "").split(",") if p]
+
+
+def audit_write(
+    actor_id: int,
+    action: str,
+    *,
+    outcome: str,
+    target_id: int | None = None,
+    chat_id: int | None = None,
+    detail: str = "",
+) -> None:
+    """Record one administrative decision, allowed or refused.
+
+    Never raises into a handler: an audit row that cannot be written must not be
+    the reason a moderation action fails. The exception is logged by the caller's
+    logger, which is the same place every other failure goes.
+    """
+    _exec(
+        "INSERT INTO admin_audit (at, actor_id, action, target_id, chat_id, "
+        "outcome, detail) VALUES (?,?,?,?,?,?,?)",
+        (
+            int(time.time()),
+            int(actor_id),
+            str(action)[:80],
+            int(target_id) if target_id is not None else None,
+            int(chat_id) if chat_id is not None else None,
+            str(outcome)[:40],
+            str(detail)[:300],
+        ),
+    )
+
+
+def audit_recent(limit: int = 20) -> list[dict]:
+    """The newest audit rows, newest first. For the operator's own inspection."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT at, actor_id, action, target_id, chat_id, outcome, detail "
+            "FROM admin_audit ORDER BY id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [
+        {
+            "at": int(r[0]),
+            "actor_id": int(r[1]),
+            "action": r[2],
+            "target_id": int(r[3]) if r[3] is not None else None,
+            "chat_id": int(r[4]) if r[4] is not None else None,
+            "outcome": r[5],
+            "detail": r[6] or "",
+        }
+        for r in rows
+    ]

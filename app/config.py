@@ -554,4 +554,449 @@ GEMINI_CHAT_START_TEXT = os.getenv(
 )
 
 
+# ---------------- Bot identity ------------------------------------------------
+# What the bot answers to. The authoritative source is Telegram itself: the bot's
+# own id and username come from ``getMe`` at startup and are what ``@mention``
+# and reply-to-bot matching use, because those are the only two mechanisms
+# Telegram makes unambiguous (see app/main.py `_addressed_to_bot`).
+#
+# BOT_ALIASES is for the *human* names the group actually uses in text — the
+# Persian word for "robot", a nickname, a transliteration. It is deliberately
+# empty by default and deliberately separate from the username: matching a
+# bare word is a heuristic, and a heuristic that decides whether the bot speaks
+# should be a decision an operator makes rather than something this file
+# assumes. Entries are matched case-insensitively against a whole word.
+BOT_ALIASES = _str_list(os.getenv("BOT_ALIASES", ""))
+
+# How long a Telegram chat-member lookup is trusted. The admin check is a live
+# API call, and an unprivileged member can trigger it by talking; caching is
+# what stops that from being a way to spend the bot's rate limit. Short enough
+# that a demotion takes effect quickly.
+ADMIN_CACHE_SECONDS = _float("ADMIN_CACHE_SECONDS", 300.0)
+
+
+# ---------------- Application authorization (RBAC) ---------------------------
+# The primary owner, by Telegram user id. This is the highest application-level
+# authority and it is **immutable at runtime**: no command, no button and no
+# group message can create it, change it, or take it away. It is a deployment
+# fact, which is exactly what makes it safe to compare against — a privilege
+# that can be granted from inside the system is a privilege an attacker can ask
+# for.
+#
+# 0 means "no owner configured", in which case every administrative command is
+# refused (fail closed) and the startup log says so loudly. It does not fall
+# back to "the first admin wins" or "the whitelist is the owner": those are both
+# ways for the wrong person to end up in charge.
+OWNER_USER_ID = _int("OWNER_USER_ID", 0)
+
+# Roles that are seeded from configuration at startup rather than through the
+# bot. Format: ``<user_id>:<role>``, comma separated, e.g.
+# ``123456:senior_admin,789012:moderator``. This exists so a deployment can come
+# up with its staff already in place without the owner having to promote
+# everyone by hand through Telegram — and it is the only way to recover if the
+# admins table is lost.
+#
+# A configured role can never be the owner (that is OWNER_USER_ID alone) and can
+# never exceed the role's own permission ceiling. An entry that names a higher
+# role than the owner's own grant list would allow is refused at load time and
+# logged, not silently applied.
+CONFIG_ADMINS = _str_list(os.getenv("CONFIG_ADMINS", ""))
+
+
+# ---------------- Gemini: moderation / content understanding ------------------
+# A **third** independent Gemini workload. It is not the acquisition classifier
+# and not the conversational assistant, and it shares nothing with either: its
+# own key setting, its own model, its own rate window, its own daily cap, its
+# own circuit breaker, its own counters table and its own client.
+#
+# What it is for: understanding what a piece of group content *is*, well enough
+# for a deterministic policy to act on. The local detectors are good at one
+# narrow question (is there an explicit body region in this frame) and bad at
+# everything else — a sexual act with no exposed anatomy, a suggestive cartoon,
+# harassment, a threat. This layer answers the wider question, and answers it
+# with a small structured verdict rather than prose.
+#
+# What it is NOT for, and this is the architectural line the whole design turns
+# on: **it never executes anything.** It cannot delete, restrict, ban or reply.
+# Its output is data. The decision to act is made by app/mod_policy.py, in code,
+# from its verdict plus the local detectors plus the configuration. There is no
+# code path from this module's return value to a Telegram call, which is why a
+# prompt-injected group message cannot make the bot do anything.
+#
+# Why a separate key matters here more than anywhere else: moderation runs on
+# *every* media item and a large share of text, so it is by far the largest
+# consumer. If it shared the classifier's project it would starve acquisition
+# and chat — and Google's limits are per project, not per key.
+GEMINI_MOD_ENABLED = _bool("GEMINI_MOD_ENABLED", False)
+
+# Must belong to a different Google Cloud project from GEMINI_API_KEY and
+# GEMINI_CHAT_API_KEY for the budget to be genuinely separate. Never logged.
+GEMINI_MOD_API_KEY = os.getenv("GEMINI_MOD_API_KEY", "").strip()
+
+# The same explicit opt-in as the assistant's, for the same reason: a shared key
+# is a shared Google allowance even though our counters are separate.
+GEMINI_MOD_ALLOW_SHARED_KEY = _bool("GEMINI_MOD_ALLOW_SHARED_KEY", False)
+
+# Its own model. Measured on this key on 2026-09-21: `gemini-flash-lite-latest`
+# answers, and is the default because moderation runs on a per-message budget
+# and this is the cheapest model that is good enough. A moderation verdict is
+# short and structured, so the stronger (and slower) models buy little here.
+GEMINI_MOD_MODEL = os.getenv("GEMINI_MOD_MODEL", "gemini-flash-lite-latest").strip()
+
+# Longer than the classifier's 10s, because a video or a voice clip is a much
+# bigger input than a line of text. Still bounded, and the media path runs off
+# the event loop.
+GEMINI_MOD_TIMEOUT_SECONDS = _float("GEMINI_MOD_TIMEOUT_SECONDS", 20.0)
+GEMINI_MOD_MAX_RETRIES = _int("GEMINI_MOD_MAX_RETRIES", 1)
+GEMINI_MOD_BACKOFF_SECONDS = _float("GEMINI_MOD_BACKOFF_SECONDS", 1.5)
+
+# The tightest brake of the three workloads. Moderation is the highest-volume
+# consumer, and its failure mode is benign (content is allowed and logged), so
+# it is the one that should yield first when the project is under pressure.
+GEMINI_MOD_RATE_LIMIT = _int("GEMINI_MOD_RATE_LIMIT", 20)
+GEMINI_MOD_RATE_WINDOW = _float("GEMINI_MOD_RATE_WINDOW", 60.0)
+GEMINI_MOD_DAILY_LIMIT = _int("GEMINI_MOD_DAILY_LIMIT", 500)
+GEMINI_MOD_CIRCUIT_FAILURES = _int("GEMINI_MOD_CIRCUIT_FAILURES", 5)
+GEMINI_MOD_CIRCUIT_SECONDS = _float("GEMINI_MOD_CIRCUIT_SECONDS", 300.0)
+
+# Text is truncated to this before it leaves the server. Media is bounded
+# separately, by bytes and by duration — see GEMINI_MEDIA_* below.
+GEMINI_MOD_MAX_CHARS = _int("GEMINI_MOD_MAX_CHARS", 2000)
+
+
+# ---------------- Media understanding (shared by moderation and chat) --------
+# One builder for "Telegram media -> something Gemini can read", used by both
+# the moderation workload and the conversational one. The *builder* is shared;
+# the policies, limits and keys above and below are not.
+#
+# Measured on this deployment's key on 2026-09-21, one real call each, to decide
+# what the builder may actually send:
+#
+#     image/png   inline  64 B..  OK   (colour described correctly)
+#     image/gif   inline  1.2 KB  OK
+#     video/mp4   inline  1.9 KB  OK
+#     video/webm  inline  1.1 KB  OK
+#     audio/wav   inline   32 KB  OK
+#     audio/ogg   inline  2.6 KB  OK
+#
+# So all five families work as **inline** parts, which is what this builder
+# uses. The Files API also works (upload -> PROCESSING -> generateContent by
+# URI -> delete), and is deliberately *not* used: it would leave a copy of a
+# group member's media in Google's storage for the life of the file, for no
+# capability we need. Telegram's own Bot API download limit is 20 MB, and the
+# inline request limit is the same order, so there is nothing the Files API
+# would unlock for us anyway.
+GEMINI_MEDIA_MAX_MB = _float("GEMINI_MEDIA_MAX_MB", 18.0)
+
+# A video that is too large or too long to send whole is reduced to this many
+# frames, which are sent as images. This is the documented fallback the API
+# supports, and it is why a long clip does not silently become "not analysed".
+GEMINI_MEDIA_FRAMES = _int("GEMINI_MEDIA_FRAMES", 4)
+
+# A hard ceiling on the parts one request may carry, so a pathological message
+# cannot turn into an unbounded upload.
+GEMINI_MEDIA_MAX_PARTS = _int("GEMINI_MEDIA_MAX_PARTS", 6)
+
+# The longest video/audio we will send whole. Beyond this the video path falls
+# back to frames, and the audio path refuses rather than truncating mid-word
+# (a half sentence is a wrong sentence).
+GEMINI_MEDIA_MAX_SECONDS = _float("GEMINI_MEDIA_MAX_SECONDS", 60.0)
+
+
+# ---------------- The moderation policy --------------------------------------
+# The deterministic engine that turns signals into an action. Everything here is
+# about *how sure we have to be before we destroy something*, and the defaults
+# are deliberately the conservative end.
+#
+# The problem this solves, stated plainly: the local detector alone was deleting
+# media at a threshold low enough that an ordinary celebrity photograph could
+# cross it. A single uncalibrated score is not a good enough reason to delete
+# somebody's message. So the local detector's role is now **evidence, not a
+# verdict**: it can raise a candidate, and it can no longer delete on its own.
+MODERATION_ENABLED = _bool("MODERATION_ENABLED", True)
+
+# Whether a deletion must be confirmed by the moderation AI.
+#
+# True (the default) means: local detector says explicit, AI disagrees or cannot
+# be asked -> the content is *allowed and logged*, never deleted. That is the
+# fail-safe direction the brief asks for, and it is why turning this on makes the
+# bot strictly less destructive than it was.
+#
+# False means the local detector may delete alone, but only at or above
+# MODERATION_LOCAL_HARD_THRESHOLD — a much higher bar than the old
+# EXPLICIT_DELETE_THRESHOLD, and one that is deliberately hard to reach. Set it
+# False only if you have decided the AI layer is unavailable and you still want
+# deletions; the startup log says which mode is in force.
+MODERATION_REQUIRE_AI_CONFIRM = _bool("MODERATION_REQUIRE_AI_CONFIRM", True)
+
+# The AI's confidence must be at least this before its "clearly explicit"
+# classification is acted on. Below it the verdict is treated as uncertain and
+# the content is only logged.
+MODERATION_DELETE_CONFIDENCE = _float("MODERATION_DELETE_CONFIDENCE", 0.80)
+
+# The band below the delete confidence that is still worth recording: the
+# content is allowed, but an operator can see it in the log and in the review
+# queue. A false positive here costs a log line, not a message.
+MODERATION_REVIEW_CONFIDENCE = _float("MODERATION_REVIEW_CONFIDENCE", 0.45)
+
+# The local detector's own hard bar, used only when
+# MODERATION_REQUIRE_AI_CONFIRM is False. Set above every true positive measured
+# on this deployment (0.50/0.51/0.56/0.67) on purpose: this mode exists for a
+# deployment that has chosen to run without the AI layer, and it should be
+# visibly stricter than the AI-confirmed path rather than quietly equivalent.
+MODERATION_LOCAL_HARD_THRESHOLD = _float("MODERATION_LOCAL_HARD_THRESHOLD", 0.85)
+
+# Which content classes the policy may ever act destructively on. This is the
+# closed vocabulary the moderation AI's verdict is coerced into, and the set the
+# policy switches on — a category outside it can never produce a deletion, so a
+# hallucinated label is inert.
+#
+#   explicit_sexual   clearly explicit sexual content          -> deletable
+#   suggestive        sexual but not explicit                  -> never deleted
+#   harassment        targeted abuse of a person               -> never deleted
+#   threat            a threat of harm                         -> never deleted
+#   spam              advertising / flooding                   -> never deleted
+#   normal            ordinary content                         -> never deleted
+#   unknown           could not be judged                      -> never deleted
+#
+# Only `explicit_sexual` is in MODERATION_DELETABLE_CLASSES by default. The
+# others are logged so an operator can see them and decide, which is the
+# "recommend a future restriction" half of the brief: the architecture carries
+# the signal, the policy decides not to act on it yet.
+MODERATION_CLASSES = (
+    "explicit_sexual",
+    "suggestive",
+    "harassment",
+    "threat",
+    "spam",
+    "normal",
+    "unknown",
+)
+MODERATION_DELETABLE_CLASSES = set(
+    _str_list(os.getenv("MODERATION_DELETABLE_CLASSES", "explicit_sexual"))
+)
+
+# Whether text is sent to the moderation layer at all.
+#
+# **Off by default**, and that is a deliberate judgement rather than an
+# oversight. This is the one part of the moderation layer that can delete a
+# person's *words* rather than a picture, in a language the model may misjudge,
+# and a false positive here removes something somebody wrote and cannot get
+# back. The capability is implemented and tested; turning it on is a decision
+# the operator should make after watching the review log for a while, not a
+# default this file imposes.
+#
+# Media moderation does not depend on this: a photo is still sent to the
+# moderation layer when this is off.
+MODERATION_TEXT_ENABLED = _bool("MODERATION_TEXT_ENABLED", False)
+
+# Messages shorter than this are not sent to the moderation layer. A three-word
+# line has almost no signal for a content classifier, and the cost is a request
+# against a shared quota.
+MODERATION_TEXT_MIN_CHARS = _int("MODERATION_TEXT_MIN_CHARS", 25)
+
+# Whether media is sent to it. This is the expensive half — a video is a much
+# larger request than a line of text — so it has its own switch.
+MODERATION_MEDIA_ENABLED = _bool("MODERATION_MEDIA_ENABLED", True)
+
+# Where a review verdict is reported. Empty means "only the log". This is
+# deliberately the same private chat the moderation reports already use, so an
+# operator has one place to look.
+MODERATION_REVIEW_NOTIFY = _bool("MODERATION_REVIEW_NOTIFY", True)
+
+
+# ---------------- Speech to text (the fourth workload) -----------------------
+# Its own workload with its own key, model, limits and breaker, for the same
+# isolation reasons as the other three.
+#
+# It is separate from the conversational assistant on purpose even though the
+# assistant *uses* it: transcription is a mechanical, cheap, cacheable operation
+# with one right answer, while a reply is a generation. Sharing a budget between
+# them would mean a busy voice chat could silence the assistant, and it would
+# make "the transcript was wrong" indistinguishable from "the reply was wrong".
+#
+# This is also what keeps ordinary group voice messages out of acquisition and
+# moderation: nothing transcribes a voice note unless something explicitly asks
+# for it. There is no handler that does so automatically.
+TRANSCRIBE_ENABLED = _bool("TRANSCRIBE_ENABLED", False)
+TRANSCRIBE_API_KEY = os.getenv("TRANSCRIBE_API_KEY", "").strip()
+TRANSCRIBE_ALLOW_SHARED_KEY = _bool("TRANSCRIBE_ALLOW_SHARED_KEY", False)
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gemini-flash-lite-latest").strip()
+TRANSCRIBE_TIMEOUT_SECONDS = _float("TRANSCRIBE_TIMEOUT_SECONDS", 25.0)
+TRANSCRIBE_MAX_RETRIES = _int("TRANSCRIBE_MAX_RETRIES", 1)
+TRANSCRIBE_BACKOFF_SECONDS = _float("TRANSCRIBE_BACKOFF_SECONDS", 1.5)
+TRANSCRIBE_RATE_LIMIT = _int("TRANSCRIBE_RATE_LIMIT", 10)
+TRANSCRIBE_RATE_WINDOW = _float("TRANSCRIBE_RATE_WINDOW", 60.0)
+TRANSCRIBE_DAILY_LIMIT = _int("TRANSCRIBE_DAILY_LIMIT", 300)
+TRANSCRIBE_CIRCUIT_FAILURES = _int("TRANSCRIBE_CIRCUIT_FAILURES", 5)
+TRANSCRIBE_CIRCUIT_SECONDS = _float("TRANSCRIBE_CIRCUIT_SECONDS", 300.0)
+# Longest voice note we will transcribe. Telegram's own voice notes are capped
+# at an hour, which is far past anything a chat reply should wait for; beyond
+# this the pipeline refuses rather than sending a truncated clip.
+TRANSCRIBE_MAX_SECONDS = _float("TRANSCRIBE_MAX_SECONDS", 300.0)
+TRANSCRIBE_MAX_MB = _float("TRANSCRIBE_MAX_MB", 18.0)
+
+# The transcription-only interface: a command that returns the transcript and
+# nothing else, so the pipeline can be used and tested on its own without the
+# conversational assistant being involved. Empty disables it.
+TRANSCRIBE_COMMAND = os.getenv("TRANSCRIBE_COMMAND", "transcribe").strip()
+
+TRANSCRIBE_UNAVAILABLE_TEXT = os.getenv(
+    "TRANSCRIBE_UNAVAILABLE_TEXT",
+    "الان نمی‌تونم صدا رو تبدیل کنم. بعداً دوباره امتحان کن.",
+)
+TRANSCRIBE_EMPTY_TEXT = os.getenv(
+    "TRANSCRIBE_EMPTY_TEXT",
+    "چیزی توی صدا نفهمیدم. واضح‌تر بفرست.",
+)
+
+
+# ---------------- Voice replies from the assistant ---------------------------
+# When somebody talks to the assistant with a voice message, answering in voice
+# is the natural thing to do — and it is technically possible: the TTS models
+# below were measured working on this key on 2026-09-21, returning raw PCM at
+# 24 kHz mono, which ffmpeg turns into the OGG/Opus that Telegram's sendVoice
+# wants.
+#
+# Off by default, and deliberately so. A voice reply costs a second model call
+# plus an ffmpeg pass, it cannot be read silently in a meeting, and a synthetic
+# voice is a much stronger claim to personhood than text is. The brief asks for
+# a natural conversation rather than a convincing impersonation, so this is an
+# opt-in the operator makes rather than a default the bot imposes.
+GEMINI_CHAT_VOICE_REPLY = _bool("GEMINI_CHAT_VOICE_REPLY", False)
+
+# Measured available on this key 2026-09-21:
+#   gemini-3.1-flash-tts-preview      -> 159 KB PCM for one short sentence
+#   gemini-2.5-flash-preview-tts      -> 143 KB PCM
+# Both are `preview`, which is why this is a separate setting: the preview
+# surface moves, and when it does only voice replies should be affected.
+GEMINI_CHAT_TTS_MODEL = os.getenv(
+    "GEMINI_CHAT_TTS_MODEL", "gemini-3.1-flash-tts-preview"
+).strip()
+# A prebuilt voice name from the API's own list. Kore is a neutral default.
+GEMINI_CHAT_TTS_VOICE = os.getenv("GEMINI_CHAT_TTS_VOICE", "Kore").strip()
+# Above this, the reply is sent as text instead. Synthesising a wall of text is
+# slow, expensive and unpleasant to listen to; the text is right there anyway.
+GEMINI_CHAT_VOICE_MAX_CHARS = _int("GEMINI_CHAT_VOICE_MAX_CHARS", 400)
+
+# The conversational media bound: how many media parts one conversational turn
+# may carry, so a message with a dozen attachments cannot become a dozen calls.
+GEMINI_CHAT_MEDIA_MAX_PARTS = _int("GEMINI_CHAT_MEDIA_MAX_PARTS", 3)
+
+# Said when somebody addresses the assistant with an attachment that could not
+# be read — too large, an unsupported format, a download that failed. The
+# assistant is told not to guess what it was, and this is what the person sees
+# when even that is not possible.
+GEMINI_CHAT_UNREADABLE_TEXT = os.getenv(
+    "GEMINI_CHAT_UNREADABLE_TEXT",
+    "این فایل رو نتونستم باز کنم 🙏 یه بار دیگه بفرست یا توضیح بده چیه.",
+)
+
+# Said by the transcription-only command when the message carries no audio.
+TRANSCRIBE_NEED_AUDIO_TEXT = os.getenv(
+    "TRANSCRIBE_NEED_AUDIO_TEXT",
+    "روی یک پیام صوتی ریپلای کن یا خودش رو با این دستور بفرست.",
+)
+
+
+# ---------------- Admin command copy -----------------------------------------
+# Every word the administrative interface says. Kept here with the rest of the
+# product's wording so no Persian literal lives in a handler.
+ADMIN_DENIED_TEXT = os.getenv(
+    "ADMIN_DENIED_TEXT",
+    "⛔️ این کار رو نمی‌تونی انجام بدی.",
+)
+ADMIN_NOT_CONFIGURED_TEXT = os.getenv(
+    "ADMIN_NOT_CONFIGURED_TEXT",
+    "⛔️ هیچ مالکی برای این ربات تنظیم نشده، پس هیچ دستور مدیریتی اجرا نمی‌شه.",
+)
+ADMIN_OWNER_PROTECTED_TEXT = os.getenv(
+    "ADMIN_OWNER_PROTECTED_TEXT",
+    "⛔️ این کاربر مالک اصلیه و قابل تغییر نیست.",
+)
+ADMIN_HIGHER_RANK_TEXT = os.getenv(
+    "ADMIN_HIGHER_RANK_TEXT",
+    "⛔️ این کاربر سطح بالاتری از تو داره؛ نمی‌تونی تغییرش بدی.",
+)
+ADMIN_TARGET_NOT_FOUND_TEXT = os.getenv(
+    "ADMIN_TARGET_NOT_FOUND_TEXT",
+    "روی پیام کسی ریپلای کن تا مشخص بشه منظورت کیه.",
+)
+ADMIN_TARGET_IS_BOT_TEXT = os.getenv(
+    "ADMIN_TARGET_IS_BOT_TEXT",
+    "⛔️ ربات رو نمی‌شه مدیر کرد.",
+)
+ADMIN_TELEGRAM_FAILED_TEXT = os.getenv(
+    "ADMIN_TELEGRAM_FAILED_TEXT",
+    "❌ تلگرام این کار رو قبول نکرد؛ چیزی تغییر نکرد.",
+)
+ADMIN_BOT_LACKS_RIGHT_TEXT = os.getenv(
+    "ADMIN_BOT_LACKS_RIGHT_TEXT",
+    "❌ خودم دسترسی لازم رو توی این گروه ندارم، پس نمی‌تونم این کار رو بکنم.",
+)
+ADMIN_PROMOTE_TITLE = os.getenv(
+    "ADMIN_PROMOTE_TITLE",
+    "انتخاب دسترسی‌ها برای {name}\nهر مورد رو بزن تا روشن/خاموش بشه، بعد تأیید کن.",
+)
+ADMIN_PROMOTE_CONFIRM_BUTTON = os.getenv("ADMIN_PROMOTE_CONFIRM_BUTTON", "✅ تأیید")
+ADMIN_PROMOTE_CANCEL_BUTTON = os.getenv("ADMIN_PROMOTE_CANCEL_BUTTON", "✖️ لغو")
+ADMIN_PROMOTE_DONE_TEXT = os.getenv(
+    "ADMIN_PROMOTE_DONE_TEXT",
+    "✅ {name} با دسترسی‌های زیر ثبت شد:\n{perms}",
+)
+ADMIN_PROMOTE_NO_TELEGRAM_TEXT = os.getenv(
+    "ADMIN_PROMOTE_NO_TELEGRAM_TEXT",
+    "ℹ️ توی تلگرام چیزی تغییر نکرد (فقط دسترسی داخلی ربات ثبت شد).",
+)
+ADMIN_PROMOTE_TELEGRAM_TEXT = os.getenv(
+    "ADMIN_PROMOTE_TELEGRAM_TEXT",
+    "ℹ️ دسترسی‌های تلگرام هم اعمال شد.",
+)
+ADMIN_DEMOTE_DONE_TEXT = os.getenv(
+    "ADMIN_DEMOTE_DONE_TEXT",
+    "✅ دسترسی مدیریتی {name} برداشته شد.",
+)
+ADMIN_DEMOTE_NOTHING_TEXT = os.getenv(
+    "ADMIN_DEMOTE_NOTHING_TEXT",
+    "این کاربر از قبل مدیر نبود.",
+)
+ADMIN_LIST_TITLE = os.getenv("ADMIN_LIST_TITLE", "مدیرهای این ربات:")
+ADMIN_LIST_EMPTY = os.getenv("ADMIN_LIST_EMPTY", "هیچ مدیری ثبت نشده.")
+ADMIN_LIST_LINE = os.getenv("ADMIN_LIST_LINE", "• {name} — {role}")
+ADMIN_WHOAMI_TEXT = os.getenv(
+    "ADMIN_WHOAMI_TEXT",
+    "شناسه: {user_id}\nسطح: {role}\nدسترسی‌ها: {perms}",
+)
+ADMIN_CANCELLED_TEXT = os.getenv("ADMIN_CANCELLED_TEXT", "لغو شد.")
+ADMIN_STALE_BUTTON_TEXT = os.getenv(
+    "ADMIN_STALE_BUTTON_TEXT",
+    "این دکمه دیگه معتبر نیست. دوباره دستور رو بزن.",
+)
+
+# Moderation command copy.
+MOD_BAN_DONE_TEXT = os.getenv("MOD_BAN_DONE_TEXT", "🚫 {name} از گروه بن شد.")
+MOD_UNBAN_DONE_TEXT = os.getenv("MOD_UNBAN_DONE_TEXT", "✅ {name} آن‌بن شد.")
+MOD_MUTE_DONE_TEXT = os.getenv(
+    "MOD_MUTE_DONE_TEXT", "🔇 ارسال پیام {name} برای {minutes} دقیقه محدود شد."
+)
+MOD_UNMUTE_DONE_TEXT = os.getenv("MOD_UNMUTE_DONE_TEXT", "🔊 محدودیت {name} برداشته شد.")
+MOD_DELETE_DONE_TEXT = os.getenv("MOD_DELETE_DONE_TEXT", "🗑 پیام حذف شد.")
+MOD_DELETE_FAILED_TEXT = os.getenv(
+    "MOD_DELETE_FAILED_TEXT", "❌ نتونستم پیام رو حذف کنم."
+)
+MOD_WARN_DONE_TEXT = os.getenv("MOD_WARN_DONE_TEXT", "⚠️ اخطار به {name} داده شد.")
+MOD_TARGET_REQUIRED_TEXT = os.getenv(
+    "MOD_TARGET_REQUIRED_TEXT",
+    "روی پیام کاربر ریپلای کن یا شناسه‌اش رو بنویس.",
+)
+MOD_WARN_USER_TEXT = os.getenv(
+    "MOD_WARN_USER_TEXT",
+    "{name} جان، این اخطاره: {reason}",
+)
+MOD_COMMAND_FAILED_TEXT = os.getenv(
+    "MOD_COMMAND_FAILED_TEXT", "❌ تلگرام این کار رو انجام نداد."
+)
+
+
+
 
