@@ -1725,6 +1725,22 @@ startup log says so loudly. It does not fall back to "the first admin wins" or
 "the whitelist is the owner"; both are ways for the wrong person to end up in
 charge.
 
+**The deployment's owner is `OWNER_USER_ID=6931339207`.** That number is the
+authority, and it is the only thing that is. The account's Telegram username is
+`@Mo3i_Best`, and the username is **not** an identity: usernames are
+user-controlled, changeable and re-usable, so `rbac` never reads one — not from
+a message, not from a config file, not from a stored row. It compares the
+numeric id, which the Telegram servers assert, and nothing else. A username
+handed where an id belongs is a `ValueError`, not a match (there is a check for
+exactly that in the hierarchy harness). If the account is ever renamed, nothing
+in this bot changes; if a different account were to claim `@Mo3i_Best`, it would
+hold nothing.
+
+This is the same id the VPN bot carries as `ADMIN_IDS` and as
+`EXEMPT_TELEGRAM_IDS` (`app/services/trial.py`), so the two projects agree on
+who the owner is. Keep them in step: changing one without the other gives the
+owner two different answers on two surfaces.
+
 ### 25.2 Permissions are the model; roles are a convenience
 
 | Permission | What it allows |
