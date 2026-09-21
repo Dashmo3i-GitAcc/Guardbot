@@ -59,6 +59,8 @@ def answer(**overrides) -> str:
         "intent_category": "vpn_request",
         "confidence": 0.9,
         "needs_acquisition_offer": True,
+        "problem_kind": "wants_access_tool",
+        "response_kind": "vpn_offer",
         "reason": "Asks for a VPN.",
         "signals": ["vpn", "میخوام"],
     }
@@ -337,25 +339,49 @@ def test_the_signals_are_bounded(monkeypatch):
 
 
 def test_the_schema_offers_no_field_a_message_could_be_written_into():
-    """The model must have nowhere to put prose that could reach a user."""
-    assert set(ai_intent.RESPONSE_SCHEMA["properties"]) == {
-        "is_relevant",
-        "intent_category",
-        "confidence",
-        "needs_acquisition_offer",
-        "reason",
-        "signals",
+    """The model must have nowhere to put prose that could reach a user.
+
+    Asserted as a *property* rather than as a fixed list of names, because the
+    list grows — ``problem_kind`` and ``response_kind`` were added so the reply
+    can match what the message was about — while the thing that must never
+    change is the shape: a closed enum, a boolean, a number, or a bounded list
+    of short strings. A ``string`` with no ``enum`` is the shape that could
+    carry a sentence into the group, so exactly one is allowed and it is
+    truncated and log-only.
+    """
+    props = ai_intent.RESPONSE_SCHEMA["properties"]
+
+    free_text = {
+        name
+        for name, spec in props.items()
+        if spec.get("type") == "string" and "enum" not in spec
     }
+    assert free_text == {"reason"}, (
+        "only `reason` may be free text: it is truncated to 200 chars and is "
+        "never sent to anyone"
+    )
+
+    # Each closed set is the constant the application switches on, so a member
+    # the model invents is coerced rather than obeyed.
+    assert set(props["intent_category"]["enum"]) == set(ai_intent.CATEGORIES)
+    assert set(props["problem_kind"]["enum"]) == set(ai_intent.PROBLEM_KINDS)
+    assert set(props["response_kind"]["enum"]) == set(ai_intent.RESPONSE_KINDS)
+
+    # And nothing in the schema is even named for a thing the model must never
+    # produce, so a future field cannot quietly become a channel for one.
+    forbidden = ("url", "link", "token", "credential", "secret", "price", "message")
+    for name in props:
+        assert not any(word in name.lower() for word in forbidden), name
+
     assert set(ai_intent.RESPONSE_SCHEMA["required"]) == {
         "is_relevant",
         "intent_category",
         "confidence",
         "needs_acquisition_offer",
+        "problem_kind",
+        "response_kind",
         "reason",
     }
-    assert set(ai_intent.RESPONSE_SCHEMA["properties"]["intent_category"]["enum"]) == set(
-        ai_intent.CATEGORIES
-    )
 
 
 def test_the_prompt_says_the_model_does_not_write_to_anyone():
@@ -676,3 +702,78 @@ def test_the_client_is_rebuilt_when_the_key_changes(monkeypatch):
     third, _ = ai_intent._client_or_raise()
     assert third is not first
     assert built == ["first", "second"]
+
+
+# ── The presentation hints: structured, closed, and never load-bearing ─────
+# These two fields exist so the reply can match what the message was actually
+# about. They are the *only* thing the model contributes to the wording, and
+# what it contributes is a key from a closed set — never a sentence. The tests
+# below pin both halves of that: the key is carried through when it is valid,
+# and a bad one degrades to the generic reply without costing the lead.
+def test_the_problem_and_response_kinds_are_carried_through(monkeypatch):
+    install(
+        monkeypatch,
+        answer(
+            intent_category="connectivity_problem",
+            problem_kind="slow_or_unstable",
+            response_kind="connectivity_offer",
+        ),
+    )
+
+    verdict = classify("اینترنت امروز خیلی ضعیف شده")
+
+    assert verdict.problem_kind == "slow_or_unstable"
+    assert verdict.response_kind == "connectivity_offer"
+
+
+def test_an_invented_response_kind_falls_back_to_the_generic_reply(monkeypatch):
+    install(monkeypatch, answer(response_kind="../../etc/passwd"))
+
+    verdict = classify("vpn میخوام")
+
+    assert verdict.response_kind == ai_intent.DEFAULT_RESPONSE_KIND
+    assert verdict.relevant is True, "a bad hint must not cost somebody their lead"
+
+
+def test_an_invented_problem_kind_is_coerced(monkeypatch):
+    install(monkeypatch, answer(problem_kind="something_the_model_made_up"))
+    assert classify("vpn").problem_kind == "none"
+
+
+def test_a_missing_presentation_hint_is_not_a_malformed_answer(monkeypatch):
+    """Strict on the decision, forgiving on the presentation.
+
+    ``is_relevant`` and ``needs_acquisition_offer`` decide whether a stranger
+    gets a trial, so a missing one of those is a failure to answer. These two
+    only choose between five fixed sentences, and discarding a real lead over a
+    missing presentation hint would trade something valuable for something
+    cheap.
+    """
+    raw = json.dumps(
+        {
+            "is_relevant": True,
+            "intent_category": "vpn_request",
+            "confidence": 0.9,
+            "needs_acquisition_offer": True,
+            "reason": "Asks for a VPN.",
+        },
+        ensure_ascii=False,
+    )
+    install(monkeypatch, raw)
+
+    verdict = classify("یه وی پی ان میخوام")
+
+    assert verdict.error == "", "a missing hint is not a failure to answer"
+    assert verdict.relevant is True
+    assert verdict.response_kind == ai_intent.DEFAULT_RESPONSE_KIND
+    assert verdict.problem_kind == "none"
+
+
+def test_the_prompt_tells_the_model_it_does_not_write_the_reply():
+    """The instruction is the other half of the schema: the model picks a key."""
+    text = ai_intent.SYSTEM_INSTRUCTION
+    assert "You never write the reply" in text
+    assert "Never put a URL, link, username, credential, price or instruction" in text
+    # And the two hints are explained, or the model would be guessing.
+    assert "problem_kind" in text
+    assert "response_kind" in text

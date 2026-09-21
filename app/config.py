@@ -262,6 +262,45 @@ GROUP_TRIAL_HINT = os.getenv(
     "تست ۵۰۰ مگابایت و ۱ روزه‌ست و فقط یک‌بار به هر کاربر داده می‌شه.",
 )
 
+# ── The lead-in, chosen by what the message was actually about ────────────────
+# One generic sentence for every lead reads like a macro, and it answers a
+# complaint about a slow connection with the same words as a question about
+# price. The AI layer returns a *key* (see app/ai_intent.py RESPONSE_KINDS) and
+# these are the words for each key — so the reply can acknowledge what the
+# person actually said while every word the group sees still comes from here.
+#
+# `{name}` is always available. The button and the hint below are appended by
+# app/responses.py, so none of these repeats them.
+GROUP_TRIAL_REPLY_CONNECTIVITY = os.getenv(
+    "GROUP_TRIAL_REPLY_CONNECTIVITY",
+    "سلام {name} 👋\n"
+    "آره، وقتی اینترنت این‌طور ضعیف یا ناپایدار می‌شه معمولاً مشکل از مسیره.\n"
+    "اگه می‌خوای ببینی مشکل از مسیر اتصالت هست یا نه، می‌تونی تست رایگان رو "
+    "امتحان کنی. 👇",
+)
+GROUP_TRIAL_REPLY_ACCESS = os.getenv(
+    "GROUP_TRIAL_REPLY_ACCESS",
+    "سلام {name} 👋\n"
+    "برای باز کردن سرویس‌هایی که فیلتر شدن، یه مسیر جایگزین لازمه.\n"
+    "اگه می‌خوای ببینی مشکل از مسیر اتصالت هست یا نه، می‌تونی تست رایگان رو "
+    "امتحان کنی. 👇",
+)
+GROUP_TRIAL_REPLY_VPN = os.getenv(
+    "GROUP_TRIAL_REPLY_VPN",
+    "سلام {name} 👋\n"
+    "اگه دنبال یه وی‌پی‌ان خوبی، ما یه تست رایگان داریم که بدون هزینه "
+    "می‌تونی امتحانش کنی. 👇",
+)
+GROUP_TRIAL_REPLY_PRICING = os.getenv(
+    "GROUP_TRIAL_REPLY_PRICING",
+    "سلام {name} 👋\n"
+    "قیمت بسته به حجم و مدت‌ش فرق می‌کنه.\n"
+    "ولی اول می‌تونی با تست رایگان ببینی برات جواب می‌ده یا نه. 👇",
+)
+# The generic wording is GROUP_TRIAL_INVITE_TEXT above — the same sentence the
+# flow used before it could tell the cases apart, reused rather than duplicated
+# so there is exactly one place to edit it.
+
 
 # ---------------- Gemini: the second opinion on an ambiguous message ----------
 # The rule engine in app/intent.py is fast, free, offline and explainable, and it

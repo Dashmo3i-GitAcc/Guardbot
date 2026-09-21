@@ -24,7 +24,17 @@ from telegram.ext import (
     filters,
 )
 
-from . import ai_intent, burst, classifier, config, db, detector, moderation, vpnbot
+from . import (
+    ai_intent,
+    burst,
+    classifier,
+    config,
+    db,
+    detector,
+    moderation,
+    responses,
+    vpnbot,
+)
 from .decision import Decision, default_engine
 
 logging.basicConfig(
@@ -901,7 +911,18 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if result.get("ok") and result.get("deep_link"):
         db.mark_offered(chat.id, user.id, "invited")
-        text = f"{config.GROUP_TRIAL_INVITE_TEXT.format(name=name)}\n\n{config.GROUP_TRIAL_HINT}"
+        # The words are chosen from what the message was about, but every one of
+        # them comes from app/config.py — the model selected a key, not a
+        # sentence, and it never sees or writes the link.
+        kind, text = responses.reply_for(match, name)
+        log.info(
+            "acquisition reply for %s kind=%s source=%s category=%s problem=%s",
+            user.id,
+            kind,
+            match.source,
+            (match.ai.category if match.ai else "") or "-",
+            (match.ai.problem_kind if match.ai else "") or "-",
+        )
         await _reply_in_group(
             ctx,
             chat.id,

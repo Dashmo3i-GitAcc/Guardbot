@@ -64,23 +64,33 @@ def _log(verdict: Verdict, user_id) -> None:
     Deliberately one line rather than several: the interesting question is
     always "why did (or didn't) this message get an offer", and that is only
     answerable if the rule verdict and the AI verdict are visible together.
+
+    Every AI field is read through ``ai is not None`` rather than ``if ai``.
+    ``AiVerdict.__bool__`` reports *relevance*, so truthiness blanks the whole
+    AI half of the line on exactly the verdicts worth investigating — the ones
+    where the model was asked and said no. That was a real defect: a successful
+    `200 OK` answering ``ordinary_conversation`` printed as
+    ``ai_consulted=False ai_category=-``, which reads as "never asked".
     """
     ai = verdict.ai
     log.info(
         "[intent] user=%s triggered=%s source=%s score=%d rules=%s "
-        "ai_consulted=%s ai_skip=%s ai_error=%s ai_category=%s ai_confidence=%.2f "
+        "ai_consulted=%s ai_skip=%s ai_error=%s ai_category=%s "
+        "ai_problem=%s ai_response=%s ai_confidence=%.2f "
         "ai_reason=%s text=%r",
         user_id,
         verdict.triggered,
         verdict.source,
         verdict.score,
         ",".join(verdict.reasons) or "-",
-        bool(ai and ai.consulted),
-        (ai.skipped if ai else "") or "-",
-        (ai.error if ai else "") or "-",
-        (ai.category if ai else "") or "-",
-        (ai.confidence if ai else 0.0),
-        (ai.reason if ai else "") or "-",
+        ai.consulted if ai is not None else False,
+        (ai.skipped if ai is not None else "") or "-",
+        (ai.error if ai is not None else "") or "-",
+        (ai.category if ai is not None else "") or "-",
+        (ai.problem_kind if ai is not None else "") or "-",
+        (ai.response_kind if ai is not None else "") or "-",
+        (ai.confidence if ai is not None else 0.0),
+        (ai.reason if ai is not None else "") or "-",
         verdict.normalised[:120],
     )
 

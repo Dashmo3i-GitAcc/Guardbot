@@ -284,3 +284,75 @@ def test_the_log_line_names_the_user_and_both_verdicts(monkeypatch, caplog):
     assert "source=ai" in text
     assert "ai_category=connectivity_problem" in text
     assert "ai_confidence=0.80" in text
+
+
+# ── The AI half of the line, on the verdicts actually worth reading ───────
+# `AiVerdict.__bool__` reports *relevance*, so reading the AI fields through
+# truthiness blanked them on exactly the verdicts an investigation wants: the
+# ones where the model was asked and said no. A live `200 OK` answering
+# `ordinary_conversation` printed as `ai_consulted=False ai_category=-`, which
+# reads as "never asked" — the opposite of what had just happened.
+def test_a_declined_verdict_still_reports_that_the_model_was_asked(monkeypatch, caplog):
+    install(
+        monkeypatch,
+        says(
+            is_relevant=False,
+            needs_acquisition_offer=False,
+            intent_category="ordinary_conversation",
+            confidence=0.9,
+            reason="Just chatting.",
+        ),
+    )
+
+    with caplog.at_level("INFO"):
+        verdict = classify("vpn چیه؟", user_id=4242)
+
+    assert verdict.triggered is False
+    assert verdict.source == classifier.SOURCE_AI, "the model did decide this"
+
+    text = caplog.text
+    assert "ai_consulted=True" in text
+    assert "ai_category=ordinary_conversation" in text
+    assert "ai_confidence=0.90" in text
+    assert "ai_reason=Just chatting." in text
+
+
+def test_a_failed_call_still_reports_that_the_model_was_asked(monkeypatch, caplog):
+    install(monkeypatch, TimeoutError("slow"))
+
+    with caplog.at_level("INFO"):
+        classify("اینستاگرام باز نمیشه", user_id=99)
+
+    text = caplog.text
+    assert "ai_consulted=True" in text
+    assert "ai_error=-" not in text, "the failure must be named, not blanked"
+
+
+def test_a_message_the_rules_never_escalated_has_no_ai_half_to_read(monkeypatch, caplog):
+    recorder = install(monkeypatch, says())
+
+    with caplog.at_level("INFO"):
+        verdict = classify("سلام خوبی؟", user_id=7)
+
+    assert recorder.count == 0, "a greeting is not worth a call"
+    assert verdict.triggered is False
+    assert "ai_consulted" not in caplog.text
+
+
+def test_the_line_carries_the_two_presentation_hints(monkeypatch, caplog):
+    """So a reply that reads oddly can be traced to the key that chose it."""
+    install(
+        monkeypatch,
+        says(
+            intent_category="connectivity_problem",
+            problem_kind="slow_or_unstable",
+            response_kind="connectivity_offer",
+        ),
+    )
+
+    with caplog.at_level("INFO"):
+        classify("اینترنت امروز خیلی ضعیف شده", user_id=5)
+
+    text = caplog.text
+    assert "ai_problem=slow_or_unstable" in text
+    assert "ai_response=connectivity_offer" in text
