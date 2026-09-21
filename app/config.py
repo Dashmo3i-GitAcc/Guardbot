@@ -1000,3 +1000,245 @@ MOD_COMMAND_FAILED_TEXT = os.getenv(
 
 
 
+
+
+# ---------------- The Gemini account pool ------------------------------------
+# Every workload above is backed by a *pool* rather than a single credential.
+# See ``app/gemini_pool.py`` for the two levels of failover; what lives here is
+# only the configuration.
+#
+# The rule that shapes all of it: **every API key is a separate Google account
+# and a separate project**, with its own quota. Two keys are not one bigger
+# allowance, and nothing here may treat them as interchangeable. That is why
+# ``app/gemini_pool.py`` keeps per-account state and why a key that appears in
+# two slots is collapsed to one account rather than counted twice.
+
+# Ask the provider which models each credential can actually see. Verified
+# against the live API: ``models.list`` returns names, token limits and
+# supported generation methods, and *nothing else* — in particular it does not
+# report input or output modalities. So discovery answers "does this model exist
+# for this key", and capability stays a curated table in the pool module.
+GEMINI_POOL_DISCOVERY_ENABLED = _bool("GEMINI_MODEL_DISCOVERY_ENABLED", True)
+# How long a discovery result is trusted before it is asked for again.
+GEMINI_POOL_DISCOVERY_TTL = _int("GEMINI_MODEL_DISCOVERY_TTL", 21600)
+
+# Cooldowns. These are the three different reasons a resource goes quiet, and
+# they are deliberately different lengths: a model rate limit clears in seconds
+# to a minute, a project quota in minutes to hours, and a transient provider
+# wobble almost immediately.
+GEMINI_POOL_MODEL_COOLDOWN = _int("GEMINI_POOL_MODEL_COOLDOWN", 120)
+GEMINI_POOL_QUOTA_COOLDOWN = _int("GEMINI_POOL_QUOTA_COOLDOWN", 900)
+GEMINI_POOL_TRANSIENT_COOLDOWN = _int("GEMINI_POOL_TRANSIENT_COOLDOWN", 15)
+
+# Owner notifications are deduplicated per (workload, event, account, model)
+# against this window, so a hundred consecutive 429s produce one message.
+GEMINI_POOL_NOTIFY_COOLDOWN = _int("GEMINI_POOL_NOTIFY_COOLDOWN", 900)
+
+# A hard ceiling on provider calls for one logical request. Without it a large
+# pool with retries could spend a minute of wall clock on a single message.
+GEMINI_POOL_MAX_ATTEMPTS = _int("GEMINI_POOL_MAX_ATTEMPTS", 12)
+
+# The model preference order. The primary is tried first and the rest only when
+# it is unavailable, which is why normal operation is unchanged by the pool.
+#
+# Every name here is validated before use: discovery must list it, and its
+# family must be capable of the workload. A name that fails either check is
+# skipped silently rather than being sent and rejected. Nothing in this list is
+# invented — all of them were returned by the live API on 2026-09-21.
+DEFAULT_FALLBACK_MODELS = (
+    "gemini-flash-lite-latest,gemini-flash-latest,gemini-2.5-flash-lite,"
+    "gemini-2.5-flash,gemini-3.1-flash-lite,gemini-3.5-flash-lite,"
+    "gemini-3.5-flash,gemini-pro-latest,gemini-2.5-pro"
+)
+# Transcription has its own order. ``gemini-3.5-transcribe`` is purpose-built
+# and appears last rather than first: it is unmeasured on this deployment, and
+# a working default should not be replaced by an assumption.
+DEFAULT_TRANSCRIBE_FALLBACKS = (
+    "gemini-flash-lite-latest,gemini-flash-latest,gemini-2.5-flash,"
+    "gemini-2.5-flash-lite,gemini-2.5-pro,gemini-3.5-transcribe"
+)
+# Speech synthesis exists only as preview models, so this is the one workload
+# that opts into them. It is stated here rather than assumed in the pool.
+DEFAULT_TTS_FALLBACKS = (
+    "gemini-3.1-flash-tts-preview,gemini-2.5-flash-preview-tts,"
+    "gemini-2.5-pro-preview-tts"
+)
+
+GEMINI_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS)
+)
+GEMINI_CHAT_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_CHAT_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS)
+)
+GEMINI_MOD_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_MOD_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS)
+)
+TRANSCRIBE_FALLBACK_MODELS = _str_list(
+    os.getenv("TRANSCRIBE_FALLBACK_MODELS", DEFAULT_TRANSCRIBE_FALLBACKS)
+)
+GEMINI_CHAT_TTS_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_CHAT_TTS_FALLBACK_MODELS", DEFAULT_TTS_FALLBACKS)
+)
+
+
+def _pool_key_list(primary: str, prefix: str, shared: list, allow_shared: bool):
+    """The ordered ``(slot, credential)`` pairs for one workload.
+
+    Slot 1 is the workload's own primary key. ``<PREFIX>_2`` … ``<PREFIX>_20``
+    are extra credentials for *this* workload only, which is how an operator
+    gives one workload a deeper pool without loosening the isolation of the
+    others. The shared pool is added only when the workload opts in with its
+    existing ``*_ALLOW_SHARED_KEY`` flag.
+
+    Duplicates are dropped here as well as in the pool, so the configuration is
+    honest about how many accounts it really describes.
+    """
+    out: list = []
+    seen: set = set()
+
+    def add(slot: str, value: str) -> None:
+        key = (value or "").strip()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        out.append((slot, key))
+
+    add("1", primary)
+    for index in range(2, 21):
+        add(str(index), os.getenv(f"{prefix}_{index}", ""))
+    if allow_shared:
+        for index, key in enumerate(shared, start=1):
+            add(f"shared{index}", key)
+    return out
+
+
+def _shared_pool_keys() -> list:
+    """Credentials any workload may draw on when it opts in.
+
+    Two spellings, both supported because the brief used both: numbered slots
+    (``GEMINI_KEY_1`` … ``GEMINI_KEY_20``) and one comma-separated list
+    (``GEMINI_POOL_KEYS``). Order is preserved, so the numbered slots are tried
+    first.
+    """
+    keys: list = []
+    for index in range(1, 21):
+        value = os.getenv(f"GEMINI_KEY_{index}", "").strip()
+        if value:
+            keys.append(value)
+    keys.extend(_str_list(os.getenv("GEMINI_POOL_KEYS", "")))
+    return keys
+
+
+SHARED_POOL_KEYS = _shared_pool_keys()
+
+
+def _models(primary: str, fallbacks: list) -> list:
+    """The preference order: the primary first, then the fallbacks, deduped."""
+    order: list = []
+    for name in [primary, *fallbacks]:
+        clean = (name or "").strip()
+        if clean and clean not in order:
+            order.append(clean)
+    return order
+
+
+# The API's own floor on a manually-set deadline. Verified the expensive way:
+# with a 6-second deadline every call answers
+#
+#   400 INVALID_ARGUMENT  Manually set deadline 6s is too short.
+#                        Minimum allowed deadline is 10s.
+#
+# so the layer looks active and answers nothing. Each workload clamps its own
+# timeout; the pool has to clamp too, or an operator lowering one of those
+# variables would reintroduce the same silent, total failure through the pool.
+MIN_GEMINI_DEADLINE_SECONDS = 10.0
+
+
+def _deadline(seconds: float) -> float:
+    return max(MIN_GEMINI_DEADLINE_SECONDS, float(seconds))
+
+
+# The pool definitions, one per AI workload. ``capabilities`` is what the
+# workload needs a model to be able to do; the pool refuses to offer a model
+# that does not satisfy it in full, which is what stops a text-only model being
+# handed an image or an audio model being asked for text.
+GEMINI_POOLS = [
+    {
+        "workload": "intent",
+        "keys": _pool_key_list(
+            GEMINI_API_KEY, "GEMINI_API_KEY", SHARED_POOL_KEYS, True
+        ),
+        "models": _models(GEMINI_MODEL, GEMINI_FALLBACK_MODELS),
+        "capabilities": frozenset({"text"}),
+        "allow_experimental": False,
+        "retries": GEMINI_MAX_RETRIES,
+        "backoff": GEMINI_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_TIMEOUT_SECONDS),
+    },
+    {
+        "workload": "chat",
+        "keys": _pool_key_list(
+            GEMINI_CHAT_API_KEY,
+            "GEMINI_CHAT_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_CHAT_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(GEMINI_CHAT_MODEL, GEMINI_CHAT_FALLBACK_MODELS),
+        "capabilities": frozenset({"text"}),
+        "allow_experimental": False,
+        "retries": GEMINI_CHAT_MAX_RETRIES,
+        "backoff": GEMINI_CHAT_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_CHAT_TIMEOUT_SECONDS),
+    },
+    {
+        "workload": "moderation",
+        "keys": _pool_key_list(
+            GEMINI_MOD_API_KEY,
+            "GEMINI_MOD_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_MOD_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(GEMINI_MOD_MODEL, GEMINI_MOD_FALLBACK_MODELS),
+        # Moderation is the media workload: it sends images and extracted video
+        # frames, so its models must accept both. This is the requirement that
+        # must never be relaxed to keep a request alive.
+        "capabilities": frozenset({"text", "image", "video"}),
+        "allow_experimental": False,
+        "retries": GEMINI_MOD_MAX_RETRIES,
+        "backoff": GEMINI_MOD_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_MOD_TIMEOUT_SECONDS),
+    },
+    {
+        "workload": "transcribe",
+        "keys": _pool_key_list(
+            TRANSCRIBE_API_KEY,
+            "TRANSCRIBE_API_KEY",
+            SHARED_POOL_KEYS,
+            TRANSCRIBE_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(TRANSCRIBE_MODEL, TRANSCRIBE_FALLBACK_MODELS),
+        # Audio in, text out. A text-only model here would answer with a
+        # confident invention rather than an error, which is the worst possible
+        # failure for a transcript.
+        "capabilities": frozenset({"audio_in"}),
+        "allow_experimental": False,
+        "retries": TRANSCRIBE_MAX_RETRIES,
+        "backoff": TRANSCRIBE_BACKOFF_SECONDS,
+        "timeout": _deadline(TRANSCRIBE_TIMEOUT_SECONDS),
+    },
+    {
+        "workload": "tts",
+        "keys": _pool_key_list(
+            GEMINI_CHAT_API_KEY,
+            "GEMINI_CHAT_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_CHAT_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(GEMINI_CHAT_TTS_MODEL, GEMINI_CHAT_TTS_FALLBACK_MODELS),
+        "capabilities": frozenset({"audio_out"}),
+        "allow_experimental": True,
+        "retries": 0,
+        "backoff": GEMINI_CHAT_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_CHAT_TIMEOUT_SECONDS),
+    },
+]

@@ -152,6 +152,83 @@ def init() -> None:
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_admin_audit_at ON admin_audit(at)"
     )
+    # The Gemini account/model pool.
+    #
+    # Keyed by ``(workload, slot)`` rather than by slot alone, and that is the
+    # whole point: the same API key serving two workloads is two independent
+    # rows with two independent counters, two cooldowns and two failure states.
+    # Workload isolation is then a property of the primary key instead of a
+    # promise about how the code happens to call things. A key that is exhausted
+    # for moderation must not silently silence the classifier.
+    #
+    # The key itself is never stored. ``fingerprint`` is a truncated hash, used
+    # only to notice that two configured slots resolved to the same credential,
+    # and ``masked`` is the last four characters for an operator to recognise.
+    # Neither can be turned back into a credential.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS gemini_accounts (
+            workload TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            masked TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'ACTIVE',
+            cooldown_until INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            last_error_at INTEGER NOT NULL DEFAULT 0,
+            requests INTEGER NOT NULL DEFAULT 0,
+            successes INTEGER NOT NULL DEFAULT 0,
+            failures INTEGER NOT NULL DEFAULT 0,
+            rate_limits INTEGER NOT NULL DEFAULT 0,
+            quota_events INTEGER NOT NULL DEFAULT 0,
+            last_request INTEGER NOT NULL DEFAULT 0,
+            last_success INTEGER NOT NULL DEFAULT 0,
+            last_failure INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (workload, slot))"""
+    )
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS gemini_models (
+            workload TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            model TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'ACTIVE',
+            cooldown_until INTEGER NOT NULL DEFAULT 0,
+            requests INTEGER NOT NULL DEFAULT 0,
+            successes INTEGER NOT NULL DEFAULT 0,
+            failures INTEGER NOT NULL DEFAULT 0,
+            rate_limits INTEGER NOT NULL DEFAULT 0,
+            quota_events INTEGER NOT NULL DEFAULT 0,
+            last_use INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (workload, slot, model))"""
+    )
+    # Model discovery results, cached per credential fingerprint rather than per
+    # slot: two slots holding the same key share one project and therefore one
+    # model list, and asking the provider twice for it is a wasted call.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS gemini_discovery (
+            fingerprint TEXT PRIMARY KEY,
+            models TEXT NOT NULL DEFAULT '',
+            at INTEGER NOT NULL DEFAULT 0)"""
+    )
+    # Every meaningful pool event, and whether the owner has been told about it.
+    # The `notified` flag is what makes notification deduplication a database
+    # fact rather than a timer in one process: a restart cannot re-announce a
+    # failover that the owner has already read about.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS gemini_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at INTEGER NOT NULL,
+            workload TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            slot TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            notified INTEGER NOT NULL DEFAULT 0)"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gemini_events_dedup "
+        "ON gemini_events(workload, kind, slot, model, at)"
+    )
     _conn.commit()
 
 
@@ -700,3 +777,285 @@ def audit_recent(limit: int = 20) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ---- the Gemini account/model pool ----
+# Counters, cooldowns and events for the multi-account provider layer. Read and
+# written by ``app/gemini_pool.py``; nothing else should touch these tables.
+#
+# Everything here is persisted for the same reason the daily quota is: the
+# container is rebuilt on every deploy, and a usage history that resets with the
+# process cannot answer "is this account nearly spent?" — which is the only
+# question the pool exists to answer.
+
+# The account states. A closed set, so a typo cannot invent a state that the
+# status report then has to render.
+ACCOUNT_STATES = (
+    "ACTIVE",
+    "RATE_LIMITED",
+    "QUOTA_EXHAUSTED",
+    "INVALID",
+    "UNAVAILABLE",
+    "RECOVERING",
+    "DISABLED",
+)
+
+# The counter columns. Named here so a caller cannot pass an arbitrary string
+# that would become a column name in an UPDATE.
+ACCOUNT_COUNTERS = (
+    "requests",
+    "successes",
+    "failures",
+    "rate_limits",
+    "quota_events",
+)
+MODEL_COUNTERS = (
+    "requests",
+    "successes",
+    "failures",
+    "rate_limits",
+    "quota_events",
+)
+
+_ACCOUNT_FIELDS = (
+    "state",
+    "cooldown_until",
+    "last_error",
+    "last_error_at",
+    "last_request",
+    "last_success",
+    "last_failure",
+) + ACCOUNT_COUNTERS
+
+
+def pool_account_save(
+    workload: str,
+    slot: str,
+    fingerprint: str = "",
+    masked: str = "",
+    **values,
+) -> None:
+    """Write one account's state and counters. Unknown fields are dropped.
+
+    An upsert rather than an update, so a freshly added credential gets a row on
+    its first use without a separate registration step.
+    """
+    clean = {k: v for k, v in values.items() if k in _ACCOUNT_FIELDS}
+    columns = ["workload", "slot", "fingerprint", "masked", *clean]
+    params = [str(workload), str(slot), str(fingerprint), str(masked), *clean.values()]
+    placeholders = ",".join("?" for _ in columns)
+    updates = ",".join(f"{c}=excluded.{c}" for c in ("fingerprint", "masked", *clean))
+    _exec(
+        f"""INSERT INTO gemini_accounts ({",".join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT(workload, slot) DO UPDATE SET {updates}""",
+        tuple(params),
+    )
+
+
+def pool_account_bump(workload: str, slot: str, counter: str, amount: int = 1) -> None:
+    """Add to one counter column. The column is whitelisted, never interpolated
+    from the caller."""
+    if counter not in ACCOUNT_COUNTERS:
+        return
+    _exec(
+        f"""INSERT INTO gemini_accounts (workload, slot, {counter}) VALUES (?,?,?)
+            ON CONFLICT(workload, slot) DO UPDATE SET {counter} = {counter} + ?""",
+        (str(workload), str(slot), int(amount), int(amount)),
+    )
+
+
+def pool_accounts(workload: str | None = None) -> list[dict]:
+    """Account rows, optionally for one workload, ordered by slot."""
+    sql = (
+        "SELECT workload, slot, fingerprint, masked, "
+        + ", ".join(_ACCOUNT_FIELDS)
+        + " FROM gemini_accounts"
+    )
+    args: tuple = ()
+    if workload is not None:
+        sql += " WHERE workload=?"
+        args = (str(workload),)
+    sql += " ORDER BY workload, slot"
+    with _lock:
+        rows = _conn.execute(sql, args).fetchall()
+    names = ("workload", "slot", "fingerprint", "masked", *_ACCOUNT_FIELDS)
+    return [dict(zip(names, row)) for row in rows]
+
+
+def pool_model_save(
+    workload: str, slot: str, model: str, **values
+) -> None:
+    """Write one model's state and counters within one account."""
+    allowed = ("state", "cooldown_until", "last_use") + MODEL_COUNTERS
+    clean = {k: v for k, v in values.items() if k in allowed}
+    columns = ["workload", "slot", "model", *clean]
+    params = [str(workload), str(slot), str(model), *clean.values()]
+    placeholders = ",".join("?" for _ in columns)
+    updates = ",".join(f"{c}=excluded.{c}" for c in clean)
+    _exec(
+        f"""INSERT INTO gemini_models ({",".join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT(workload, slot, model) DO UPDATE SET {updates}""",
+        tuple(params),
+    )
+
+
+def pool_model_bump(
+    workload: str, slot: str, model: str, counter: str, amount: int = 1
+) -> None:
+    """Add to one model counter column, whitelisted the same way."""
+    if counter not in MODEL_COUNTERS:
+        return
+    _exec(
+        f"""INSERT INTO gemini_models (workload, slot, model, {counter})
+            VALUES (?,?,?,?)
+            ON CONFLICT(workload, slot, model) DO UPDATE SET
+                {counter} = {counter} + ?""",
+        (str(workload), str(slot), str(model), int(amount), int(amount)),
+    )
+
+
+def pool_models(workload: str | None = None) -> list[dict]:
+    """Model rows, optionally for one workload."""
+    sql = (
+        "SELECT workload, slot, model, state, cooldown_until, last_use, "
+        + ", ".join(MODEL_COUNTERS)
+        + " FROM gemini_models"
+    )
+    args: tuple = ()
+    if workload is not None:
+        sql += " WHERE workload=?"
+        args = (str(workload),)
+    sql += " ORDER BY workload, slot, model"
+    with _lock:
+        rows = _conn.execute(sql, args).fetchall()
+    names = ("workload", "slot", "model", "state", "cooldown_until", "last_use",
+             *MODEL_COUNTERS)
+    return [dict(zip(names, row)) for row in rows]
+
+
+def pool_event_add(
+    workload: str,
+    kind: str,
+    slot: str = "",
+    model: str = "",
+    reason: str = "",
+    detail: str = "",
+    at: int | None = None,
+) -> int:
+    """Record one pool event. Returns its row id."""
+    with _lock:
+        cur = _conn.execute(
+            "INSERT INTO gemini_events "
+            "(at, workload, kind, slot, model, reason, detail) VALUES (?,?,?,?,?,?,?)",
+            (
+                int(time.time()) if at is None else int(at),
+                str(workload)[:40],
+                str(kind)[:40],
+                str(slot)[:20],
+                str(model)[:80],
+                str(reason)[:60],
+                str(detail)[:200],
+            ),
+        )
+        _conn.commit()
+        return int(cur.lastrowid)
+
+
+def pool_events(limit: int = 20) -> list[dict]:
+    """The newest pool events, newest first."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT id, at, workload, kind, slot, model, reason, detail, notified "
+            "FROM gemini_events ORDER BY id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+    names = ("id", "at", "workload", "kind", "slot", "model", "reason",
+             "detail", "notified")
+    return [dict(zip(names, row)) for row in rows]
+
+
+def pool_last_notified(
+    workload: str, kind: str, slot: str = "", model: str = ""
+) -> int:
+    """When the owner was last told about this exact event, or 0.
+
+    The deduplication key is ``(workload, kind, slot, model)``: one hundred
+    consecutive 429s on one model are one notification, but the same event on a
+    second account is its own message, because that is the one that says the
+    pool is shrinking.
+    """
+    with _lock:
+        row = _conn.execute(
+            "SELECT MAX(at) FROM gemini_events "
+            "WHERE workload=? AND kind=? AND slot=? AND model=? AND notified=1",
+            (str(workload), str(kind), str(slot), str(model)),
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def pool_event_mark_notified(event_id: int) -> None:
+    _exec("UPDATE gemini_events SET notified=1 WHERE id=?", (int(event_id),))
+
+
+def pool_counts(workload: str | None = None) -> dict:
+    """Totals across every account, for the owner's report."""
+    args: tuple = ()
+    where = ""
+    if workload is not None:
+        where = " WHERE workload=?"
+        args = (str(workload),)
+    with _lock:
+        row = _conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(requests),0), COALESCE(SUM(successes),0), "
+            "COALESCE(SUM(failures),0), COALESCE(SUM(rate_limits),0), "
+            "COALESCE(SUM(quota_events),0) FROM gemini_accounts" + where,
+            args,
+        ).fetchone()
+    return dict(
+        zip(
+            ("accounts", "requests", "successes", "failures", "rate_limits",
+             "quota_events"),
+            (int(v or 0) for v in row),
+        )
+    )
+
+
+def discovery_get(fingerprint: str, ttl: int) -> list[str] | None:
+    """The cached model list for one credential, or None when stale or absent."""
+    if not fingerprint:
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT models, at FROM gemini_discovery WHERE fingerprint=?",
+            (str(fingerprint),),
+        ).fetchone()
+    if not row:
+        return None
+    models, at = row[0] or "", int(row[1] or 0)
+    if int(time.time()) - at > max(0, int(ttl)):
+        return None
+    return [m for m in models.split(",") if m]
+
+
+def discovery_put(fingerprint: str, models) -> None:
+    """Cache one credential's model list."""
+    if not fingerprint:
+        return
+    _exec(
+        """INSERT INTO gemini_discovery (fingerprint, models, at) VALUES (?,?,?)
+           ON CONFLICT(fingerprint) DO UPDATE SET
+               models=excluded.models, at=excluded.at""",
+        (str(fingerprint), ",".join(models), int(time.time())),
+    )
+
+
+def pool_reset() -> None:
+    """Drop all pool state. For tests and for an operator starting over."""
+    with _lock:
+        _conn.execute("DELETE FROM gemini_accounts")
+        _conn.execute("DELETE FROM gemini_models")
+        _conn.execute("DELETE FROM gemini_events")
+        _conn.execute("DELETE FROM gemini_discovery")
+        _conn.commit()
