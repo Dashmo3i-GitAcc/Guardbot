@@ -350,13 +350,43 @@ def status() -> dict:
         "shares_google_project": shares_google_project(),
         "model": config.GEMINI_CHAT_MODEL,
         "pool": pool.status() if pool is not None else None,
+        # Per *account*. The pool multiplies it by however many chat accounts
+        # are configured; `daily_remaining` below is the number that is actually
+        # spendable, and `used_today` stays as the deployment-wide count the log
+        # has always carried.
         "daily_limit": int(config.GEMINI_CHAT_DAILY_LIMIT),
+        "daily_limit_per_account": True,
+        "daily_remaining": pool.daily_remaining() if pool is not None else 0,
         "used_today": db.chat_calls_today(),
         "history_turns": int(config.GEMINI_CHAT_HISTORY_TURNS),
         "history_ttl": int(config.GEMINI_CHAT_HISTORY_TTL),
         "voice_reply": bool(config.GEMINI_CHAT_VOICE_REPLY),
         "tts_model": config.GEMINI_CHAT_TTS_MODEL if config.GEMINI_CHAT_VOICE_REPLY else "",
     }
+
+
+def _daily_allowance_left() -> bool:
+    """Whether any chat account still has allowance for the day.
+
+    The allowance belongs to an *account*, so the pool is what answers this: it
+    is the only thing that knows that the first account's day is spent and the
+    second's is not. A single counter for the whole deployment was the bug —
+    it reached zero while a second configured account with a full day sat
+    unused, and the group was told its quota was gone when it was not.
+
+    Takes no clock. The rest of this module measures intervals against
+    ``time.monotonic()``, but a *day* is a calendar fact and only the wall clock
+    can answer it; the pool reads that itself. Handing it the monotonic reading
+    would date the allowance to 1970 and quietly disable the cap.
+
+    The counter is still the answer when the deployment has no pool, because
+    then there is no account to attribute an allowance to and one number really
+    is the whole truth. That path is unchanged.
+    """
+    pool = gemini_pool.pool_for("chat")
+    if pool is not None and pool.enabled:
+        return not pool.daily_exhausted()
+    return db.chat_calls_today() < max(1, int(config.GEMINI_CHAT_DAILY_LIMIT))
 
 
 def _rate_limited(now: float) -> bool:
@@ -1066,7 +1096,7 @@ async def reply(
         return _skip("user_rate_limit", limit=int(config.GEMINI_CHAT_USER_RATE_LIMIT))
     if _rate_limited(now):
         return _skip("rate_limit", limit=int(config.GEMINI_CHAT_RATE_LIMIT))
-    if db.chat_calls_today() >= max(1, int(config.GEMINI_CHAT_DAILY_LIMIT)):
+    if not _daily_allowance_left():
         return _skip("daily_cap", limit=int(config.GEMINI_CHAT_DAILY_LIMIT))
 
     # Read once, and used for both the payload and the repetition check. Two

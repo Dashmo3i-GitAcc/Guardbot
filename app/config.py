@@ -518,6 +518,19 @@ GEMINI_CHAT_USER_RATE_WINDOW = _float("GEMINI_CHAT_USER_RATE_WINDOW", 30.0)
 
 # Its own daily ceiling, counted on the same Pacific boundary but in its own
 # table, so the two can never be added together by accident.
+#
+# **This is a per-account allowance, not a deployment-wide one.** It is handed
+# to the chat pool, which spends one account's day and then fails over to the
+# next — the same failover it performs for a 429 — so a deployment with two chat
+# accounts can serve twice this per day, and one with three can serve three
+# times it. That is the point: a single shared ceiling was reached while a
+# second configured key with a full day sat unused, and the group was told its
+# quota was used up when it was not.
+#
+# The workload still reports `daily_cap` to a user only when *every* chat
+# account has spent its own allowance. The total actually spendable is
+# `GEMINI_CHAT_DAILY_LIMIT × number of chat accounts`, and `/chat` reports the
+# remaining figure directly rather than leaving it to be worked out.
 GEMINI_CHAT_DAILY_LIMIT = _int("GEMINI_CHAT_DAILY_LIMIT", 200)
 
 GEMINI_CHAT_CIRCUIT_FAILURES = _int("GEMINI_CHAT_CIRCUIT_FAILURES", 5)
@@ -1304,6 +1317,14 @@ GEMINI_POOLS = [
         "retries": GEMINI_CHAT_MAX_RETRIES,
         "backoff": GEMINI_CHAT_BACKOFF_SECONDS,
         "timeout": _deadline(GEMINI_CHAT_TIMEOUT_SECONDS),
+        # The only workload with a per-account daily allowance. It is the same
+        # number the workload's own daily cap always used, but it now belongs to
+        # each account rather than to the deployment, so the total a deployment
+        # can serve is the allowance times the number of chat accounts — and the
+        # pool fails over from a spent account to a fresh one instead of
+        # stopping. The floor of 1 preserves the old meaning of 0, which used to
+        # mean "one request, then stop".
+        "daily_budget": max(1, GEMINI_CHAT_DAILY_LIMIT),
     },
     {
         "workload": "moderation",

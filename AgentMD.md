@@ -1147,7 +1147,7 @@ ones that matter:
 | `GEMINI_CHAT_MODEL` | `gemini-flash-lite-latest` | its own setting; a longer reply read by a human is a different job from a one-word classification. Measured options in §17.2.1 — the `-latest` alias is deliberate |
 | `GEMINI_CHAT_TIMEOUT_SECONDS` | `25.0` | longer than the classifier's 10s — a person will wait, a message handler cannot |
 | `GEMINI_CHAT_RATE_LIMIT` / `WINDOW` | `6` / `60s` | lower than the classifier's: each request is larger |
-| `GEMINI_CHAT_DAILY_LIMIT` | `200` | its own table, so the two can never be summed |
+| `GEMINI_CHAT_DAILY_LIMIT` | `200` | **per account**, not per bot: the pool spends one account's day and fails over to the next (§29.14) |
 | `GEMINI_CHAT_HISTORY_TURNS` | `8` | turns replayed to the model |
 | `GEMINI_CHAT_HISTORY_TTL` | `1800` | how long a quiet conversation is remembered |
 | `GEMINI_CHAT_REPLY_CHARS` | `3500` | Telegram's hard limit is 4096; the margin is for escaping |
@@ -2653,3 +2653,119 @@ is made without tools, so the model has to answer in words.
    gateway recorded no calls. A refusal the bot prints while still calling the
    API is not a refusal, and that is the one failure mode this suite is built to
    make impossible.
+
+### 29.14 The conversational daily allowance belongs to an account
+
+The chat workload has a daily allowance, and it is now **per account**. With two
+chat keys and `GEMINI_CHAT_DAILY_LIMIT=200`, the bot can serve 400 conversations
+a day, and it says "سهم امروز چت تموم شده" only when *both* accounts have spent
+their own 200.
+
+#### The incident this fixes
+
+The allowance used to be one counter for the whole deployment, in
+`chat_usage`, keyed by day alone:
+
+```sql
+-- the columns, before
+day, calls, replies, malformed, errors, skipped
+```
+
+There is no account column there, and that was the bug. A second configured key
+with a completely fresh day's allowance bought nothing, because the gate was
+`db.chat_calls_today() >= GEMINI_CHAT_DAILY_LIMIT` — a question about the
+*deployment* — and it was asked before the pool was ever consulted. So the
+group was told its quota was gone while half the pool sat idle. Observed live on
+2026-09-21: 500 calls against a cap of 500, both chat accounts `ACTIVE` with zero
+cooldowns and zero quota events, and the credential answering a real request in
+four seconds.
+
+#### How it works now
+
+A new table, `gemini_daily(workload, slot, day, calls)`, records how many
+provider requests each account has spent on the current day. It is a separate
+table rather than extra columns on `gemini_accounts` for two reasons: the
+lifetime counters there are the account's health record and must not be reset by
+a day boundary, and `CREATE TABLE IF NOT EXISTS` needs no migration where an
+added column would.
+
+`Account.usable()` now also requires the account to be under its allowance, so
+the pool stops offering a spent account and moves to the next — the same
+mechanism it already uses for a 429. `Pool.daily_exhausted()` is the *only*
+question that may produce the "quota is used up" message, and it is asked of the
+accounts:
+
+```python
+if not self.daily_budget or not self.accounts:
+    return False
+return all(a.daily_exhausted(now) for a in self.accounts)
+```
+
+Two properties of that line are deliberate:
+
+* **It is `all`, over accounts.** One counter reaching zero was the bug; the
+  message is now only produced when there is genuinely nothing left to try.
+* **Cooldowns are ignored.** An account that has allowance but is briefly
+  cooling down is a transient failure, not an exhausted quota. Conflating them
+  would send somebody away for a day over a minute.
+
+Only the chat workload sets `daily_budget`; it is 0 — unlimited — for
+acquisition, moderation, transcription and TTS, so their provider use is
+unchanged. `spec.get("daily_budget", 0)` in `build_pools()` is what keeps that
+true.
+
+#### The two clocks, and the bug that found itself
+
+A day is a calendar fact; a cooldown is an interval. The rest of `app/chat.py`
+measures intervals against `time.monotonic()`, and the first version of this
+change passed that monotonic reading into the allowance check. `db.ai_day()` on
+a monotonic timestamp lands in 1970, so the allowance was written under one day
+and read under another and the cap silently never fired.
+
+The fix is structural rather than a corrected argument: `daily_calls`,
+`daily_exhausted`, `daily_remaining` and `Pool.daily_exhausted` take **no clock
+at all** and read `time.time()` themselves. `Account.usable()` calls
+`self.daily_exhausted()` with no argument rather than forwarding the `now` it
+was given. The calendar is now behind a boundary that cannot be handed the wrong
+clock, which is a stronger guarantee than remembering not to. The test that
+caught it is `test_the_user_is_told_only_once_every_account_is_out`, which drives
+`chat.reply` — the one path that had the monotonic clock in scope.
+
+#### The fallback is unchanged
+
+A deployment with no pool has no account to attribute an allowance to, so one
+counter really is the whole truth and the old behaviour stands exactly as it was,
+including its floor of one. `_daily_allowance_left()` decides between the two:
+
+```python
+pool = gemini_pool.pool_for("chat")
+if pool is not None and pool.enabled:
+    return not pool.daily_exhausted()
+return db.chat_calls_today() < max(1, int(config.GEMINI_CHAT_DAILY_LIMIT))
+```
+
+#### What the model-level failover was already doing
+
+The other half of the request — "use all compatible models, fail over when one
+is limited" — needed no change. The chat pool is configured with eight
+compatible models and, when a model answers 429, that *model* is benched on that
+account and the next compatible one is tried before the account is abandoned at
+all. That distinction is §28.2, and it was verified live rather than inferred:
+`tests/test_gemini_pool.py` covers it with a scripted provider, and
+`test_a_spent_account_is_skipped_and_the_request_is_served_by_the_next` in
+`tests/test_chat_daily_budget.py` covers the new allowance composing with it
+through `generate()` rather than around it.
+
+#### Verifying it
+
+```bash
+# The allowance suite: per-account spending, the `all` question, the rollover,
+# the fallback, and that the other workloads have no allowance at all.
+.venv-test/bin/python -m pytest tests/test_chat_daily_budget.py -q
+
+# What is left across the whole chat pool right now.
+docker exec -w /srv guardbot python -c "
+from app import db, gemini_pool; db.init()
+p = gemini_pool.pool_for('chat')
+print(p.daily_remaining(), 'of', p.daily_budget * len(p.accounts))"
+```

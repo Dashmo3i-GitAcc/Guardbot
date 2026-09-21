@@ -267,6 +267,31 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_gemini_events_dedup "
         "ON gemini_events(workload, kind, slot, model, at)"
     )
+    # How many provider requests each account has spent *today*.
+    #
+    # Lifetime totals live on `gemini_accounts` and are that account's health
+    # record; this is a per-day spend that has to be able to reset without
+    # disturbing them, which is why it is its own table rather than more columns
+    # on the account row. A "day" here is the API day (`ai_day`), not midnight
+    # local, so an allowance resets when the provider's own quota does.
+    #
+    # It exists so a daily allowance can belong to an *account* rather than to
+    # the deployment. One shared counter for the whole bot meant the second
+    # configured key bought nothing: the cap was reached while a healthy account
+    # with a full allowance sat unused. Per account, the pool spends one
+    # account's day and then moves to the next — the same failover it already
+    # performs for a 429.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS gemini_daily (
+            workload TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            day TEXT NOT NULL,
+            calls INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (workload, slot, day))"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gemini_daily_day ON gemini_daily(day)"
+    )
     _conn.commit()
 
 
@@ -1177,6 +1202,70 @@ def pool_last_event(
             (str(workload), str(kind), str(slot), str(model)),
         ).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+def daily_add(workload: str, slot: str, day: str) -> int:
+    """Count one provider request against an account's day. Returns the new total.
+
+    A separate table from ``gemini_accounts`` on purpose. The counters there are
+    *lifetime* totals and are the account's health record; this one is a
+    per-day spend that must be able to reset without touching them, and a
+    ``CREATE TABLE IF NOT EXISTS`` needs no migration where an added column
+    would.
+
+    The increment is an atomic upsert rather than a read-modify-write, for the
+    same reason the lifetime counters are: two concurrent requests in this
+    process must not be able to lose one another's count, or an account would
+    serve more than its allowance precisely when the bot is busy.
+    """
+    key = str(day)
+    with _lock:
+        _conn.execute(
+            """INSERT INTO gemini_daily (workload, slot, day, calls)
+               VALUES (?,?,?,1)
+               ON CONFLICT(workload, slot, day) DO UPDATE SET calls = calls + 1""",
+            (str(workload), str(slot), key),
+        )
+        _conn.commit()
+        row = _conn.execute(
+            "SELECT calls FROM gemini_daily WHERE workload=? AND slot=? AND day=?",
+            (str(workload), str(slot), key),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def daily_for(workload: str, day: str) -> dict[str, int]:
+    """``slot -> calls`` for one workload on one day. Missing slots are absent.
+
+    Absent means zero, and the caller is expected to treat it that way: an
+    account that has never been used has no row, and inventing one on read
+    would make a fresh day look like a fresh start for some slots and not
+    others.
+    """
+    with _lock:
+        rows = _conn.execute(
+            "SELECT slot, calls FROM gemini_daily WHERE workload=? AND day=?",
+            (str(workload), str(day)),
+        ).fetchall()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+def daily_prune(keep_days: int) -> int:
+    """Drop day rows older than ``keep_days``. Returns rows removed.
+
+    Called on the pool path rather than by a scheduler, for the same reason the
+    audit retention is: this process has no scheduler, and a retention rule that
+    only runs when somebody remembers is not a retention rule.
+    """
+    if keep_days <= 0:
+        return 0
+    cutoff = time.strftime(
+        "%Y-%m-%d", time.gmtime(time.time() - int(keep_days) * 86400 - _API_DAY_OFFSET)
+    )
+    with _lock:
+        cur = _conn.execute("DELETE FROM gemini_daily WHERE day < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
 
 
 def pool_counts(workload: str | None = None) -> dict:

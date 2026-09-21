@@ -465,6 +465,15 @@ class Account:
         self.model_states: dict[str, "ModelState"] = {}
         self._persisted = False
 
+        # The per-account daily allowance, set by the pool after construction.
+        # 0 means unlimited, which is what every workload except chat uses.
+        self.daily_budget = 0
+        # Cached count for `_daily_day`. Read lazily and refreshed whenever the
+        # day turns over, so a long-running process picks up the new day without
+        # anything having to fire at midnight.
+        self._daily_day = ""
+        self._daily_calls = 0
+
     # -- persistence --
     def load(self) -> "Account":
         """Adopt the persisted rows, if there are any.
@@ -533,21 +542,73 @@ class Account:
         INVALID is terminal: a revoked credential is not going to start working,
         and hammering it wastes the request budget of every message that needs
         an answer.
+
+        A spent daily allowance is *not* terminal — it comes back when the day
+        turns over — so it is checked last and reported separately by
+        :meth:`daily_exhausted`, which is what lets the caller say "out of
+        allowance" rather than "out of accounts".
         """
         if self.state == "INVALID":
             return False
         if self.state in ("DISABLED",):
             return False
-        return self.cooldown_until <= int(now)
+        if self.cooldown_until > int(now):
+            return False
+        # No argument on purpose: the allowance is a calendar fact and reads the
+        # wall clock itself. See the note above ``daily_calls``.
+        return not self.daily_exhausted()
 
     def in_cooldown(self, now: float) -> bool:
         return self.cooldown_until > int(now)
+
+    # -- the per-account daily allowance --
+    #
+    # These deliberately take **no** clock from the caller, and default to
+    # ``time.time()``. A day is a calendar fact and can only be read from the
+    # wall clock, whereas the cooldown logic around them is about intervals and
+    # is happy with a monotonic one. Passing a caller's ``now`` in here is how
+    # the two get mixed, and a monotonic reading through ``ai_day`` lands in
+    # 1970 — so the allowance was written under one day and read under another,
+    # and the cap never fired. Keeping the calendar behind this boundary is what
+    # makes that impossible rather than merely unlikely.
+    def daily_calls(self, now: float | None = None) -> int:
+        """Provider requests this account has spent on the current API day.
+
+        Cached per day rather than per call: this is asked on every candidate
+        account for every request, and the day only changes once. The cache is
+        keyed by the day itself, so it cannot go stale — reading a new day is
+        what refreshes it.
+        """
+        if not self.daily_budget:
+            return 0
+        day = db.ai_day(time.time() if now is None else now)
+        if day != self._daily_day:
+            self._daily_day = day
+            self._daily_calls = db.daily_for(self.workload, day).get(self.slot, 0)
+        return self._daily_calls
+
+    def daily_exhausted(self, now: float | None = None) -> bool:
+        """Whether this account has spent its whole allowance for the day.
+
+        False when no allowance is configured, which is the case for every
+        workload but chat.
+        """
+        if not self.daily_budget:
+            return False
+        return self.daily_calls(now) >= self.daily_budget
 
     def note_request(self, now: float) -> None:
         self.requests += 1
         self.last_request = int(now)
         db.pool_account_bump(self.workload, self.slot, "requests")
         db.pool_account_save(self.workload, self.slot, last_request=int(now))
+        if self.daily_budget:
+            # Counted here rather than at the call site because this is the one
+            # place that already means "a provider request is about to be spent
+            # on this account", and a second place would eventually disagree.
+            # The day comes from the wall clock, never from ``now``.
+            self._daily_day = db.ai_day()
+            self._daily_calls = db.daily_add(self.workload, self.slot, self._daily_day)
 
     def note_success(self, now: float) -> bool:
         """Record a success. Returns True when this was a recovery.
@@ -787,8 +848,18 @@ class Pool:
         retries: int = 0,
         backoff: float = 1.5,
         timeout: float = 10.0,
+        daily_budget: int = 0,
     ):
-        """``keys`` is an ordered list of ``(slot, credential)`` pairs."""
+        """``keys`` is an ordered list of ``(slot, credential)`` pairs.
+
+        ``daily_budget`` is a per-account allowance of provider requests per API
+        day, and 0 means unlimited. It is per *account* rather than per pool on
+        purpose: a single shared allowance for the whole workload is reached
+        while a second configured account still has a full day available, which
+        makes the second account worth nothing. Per account, the pool spends one
+        account's day and then fails over to the next exactly as it does for a
+        429 — so the allowance scales with the pool instead of capping it.
+        """
         self.workload = workload
         self.capabilities = capabilities
         self.models = [m for m in models if m]
@@ -796,6 +867,7 @@ class Pool:
         self.retries = max(0, int(retries))
         self.backoff = max(0.0, float(backoff))
         self.timeout = max(1.0, float(timeout))
+        self.daily_budget = max(0, int(daily_budget))
         self.accounts: list[Account] = []
         self._discovery: dict[str, list[str] | None] = {}
         seen: set[str] = set()
@@ -808,7 +880,9 @@ class Pool:
                 # invent a quota that does not exist.
                 continue
             seen.add(fp)
-            self.accounts.append(Account(workload, str(slot), key).load())
+            account = Account(workload, str(slot), key).load()
+            account.daily_budget = self.daily_budget
+            self.accounts.append(account)
 
     @property
     def enabled(self) -> bool:
@@ -826,6 +900,35 @@ class Pool:
         usable = [a for a in self.accounts if a.usable(now)]
         usable.sort(key=lambda a: (a.last_success or 0, a.slot))
         return usable
+
+    def daily_exhausted(self, now: float | None = None) -> bool:
+        """Whether *every* account has spent its allowance for the day.
+
+        This is the only question that may produce a "your daily quota is used
+        up" message, and it is deliberately asked of the accounts rather than of
+        a single counter. One shared counter reached zero while a second account
+        with a full day sat unused, and the bot told the group its quota was
+        gone — which was false.
+
+        Cooldowns are ignored here on purpose. An account that has allowance but
+        is briefly cooling down is a transient failure, not an exhausted quota,
+        and conflating the two would send people away for a day over a minute.
+        """
+        if not self.daily_budget or not self.accounts:
+            return False
+        return all(a.daily_exhausted(now) for a in self.accounts)
+
+    def daily_remaining(self, now: float | None = None) -> int:
+        """Provider requests left across the pool today. For the owner report.
+
+        An account with no budget configured contributes nothing, so a workload
+        without an allowance reports 0 rather than a misleading infinity.
+        """
+        if not self.daily_budget:
+            return 0
+        return sum(
+            max(0, self.daily_budget - a.daily_calls(now)) for a in self.accounts
+        )
 
     def models_for(self, account: Account, now: float) -> list[str]:
         """The models to try, in preference order, for one account.
@@ -911,6 +1014,12 @@ class Pool:
                 counts["limited"] += 1
             elif account.in_cooldown(now):
                 counts["limited"] += 1
+            elif account.daily_exhausted(now):
+                # Out of allowance is a kind of limited, not a kind of dead: it
+                # comes back on its own when the day turns over. Counting it as
+                # active would overstate what the pool can serve right now, and
+                # counting it as invalid would be a lie about the credential.
+                counts["limited"] += 1
             else:
                 counts["active"] += 1
         usable = counts["active"]
@@ -931,6 +1040,12 @@ class Pool:
             # change they can act on.
             "degraded": accounts > 1 and usable == 1,
             "empty": accounts > 0 and usable == 0,
+            # The daily allowance, which is a different question from whether
+            # the accounts are healthy: an account can be perfectly valid and
+            # still have spent its day.
+            "daily_budget": self.daily_budget,
+            "daily_remaining": self.daily_remaining(now),
+            "daily_exhausted": self.daily_exhausted(now),
         }
 
     # -- events --
@@ -994,6 +1109,9 @@ class Pool:
             "models": list(self.models),
             "capabilities": sorted(self.capabilities),
             "discovery": bool(config.GEMINI_POOL_DISCOVERY_ENABLED),
+            "daily_budget": health["daily_budget"],
+            "daily_remaining": health["daily_remaining"],
+            "daily_exhausted": health["daily_exhausted"],
         }
 
 
@@ -1406,6 +1524,10 @@ def build_pools() -> dict[str, Pool]:
             retries=spec["retries"],
             backoff=spec["backoff"],
             timeout=spec["timeout"],
+            # Per account, and 0 for every workload that has not asked for one.
+            # Only the conversational workload sets it today: it is the one with
+            # a user-facing daily budget that has to scale with the pool.
+            daily_budget=spec.get("daily_budget", 0),
         )
         _pools[spec["workload"]] = pool
     return _pools
