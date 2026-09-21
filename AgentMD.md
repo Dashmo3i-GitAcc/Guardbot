@@ -788,6 +788,29 @@ is believing we have allowance the API still considers spent.
 `classify()` never raises, and `app/main.py` never awaits it in a way that can
 fail a handler.
 
+**The deadline has a floor of 10 seconds, and you cannot go below it.** This
+one cost a live debugging round: with `GEMINI_TIMEOUT_SECONDS=6` the transport
+accepted the setting, the request went out, and Google answered *every* call
+with
+
+```
+400 INVALID_ARGUMENT  Manually set deadline 6s is too short.
+                      Minimum allowed deadline is 10s.
+```
+
+The layer reported itself `active` and classified nothing — silent, total, and
+invisible to a suite that replaces `_request`, because the mock never validates
+the deadline. So `ai_intent.MIN_DEADLINE_SECONDS` is 10.0 and
+`timeout_seconds()` clamps to it rather than trusting the setting; the default
+in `config.py` matches. `tests/test_ai_intent.py` asserts the floor, the clamp,
+and that the value actually reaches `HttpOptions` — the last one is what fails
+if someone removes the clamp. **A green unit suite is not evidence this
+integration works; one real call is.**
+
+Function calling is disabled explicitly (`AutomaticFunctionCallingConfig`). We
+give the model no tools, so leaving it on only produces a warning on every
+request and advertises a capability this integration never wants.
+
 **What it can and cannot change.** It can promote a message the rules missed
 and it can decline a candidate. It cannot overturn a rule match or a veto, and
 it cannot change eligibility, provisioning or what is sent: the offer is the
@@ -810,10 +833,32 @@ service.
 and requests-per-day are per project, are not guaranteed, and are only visible
 in AI Studio — the numbers in `.env.example` are deliberately set *below* them.
 Over quota is a `429 RESOURCE_EXHAUSTED`, which this layer treats as a transient
-failure and then a skip. `gemini-flash-latest` is an alias, so the model behind
-it can change without a deploy; that is the intended trade against a pinned
-version being retired. None of this can be verified from inside the bot, so
+failure and then a skip. None of this can be verified from inside the bot, so
 treat the counters as the real ceiling and watch `ai_usage`.
+
+**The model default was chosen by measurement, and the first choice was wrong.**
+The SDK documents `gemini-flash-latest` as the stable alias for the current
+Flash model, so that is what this shipped with. Against this deployment's key it
+answered **0 of 8** calls — `503 UNAVAILABLE ... currently experiencing high
+demand`, `504 DEADLINE_EXCEEDED`, sustained over roughly 25 attempts. The layer
+reported itself `active` and classified nothing, which is the same silent-total
+failure shape as the deadline bug above.
+
+`gemini-flash-lite-latest` answered **8 of 8** with no errors, and classified
+every probe message correctly:
+
+| Message | Verdict |
+|---|---|
+| «اینترنت ایرانسل وصل نمیشه» | `connectivity_problem`, not relevant, no offer |
+| «سلام کسی میتونه کمک کنه یه وی پی ان خوب معرفی کنه؟» | `vpn_request`, **relevant, offer** |
+| «سلام بچه ها، کی بازی دیشب رو دید؟» | `ordinary_conversation`, not relevant |
+| «قیمتتون چنده؟» | `pricing_question`, not relevant |
+
+So `GEMINI_MODEL` defaults to the lite alias. For judging one short message it is
+also the better tool — faster, which matters inside a 10-second message-handler
+budget, and cheaper against the daily quota. Availability is per key and moves,
+so **measure it again rather than assuming**; the model is one env var and needs
+no rebuild.
 
 ---
 
