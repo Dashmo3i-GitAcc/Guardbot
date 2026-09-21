@@ -208,9 +208,45 @@ class Failure:
 
 
 _CODE_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
-_STATUS_RE = re.compile(r'"(?:status|reason)"\s*:\s*"([A-Z_]+)"')
-_RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
-_QUOTA_RE = re.compile(r'"(?:quotaId|quotaMetric)"\s*:\s*"([^"]+)"')
+
+# The error body is parsed from text, and the quoting is not stable: the SDK
+# renders it as a Python dict repr — single quotes — while a body that is still
+# JSON is double-quoted. Matching only one of them fails silently, which is the
+# worst way for this to fail: every 400 then looks alike, and an invalid key is
+# read as a malformed request. Both are matched.
+_Q = r"['\"]"
+_STATUS_RE = re.compile(rf"{_Q}(?:status|reason){_Q}\s*:\s*{_Q}([A-Z_]+){_Q}")
+# The provider's own reset hint, in the two shapes it actually uses. Verified
+# against the live API on 2026-09-21: a free-tier 429 answers
+#   429 RESOURCE_EXHAUSTED ... * Quota exceeded for metric:
+#   generativelanguage.googleapis.com/generate_content_free_tier_requests,
+#   limit: 20, model: gemini-3.8-flash
+#   Please retry in 26.510175789s.
+# The JSON `retryDelay` field the docs describe is not present in that body, so
+# a reset time the provider *did* give would have been reported as "not exposed".
+_RETRY_DELAY_RE = re.compile(rf"{_Q}retryDelay{_Q}\s*:\s*{_Q}(\d+(?:\.\d+)?)s{_Q}")
+_RETRY_IN_RE = re.compile(r"retry in (\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+_QUOTA_RE = re.compile(rf"{_Q}(?:quotaId|quotaMetric){_Q}\s*:\s*{_Q}([^'\"]+){_Q}")
+# The metric is a full resource path — `generativelanguage.googleapis.com/
+# generate_content_free_tier_requests` — so the character class has to include
+# the slash. Stopping at it would capture only the hostname, which contains
+# neither "model" nor "free_tier", and the scope decision below would read a
+# per-model limit as a per-project one: the whole account benched for the quota
+# cooldown, when a sibling model was available the entire time.
+_QUOTA_METRIC_RE = re.compile(r"Quota exceeded for metric:\s*([\w./]+)", re.IGNORECASE)
+
+# Text that means "this credential will never work", whatever code carried it.
+# An invalid key answers 400, not 401 (verified live), and reading that as a bad
+# request would abandon the whole request instead of moving to the next account.
+_AUTH_MARKERS = (
+    "api key not valid",
+    "api_key_invalid",
+    "api key expired",
+    "api key is invalid",
+    "unauthenticated",
+    "permission_denied",
+    "access_token_type_unsupported",
+)
 
 
 def _text_of(exc: BaseException) -> str:
@@ -237,12 +273,19 @@ def classify_error(exc: BaseException) -> Failure:
 
     Read from the response text rather than the exception class, because the
     SDK's exception types have moved between versions and the JSON body has not.
-    The shapes below were captured from the live API, not guessed:
+    The shapes below were captured from the live API on 2026-09-21, not guessed:
 
     * an unknown model answers ``404 NOT_FOUND`` — *"is not found for API
       version v1beta, or is not supported for generateContent"*
-    * a bad key answers ``401 UNAUTHENTICATED`` with
-      ``reason: ACCESS_TOKEN_TYPE_UNSUPPORTED``
+    * a model retired for new users answers ``404 NOT_FOUND`` too — *"is no
+      longer available to new users"*
+    * **an invalid key answers ``400 INVALID_ARGUMENT``**, with
+      ``reason: API_KEY_INVALID`` and *"API key not valid"* — not the 401 the
+      documentation implies. Read as a bad request it would abandon the request
+      instead of moving to the next account, which is the bug this branch
+      exists to prevent.
+    * a free-tier 429 names the model and the limit in prose and carries the
+      reset as *"Please retry in 26.5s"*, not in a ``retryDelay`` field
     """
     text = _text_of(exc)
     lowered = text.lower()
@@ -251,9 +294,10 @@ def classify_error(exc: BaseException) -> Failure:
     status = status_match.group(1) if status_match else ""
 
     # A reset time, but only when the provider actually sent one. This is the
-    # single source of truth for "when will this work again".
+    # single source of truth for "when will this work again", and it is read
+    # from either shape the provider uses.
     reset_at = None
-    delay = _RETRY_DELAY_RE.search(text)
+    delay = _RETRY_DELAY_RE.search(text) or _RETRY_IN_RE.search(text)
     if delay:
         try:
             reset_at = int(time.time() + float(delay.group(1)))
@@ -261,7 +305,13 @@ def classify_error(exc: BaseException) -> Failure:
             reset_at = None
 
     # ── authentication / authorisation: the account is finished ──
-    if code in (401, 403) or status in ("UNAUTHENTICATED", "PERMISSION_DENIED"):
+    #
+    # Checked before the 400 branch, because an invalid key arrives as a 400.
+    if (
+        code in (401, 403)
+        or status in ("UNAUTHENTICATED", "PERMISSION_DENIED")
+        or any(marker in lowered for marker in _AUTH_MARKERS)
+    ):
         # 403 splits two ways, and they mean different things: a revoked or
         # unpermitted key is INVALID and must not be retried, while a billing
         # or quota refusal is the account being out of allowance, which is
@@ -286,6 +336,12 @@ def classify_error(exc: BaseException) -> Failure:
     if code == 429 or status == "RESOURCE_EXHAUSTED":
         quota = _QUOTA_RE.search(text)
         quota_id = (quota.group(1) if quota else "").lower()
+        if not quota_id:
+            # The live free-tier body names the metric in prose rather than in a
+            # `quotaId` field. Read it, so the model-versus-project decision
+            # below is made on what the provider said rather than on a default.
+            metric = _QUOTA_METRIC_RE.search(text)
+            quota_id = (metric.group(1) if metric else "").lower()
         # Google's per-model limits name the model in the quota id; the
         # project-wide ones talk about the free tier or the project. When the
         # provider names neither, the conservative reading is a *model* limit:
@@ -411,11 +467,16 @@ class Account:
 
     # -- persistence --
     def load(self) -> "Account":
-        """Adopt the persisted row, if there is one.
+        """Adopt the persisted rows, if there are any.
 
         Cooldowns are honoured across restarts; a state of RECOVERING becomes
         ACTIVE, because the process that was going to prove recovery is gone and
         the next request is itself the proof.
+
+        Every model row for this workload is adopted in one read rather than one
+        read per model. ``models_for`` asks about each candidate model on every
+        request, so loading lazily would be a full table scan per candidate per
+        request — nine queries where one will do, on the busiest path in the bot.
         """
         for row in db.pool_accounts(self.workload):
             if row["slot"] != self.slot:
@@ -436,6 +497,12 @@ class Account:
             self.quota_events = int(row["quota_events"] or 0)
             self._persisted = True
             break
+        for row in db.pool_models(self.workload):
+            if row["slot"] != self.slot:
+                continue
+            state = ModelState(self, row["model"])
+            state.adopt(row)
+            self.model_states[row["model"]] = state
         self.save()
         return self
 
@@ -550,10 +617,15 @@ class Account:
 
     # -- models --
     def model(self, name: str) -> "ModelState":
+        """This account's state for one model, created on first use.
+
+        No database read: ``load()`` already adopted every persisted model row
+        for this workload, so a state that is not in the dictionary genuinely
+        has no history rather than merely not having been read yet.
+        """
         state = self.model_states.get(name)
         if state is None:
             state = ModelState(self, name)
-            state.load()
             self.model_states[name] = state
         return state
 
@@ -601,22 +673,19 @@ class ModelState:
         self.quota_events = 0
         self._persisted = False
 
-    def load(self) -> None:
-        for row in db.pool_models(self.account.workload):
-            if row["slot"] != self.account.slot or row["model"] != self.name:
-                continue
-            self.state = row["state"] if row["state"] in db.ACCOUNT_STATES else "ACTIVE"
-            if self.state == "RECOVERING":
-                self.state = "ACTIVE"
-            self.cooldown_until = int(row["cooldown_until"] or 0)
-            self.last_use = int(row["last_use"] or 0)
-            self.requests = int(row["requests"] or 0)
-            self.successes = int(row["successes"] or 0)
-            self.failures = int(row["failures"] or 0)
-            self.rate_limits = int(row["rate_limits"] or 0)
-            self.quota_events = int(row["quota_events"] or 0)
-            self._persisted = True
-            break
+    def adopt(self, row: dict) -> None:
+        """Take the state and counters from one persisted row."""
+        self.state = row["state"] if row["state"] in db.ACCOUNT_STATES else "ACTIVE"
+        if self.state == "RECOVERING":
+            self.state = "ACTIVE"
+        self.cooldown_until = int(row["cooldown_until"] or 0)
+        self.last_use = int(row["last_use"] or 0)
+        self.requests = int(row["requests"] or 0)
+        self.successes = int(row["successes"] or 0)
+        self.failures = int(row["failures"] or 0)
+        self.rate_limits = int(row["rate_limits"] or 0)
+        self.quota_events = int(row["quota_events"] or 0)
+        self._persisted = True
 
     def save(self) -> None:
         db.pool_model_save(
@@ -851,13 +920,23 @@ class Pool:
             else:
                 counts["active"] += 1
         usable = counts["active"]
+        accounts = len(self.accounts)
         return {
             "workload": self.workload,
-            "accounts": len(self.accounts),
+            "accounts": accounts,
             "usable": usable,
             **counts,
-            "critical": len(self.accounts) > 0 and usable == 1,
-            "empty": len(self.accounts) > 0 and usable == 0,
+            # Exactly one usable account left. Literally what the brief asks to
+            # be warned about.
+            "critical": accounts > 0 and usable == 1,
+            # ...and the version of that which is actually news. A pool of one
+            # is *always* at one usable account, so warning about it on every
+            # boot would be a message that never means anything — which is how
+            # an operator learns to ignore the message that does. Degraded means
+            # the pool has shrunk from more than one to exactly one, which is a
+            # change they can act on.
+            "degraded": accounts > 1 and usable == 1,
+            "empty": accounts > 0 and usable == 0,
         }
 
     # -- notifications --
@@ -1322,7 +1401,7 @@ async def _notify_pool_health(pool, now):
             ),
             now=now,
         )
-    elif health["critical"]:
+    elif health["degraded"]:
         await pool.notify(
             "pool_critical",
             reason="one usable account",

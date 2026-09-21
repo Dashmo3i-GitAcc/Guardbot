@@ -917,6 +917,34 @@ def test_the_status_report_counts_every_account_state(provider):
     assert health["invalid"] == 1
     assert health["active"] == 1
     assert health["critical"] is True
+    assert health["degraded"] is True
+
+
+def test_a_pool_of_one_is_critical_but_not_degraded(provider):
+    """A one-account pool is always at one usable account.
+
+    Warning about it would be a message that never means anything, which is how
+    an operator learns to ignore the message that does. "Degraded" is the
+    version that is news: the pool shrank from more than one to exactly one.
+    """
+    pool = make_pool(keys=(("1", KEY_A),))
+
+    health = pool.health()
+
+    assert health["accounts"] == 1
+    assert health["critical"] is True
+    assert health["degraded"] is False
+
+
+def test_a_pool_of_one_does_not_warn_the_owner(provider):
+    notices = []
+    provider.answers(KEY_A, "a")
+    pool = make_pool(keys=(("1", KEY_A),))
+    pool.set_notifier(lambda text: _collect(notices, text))
+
+    call(pool)
+
+    assert not [n for n in notices if "POOL WARNING" in n]
 
 
 # ══ ISOLATION TESTS ═══════════════════════════════════════════════════════
@@ -1271,3 +1299,157 @@ def test_a_pool_unavailable_becomes_the_modules_own_failure_type(monkeypatch, pr
 
     with pytest.raises(ai_intent.AiUnavailable):
         asyncio.run(ai_intent._request("سلام"))
+
+
+# ══ THE SHAPES THE LIVE API ACTUALLY SENDS ════════════════════════════════
+# Every string below was captured from the live API on 2026-09-21. They are
+# here because the first version of this module classified against the shapes
+# the *documentation* implies, and two of them were wrong in ways a mock could
+# never have shown:
+#
+#   * an invalid key answers 400 INVALID_ARGUMENT, not 401 UNAUTHENTICATED —
+#     read as a bad request it abandoned the request instead of failing over
+#   * the free-tier 429 carries its reset as "Please retry in 26.5s", not in a
+#     `retryDelay` field, so a reset the provider *did* give was reported as
+#     "not exposed by provider"
+#
+# They are also quoted the way the SDK renders them: a Python dict repr, single
+# quotes, which a double-quote-only regex silently fails to match.
+LIVE_404_UNKNOWN = (
+    "ClientError 404 NOT_FOUND. {'error': {'code': 404, 'message': "
+    "'models/gemini-model-that-does-not-exist-xyz is not found for API version "
+    "v1beta, or is not supported for generateContent. Call ModelService.ListModels "
+    "to see the list of available models and their supported methods.', "
+    "'status': 'NOT_FOUND'}}"
+)
+LIVE_404_RETIRED = (
+    "ClientError 404 NOT_FOUND. {'error': {'code': 404, 'message': "
+    "'This model models/gemini-2.5-flash is no longer available to new users. "
+    "Please update your code to use models/gemini-3.6-flash for the latest "
+    "features and improvements.', 'status': 'NOT_FOUND'}}"
+)
+LIVE_429_FREE_TIER = (
+    "ClientError 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': "
+    "'You exceeded your current quota, please check your plan and billing "
+    "details.\\n* Quota exceeded for metric: generativelanguage.googleapis.com/"
+    "generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\\n"
+    "Please retry in 26.510175789s.', 'status': 'RESOURCE_EXHAUSTED'}}"
+)
+LIVE_400_INVALID_KEY = (
+    "ClientError 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': "
+    "'API key not valid. Please pass a valid API key.', 'status': "
+    "'INVALID_ARGUMENT', 'details': [{'@type': "
+    "'type.googleapis.com/google.rpc.ErrorInfo', 'reason': 'API_KEY_INVALID', "
+    "'domain': 'googleapis.com'}]}}"
+)
+
+
+class LiveError(Exception):
+    """An exception whose text is exactly what the SDK produced."""
+
+    def __init__(self, text):
+        self.code = int(text.split()[1])
+        super().__init__(text.split(" ", 1)[1] if " " in text else text)
+
+
+def classify(text):
+    return gemini_pool.classify_error(LiveError(text))
+
+
+def test_an_unknown_model_is_a_model_problem():
+    failure = classify(LIVE_404_UNKNOWN)
+
+    assert failure.kind == "unsupported_model"
+    assert failure.scope == gemini_pool.SCOPE_MODEL
+
+
+def test_a_model_retired_for_new_users_is_also_a_model_problem():
+    """The live API words this differently from an unknown name."""
+    failure = classify(LIVE_404_RETIRED)
+
+    assert failure.kind == "unsupported_model"
+    assert failure.scope == gemini_pool.SCOPE_MODEL
+
+
+def test_the_free_tier_429_is_a_model_limit_with_a_real_reset():
+    """The metric names the model, and the reset is in prose, not in a field."""
+    failure = classify(LIVE_429_FREE_TIER)
+
+    assert failure.kind == "rate_limited"
+    assert failure.scope == gemini_pool.SCOPE_MODEL
+    assert failure.retryable is True
+    assert failure.reset_at is not None
+    assert 20 <= failure.reset_at - time.time() <= 30
+
+
+def test_an_invalid_key_answers_400_and_must_still_abandon_the_account():
+    """The one that mattered: a revoked key is not a malformed request."""
+    failure = classify(LIVE_400_INVALID_KEY)
+
+    assert failure.kind == "invalid_credential"
+    assert failure.scope == gemini_pool.SCOPE_ACCOUNT
+
+
+def test_an_invalid_key_fails_over_to_the_next_account(provider):
+    """End to end, with the real error text rather than a synthetic 401."""
+    provider.then(KEY_A, TEXT_MODELS[0], LiveError(LIVE_400_INVALID_KEY))
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    assert call(pool) == "b"
+    assert pool.accounts[0].state == "INVALID"
+
+
+def test_a_free_tier_429_benches_the_model_for_the_providers_own_reset(provider):
+    provider.then(KEY_A, TEXT_MODELS[0], LiveError(LIVE_429_FREE_TIER))
+    provider.always(KEY_A, TEXT_MODELS[1], "sibling")
+    pool = make_pool()
+
+    assert call(pool) == "sibling"
+
+    benched = pool.accounts[0].model(TEXT_MODELS[0])
+    # The provider said 26 seconds; the default model cooldown is 120. Believing
+    # the provider is the difference between a model back in half a minute and
+    # one wrongly written off for two.
+    assert benched.state == "RATE_LIMITED"
+    assert benched.cooldown_until - int(time.time()) <= 30
+    # And the account is untouched: this was a model limit.
+    assert pool.accounts[0].state == "ACTIVE"
+
+
+def test_the_classifier_reads_double_quoted_json_too():
+    """A body that is still JSON must classify the same way as the repr."""
+    text = (
+        'ClientError 400 INVALID_ARGUMENT. {"error": {"code": 400, "message": '
+        '"API key not valid. Please pass a valid API key.", "status": '
+        '"INVALID_ARGUMENT"}}'
+    )
+
+    failure = classify(text)
+
+    assert failure.kind == "invalid_credential"
+    assert failure.scope == gemini_pool.SCOPE_ACCOUNT
+
+
+def test_a_plain_bad_request_is_still_the_requests_fault():
+    """Widening the auth branch must not swallow a genuinely malformed payload."""
+    failure = classify(
+        "ClientError 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': "
+        "'Invalid JSON payload received. Unknown name \\\"foo\\\".', 'status': "
+        "'INVALID_ARGUMENT'}}"
+    )
+
+    assert failure.kind == "bad_request"
+    assert failure.scope == gemini_pool.SCOPE_REQUEST
+
+
+def test_a_capability_mismatch_is_a_model_problem_not_a_bad_request():
+    failure = classify(
+        "ClientError 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': "
+        "'Unable to process input image. Please retry or report in "
+        "https://developers.generativeai.google/guide/troubleshooting', "
+        "'status': 'INVALID_ARGUMENT'}}"
+    )
+
+    assert failure.kind == "unsupported_input"
+    assert failure.scope == gemini_pool.SCOPE_MODEL

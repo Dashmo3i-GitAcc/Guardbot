@@ -1043,19 +1043,34 @@ GEMINI_POOL_MAX_ATTEMPTS = _int("GEMINI_POOL_MAX_ATTEMPTS", 12)
 #
 # Every name here is validated before use: discovery must list it, and its
 # family must be capable of the workload. A name that fails either check is
-# skipped silently rather than being sent and rejected. Nothing in this list is
-# invented — all of them were returned by the live API on 2026-09-21.
+# skipped silently rather than being sent and rejected.
+#
+# Order is cheapest-and-fastest first. Nothing in this list is invented: every
+# name was both returned by ``models.list`` AND answered a real generateContent
+# call on 2026-09-21.
+#
+# The 2.5 family was removed after a live probe, and the reason is worth
+# keeping: ``models.list`` still lists ``gemini-2.5-flash``,
+# ``gemini-2.5-flash-lite`` and ``gemini-2.5-pro``, but calling any of them
+# answers
+#
+#   404 NOT_FOUND  This model ... is no longer available to new users.
+#
+# So being listed is not the same as being usable, and a preference list built
+# from the listing alone spends one wasted call per account on each retired
+# name before the pool disables it. Discovery cannot catch this; the 404 can,
+# and does — this list is simply the cheaper way to learn it.
 DEFAULT_FALLBACK_MODELS = (
-    "gemini-flash-lite-latest,gemini-flash-latest,gemini-2.5-flash-lite,"
-    "gemini-2.5-flash,gemini-3.1-flash-lite,gemini-3.5-flash-lite,"
-    "gemini-3.5-flash,gemini-pro-latest,gemini-2.5-pro"
+    "gemini-flash-lite-latest,gemini-flash-latest,gemini-3.5-flash-lite,"
+    "gemini-3.1-flash-lite,gemini-3.5-flash,gemini-3.6-flash,"
+    "gemini-3.7-flash,gemini-pro-latest"
 )
 # Transcription has its own order. ``gemini-3.5-transcribe`` is purpose-built
 # and appears last rather than first: it is unmeasured on this deployment, and
 # a working default should not be replaced by an assumption.
 DEFAULT_TRANSCRIBE_FALLBACKS = (
-    "gemini-flash-lite-latest,gemini-flash-latest,gemini-2.5-flash,"
-    "gemini-2.5-flash-lite,gemini-2.5-pro,gemini-3.5-transcribe"
+    "gemini-flash-lite-latest,gemini-flash-latest,gemini-3.5-flash-lite,"
+    "gemini-3.1-flash-lite,gemini-3.5-flash,gemini-3.5-transcribe"
 )
 # Speech synthesis exists only as preview models, so this is the one workload
 # that opts into them. It is stated here rather than assumed in the pool.

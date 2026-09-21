@@ -2277,10 +2277,19 @@ print('\n'.join(gemini_pool.startup_lines()))"
 
 ### 28.12 Known limitations
 
-1. **Discovery answers availability, not capability.** A model the provider lists
-   and that the curated table calls multimodal can still reject a specific
-   payload; that arrives as a 400, which `classify_error` reads as
-   `unsupported_input` and treats as a model problem, so the next model is tried.
+1. **Discovery answers availability, not usability — and they are not the same
+   thing.** Measured on 2026-09-21: `models.list` still lists
+   `gemini-2.5-flash`, `gemini-2.5-flash-lite` and `gemini-2.5-pro`, and calling
+   any of them answers `404 NOT_FOUND — "This model … is no longer available to
+   new users."` The 404 is classified correctly and the model is disabled for
+   that account permanently, so the pool converges on a working set either way —
+   but the convergence costs one wasted call per account per retired name. That
+   is why the default preference list no longer contains the 2.5 family, and why
+   it is worth re-probing the list after a Google model deprecation rather than
+   trusting `models.list` alone.
+   Related: a listed-and-capable model can still reject a specific payload; that
+   arrives as a 400, which `classify_error` reads as `unsupported_input` and
+   treats as a model problem, so the next model is tried.
 2. **`Transcript.model` names the workload's configured model**, not the model
    that actually answered after a failover. The per-model counters in the pool
    are the authoritative record of what served what. Making the field exact would

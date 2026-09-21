@@ -2784,11 +2784,20 @@ async def post_init(app: Application) -> None:
                 pool.workload,
                 health["accounts"],
             )
-        elif health["critical"]:
+        elif health["degraded"]:
             log.warning(
-                "Gemini pool '%s' is down to one usable account of %d.",
+                "Gemini pool '%s' has degraded to one usable account of %d.",
                 pool.workload,
                 health["accounts"],
+            )
+        elif health["accounts"] == 1:
+            # Not a warning. A pool of one is the pool the operator configured,
+            # and calling it critical on every boot is how a real degradation
+            # later gets mistaken for the usual noise.
+            log.info(
+                "Gemini pool '%s' has a single account; there is no failover "
+                "capacity behind it. Add <PREFIX>_2 to give it one.",
+                pool.workload,
             )
 
     # The authorization model. The owner line is the one that matters: with no
