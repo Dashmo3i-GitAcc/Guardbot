@@ -7,6 +7,21 @@ services:
     volumes:
       - ./data:/data          # sqlite db + downloaded model cache
 
+    # A log ceiling, because the default is none.
+    #
+    # `json-file` with no `max-size` grows until the disk is full, and this
+    # container logs a line per moderated message. The host is a 20 GB root
+    # volume that already runs at 86%; an unbounded log on it is a slow-motion
+    # outage, and it is the kind that arrives at the worst moment.
+    #
+    # 10 MB x 3 files = a 30 MB ceiling. A day of moderation fits in that many
+    # times over, so nothing an operator needs to read is lost.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     # Host networking, on purpose.
     #
     # The VPN bot is a systemd service on the host, not part of this compose
