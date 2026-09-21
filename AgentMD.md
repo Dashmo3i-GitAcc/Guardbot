@@ -545,7 +545,150 @@ This is a small VPS. Disk leaks are production incidents.
 
 ---
 
-## 13. Git discipline
+## 13. Group acquisition — the VPN bot handover
+
+Someone asks in one of the moderated groups for a VPN. Instead of ignoring it or
+answering with a link, the bot offers them a **personal way into the VPN bot**,
+which is where a test actually gets provisioned.
+
+The other half of this feature lives in the VPN bot
+(`mo3iiibest77-hub/vpn-bot-private`, `/opt/vpn-bot/AGENTS.md` §13). Read that
+side before changing this one; the wire protocol is the contract between them.
+
+### 13.1 The boundary
+
+| | GuardBot | VPN bot |
+|---|---|---|
+| Detects the intent | ✅ | |
+| Signs requests | ✅ | ✅ verifies |
+| Holds panel credentials | ❌ **never** | ✅ |
+| Decides eligibility | ❌ | ✅ |
+| Creates the client | ❌ | ✅ |
+| Sends a configuration | ❌ **never** | ✅ |
+
+This bot must never hold a VPN credential, never talk to the 3x-ui panel, and
+never put a subscription URL, a UUID, a `pbk` or a panel client name in a group
+message. `tests/test_acquisition.py` asserts all of that by reading the outgoing
+`send_message` calls. The only thing a group ever sees is a friendly line and
+one button.
+
+Nothing is scraped: this bot does not read the VPN bot's Telegram messages. It
+calls a signed HTTP endpoint and gets back a deep link or a refusal.
+
+### 13.2 What counts as an intent
+
+The rules are **data**, not code: `app/intent_rules.json`. Topic groups, support
+groups, standalone phrases and `ignore` patterns, each a list of regexes with
+weights. Adding a phrasing is a JSON edit. `INTENT_RULES_PATH` can point at a
+different file to override them on a running deployment without a rebuild.
+
+`app/intent.py` normalises the message *and* the rule patterns before matching —
+Arabic yeh/kaf to Persian, alef variants unified, ZWNJ and bidi controls
+stripped, harakat stripped, Persian and Arabic-Indic digits to ASCII, Arabic
+punctuation to ASCII, whitespace collapsed. Without this, «ویپیان» typed with an
+Arabic yeh never matches a Persian pattern, which is most of the traffic.
+
+Scoring: a **topic** hit (weight 2) **and** at least one **support** hit
+(request / problem / poor-internet, weight 1) makes an intent. A **standalone**
+phrase (weight 3) is enough on its own. An **ignore** pattern is a hard veto.
+
+Two deliberate consequences:
+
+- **A bare mention of "VPN" is not an intent.** With `INTENT_REQUIRE_TOPIC=1`
+  (the default), «اینترنتم ضعیفه» is not one either — half the group complains
+  about slow internet, and offering all of them a test is noise. Both are
+  asserted in `tests/test_intent.py`.
+- **The `ignore` list vetoes competing sellers.** Someone advertising their own
+  service must not be handed ours.
+
+`INTENT_MIN_LENGTH` (4) exists because a three-character message cannot carry a
+request; without it, stray short messages reach the matcher.
+
+### 13.3 The cooldown, and why it is not in memory
+
+`intent_offers(chat_id, user_id, last_offered, last_reason)` in `app/db.py`.
+`INTENT_COOLDOWN_SECONDS` (3600) is checked per chat *and* user, and the record
+is in SQLite because this container is restarted on every deploy — an
+in-memory cooldown would reset and re-offer to the same person.
+
+The VPN bot enforces the real limit (one test per account, §13.5). This cooldown
+is only here so a chatty member cannot make the bot look like a spammer.
+
+### 13.4 The handler
+
+`on_group_text` is registered in `group=1` behind `acquisition_message_filter()`,
+which is `TEXT & ~COMMAND & ChatType.GROUPS & ~EDITED_MESSAGE`. Edited updates
+are not requested from Telegram at all, and the filter excludes them as well, so
+editing a message into an intent cannot produce a second reply.
+
+It returns early for bots, for `user.is_bot`, and for group admins — never offer
+staff their own product. It only acts in `config.GROUP_IDS`, so the bot can
+never advertise in a group the owner did not list.
+
+Replies go through `_reply_in_group`, which retries without
+`reply_to_message_id` when the original message is gone: a reply to a deleted
+message is an error, and losing the invitation over that would be silly.
+
+### 13.5 The VPN bot client
+
+`app/vpnbot.py` mirrors the VPN bot's signing scheme rather than importing it —
+the two projects run different frameworks on different Python versions and
+cannot share code. Both repositories assert the **same fixed vector**
+(`34bfe93c19f199b1e9d20199845cea664b0f0da554e0f16b170563d4f7176950`). If you
+change the signing string, change it in both and update both tests, or
+production breaks with a 401 that looks like a wrong secret.
+
+`ERR_NOT_CONFIGURED` / `ERR_UNREACHABLE` / `ERR_BAD_RESPONSE` are this side's
+failures; `ERR_REFUSED` carries the VPN bot's decision about the user
+(`already_invited`, `in_progress`, `invalid`, `already_used`, `unavailable`),
+each with its own reply. A refusal is a 200 with `ok: false` — a decision, not
+an error — so "we already sent you a link" is distinguishable from "the VPN bot
+is down". An unreachable VPN bot is silent by design: a group must not see the
+infrastructure complaining.
+
+### 13.6 Deployment, and the networking trap
+
+```ini
+GROUP_TRIAL_ENABLED=1
+VPNBOT_API_URL=http://127.0.0.1:8099
+VPNBOT_SHARED_SECRET=<must equal SERVICE_SHARED_SECRET in the VPN bot's .env>
+```
+
+**The container runs with `network_mode: host`.** The obvious alternative —
+staying on a bridge network and using
+`extra_hosts: host.docker.internal:host-gateway` — does not work on this host:
+the gateway address *is* the host, so the packet lands on the host's `INPUT`
+chain where ufw's default-deny drops it. It does not refuse, it **times out**,
+which looks exactly like the VPN bot being down. Sharing the host's network
+namespace makes the VPN bot reachable on `127.0.0.1:8099`, and the VPN bot binds
+loopback to match. Nothing is published either way.
+
+The coupling to remember: if this container goes back to bridge networking, the
+VPN bot's `INTERNAL_API_HOST` must go back to `0.0.0.0` **and** the host firewall
+must allow the Docker bridge range to reach 8099. Both sides, together.
+
+`docker-compose.yml` carries the same note next to the setting.
+
+### 13.7 Testing
+
+| File | Covers |
+|---|---|
+| `tests/test_intent.py` | normalisation, a corpus of realistic Persian requests, the negative corpus, the bare-mention and connectivity-complaint guards, the competing-seller veto, the knobs, rule loading and extension |
+| `tests/test_vpnbot_client.py` | the signing vector, header shape, nonce uniqueness, cross-path and body-tamper rejection, unconfigured refusal, unreachable transport |
+| `tests/test_acquisition.py` | the group handler: the invitation is sent, **nothing else ever reaches the group**, unmatched messages stay silent, the cooldown across a restart, refusal copy, unreachable, unconfigured, deleted original, other groups, bots and admins, the command filter |
+
+`tests/test_acquisition.py` exercises the real `main.acquisition_message_filter()`
+rather than a copy of it, so a filter change cannot pass the tests while
+changing production behaviour.
+
+The full suite needs `nudenet` and `torch`; a light venv (`.venv-test/`,
+gitignored) runs everything except the media stages, where one test fails for the
+missing module. That failure is environmental — verify it is the *same* failure
+before calling it unrelated.
+
+---
+
+## 14. Git discipline
 
 - Work on `main` (this repository has no long-lived feature branches). Keep the
   tree clean and commit only the files the change is about.
@@ -568,7 +711,7 @@ This is a small VPS. Disk leaks are production incidents.
 
 ---
 
-## 14. Documentation updates
+## 15. Documentation updates
 
 - If a change alters the decision table, the admin-report rule, a known limit,
   a setting or the architecture, update `README.md` **and** the relevant
@@ -580,7 +723,7 @@ This is a small VPS. Disk leaks are production incidents.
 
 ---
 
-## 15. Final implementation report
+## 16. Final implementation report
 
 End every task with a report in this shape. The strategy agent reviews from it,
 so an unverifiable claim is worse than an admitted gap.
@@ -624,7 +767,7 @@ Rules for the report:
 
 ---
 
-## 16. Gotchas learned the hard way
+## 17. Gotchas learned the hard way
 
 1. **A threshold that looks safe can mean the feature never fires.** The first
    delete threshold was 0.80; confirmed explicit media scored 0.50–0.67, so
@@ -674,3 +817,22 @@ Rules for the report:
 15. **A documentation change is not a code change.** Do not let a docs commit
     carry source edits, and do not let a code commit quietly rewrite the
     decision table.
+16. **A container reaching a host service through the bridge gateway can hang
+    instead of failing.** `host.docker.internal:host-gateway` points at the host
+    itself, so the packet hits the host's `INPUT` chain, where ufw's default-deny
+    drops it. The symptom is a *timeout*, which is indistinguishable from the
+    service being down — do not spend an hour debugging the VPN bot. The
+    acquisition flow uses `network_mode: host` and `127.0.0.1` for exactly this
+    reason (§13.6). Test a new host dependency with a raw
+    `socket.create_connection()` from inside the container before wiring it into
+    application code.
+17. **`host-gateway` resolves to the *default bridge* gateway, not the compose
+    network's.** With `network_mode: host` this stops mattering; if you ever go
+    back to a bridge network, remember that `getent hosts host.docker.internal`
+    inside the container is the only way to know which address it picked.
+18. **A fake that returns the shape you wish for hides real bugs.** The
+    acquisition tests originally faked the panel with flat `total` / `up` /
+    `down` keys; the real panel sends `totalGB` and nests the counters under
+    `traffic`, so the sweep's exhaustion check passed while being unable to fire
+    in production. When faking an external system, copy its *actual* response —
+    see `/opt/vpn-bot/AGENTS.md` §5.6.

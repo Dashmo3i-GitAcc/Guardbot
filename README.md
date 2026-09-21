@@ -209,6 +209,34 @@ nothing. If the report was already deleted, the press is answered and ignored.
 | Animated sticker (.tgs) | static preview thumbnail only | yes |
 | Image / video document | yes | no |
 
+## Group acquisition (the VPN test handover)
+
+A member asking for a VPN in one of the moderated groups gets a friendly reply
+and **one button** — a personal link into the VPN bot, which is where a test
+actually gets provisioned and delivered privately.
+
+GuardBot never holds a VPN credential, never talks to the panel, and never puts
+a configuration, a subscription URL or a UUID in a group message. It signs an
+HTTP request to the VPN bot and gets back either a deep link or a refusal.
+
+It stays silent until the shared secret is set, so a deployment that has not
+been wired up to the VPN bot behaves exactly as before.
+
+```ini
+GROUP_TRIAL_ENABLED=1
+VPNBOT_API_URL=http://127.0.0.1:8099
+VPNBOT_SHARED_SECRET=<must equal SERVICE_SHARED_SECRET in the VPN bot's .env>
+```
+
+What counts as a request is data, not code: `app/intent_rules.json`. Persian
+phrasing, informal wording and spelling variations are normalised before
+matching, and an `ignore` list vetoes competing sellers. A bare mention of "VPN"
+is not enough, and neither is a plain "my internet is slow" — see
+`app/intent.py` and `AgentMD.md` §13.
+
+The container needs `network_mode: host` for this; the reason is in
+`AgentMD.md` §13.6 and in `docker-compose.yml`.
+
 ## Test in a private test group first
 
 Set `GROUP_IDS` to a test group, send normal photos / videos / stickers and
