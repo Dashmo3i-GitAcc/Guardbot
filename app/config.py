@@ -603,6 +603,85 @@ OWNER_USER_ID = _int("OWNER_USER_ID", 0)
 CONFIG_ADMINS = _str_list(os.getenv("CONFIG_ADMINS", ""))
 
 
+# ---------------- AI-mediated administration ---------------------------------
+# Whether the assistant may propose administrative actions at all.
+#
+# This switch does **not** change what any action requires. It only decides
+# whether the conversational model is given administrative tools to call, and
+# whether a tool call it produces is executed. Every call is authorised by
+# ``app/rbac.py`` regardless of this setting, so turning it on cannot widen
+# anybody's authority — it only adds a second way to *ask*.
+#
+# Turning it off leaves the direct commands working, which is the whole point of
+# having two modes: a Gemini outage must never take group administration down.
+ADMIN_AI_ENABLED = _bool("ADMIN_AI_ENABLED", True)
+
+# Whether the direct Python commands work. Off is for a deployment that wants
+# the model to be the only interface; it is not a security control, because the
+# commands are the fallback that keeps the group manageable when the model is
+# not.
+ADMIN_PYTHON_ENABLED = _bool("ADMIN_PYTHON_ENABLED", True)
+
+# How old an administrative request may be before it is refused as stale.
+#
+# This is the replay window. A request that a model produced is stamped when it
+# is produced and must be executed in the same turn; anything older has been
+# sitting somewhere, which is the shape of a replay rather than of a live
+# request. 0 disables the check, which is only sensible for the in-process
+# Python path — that path cannot be replayed, because it has no representation
+# outside the call stack.
+ADMIN_REQUEST_REPLAY_WINDOW = _int("ADMIN_REQUEST_REPLAY_WINDOW", 120)
+
+# How long a request id is remembered. Must be at least the replay window, or a
+# request could be forgotten while it is still replayable. The floor is applied
+# here rather than trusted to the operator, because the failure is silent.
+ADMIN_IDEMPOTENCY_RETENTION = max(
+    _int("ADMIN_IDEMPOTENCY_RETENTION", 86400),
+    ADMIN_REQUEST_REPLAY_WINDOW,
+)
+
+# How long administrative audit rows are kept. The audit trail is the answer to
+# "who did this", so the default is long; an operator with a data-retention
+# obligation can shorten it. Pruning happens on the administrative path, since
+# this process has no scheduler.
+ADMIN_ACTIVITY_RETENTION = _int("ADMIN_ACTIVITY_RETENTION", 90 * 86400)
+
+# How many recent administrative events the assistant may be shown when it asks
+# for context, and over what window. Both bounds exist: the count keeps a busy
+# room from filling the prompt, the window keeps an old incident from being
+# re-litigated. This is the only administrative history that reaches the model.
+ADMIN_CONTEXT_LIMIT = _int("ADMIN_CONTEXT_LIMIT", 12)
+ADMIN_CONTEXT_WINDOW = _int("ADMIN_CONTEXT_WINDOW", 6 * 3600)
+
+# How many tool calls the model may make in one turn before the loop stops.
+# A bound rather than a timeout, because the failure mode is a model that keeps
+# asking, and a turn that never ends is worse than one that ends with "I could
+# not finish". Each call is still authorised individually.
+ADMIN_TOOL_MAX_CALLS = _int("ADMIN_TOOL_MAX_CALLS", 4)
+
+# Whether an ordinary member is offered the *read-only* tools.
+#
+# Off by default, for two reasons that point the same way. The brief asks that
+# the complete tool list not be exposed to normal members unnecessarily, and the
+# read tools are not free: they let any member enumerate the administrator
+# roster and read anybody's role and permission set. Neither is a secret inside
+# a group, but neither is something an ordinary conversation needs either.
+#
+# The second reason is cost. Offering tools at all switches the turn onto the
+# tool-aware transport, which sends every declaration with every message. For an
+# administrator that is the price of being able to act; for a guest it is the
+# price of nothing.
+#
+# An operator who wants members to be able to ask "what is my role?" can turn
+# this on. It grants no write tool under any setting — that is decided by RBAC,
+# not here.
+ADMIN_TOOL_GUEST_TOOLS = _bool("ADMIN_TOOL_GUEST_TOOLS", False)
+
+# The sentences for the two outcomes that only exist because requests are typed
+# and replay-protected. They live with the other administrative copy below, in
+# the text section, so every operator-facing string is in one place.
+
+
 # ---------------- Gemini: moderation / content understanding ------------------
 # A **third** independent Gemini workload. It is not the acquisition classifier
 # and not the conversational assistant, and it shares nothing with either: its
@@ -905,6 +984,20 @@ TRANSCRIBE_NEED_AUDIO_TEXT = os.getenv(
 ADMIN_DENIED_TEXT = os.getenv(
     "ADMIN_DENIED_TEXT",
     "⛔️ این کار رو نمی‌تونی انجام بدی.",
+)
+# The two outcomes that only exist because administrative requests are typed and
+# replay-protected. Both are deliberately *not* the generic denial: "it was
+# already done" and "it was too old" are different facts, and telling an operator
+# they were refused when the action actually succeeded once is how somebody
+# performs it a second time by hand.
+ADMIN_DONE_TEXT = os.getenv("ADMIN_DONE_TEXT", "✅ انجام شد.")
+ADMIN_DUPLICATE_TEXT = os.getenv(
+    "ADMIN_DUPLICATE_TEXT",
+    "♻️ این درخواست قبلاً انجام شده بود؛ دوباره اجرا نشد.",
+)
+ADMIN_STALE_TEXT = os.getenv(
+    "ADMIN_STALE_TEXT",
+    "⌛️ این درخواست قدیمی بود و اجرا نشد. لطفاً دوباره بگو.",
 )
 ADMIN_NOT_CONFIGURED_TEXT = os.getenv(
     "ADMIN_NOT_CONFIGURED_TEXT",

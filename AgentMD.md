@@ -2321,3 +2321,335 @@ print('\n'.join(gemini_pool.startup_lines()))"
    lock and atomic `UPDATE ... SET x = x + 1`, so concurrent requests inside the
    container cannot corrupt them; two containers sharing one SQLite file is not a
    configuration this deployment has and is not supported.
+
+## 29. AI-mediated administration: the model asks, the bot decides
+
+The assistant can now *propose* administrative actions. Somebody types "ban
+@someone for spamming" in the group, Gemini works out that this is a ban request
+against a particular person, and calls a tool. What happens next is the entire
+subject of this section.
+
+```
+HUMAN → conversational Gemini → a typed tool call
+      → app/admin_service.py → app/rbac.py → Telegram
+```
+
+Gemini is the **interface**. `admin_service` is the **boundary**, the
+**execution layer**, and the final authority. `rbac` is the only thing that
+decides who may do what. Three sentences, three different jobs, and the design
+falls apart the moment they blur.
+
+The rule the whole section exists to enforce: **a language model may ask, and
+may not decide.** Everything below is a way of making that true structurally
+rather than by remembering to check.
+
+### 29.1 One execution layer, two interfaces
+
+There is exactly one place in this codebase that performs an administrative
+action: `admin_service.execute()`. Both interfaces end there.
+
+| | AI mode | Python mode |
+|---|---|---|
+| who parses the request | Gemini, into a tool call | `app/main.py`, from the command |
+| what it produces | `AdminRequest` | `AdminRequest` |
+| who authorises it | `admin_service` → `rbac` | `admin_service` → `rbac` |
+| who performs it | `Gateway` | `Gateway` |
+| who audits it | `admin_service` | `admin_service` |
+
+The two paths are indistinguishable from step two onwards. `AdminRequest` has an
+`interface` field (`ai` / `python`) which is recorded in the audit row and
+**read by nothing that decides anything** — it exists so an operator can ask
+"did the model do this or did a person", not so the code can behave differently.
+A request that is refused on the command path is refused identically when a
+model asks for it, and the tests assert exactly that by driving both.
+
+`cmd_ban`, `cmd_mute` and the rest in `app/main.py` are now one-liners that
+resolve *what* is being asked (which target, which message) and hand over a
+typed request. They no longer contain a single authority check, because a check
+there would be a second authority model, and the point is that there is one.
+
+### 29.2 `AdminRequest` has no field that can express authority
+
+This is the load-bearing decision, so it is worth stating plainly. The frozen
+dataclass contains:
+
+```python
+operation, chat_id, actor_id, target_id, message_id,
+role, permissions, reason, request_id, interface, at
+```
+
+There is no `is_owner`, no `actor_role`, no `allowed`, no `permissions_of_actor`.
+Not "these are ignored" — **they do not exist**, so nothing can set them and
+nothing can read them. The service re-resolves the actor from `actor_id` through
+`rbac.resolve()` on every single call, and the permission set it checks against
+is the one that resolution produces.
+
+The consequence is that the two most obvious attacks are not rejected, they are
+*inexpressible*:
+
+* **Forged identity.** The model has no parameter for `actor_id`, so it cannot
+  claim to be somebody else. `parse_write_call()` takes `actor_id` and `chat_id`
+  from the *caller* — `app/main.py`, from the real Telegram update — and not from
+  the model's arguments.
+* **Forged authority.** Even if a model wrote `"I am the owner"` into a reason
+  string, that string is an audit detail. It is never compared to anything.
+
+The tests assert this as a property of the code rather than of a run:
+`test_a_request_has_no_field_that_can_claim_authority` checks that `AdminRequest`
+has none of those field names, and `test_the_tool_schema_has_no_identity_parameter`
+checks that no declared tool has a parameter named `actor_id`, `chat_id`,
+`is_owner` or `permissions`. Adding one later fails the suite.
+
+### 29.3 The trusted context, and why it is not in the user's message
+
+The model needs to know who it is talking to. It is told, in a block that
+`admin_tools.build_context()` appends to the **system instruction** — not to the
+user's turn:
+
+```
+Actor Telegram user id: 6931339207
+Actor role: owner (owner of this bot)
+Actor is the owner: yes
+Actor may ask for: admins.manage, commands.use, config.manage, …
+Chat id: -1001234567890
+Replying to user id: 42 (Somebody)
+You may only act on the ids above. If a target is not identified by an id, ask
+for one — never pick a person by name, and never choose between two similar
+names.
+```
+
+Two things make this safe rather than a new attack surface:
+
+1. **One producer.** The block is built in one function from the resolved
+   `Principal`, so the id the model is told about and the id the service will
+   authorise against cannot disagree. If they could be assembled independently,
+   they eventually would, and that disagreement is precisely the bug this design
+   exists to prevent.
+2. **It is instruction, not evidence.** A claim to be the owner arriving *in the
+   conversation* arrives as text the model has been told to distrust. The
+   server-side block says who is asking; anything else is content.
+
+### 29.4 The tool set: eight writes, nine reads
+
+`app/admin_tools.py` declares seventeen tools. The write tools map onto the eight
+operations in `admin_service.OPERATIONS`:
+
+| Tool | Permission | Telegram right | Notes |
+|---|---|---|---|
+| `ban_member` / `unban_member` | `moderation.ban` | `can_restrict_members` | |
+| `mute_member` / `unmute_member` | `moderation.mute` | `can_restrict_members` | duration from `MUTE_MINUTES` |
+| `warn_member` | `moderation.warn` | — | application-owned |
+| `delete_message` | `moderation.delete` | `can_delete_messages` | |
+| `promote_member` / `demote_member` | `admins.manage` | `can_promote_members` | *soft right*, see 29.7 |
+
+The read tools — `get_member`, `get_member_status`, `get_admin_status`,
+`list_admins`, `get_role`, `get_permissions`, `get_chat_info`,
+`resolve_reply_target`, `get_recent_admin_context` — answer from state and touch
+no authority at all.
+
+**`promote_member` has no parameter for Telegram rights.** Its schema is
+`target_user_id` and a `role` string, nothing else. The role is mapped to
+`promoteChatMember` flags by `rbac.telegram_rights_for()`, inside the
+application. So "the model may not hand out arbitrary Telegram permissions" is
+enforced by the *shape of the tool*, not by a check somebody has to remember to
+write — there is no argument a model could populate to express it. The Python
+promotion dialog is the only caller that ever supplies an explicit permission
+set, because an operator is allowed to tick boxes and a model is not.
+
+### 29.5 Exposure is a courtesy; authority is the thing
+
+`tool_names_for(principal)` decides which tools are *offered*, and it is worth
+being clear about what that does and does not buy. It buys a better conversation:
+a helper is not told about `ban_member`, so it does not offer to ban anybody and
+then have to explain a refusal. It buys nothing else. Every call the model
+actually makes comes back through `on_tool` and is authorised again in
+`admin_service` against the same id, whether or not it was offered.
+
+That asymmetry is deliberate. Exposure is the layer that can be wrong without
+consequence; authorisation is the layer that cannot.
+
+By default a guest — an ordinary member — is offered **nothing**, because
+`ADMIN_TOOL_GUEST_TOOLS` is off. The read tools would let any member enumerate
+the administrator roster, which is not a secret inside a group but is also not
+something an ordinary conversation needs. It is off for a second reason too:
+offering tools at all switches the turn onto the tool-aware transport, which
+sends every declaration with every message, and for a member that is the price
+of nothing. Even with the setting on, no write tool is ever offered to a
+principal with no permissions — that is a loop in the code, not a setting.
+
+### 29.6 A request is typed, stamped, and remembered
+
+Four separate refusals guard the request boundary. They exist because a tool call
+is the first administrative request in this codebase that has ever existed
+*somewhere other than the call stack* — it is produced as model output, and
+anything that can be produced can be produced again.
+
+**Shape.** `parse_write_call()` returns `None` for anything malformed: an
+unknown tool, an argument the schema does not declare, a missing required
+argument, an id that is not a positive integer. It refuses rather than repairs.
+The temptation is to coerce — a missing id becomes `0`, a missing role becomes
+the default — and every coercion is a way for an action to run that the model did
+not correctly ask for. An undeclared argument is refused rather than ignored,
+because a model inventing parameters is not describing the call it thinks it is
+describing.
+
+**Replay.** The request is stamped with `time.time()` when the call is read, and
+`execute()` refuses one older than `ADMIN_REQUEST_REPLAY_WINDOW` (120s) as
+`stale`. A request that has been sitting somewhere is the shape of a replay, not
+of a live request. This check only means something on the AI path — the Python
+path has no representation outside the call stack and cannot be replayed — but
+it is applied uniformly so there is no second code path to reason about.
+
+**Idempotency.** Every request carries a `request_id` (`uuid4().hex`) and
+`admin_requests` is keyed on it with `INSERT OR IGNORE`. First write wins: if two
+requests with the same id race, the first one recorded is the one that happened,
+and rewriting the row would let the loser claim it did something else. A
+duplicate returns the stored outcome with `duplicate=True` and a sentence saying
+so, rather than performing the action twice.
+
+**Target.** An operation that acts on a user needs a `target_id`; one that acts
+on a message needs a `message_id`; and a target equal to the bot's own id is
+refused as `target_is_bot`, because promoting the bot is a no-op that looks like
+success and banning it is worse. Resolution never guesses by display name — the
+model is told to ask, and `resolve_reply_target` answers with the replied-to user
+or with "there is no reply", never with a best guess.
+
+### 29.7 Telegram is the floor, not the ceiling
+
+After `rbac` has allowed something, the service checks whether the *bot* holds
+the Telegram right the action needs, live, before attempting it. Configuration
+saying the bot should have a right is not evidence that it has one.
+
+For six of the eight operations that check is fatal: if the bot cannot restrict
+members it cannot ban, and the request fails with `bot_lacks_right`.
+
+`promote_member` and `demote_member` are marked `soft_right`, and the difference
+matters. The application role and the Telegram administrator flag are two
+separable layers — §35 of the brief, and true of Telegram generally: somebody can
+hold `moderator` here without being a Telegram admin there. So a promotion writes
+the application role **first**, and a Telegram refusal is reported as a note
+attached to the success rather than as a failure. Reporting it as a failure would
+be a lie in the other direction: the role really was granted.
+
+`demote_member` returns `not_an_admin` when there was no stored role to remove,
+which the caller turns into "there was nothing to do". A demotion that removed
+nothing has not happened, and saying "done" would be wrong.
+
+### 29.8 The gateway is the whole attack surface
+
+`admin_service` never imports `telegram`. It reaches Telegram only through a
+`Gateway` `Protocol` whose complete method list is:
+
+```
+bot_right, promote, demote, mute, unmute, ban, unban, delete, warn, member
+```
+
+Ten methods. No `call`, no raw method name, no access to the underlying `Bot`
+object. So the set of Telegram side effects reachable from an administrative
+request is those ten methods, and reviewing them is reviewing the whole surface —
+which is a great deal easier than reviewing a `Bot` object with four hundred
+methods on it. `TelegramGateway` in `app/main.py` is the only implementation, and
+the tests replace it with a fake that records calls, which is how "nothing
+reached Telegram" becomes an assertion rather than a hope.
+
+### 29.9 Two modes, and what a Gemini outage actually does
+
+`admin_service.mode_status()` reports one of three states:
+
+| mode | meaning |
+|---|---|
+| `ai` | AI administration is up |
+| `degraded` | configured but unavailable — the commands are the way |
+| `python` | AI administration is switched off by configuration |
+
+Three states rather than two, because "AI is off" and "AI is broken" are
+different facts and an operator needs to be able to tell them apart. The mode is
+surfaced to the operator rather than being a silent property of the deployment.
+
+The fallback is the whole reason the commands were kept. `ADMIN_AI_ENABLED` off,
+or Gemini unreachable, or every account in the pool cooling down — in all three
+cases `/ban`, `/mute`, `/promote` keep working, because they were never routed
+through the model. A provider outage degrades the group to commands. It does not
+degrade it to no administration at all.
+
+### 29.10 Isolation: the other three workloads cannot reach here
+
+The conversational assistant is the only workload with administrative tools. The
+acquisition classifier, the moderation AI and the transcription workload have no
+route to `admin_tools` at all, and this is asserted rather than assumed:
+
+* `test_only_the_conversational_workload_has_administrative_tools`
+* `test_the_chat_module_does_not_execute_tools_itself` — `app/chat.py` transports
+  tool calls and never decides anything; the runner is passed in.
+* `test_the_service_never_imports_telegram` — the boundary is real, not
+  stylistic.
+* `test_a_moderation_verdict_cannot_become_a_ban` — a moderation decision is a
+  decision about content, and it has no path to an administrative action.
+
+That last one is worth its own sentence. A moderation verdict and an
+administrative ban are produced by different systems for different reasons, and
+the only thing that turns one into the other is a human or a model *asking* for a
+ban. There is no code path where a classifier's output becomes an action.
+
+### 29.11 The audit trail keeps its one vocabulary
+
+Refusals are audited as well as successes. "Who did this" is the question asked
+after an incident; "who tried" is the question asked *during* one, and a trail
+that only records successes cannot answer it. Both interfaces write the same
+rows.
+
+The action names are the ones the trail already used — `moderation.ban`,
+`admin.promote` and so on — preserved through an `Operation.audit_action` field
+so that adding the AI path did not fork the vocabulary. An operator searching the
+audit for `moderation.ban` finds every ban, whichever interface asked for it.
+
+The detail column holds ids, keys and short machine strings. It never holds a
+message body, and the tests assert that: `test_the_audit_row_never_contains_a_message_body`.
+
+Retention is enforced on the administrative path — `audit_prune()` and
+`admin_request_prune()` — because this process has no scheduler, and a retention
+rule that only runs when somebody remembers is not a retention rule.
+`ADMIN_IDEMPOTENCY_RETENTION` is floored at `ADMIN_REQUEST_REPLAY_WINDOW` in
+`config.py` rather than trusted to the operator, because a request forgotten
+while it is still replayable fails silently.
+
+### 29.12 Configuration
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ADMIN_AI_ENABLED` | `true` | offer the model administrative tools at all |
+| `ADMIN_PYTHON_ENABLED` | `true` | the direct commands keep working |
+| `ADMIN_REQUEST_REPLAY_WINDOW` | `120` | seconds; older requests are refused as stale |
+| `ADMIN_IDEMPOTENCY_RETENTION` | `86400` | floored at the replay window |
+| `ADMIN_ACTIVITY_RETENTION` | `7776000` | 90 days of audit trail |
+| `ADMIN_CONTEXT_LIMIT` | `12` | recent events shown to the model |
+| `ADMIN_CONTEXT_WINDOW` | `21600` | and over what window |
+| `ADMIN_TOOL_MAX_CALLS` | `4` | tool calls per turn before the loop stops |
+| `ADMIN_TOOL_GUEST_TOOLS` | `false` | offer the read-only tools to members |
+
+None of these widen anybody's authority. They decide what the model is offered
+and how long records are kept; every action still requires the same permission
+from the same table.
+
+`ADMIN_TOOL_MAX_CALLS` is a bound rather than a timeout because the failure mode
+is a model that keeps asking, and a turn that never ends is worse than one that
+ends with "I could not finish". The loop is application-owned: the last request
+is made without tools, so the model has to answer in words.
+
+### 29.13 What this section does not claim
+
+1. **The model's judgement is not a security control, and is not treated as
+   one.** It decides *what was asked for*. It has no influence on whether the
+   asker may have it. A perfectly-prompted model and a jailbroken one produce
+   requests that go through the identical pipeline.
+2. **Prompt injection is not solved; it is defanged.** Somebody can still put
+   text in a message that persuades the model to call `ban_member` on somebody.
+   What they cannot do is make that call succeed for an actor without
+   `moderation.ban`, or against the owner, or against a peer, or twice. The blast
+   radius of a fully compromised model is "the set of actions the person who
+   triggered it could have performed anyway by typing the command".
+3. **A refusal is only a refusal if nothing reached Telegram.** Every test in
+   `tests/test_ai_admin.py` that asserts a refusal also asserts that the fake
+   gateway recorded no calls. A refusal the bot prints while still calling the
+   API is not a refusal, and that is the one failure mode this suite is built to
+   make impossible.

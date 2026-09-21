@@ -28,6 +28,8 @@ from telegram.ext import (
 )
 
 from . import (
+    admin_service,
+    admin_tools,
     ai_intent,
     ai_moderation,
     burst,
@@ -1346,6 +1348,142 @@ async def _prepare_conversation_media(
     return parts, ref.kind, _message_text(msg), False, PREPARE_OK
 
 
+def _reply_context(msg) -> tuple[int, str, int]:
+    """Who the current message is replying to, if anyone.
+
+    Returned as plain ids and a display name rather than the message object, so
+    nothing downstream can be tempted to read the replied-to *content*. The
+    assistant is told who was replied to; it is not handed the message, because
+    the only thing an administrative request needs is the id.
+    """
+    replied = getattr(msg, "reply_to_message", None)
+    if replied is None:
+        return 0, "", 0
+    author = getattr(replied, "from_user", None)
+    if author is None:
+        return 0, "", int(getattr(replied, "message_id", 0) or 0)
+    return (
+        int(getattr(author, "id", 0) or 0),
+        getattr(author, "full_name", "") or "",
+        int(getattr(replied, "message_id", 0) or 0),
+    )
+
+
+def _ai_admin_turn(update, ctx, msg, room, user):
+    """The tools, trusted context and tool-runner for one conversational turn.
+
+    Returns ``(None, "", None)`` — the ordinary, tool-free conversation — in
+    every case where administration is not on the table: the feature is switched
+    off, the actor resolves to no permissions at all, or the declarations could
+    not be built. Failing to the tool-free path is deliberate. An error while
+    assembling the administrative half must degrade the assistant to what it was
+    before this feature existed, never leave it in a state where it holds tools
+    it was not supposed to have.
+
+    Tool *exposure* is decided here. Tool *authority* is not: every call the
+    model makes comes back through ``on_tool`` and is authorised again in
+    ``app/admin_service.py`` against the same id. That asymmetry is the design —
+    exposure is a courtesy that keeps the model from offering things it cannot
+    do, and it is never the thing that stops it.
+    """
+    if not config.ADMIN_AI_ENABLED:
+        return None, "", None
+
+    try:
+        principal = rbac.resolve(user.id)
+        if not principal.is_admin and not config.ADMIN_TOOL_GUEST_TOOLS:
+            return None, "", None
+        names = admin_tools.tool_names_for(principal)
+        if not names:
+            return None, "", None
+
+        reply_user_id, reply_name, reply_message_id = _reply_context(msg)
+        context = admin_tools.build_context(
+            principal=principal,
+            chat_id=room.id,
+            chat_title=getattr(room, "title", "") or "",
+            chat_type=str(getattr(room, "type", "") or ""),
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+            reply_user_id=reply_user_id,
+            reply_name=reply_name,
+            reply_message_id=reply_message_id,
+            bot_username=getattr(ctx.bot, "username", "") or "",
+        )
+        tools = admin_tools.declarations_for(principal)
+    except Exception:  # noqa: BLE001 - degrade to an ordinary conversation
+        log.exception("could not build the administrative tool set")
+        return None, "", None
+
+    gateway = TelegramGateway(ctx)
+
+    async def on_tool(name: str, args: dict) -> dict:
+        """Run one tool call the model asked for. Authorisation is not here.
+
+        This function's only job is to route: read tools answer from state, write
+        tools become a typed request and go to the service, which decides. It
+        deliberately contains no ``if actor is allowed`` branch — a check here
+        would be a second authority model, and the whole point is that there is
+        one.
+        """
+        spec = admin_tools.TOOLS.get(name)
+        if spec is None:
+            return {"error": f"unknown tool {name}"}
+
+        if spec.kind == admin_tools.KIND_READ:
+            return await admin_tools.run_read_tool(
+                name,
+                args,
+                principal=principal,
+                chat_id=room.id,
+                reply_user_id=reply_user_id,
+                reply_name=reply_name,
+                bot_id=getattr(ctx.bot, "id", 0),
+                gateway=gateway,
+            )
+
+        if not config.ADMIN_AI_ENABLED:
+            return {"error": "AI administration is switched off"}
+
+        request = admin_tools.parse_write_call(
+            name,
+            args,
+            actor_id=user.id,
+            chat_id=room.id,
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+            request_id=admin_service.new_request_id(),
+        )
+        if request is None:
+            log.info("refused malformed tool call %s args=%s", name, sorted(args or {}))
+            return {
+                "ok": False,
+                "error": "the request was malformed, so nothing was executed",
+            }
+
+        result = await admin_service.execute(
+            request,
+            gateway,
+            actor=principal,
+            bot_id=getattr(ctx.bot, "id", 0),
+        )
+        log.info(
+            "ai admin tool=%s actor=%s outcome=%s ok=%s",
+            name, user.id, result.outcome, result.ok,
+        )
+        return {
+            "ok": result.ok,
+            "operation": result.operation,
+            "outcome": result.outcome,
+            "target_user_id": result.target_id,
+            # The Persian sentence and the English gloss: the first is what to
+            # convey, the second is why, and the model is expected to write its
+            # own words around them rather than repeat either.
+            "message": result.message,
+            "explanation": admin_service.explain(result),
+        }
+
+    return tools, context, on_tool
+
+
 async def _answer_conversationally(
     update: Update, ctx: ContextTypes.DEFAULT_TYPE, reply_to: int | None = None
 ) -> None:
@@ -1404,8 +1542,21 @@ async def _answer_conversationally(
             )
             return
 
+    # The administrative half of this turn. Built from server-side values only,
+    # and empty for a room where the person asking is not an administrator —
+    # which is the normal case, and costs one dictionary lookup.
+    tools, context, on_tool = _ai_admin_turn(update, ctx, msg, room, user)
+
     result = await chat.reply(
-        room.id, user.id, text, parts=parts, kind=kind, want_voice=want_voice
+        room.id,
+        user.id,
+        text,
+        parts=parts,
+        kind=kind,
+        want_voice=want_voice,
+        tools=tools,
+        context=context,
+        on_tool=on_tool,
     )
     if result:
         log.info(
@@ -1700,6 +1851,114 @@ async def _bot_right(ctx, chat_id: int, right: str) -> bool:
         log.warning("could not read my own chat member status: %s", e)
         return False
     return bool(getattr(me, right, False))
+
+
+class TelegramGateway:
+    """The only object in this bot that performs Telegram administration.
+
+    ``app/admin_service.py`` knows the ten operations below and nothing else. It
+    never imports ``telegram``, never sees a ``Context``, and cannot call a
+    method that is not on this class — which means the complete set of Telegram
+    side effects reachable from *either* interface, the AI's tools or the
+    operator's commands, is these ten methods. That is what "do not create a
+    second Telegram action engine" means in practice: there is nowhere else for
+    one to live.
+
+    The two permission objects are defined here rather than in the service
+    because they are Telegram's types, not the application's. The service says
+    "mute this person"; what a mute *is* in the Bot API is this file's business.
+    """
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.bot = ctx.bot
+
+    async def bot_right(self, chat_id: int, right: str) -> bool:
+        return await _bot_right(self.ctx, chat_id, right)
+
+    async def promote(self, chat_id: int, user_id: int, rights: dict) -> None:
+        await self.bot.promote_chat_member(chat_id, user_id, **rights)
+
+    async def demote(self, chat_id: int, user_id: int) -> None:
+        """Strip every right, not a selection.
+
+        The bot does not know which rights were there before it touched the
+        account, and guessing would be a way to leave somebody holding a
+        capability nobody meant to leave them.
+        """
+        await self.bot.promote_chat_member(
+            chat_id, user_id, **{right: False for right in rbac.TELEGRAM_RIGHTS}
+        )
+
+    async def mute(self, chat_id: int, user_id: int) -> None:
+        until = datetime.now(timezone.utc) + timedelta(
+            minutes=max(1, int(config.MUTE_MINUTES))
+        )
+        await self.bot.restrict_chat_member(
+            chat_id, user_id, permissions=MUTED, until_date=until
+        )
+
+    async def unmute(self, chat_id: int, user_id: int) -> None:
+        await self.bot.restrict_chat_member(chat_id, user_id, permissions=FULL)
+
+    async def ban(self, chat_id: int, user_id: int) -> None:
+        await self.bot.ban_chat_member(chat_id, user_id)
+
+    async def unban(self, chat_id: int, user_id: int) -> None:
+        await self.bot.unban_chat_member(chat_id, user_id)
+
+    async def delete(self, chat_id: int, message_id: int) -> None:
+        await self.bot.delete_message(chat_id, message_id)
+
+    async def warn(self, chat_id: int, user_id: int, reason: str) -> None:
+        """Say the warning in the group, addressed to the person warned.
+
+        This is the one operation whose effect is a message rather than a
+        permission change, and it is the only place ``_send_user_notice`` is
+        reached from the service. It deliberately takes no ``ctx`` of its own —
+        the gateway already holds one.
+        """
+        await _send_user_notice(
+            self.ctx,
+            chat_id,
+            config.MOD_WARN_USER_TEXT.format(
+                name=f"<a href=\"tg://user?id={int(user_id)}\">کاربر</a>",
+                reason=html.escape(reason or "لطفاً قوانین گروه رو رعایت کن."),
+            ),
+        )
+
+    async def member(self, chat_id: int, user_id: int) -> dict:
+        """The target's live Telegram status, narrowed to a safe dict.
+
+        Read-only, and narrowed on purpose: the model is told what it needs in
+        order to explain a situation, not handed the whole ``ChatMember``
+        object, which carries fields it has no use for and should not be
+        encouraged to reason about.
+        """
+        try:
+            member = await self.bot.get_chat_member(chat_id, user_id)
+        except TelegramError as e:
+            log.info("get_chat_member failed for %s: %s", user_id, e)
+            return {"error": "not a member of this chat, or not readable"}
+
+        status = getattr(member, "status", "")
+        name = str(status).split(".")[-1].lower() if status else ""
+        rights = {
+            right: bool(getattr(member, right, False))
+            for right in rbac.TELEGRAM_RIGHTS
+            if hasattr(member, right)
+        }
+        return {
+            "user_id": int(user_id),
+            "telegram_status": name or str(status),
+            "is_telegram_admin": name in ("administrator", "creator"),
+            "custom_title": getattr(member, "custom_title", "") or "",
+            "is_member": bool(getattr(member, "is_member", name != "left")),
+            "can_send_messages": getattr(
+                member, "can_send_messages", name not in ("restricted", "kicked")
+            ),
+            "telegram_rights": sorted(k for k, v in rights.items() if v),
+        }
 
 
 async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2000,18 +2259,43 @@ async def on_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         await q.answer(_deny_text(decision))
         return
 
-    # ── Everything is authorised. Now write, then tell the truth about it.
-    db.admin_set(target_id, role, permissions, granted_by=presser.user_id)
+    # ── Everything is authorised. Now hand it to the service, which authorises
+    #    it again on its own terms and performs both layers in the right order.
+    #
+    #    The double check is not redundant: the check above is what makes the
+    #    button honest about what it is offering, and the service's check is what
+    #    actually decides. Only the second one is the security boundary, and it
+    #    does not know or care that a keyboard was involved.
+    result = await admin_service.execute(
+        admin_service.AdminRequest(
+            operation="promote_member",
+            chat_id=int(chat_id or 0),
+            actor_id=presser.user_id,
+            target_id=target_id,
+            role=role,
+            # The operator's toggled set. The AI path never sets this field —
+            # its tool has no such parameter — so "the model may not choose
+            # individual Telegram rights" is a property of the tool, not a rule
+            # this line has to remember to enforce.
+            permissions=tuple(sorted(permissions)),
+            request_id=admin_service.new_request_id(),
+            interface=admin_service.INTERFACE_PYTHON,
+            at=int(time.time()),
+        ),
+        TelegramGateway(ctx),
+        actor=presser,
+        bot_id=getattr(ctx.bot, "id", 0),
+    )
+    if not result.ok:
+        _audit(presser.user_id, "admin.promote", result.outcome, target_id=target_id,
+               chat_id=chat_id, detail=result.reason or result.detail)
+        try:
+            await q.answer(_refusal_text(result)[:180])
+        except TelegramError:
+            pass
+        return
 
-    telegram_note = ""
-    if chat_id is not None:
-        telegram_note = await _apply_telegram_promotion(
-            ctx, chat_id, target_id, permissions
-        )
-
-    _audit(presser.user_id, "admin.promote", "ok", target_id=target_id,
-           chat_id=chat_id,
-           detail=f"role={role} perms={','.join(sorted(permissions))}")
+    telegram_note = result.extra.get("telegram_note", "")
     label = rbac.ROLE_LABELS.get(role, role)
     perms_text = "، ".join(rbac.permission_labels(permissions)) or "—"
     body = (
@@ -2031,30 +2315,6 @@ async def on_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
             pass
 
 
-async def _apply_telegram_promotion(ctx, chat_id: int, user_id: int, permissions) -> str:
-    """Promote in Telegram as well, and say exactly what happened.
-
-    Returns the sentence to append to the confirmation. It reports three
-    distinct outcomes rather than two, because "the API refused" and "we chose
-    not to ask" are different facts and an operator acting on the first would be
-    chasing a problem that does not exist.
-    """
-    rights = rbac.telegram_rights_for(permissions)
-    if not rights:
-        return config.ADMIN_PROMOTE_NO_TELEGRAM_TEXT
-    if not await _bot_right(ctx, chat_id, "can_promote_members"):
-        log.warning("cannot promote in %s: the bot lacks can_promote_members", chat_id)
-        return config.ADMIN_BOT_LACKS_RIGHT_TEXT
-    try:
-        await ctx.bot.promote_chat_member(chat_id, user_id, **rights)
-    except Exception as e:  # noqa: BLE001
-        # Reported, never swallowed: the application role was stored, and the
-        # operator has to know that Telegram did not follow.
-        log.warning("promote_chat_member failed: %s", e)
-        return config.ADMIN_TELEGRAM_FAILED_TEXT
-    return config.ADMIN_PROMOTE_TELEGRAM_TEXT
-
-
 async def cmd_demote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """`/demote` — reply to an administrator to revoke the application role."""
     msg = update.effective_message
@@ -2068,259 +2328,197 @@ async def cmd_demote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                               reply_to=msg.message_id)
         return
     target_id, _name = found
-    target = rbac.resolve(target_id)
-    decision = rbac.authorize(actor, "admins.manage", target=target)
-    if not decision:
-        _audit(actor.user_id, "admin.demote", decision.reason, target_id=target_id,
-               chat_id=room.id)
-        await _reply_in_group(ctx, room.id, _deny_text(decision),
+    result = await admin_service.execute(
+        admin_service.AdminRequest(
+            operation="demote_member",
+            chat_id=room.id,
+            actor_id=actor.user_id,
+            target_id=target_id,
+            request_id=admin_service.new_request_id(),
+            interface=admin_service.INTERFACE_PYTHON,
+            at=int(time.time()),
+        ),
+        TelegramGateway(ctx),
+        actor=actor,
+        bot_id=getattr(ctx.bot, "id", 0),
+    )
+    if not result.ok:
+        await _reply_in_group(ctx, room.id, _refusal_text(result),
                               reply_to=msg.message_id)
         return
 
-    removed = db.admin_remove(target_id)
-    if not removed:
-        _audit(actor.user_id, "admin.demote", "not_an_admin", target_id=target_id,
-               chat_id=room.id)
-        await _reply_in_group(ctx, room.id, config.ADMIN_DEMOTE_NOTHING_TEXT,
-                              reply_to=msg.message_id)
-        return
-
-    telegram_note = await _apply_telegram_demotion(ctx, room.id, target_id)
-    _audit(actor.user_id, "admin.demote", "ok", target_id=target_id, chat_id=room.id)
     body = config.ADMIN_DEMOTE_DONE_TEXT.format(name=f"<code>{target_id}</code>")
-    if telegram_note:
-        body += f"\n{telegram_note}"
+    note = result.extra.get("telegram_note", "")
+    if note:
+        body += f"\n{note}"
     await _reply_in_group(ctx, room.id, body, reply_to=msg.message_id)
 
 
-async def _apply_telegram_demotion(ctx, chat_id: int, user_id: int) -> str:
-    """Remove the Telegram administrator rights this bot could have granted.
 
-    All rights are set to False rather than a selective demotion: the bot does
-    not know which rights were there before it touched the account, and guessing
-    would be a way to leave somebody holding a capability nobody meant to leave
-    them. The operator is told when Telegram refused.
+
+def _command_done_text(operation: str, name: str) -> str:
+    """The sentence for a completed operation, keyed on the operation name.
+
+    Keyed on ``admin_service``'s operation names rather than on the RBAC
+    permission keys the commands used to pass, because the operation is now what
+    the service returns — and a sentence table keyed on anything else would be a
+    second vocabulary for the same set of actions.
     """
-    if not await _bot_right(ctx, chat_id, "can_promote_members"):
-        return config.ADMIN_PROMOTE_NO_TELEGRAM_TEXT
-    try:
-        await ctx.bot.promote_chat_member(
-            chat_id, user_id, **{right: False for right in rbac.TELEGRAM_RIGHTS}
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("demotion in Telegram failed: %s", e)
-        return config.ADMIN_TELEGRAM_FAILED_TEXT
-    return ""
-
-
-def _command_done_text(action: str, name: str) -> str:
     safe = html.escape(name)
-    if action == "moderation.ban":
+    if operation == "ban_member":
         return config.MOD_BAN_DONE_TEXT.format(name=safe)
-    if action == "moderation.unban":
+    if operation == "unban_member":
         return config.MOD_UNBAN_DONE_TEXT.format(name=safe)
-    if action == "moderation.mute":
+    if operation == "mute_member":
         return config.MOD_MUTE_DONE_TEXT.format(name=safe, minutes=config.MUTE_MINUTES)
-    if action == "moderation.unmute":
+    if operation == "unmute_member":
         return config.MOD_UNMUTE_DONE_TEXT.format(name=safe)
-    if action == "moderation.warn":
+    if operation == "warn_member":
         return config.MOD_WARN_DONE_TEXT.format(name=safe)
-    if action == "moderation.delete":
+    if operation == "delete_message":
         return config.MOD_DELETE_DONE_TEXT
-    return config.ADMIN_DENIED_TEXT
+    return config.ADMIN_DONE_TEXT
 
 
-async def _moderation_command(
+def _refusal_text(result: admin_service.AdminResult) -> str:
+    """The Persian sentence for a refused result.
+
+    A refusal that came from the authority model keeps its specific wording —
+    "you cannot do that" and "that person outranks you" are different facts and
+    an operator acts differently on each. Everything else uses the outcome's own
+    sentence.
+    """
+    if result.outcome == admin_service.OUTCOME_DENIED and result.reason:
+        return _deny_text(rbac.Decision(False, result.reason, result.detail))
+    return admin_service.message_for(result.outcome)
+
+
+async def _admin_command(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
     *,
-    permission: str,
-    action: str,
-    verb,
-) -> None:
+    operation: str,
+) -> admin_service.AdminResult | None:
     """The shared body of every moderation command.
 
-    One function rather than five, because the five differ only in the
-    permission they require and the Telegram call they make — and the checks
-    that must happen first are exactly the part that must not be duplicated. The
-    sequence is the brief's list: who asked, are they registered, what may they
-    do, is the target protected, does Telegram permit it, then act.
+    One function rather than six, and it no longer decides anything: it resolves
+    *what* is being asked (which target, which message) and hands a typed request
+    to ``app/admin_service.py``, which authorises and executes it. The checks
+    that must not be duplicated — is the actor real, may they do this, is the
+    target protected, does Telegram permit it — now live in exactly one place,
+    the same place the assistant's tool calls go through.
+
+    The split of responsibility is deliberate. This function knows about
+    ``Update`` objects and Persian sentences; the service knows about authority
+    and Telegram. Neither knows about the other's world, which is what makes it
+    possible to test the security rules without a Telegram client and to add a
+    second interface without touching them.
     """
     msg = update.effective_message
     room = update.effective_chat
     if not msg or not room:
         return
     actor = _actor(update)
-    found = _target_from(update, ctx, ctx.args)
-    if found is None:
-        await _reply_in_group(ctx, room.id, config.MOD_TARGET_REQUIRED_TEXT,
-                              reply_to=msg.message_id)
-        return
-    target_id, target_name = found
-    target = rbac.resolve(target_id)
 
-    decision = rbac.authorize(actor, permission, target=target)
-    if not decision:
-        _audit(actor.user_id, action, decision.reason, target_id=target_id,
-               chat_id=room.id)
-        await _reply_in_group(ctx, room.id, _deny_text(decision),
-                              reply_to=msg.message_id)
-        return
+    if operation == "delete_message":
+        replied = getattr(msg, "reply_to_message", None)
+        if replied is None:
+            await _reply_in_group(ctx, room.id, config.MOD_TARGET_REQUIRED_TEXT,
+                                  reply_to=msg.message_id)
+            return
+        request = admin_service.AdminRequest(
+            operation=operation,
+            chat_id=room.id,
+            actor_id=actor.user_id,
+            message_id=int(getattr(replied, "message_id", 0) or 0),
+            request_id=admin_service.new_request_id(),
+            interface=admin_service.INTERFACE_PYTHON,
+            at=int(time.time()),
+        )
+        target_name = str(getattr(replied, "message_id", ""))
+    else:
+        found = _target_from(update, ctx, ctx.args)
+        if found is None:
+            await _reply_in_group(ctx, room.id, config.MOD_TARGET_REQUIRED_TEXT,
+                                  reply_to=msg.message_id)
+            return
+        target_id, target_name = found
+        request = admin_service.AdminRequest(
+            operation=operation,
+            chat_id=room.id,
+            actor_id=actor.user_id,
+            target_id=target_id,
+            reason=" ".join(ctx.args or ()) if operation == "warn_member" else "",
+            request_id=admin_service.new_request_id(),
+            interface=admin_service.INTERFACE_PYTHON,
+            at=int(time.time()),
+        )
 
-    # Telegram's own permission for this action, checked before attempting it so
-    # a refusal is reported as a permission problem rather than a mystery.
-    needed = rbac.TELEGRAM_RIGHTS_FOR_ACTION.get(permission)
-    if needed and not await _bot_right(ctx, room.id, needed):
-        _audit(actor.user_id, action, "bot_lacks_right", target_id=target_id,
-               chat_id=room.id, detail=needed)
-        await _reply_in_group(ctx, room.id, config.ADMIN_BOT_LACKS_RIGHT_TEXT,
-                              reply_to=msg.message_id)
-        return
-
-    try:
-        await verb(target_id)
-    except Exception as e:  # noqa: BLE001 - any failure is reported, not raised
-        # TelegramError is the expected one; anything else is a surprise, and a
-        # surprise that crashes a handler is worse than a surprise that is
-        # logged and reported as a failure.
-        log.warning("%s failed: %s", action, e)
-        _audit(actor.user_id, action, "telegram_error", target_id=target_id,
-               chat_id=room.id, detail=str(e)[:120])
-        await _reply_in_group(ctx, room.id, config.MOD_COMMAND_FAILED_TEXT,
-                              reply_to=msg.message_id)
-        return
-
-    _audit(actor.user_id, action, "ok", target_id=target_id, chat_id=room.id)
-    log.info(
-        "admin action=%s actor=%s target=%s chat=%s",
-        action, actor.user_id, target_id, room.id,
+    result = await admin_service.execute(
+        request, TelegramGateway(ctx), actor=actor, bot_id=getattr(ctx.bot, "id", 0)
     )
+
+    if not result.ok:
+        log.info(
+            "admin refused operation=%s actor=%s outcome=%s reason=%s",
+            operation, actor.user_id, result.outcome, result.reason,
+        )
+        await _reply_in_group(ctx, room.id, _refusal_text(result),
+                              reply_to=msg.message_id)
+        return result
+
     await _reply_in_group(
-        ctx, room.id, _command_done_text(action, target_name),
+        ctx, room.id, _command_done_text(operation, target_name),
         reply_to=msg.message_id,
     )
+    return result
 
 
+# Each command is now one line of policy — which operation it is — and nothing
+# else. Everything they used to do individually (resolve the actor, resolve the
+# target, ask RBAC, check the bot's Telegram rights, call the API, audit, report)
+# happens once, in ``app/admin_service.py``, on the same path the assistant's
+# tool calls take. The verbs that used to be lambdas closing over ``ctx.bot``
+# are methods on ``TelegramGateway``.
 async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    room = update.effective_chat
-    if room is None:
-        return
-    await _moderation_command(
-        update, ctx, permission="moderation.ban", action="moderation.ban",
-        verb=lambda uid: ctx.bot.ban_chat_member(room.id, uid),
-    )
+    await _admin_command(update, ctx, operation="ban_member")
 
 
 async def cmd_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    room = update.effective_chat
-    if room is None:
-        return
-    await _moderation_command(
-        update, ctx, permission="moderation.ban", action="moderation.unban",
-        verb=lambda uid: ctx.bot.unban_chat_member(room.id, uid),
-    )
+    await _admin_command(update, ctx, operation="unban_member")
 
 
 async def cmd_mute(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    room = update.effective_chat
-    if room is None:
-        return
-    until = datetime.now(timezone.utc) + timedelta(minutes=max(1, int(config.MUTE_MINUTES)))
-
-    async def _mute(uid: int) -> None:
-        await ctx.bot.restrict_chat_member(
-            room.id, uid, permissions=MUTED, until_date=until
-        )
-
-    await _moderation_command(
-        update, ctx, permission="moderation.mute", action="moderation.mute",
-        verb=_mute,
-    )
+    await _admin_command(update, ctx, operation="mute_member")
 
 
 async def cmd_unmute(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    room = update.effective_chat
-    if room is None:
-        return
-
-    async def _unmute(uid: int) -> None:
-        await ctx.bot.restrict_chat_member(room.id, uid, permissions=FULL)
-
-    await _moderation_command(
-        update, ctx, permission="moderation.mute", action="moderation.unmute",
-        verb=_unmute,
-    )
+    await _admin_command(update, ctx, operation="unmute_member")
 
 
 async def cmd_warn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Warn a user. The only command that addresses the person being actioned."""
-    room = update.effective_chat
-    msg = update.effective_message
-    if room is None or msg is None:
-        return
-    reason = " ".join(ctx.args or ()) or "لطفاً قوانین گروه رو رعایت کن."
-
-    async def _warn(uid: int) -> None:
-        replied = getattr(msg, "reply_to_message", None)
-        who = getattr(replied, "from_user", None) if replied else None
-        await _send_user_notice(
-            ctx,
-            room.id,
-            config.MOD_WARN_USER_TEXT.format(
-                name=mention(who) if who is not None else "",
-                reason=html.escape(reason),
-            ),
-        )
-
-    await _moderation_command(
-        update, ctx, permission="moderation.warn", action="moderation.warn",
-        verb=_warn,
-    )
+    await _admin_command(update, ctx, operation="warn_member")
 
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete the replied-to message."""
+    """Delete the replied-to message.
+
+    The one command with an extra step afterwards: the message id is remembered
+    as deleted so the assistant does not reply to something that is gone. That
+    is presentation, not authorisation, so it stays here rather than in the
+    service.
+    """
     msg = update.effective_message
     room = update.effective_chat
     if not msg or not room:
         return
     replied = getattr(msg, "reply_to_message", None)
-    if replied is None:
-        await _reply_in_group(ctx, room.id, config.MOD_TARGET_REQUIRED_TEXT,
-                              reply_to=msg.message_id)
-        return
-    actor = _actor(update)
-    author = getattr(replied, "from_user", None)
-    target_id = int(getattr(author, "id", 0) or 0)
-    target = rbac.resolve(target_id) if target_id else None
-
-    decision = rbac.authorize(actor, "moderation.delete", target=target)
-    if not decision:
-        _audit(actor.user_id, "moderation.delete", decision.reason,
-               target_id=target_id, chat_id=room.id)
-        await _reply_in_group(ctx, room.id, _deny_text(decision),
-                              reply_to=msg.message_id)
-        return
-    if not await _bot_right(ctx, room.id, "can_delete_messages"):
-        _audit(actor.user_id, "moderation.delete", "bot_lacks_right",
-               target_id=target_id, chat_id=room.id)
-        await _reply_in_group(ctx, room.id, config.ADMIN_BOT_LACKS_RIGHT_TEXT,
-                              reply_to=msg.message_id)
-        return
-    try:
-        await replied.delete()
-    except Exception as e:  # noqa: BLE001 - reported, never raised
-        log.warning("command delete failed: %s", e)
-        _audit(actor.user_id, "moderation.delete", "telegram_error",
-               target_id=target_id, chat_id=room.id)
-        await _reply_in_group(ctx, room.id, config.MOD_DELETE_FAILED_TEXT,
-                              reply_to=msg.message_id)
-        return
-    mark_deleted(room.id, getattr(replied, "message_id", 0))
-    _audit(actor.user_id, "moderation.delete", "ok", target_id=target_id,
-           chat_id=room.id)
-    await _reply_in_group(ctx, room.id, config.MOD_DELETE_DONE_TEXT,
-                          reply_to=msg.message_id)
+    result = await _admin_command(update, ctx, operation="delete_message")
+    # Only when it actually went. Remembering a deletion that was refused would
+    # silence the assistant about a message that is still there.
+    if result is not None and result.ok and replied is not None:
+        mark_deleted(room.id, getattr(replied, "message_id", 0))
 
 
 def _chat_active() -> bool:

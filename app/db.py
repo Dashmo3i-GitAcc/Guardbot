@@ -152,6 +152,34 @@ def init() -> None:
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_admin_audit_at ON admin_audit(at)"
     )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_chat "
+        "ON admin_audit(chat_id, at)"
+    )
+    # Replay and idempotency for administrative requests.
+    #
+    # The primary key is the request id, which is what makes "the same request
+    # twice" a fact rather than a guess. Both outcomes are stored, not only the
+    # successes: a denial that is replayed is also a replay, and re-running it
+    # could produce a different answer if the actor's permissions changed in
+    # between — which is exactly the window an attacker wants.
+    #
+    # `outcome` is kept so a duplicate can report what the original did rather
+    # than a bare "already seen". Pruned on a retention window, because a table
+    # that grows forever is a table that eventually stops being written to.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS admin_requests (
+            request_id TEXT PRIMARY KEY,
+            at INTEGER NOT NULL,
+            actor_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            target_id INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT NOT NULL DEFAULT '')"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_requests_at ON admin_requests(at)"
+    )
     # The Gemini account/model pool.
     #
     # Keyed by ``(workload, slot)`` rather than by slot alone, and that is the
@@ -787,6 +815,145 @@ def audit_recent(limit: int = 20) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def audit_since(
+    *, chat_id: int | None = None, since: int = 0, limit: int = 20
+) -> list[dict]:
+    """Recent audit rows for one room, newest first.
+
+    This is what the assistant is allowed to see of administrative history. Two
+    bounds, and both matter: ``chat_id`` keeps one group's administrative
+    business out of another group's conversation, and ``since`` keeps it to a
+    window rather than the whole record. The brief's rule is bounded,
+    privacy-conscious context — not a copy of the audit table in a prompt.
+    """
+    sql = (
+        "SELECT at, actor_id, action, target_id, chat_id, outcome, detail "
+        "FROM admin_audit WHERE at >= ?"
+    )
+    args: list = [int(since)]
+    if chat_id is not None:
+        sql += " AND chat_id = ?"
+        args.append(int(chat_id))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(max(1, int(limit)))
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [
+        {
+            "at": int(r[0]),
+            "actor_id": int(r[1]),
+            "action": r[2],
+            "target_id": int(r[3]) if r[3] is not None else None,
+            "chat_id": int(r[4]) if r[4] is not None else None,
+            "outcome": r[5],
+            "detail": r[6] or "",
+        }
+        for r in rows
+    ]
+
+
+def audit_prune(keep_seconds: int) -> int:
+    """Drop audit rows older than the retention window. Returns rows removed.
+
+    Called on the administrative path rather than on a timer, because this
+    process has no scheduler and a retention rule that only runs when somebody
+    remembers is not a retention rule.
+    """
+    if keep_seconds <= 0:
+        return 0
+    cutoff = int(time.time()) - int(keep_seconds)
+    with _lock:
+        cur = _conn.execute("DELETE FROM admin_audit WHERE at < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
+
+
+# ── Administrative request idempotency ────────────────────────────────────
+def admin_request_get(request_id: str) -> dict | None:
+    """The stored outcome for a request id, or None if it is new."""
+    if not request_id:
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT at, actor_id, chat_id, operation, target_id, outcome "
+            "FROM admin_requests WHERE request_id=?",
+            (str(request_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "at": int(row[0]),
+        "actor_id": int(row[1]),
+        "chat_id": int(row[2]),
+        "operation": row[3],
+        "target_id": int(row[4]),
+        "outcome": row[5],
+    }
+
+
+def admin_request_put(
+    request_id: str,
+    *,
+    actor_id: int,
+    chat_id: int,
+    operation: str,
+    target_id: int,
+    outcome: str,
+    at: int | None = None,
+) -> None:
+    """Remember a handled request id. First write wins.
+
+    ``INSERT OR IGNORE`` rather than an upsert: if two requests with the same id
+    race, the first one to be recorded is the one that happened, and rewriting
+    the row would let the loser claim it did something else.
+    """
+    _exec(
+        "INSERT OR IGNORE INTO admin_requests "
+        "(request_id, at, actor_id, chat_id, operation, target_id, outcome) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (
+            str(request_id)[:120],
+            int(at if at is not None else time.time()),
+            int(actor_id),
+            int(chat_id),
+            str(operation)[:80],
+            int(target_id),
+            str(outcome)[:40],
+        ),
+    )
+
+
+def admin_request_prune(keep_seconds: int) -> int:
+    """Drop request ids older than the retention window. Returns rows removed.
+
+    The window must be at least as long as the replay window, or a request could
+    be forgotten while it is still replayable. ``app/config.py`` enforces that
+    ordering when it reads the two settings.
+    """
+    if keep_seconds <= 0:
+        return 0
+    cutoff = int(time.time()) - int(keep_seconds)
+    with _lock:
+        cur = _conn.execute("DELETE FROM admin_requests WHERE at < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
+
+
+def admin_reset() -> None:
+    """Drop all administrative state: roles, the trail, and the request ids.
+
+    For tests and for an operator starting over, in the same spirit as
+    :func:`pool_reset`. Note what it does *not* touch — the moderation strikes
+    in ``users`` and the captcha rows are not administrative state and are not
+    this function's to erase.
+    """
+    with _lock:
+        _conn.execute("DELETE FROM admins")
+        _conn.execute("DELETE FROM admin_audit")
+        _conn.execute("DELETE FROM admin_requests")
+        _conn.commit()
 
 
 # ---- the Gemini account/model pool ----

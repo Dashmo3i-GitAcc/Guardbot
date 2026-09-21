@@ -94,6 +94,15 @@ class FakeBot:
             raise TelegramError("refused")
         self.restricted.append(user_id)
 
+    async def delete_message(self, chat_id, message_id, **kwargs):
+        # The gateway deletes by (chat_id, message_id) rather than through the
+        # Message object, so the double has to answer that call. Same Bot API
+        # method either way; the explicit form is what the shared service can
+        # express without holding a Message.
+        if self.action_fails:
+            raise TelegramError("refused")
+        self.deleted.append((chat_id, message_id))
+
     async def send_chat_action(self, *args, **kwargs):
         return None
 

@@ -493,6 +493,14 @@ def _wire(contents: list) -> list:
         for part in turn.get("parts", []):
             if "text" in part:
                 converted.append(types.Part(text=part["text"]))
+            elif "function_call" in part:
+                # A tool call the model made, echoed back as part of its own
+                # turn. It must be replayed verbatim: the protocol requires the
+                # model's call and its result to appear in that order, and a
+                # turn that omits the call leaves the result unexplained.
+                converted.append(types.Part(function_call=part["function_call"]))
+            elif "function_response" in part:
+                converted.append(types.Part(function_response=part["function_response"]))
             else:
                 converted.append(
                     types.Part.from_bytes(
@@ -503,14 +511,28 @@ def _wire(contents: list) -> list:
     return wire
 
 
-def _generation_config(types):
-    """The chat request shape, shared by both transports."""
+def _generation_config(types, *, tools=None, context: str = ""):
+    """The chat request shape, shared by both transports.
+
+    ``tools`` is empty for an ordinary conversation and carries the
+    administrative function declarations for a turn where the actor is entitled
+    to them. ``context`` is the trusted-context block, and it is appended to the
+    **system instruction** rather than to the user's turn — that placement is
+    the security property, not a detail. The user's text is user-controlled; the
+    system instruction is not, so a person claiming to be the owner is writing
+    inside a document they control, while the server's statement of who they are
+    is outside it.
+
+    Automatic function calling stays disabled even when tools are present. The
+    SDK's own loop would execute the model's request before this application had
+    seen it, which is precisely the trust the design withholds: the call has to
+    come back here so it can be authorised. The loop in ``_tool_turn`` is ours.
+    """
     return types.GenerateContentConfig(
         temperature=0.8,
         max_output_tokens=1024,
-        system_instruction=SYSTEM_INSTRUCTION,
-        # No tools are given, so a request to call one is a bug in the prompt
-        # rather than a feature. Disabling it keeps the wire traffic honest.
+        system_instruction=SYSTEM_INSTRUCTION + (context or ""),
+        tools=tools or None,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
@@ -564,6 +586,119 @@ async def _request(contents: list) -> str:
 
     response = await asyncio.wait_for(_call(), timeout=timeout_seconds())
     return getattr(response, "text", "") or ""
+
+
+# ── The tool-aware transport ──────────────────────────────────────────────
+# A second seam, deliberately separate from ``_request``. ``_request`` returns
+# the answer as text and is the seam every existing test replaces; adding
+# keyword arguments to it would have silently changed what those stubs are
+# asked to be. This one returns the whole response, because a turn that may
+# contain a tool call cannot be reduced to its text — there is no text.
+async def _pooled_full(pool, contents: list, *, tools=None, context: str = ""):
+    """One conversational call through the pool, with the raw response back."""
+    try:
+        return await gemini_pool.generate(
+            pool,
+            build_contents=lambda types: _wire(contents),
+            build_config=lambda types: _generation_config(
+                types, tools=tools, context=context
+            ),
+            # Identity: hand back the response object rather than its text.
+            extract=lambda response: response,
+        )
+    except gemini_pool.PoolUnavailable as exc:
+        raise ChatUnavailable(exc.kind, exc.detail) from exc
+
+
+async def _request_full(contents: list, *, tools=None, context: str = ""):
+    """The tool-aware network seam. Returns the SDK's response object."""
+    pool = gemini_pool.pool_for("chat")
+    if pool is not None and pool.enabled:
+        return await _pooled_full(pool, contents, tools=tools, context=context)
+
+    from google.genai import types
+
+    client = _client_or_raise()
+    config_ = _generation_config(types, tools=tools, context=context)
+    wire = _wire(contents)
+
+    async def _call():
+        return await client.aio.models.generate_content(
+            model=config.GEMINI_CHAT_MODEL,
+            contents=wire,
+            config=config_,
+        )
+
+    return await asyncio.wait_for(_call(), timeout=timeout_seconds())
+
+
+async def _tool_turn(contents: list, *, tools, context: str, on_tool) -> str:
+    """Run the bounded tool loop for one turn and return the final text.
+
+    The loop is the application's, not the SDK's, and that is the point: the
+    model's request arrives here as data, is handed to ``on_tool`` — which is
+    where authorisation happens — and only then is the result sent back. The SDK
+    would happily do this itself (``automatic_function_calling``), and letting it
+    would mean the first thing that ran was the model's intention, with the
+    permission check somewhere after.
+
+    Bounded twice over. ``ADMIN_TOOL_MAX_CALLS`` caps how many rounds of calls
+    the model may make, and the final request is made **without tools** so the
+    model has to answer in words rather than ask again. A turn that ends in
+    silence because the model kept reaching for a tool is worse than a turn that
+    ends in "I could not finish that".
+    """
+    from google.genai import types
+
+    convo = list(contents)
+    budget = max(1, int(config.ADMIN_TOOL_MAX_CALLS))
+    used = 0
+
+    while used < budget:
+        response = await _request_full(convo, tools=tools, context=context)
+        calls = list(getattr(response, "function_calls", None) or ())
+        if not calls:
+            return getattr(response, "text", "") or ""
+
+        convo.append(
+            {
+                "role": "model",
+                "parts": [
+                    {
+                        "function_call": types.FunctionCall(
+                            name=call.name, args=dict(call.args or {})
+                        )
+                    }
+                    for call in calls
+                ],
+            }
+        )
+        for call in calls:
+            used += 1
+            try:
+                answer = await on_tool(call.name, dict(call.args or {}))
+            except Exception as exc:  # noqa: BLE001 - a tool failure is an answer
+                log.warning("tool %s raised: %s", call.name, exc)
+                answer = {"error": "the tool failed"}
+            convo.append(
+                {
+                    "role": "tool",
+                    "parts": [
+                        {
+                            "function_response": types.FunctionResponse(
+                                name=call.name, response={"result": answer}
+                            )
+                        }
+                    ],
+                }
+            )
+        if used >= budget:
+            break
+
+    # Out of budget. One more request, with the tools taken away, so the model
+    # is forced to say what it managed to do instead of asking for another call.
+    final = await _request_full(convo, tools=None, context=context)
+    return getattr(final, "text", "") or ""
 
 
 def _tts_config(types):
@@ -897,6 +1032,9 @@ async def reply(
     parts: list | None = None,
     kind: str = "",
     want_voice: bool = False,
+    tools: list | None = None,
+    context: str = "",
+    on_tool=None,
 ) -> ChatReply:
     """Answer one message in an ongoing conversation.
 
@@ -962,7 +1100,17 @@ async def reply(
         _recent_calls.append(stamp)
         _user_calls.setdefault((chat_id, user_id), []).append(stamp)
         try:
-            raw = await _request(contents)
+            if tools and on_tool is not None:
+                # A turn that may call administrative tools. It takes a
+                # different transport because the answer is not necessarily
+                # text, and it is bounded internally — but every failure it can
+                # raise is the same shape as the plain path's, so the handling
+                # below is unchanged and the two paths cannot drift apart.
+                raw = await _tool_turn(
+                    contents, tools=tools, context=context, on_tool=on_tool
+                )
+            else:
+                raw = await _request(contents)
         except asyncio.CancelledError:
             raise
         except ChatUnavailable as exc:
