@@ -2836,11 +2836,18 @@ async def post_init(app: Application) -> None:
     # group acquisition is on. `status()` never contains the key.
     chat_state = chat.status()
     if chat_state["active"]:
+        # The daily figure is per account, so `used_today` — which is the
+        # deployment-wide count — is reported beside the number that is actually
+        # spendable rather than against the per-account limit. Reporting
+        # `daily_limit=500 used_today=500` read as "exhausted" while a second
+        # account with a full day sat unused, which is the confusion this line
+        # exists to prevent.
         log.info(
-            "Conversational AI active: model=%s daily_limit=%d used_today=%d "
-            "history_turns=%d history_ttl=%ds",
+            "Conversational AI active: model=%s daily_limit=%d_per_account "
+            "daily_remaining=%d used_today=%d history_turns=%d history_ttl=%ds",
             chat_state["model"],
             chat_state["daily_limit"],
+            chat_state["daily_remaining"],
             chat_state["used_today"],
             chat_state["history_turns"],
             chat_state["history_ttl"],

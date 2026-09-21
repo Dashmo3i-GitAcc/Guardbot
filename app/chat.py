@@ -355,7 +355,6 @@ def status() -> dict:
         # spendable, and `used_today` stays as the deployment-wide count the log
         # has always carried.
         "daily_limit": int(config.GEMINI_CHAT_DAILY_LIMIT),
-        "daily_limit_per_account": True,
         "daily_remaining": pool.daily_remaining() if pool is not None else 0,
         "used_today": db.chat_calls_today(),
         "history_turns": int(config.GEMINI_CHAT_HISTORY_TURNS),

@@ -371,3 +371,35 @@ def test_the_request_is_refused_only_when_every_account_is_out(monkeypatch):
                 build_config=lambda types: None,
             )
         )
+
+
+# ── What the operator is shown ────────────────────────────────────────────
+def test_the_pool_report_shows_the_allowance_across_the_pool(monkeypatch):
+    """`/pool` has to answer "how much is left", not leave it to arithmetic.
+
+    The number the operator wrote is per account; the number they need is the
+    total. Printing only the per-account figure is what made the original
+    problem hard to see.
+    """
+    pool = _pool("1", "2", budget=5)
+    monkeypatch.setattr(gemini_pool, "_pools", {"chat": pool})
+    _use(pool, "1", 5)
+
+    report = gemini_pool.status_report("chat")
+
+    assert "Daily allowance: 5 of 10 left (5 per account)" in report
+    assert "Today: 5 of 5 used" in report
+
+
+def test_the_pool_report_omits_the_allowance_where_there_is_none(monkeypatch):
+    """A workload with no allowance must not be given a misleading one."""
+    pool = gemini_pool.Pool(
+        "moderation", [("1", "k")], ["gemini-flash-lite-latest"],
+        frozenset({"text"}), daily_budget=0,
+    )
+    monkeypatch.setattr(gemini_pool, "_pools", {"moderation": pool})
+
+    report = gemini_pool.status_report("moderation")
+
+    assert "Daily allowance" not in report
+    assert "Today:" not in report

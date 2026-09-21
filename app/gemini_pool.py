@@ -1627,6 +1627,15 @@ def status_report(workload: str | None = None) -> str:
         )
         if pool.models:
             lines.append(f"Model preference: {' → '.join(pool.models[:4])}")
+        if health["daily_budget"]:
+            # The daily allowance is per account, so the number worth printing is
+            # what is left across the pool — and the per-account figure beside it,
+            # because that is the setting the operator actually wrote.
+            lines.append(
+                f"Daily allowance: {health['daily_remaining']} of "
+                f"{health['daily_budget'] * health['accounts']} left "
+                f"({health['daily_budget']} per account)"
+            )
         now = time.time()
         for account in pool.accounts:
             row = account.describe()
@@ -1644,6 +1653,10 @@ def status_report(workload: str | None = None) -> str:
                 )
             else:
                 lines.append("Cooldown: none")
+            if pool.daily_budget:
+                lines.append(
+                    f"Today: {account.daily_calls()} of {pool.daily_budget} used"
+                )
             lines.append("Remaining: Not exposed by provider")
             lines.append("Reset: Not exposed by provider")
             if row["last_error"]:
