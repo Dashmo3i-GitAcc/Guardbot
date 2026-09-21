@@ -48,6 +48,38 @@ def init() -> None:
             errors INTEGER NOT NULL DEFAULT 0,
             skipped INTEGER NOT NULL DEFAULT 0)"""
     )
+    # The conversational AI's history, and its own counters.
+    #
+    # Both are deliberately separate from the acquisition side. The two
+    # workloads have different quotas on different keys, and the requirement is
+    # that neither can exhaust the other — which is only true if they cannot
+    # read, let alone increment, each other's counters.
+    #
+    # History is per (chat, user) so one person's conversation can never be
+    # shown to another, and a group conversation is isolated from a private one
+    # because the chat_id differs.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            text TEXT NOT NULL,
+            at INTEGER NOT NULL)"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_messages_turn "
+        "ON chat_messages(chat_id, user_id, id)"
+    )
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS chat_usage (
+            day TEXT PRIMARY KEY,
+            calls INTEGER NOT NULL DEFAULT 0,
+            replies INTEGER NOT NULL DEFAULT 0,
+            malformed INTEGER NOT NULL DEFAULT 0,
+            errors INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0)"""
+    )
     _conn.commit()
 
 
@@ -229,3 +261,139 @@ def record_ai_skip() -> int:
         (ai_day(),),
     )
     return ai_calls_today()
+
+
+# ---- conversational AI: history, and its own counters ----
+# Nothing below touches `ai_usage`. A chatty user must not be able to spend the
+# acquisition classifier's quota, and an acquisition burst must not silence the
+# chat — the two are separate budgets on separate keys, and separate rows here
+# is what makes that a property of the code rather than a promise.
+CHAT_ROLES = ("user", "model")
+
+# The outcome whitelist for the chat counters. Same reasoning as OUTCOMES: a
+# typo must not invent a column nothing reads.
+CHAT_OUTCOMES = ("replies", "malformed", "errors")
+
+
+def chat_history(
+    chat_id: int, user_id: int, *, limit: int, ttl: int
+) -> list[tuple[str, str]]:
+    """Recent turns for one conversation, oldest first.
+
+    Two bounds, both applied here rather than by the caller: a maximum number of
+    turns, and an age cutoff. Either alone leaves a hole — a turn limit alone
+    would let a conversation from last week reappear, and an age cutoff alone
+    would let one long session grow without limit.
+
+    Scoped by ``(chat_id, user_id)`` so histories cannot leak between people, or
+    between a group and a private chat with the same person.
+    """
+    cutoff = int(time.time()) - max(1, int(ttl))
+    with _lock:
+        rows = _conn.execute(
+            "SELECT role, text FROM chat_messages "
+            "WHERE chat_id=? AND user_id=? AND at>=? "
+            "ORDER BY id DESC LIMIT ?",
+            (int(chat_id), int(user_id), cutoff, max(1, int(limit))),
+        ).fetchall()
+    # Reversed: the query takes the newest N, the model wants them oldest-first.
+    return [(row[0], row[1]) for row in reversed(rows)]
+
+
+def chat_append(chat_id: int, user_id: int, role: str, text: str) -> None:
+    """Record one turn. Truncated hard, because this is attacker-controlled text."""
+    role = role if role in CHAT_ROLES else "user"
+    _exec(
+        "INSERT INTO chat_messages (chat_id, user_id, role, text, at) "
+        "VALUES (?,?,?,?,?)",
+        (int(chat_id), int(user_id), role, (text or "")[:4000], int(time.time())),
+    )
+
+
+def chat_trim(chat_id: int, user_id: int, *, keep: int) -> int:
+    """Keep only the newest ``keep`` turns for one conversation.
+
+    Called after every append, which is what stops a single determined user from
+    growing the table without limit. Returns how many rows were dropped.
+    """
+    keep = max(0, int(keep))
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM chat_messages WHERE chat_id=? AND user_id=? AND id NOT IN "
+            "(SELECT id FROM chat_messages WHERE chat_id=? AND user_id=? "
+            " ORDER BY id DESC LIMIT ?)",
+            (int(chat_id), int(user_id), int(chat_id), int(user_id), keep),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def chat_clear(chat_id: int, user_id: int) -> int:
+    """Forget one conversation. Returns how many turns were removed."""
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM chat_messages WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def chat_purge(ttl: int) -> int:
+    """Drop every conversation older than ``ttl``.
+
+    The per-conversation trim bounds one conversation; this bounds the table.
+    Conversations that are simply abandoned would otherwise sit there forever,
+    since nothing else would ever come back to trim them.
+    """
+    cutoff = int(time.time()) - max(1, int(ttl))
+    with _lock:
+        cur = _conn.execute("DELETE FROM chat_messages WHERE at < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
+
+
+def chat_calls_today(day: str | None = None) -> int:
+    key = day or ai_day()
+    with _lock:
+        row = _conn.execute(
+            "SELECT calls FROM chat_usage WHERE day=?", (key,)
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def chat_usage(day: str | None = None) -> dict:
+    """The chat counter row for ``day``. All zeros when nothing has happened."""
+    key = day or ai_day()
+    with _lock:
+        row = _conn.execute(
+            "SELECT calls, replies, malformed, errors, skipped "
+            "FROM chat_usage WHERE day=?",
+            (key,),
+        ).fetchone()
+    values = row or (0, 0, 0, 0, 0)
+    return dict(zip(("calls", "replies", "malformed", "errors", "skipped"), values))
+
+
+def record_chat_attempt(outcome: str) -> int:
+    """Count one conversational request that was actually sent."""
+    key = ai_day()
+    outcome = outcome if outcome in CHAT_OUTCOMES else "errors"
+    _exec(
+        f"""INSERT INTO chat_usage (day, calls, {outcome}) VALUES (?, 1, 1)
+            ON CONFLICT(day) DO UPDATE SET
+                calls = calls + 1,
+                {outcome} = {outcome} + 1""",
+        (key,),
+    )
+    return chat_calls_today(key)
+
+
+def record_chat_skip() -> int:
+    """Count a conversational request we chose not to send."""
+    _exec(
+        """INSERT INTO chat_usage (day, calls, skipped) VALUES (?, 0, 1)
+           ON CONFLICT(day) DO UPDATE SET skipped = skipped + 1""",
+        (ai_day(),),
+    )
+    return chat_calls_today()

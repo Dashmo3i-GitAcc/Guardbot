@@ -189,6 +189,19 @@ DB_PATH = os.getenv("DB_PATH", "/data/guardbot.db")
 TMP_DIR = os.getenv("TMP_DIR", "/tmp/guardbot")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# ---------------- Outbound AI connectivity: which IP family ------------------
+# This host has a global IPv6 address and the AI endpoint publishes AAAA
+# records, so the kernel already prefers IPv6 (the RFC 6724 default). This
+# setting makes that explicit rather than incidental: with it on, addresses for
+# the AI hosts are ordered IPv6-first so the preference does not depend on the
+# kernel's address-selection heuristics staying the way they are today.
+#
+# It is a *reorder*, never a filter — every IPv4 address stays in the list, and
+# a connector that walks it falls back to IPv4 when IPv6 does not work. So the
+# failure mode of being wrong here is a slower call, not a call that cannot be
+# made. See app/net.py.
+AI_PREFER_IPV6 = _bool("AI_PREFER_IPV6", True)
+
 
 # ---------------- Group acquisition (VPN trial invitations) ----------------
 # Someone asking about a VPN in the group is a customer the VPN bot has not met
@@ -390,4 +403,155 @@ GEMINI_MIN_CONFIDENCE = _float("GEMINI_MIN_CONFIDENCE", 0.55)
 # message is short; a pasted wall of text is not worth the tokens, and this is
 # also the bound on what leaves the server.
 GEMINI_MAX_CHARS = _int("GEMINI_MAX_CHARS", 600)
+
+# ---------------- Gemini: the conversational assistant ------------------------
+# A second, entirely independent Gemini workload. It answers somebody who talks
+# to the bot directly; it has nothing to do with deciding whether a group
+# message is a lead.
+#
+# Why it is separate, and why it needs its own key:
+#
+#   * Gemini rate limits are applied **per Google Cloud project**, not per API
+#     key. Two keys in the same project share one allowance. So "a separate key"
+#     only gives a separate budget if it belongs to a different project — and
+#     that is the whole point of the exercise, because a chatty user must not be
+#     able to exhaust the acquisition classifier's daily quota.
+#     Verified against the official docs on 2026-09-21:
+#     https://ai.google.dev/gemini-api/docs/rate-limits
+#     "Rate limits are applied per project, not per API key. Requests per day
+#     (RPD) quotas reset at midnight Pacific time." — the same page also
+#     confirms that no static free-tier table is published any more, which is
+#     why this file carries conservative defaults and `db.ai_day()` measures the
+#     Pacific boundary rather than UTC.
+#   * The workloads have opposite shapes. Acquisition is many short, cheap,
+#     high-stakes classifications. Chat is fewer, longer, multi-turn requests
+#     whose output a person is waiting for. One quota tuned for either is wrong
+#     for the other.
+#   * Failures must not propagate. Chat being down must leave acquisition
+#     working, and vice versa. Separate state (rate window, circuit breaker,
+#     counters, client) is what makes that true rather than hoped for.
+#
+# A consumer Gemini app subscription is *not* a developer quota: the same Google
+# account can have a Pro/Ultra Gemini subscription and a free-tier API project,
+# and the API is still bounded by the API tier. Nothing here may assume
+# otherwise.
+#
+# Google publishes no static free-tier table — limits are per project and must
+# be read from AI Studio for the account in question. The defaults below are
+# therefore deliberately conservative, and the real ceilings belong in .env
+# once measured for the key you supply.
+GEMINI_CHAT_ENABLED = _bool("GEMINI_CHAT_ENABLED", False)
+
+# Must belong to a different Google Cloud project from GEMINI_API_KEY, or the
+# separation above is nominal. Never logged, never in status().
+GEMINI_CHAT_API_KEY = os.getenv("GEMINI_CHAT_API_KEY", "").strip()
+
+# Whether the assistant may fall back to GEMINI_API_KEY when no chat key is set.
+#
+# Off by default, and it is an explicit opt-in rather than an automatic fallback
+# because of what it costs: Google applies rate limits **per project**, so a
+# shared key means a shared Google allowance even though this application keeps
+# separate counters. A busy conversation can then push the classifier into a
+# 429, at which point it degrades to the rule engine — safe, but a real
+# behaviour change that an operator should choose knowingly rather than
+# discover.
+#
+# What is *not* shared, either way: the counters, the daily cap, the rate window
+# and the circuit breaker in this application. Chat can never spend the
+# classifier's 200-call allowance or trip its breaker, and that is asserted in
+# tests/test_chat.py. Turn this on to make the assistant work on a deployment
+# with one key; leave it off, and set GEMINI_CHAT_API_KEY from a second project,
+# for genuinely independent quotas.
+GEMINI_CHAT_ALLOW_SHARED_KEY = _bool("GEMINI_CHAT_ALLOW_SHARED_KEY", False)
+
+# The conversational model. This is a different job from classification: the
+# reply is longer, is read by a human, and benefits from a stronger model. It is
+# its own setting precisely so the two can be tuned apart.
+#
+# What was measured on this key on 2026-09-21 (one real call each, `models.list`
+# for availability) — re-measure before changing any of it:
+#
+#   * `gemini-flash-lite-latest`  answers, in fluent Persian. The default.
+#   * `gemini-3.5-flash-lite`     answers, same quality.
+#   * `gemini-flash-latest`       answers, but returned *no visible text* at a
+#                                 small output budget. It is a thinking model:
+#                                 the budget is spent on internal reasoning and
+#                                 `response.text` comes back empty, which
+#                                 `chat.reply` correctly reports as
+#                                 `empty_response` rather than sending a blank
+#                                 message. Raising GEMINI_CHAT_MAX_TOKENS in
+#                                 `_request` is what such a model needs — not a
+#                                 prompt change.
+#   * `gemini-2.5-flash` and `gemini-2.5-flash-lite` are **gone**: the API
+#                                 answers `404 ... no longer available`. The
+#                                 2.5 generation was retired, so pinning a
+#                                 version number is the fragile choice here and
+#                                 the `-latest` alias is the durable one.
+#
+# `models.list()` on this key returns ~41 generateContent models including the
+# 3.x family (gemini-3.8-flash, gemini-3.5-flash-lite, gemini-3.1-flash-lite…),
+# so the choice is real. There is no separate "chat" endpoint or product to
+# reach for: conversational use is the same `generateContent` API and the same
+# per-project limits as the classifier — which is why the separation in this
+# file is about keys, counters and breakers, not about a different API.
+GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-flash-lite-latest").strip()
+
+# Longer than the classifier's 10s. A person waiting for a considered reply will
+# wait; a group message being classified is on a message-handler budget and
+# cannot. Still bounded, because a Telegram handler must never wait forever.
+GEMINI_CHAT_TIMEOUT_SECONDS = _float("GEMINI_CHAT_TIMEOUT_SECONDS", 25.0)
+GEMINI_CHAT_MAX_RETRIES = _int("GEMINI_CHAT_MAX_RETRIES", 1)
+GEMINI_CHAT_BACKOFF_SECONDS = _float("GEMINI_CHAT_BACKOFF_SECONDS", 1.5)
+
+# Its own brake. Lower than the classifier's because each request is larger and
+# a person can only read so fast, and because a chatty user is exactly the load
+# this is meant to absorb without touching the other budget.
+GEMINI_CHAT_RATE_LIMIT = _int("GEMINI_CHAT_RATE_LIMIT", 6)
+GEMINI_CHAT_RATE_WINDOW = _float("GEMINI_CHAT_RATE_WINDOW", 60.0)
+
+# One person's own brake. The window above bounds the whole deployment; this
+# bounds a single conversation, so nobody can hold down the send key and spend
+# the day's allowance before anyone else gets a reply. Keyed by (chat, user), so
+# it follows the person rather than the room.
+GEMINI_CHAT_USER_RATE_LIMIT = _int("GEMINI_CHAT_USER_RATE_LIMIT", 5)
+GEMINI_CHAT_USER_RATE_WINDOW = _float("GEMINI_CHAT_USER_RATE_WINDOW", 30.0)
+
+# Its own daily ceiling, counted on the same Pacific boundary but in its own
+# table, so the two can never be added together by accident.
+GEMINI_CHAT_DAILY_LIMIT = _int("GEMINI_CHAT_DAILY_LIMIT", 200)
+
+GEMINI_CHAT_CIRCUIT_FAILURES = _int("GEMINI_CHAT_CIRCUIT_FAILURES", 5)
+GEMINI_CHAT_CIRCUIT_SECONDS = _float("GEMINI_CHAT_CIRCUIT_SECONDS", 300.0)
+
+# What one incoming message is truncated to before it leaves the server.
+GEMINI_CHAT_MAX_CHARS = _int("GEMINI_CHAT_MAX_CHARS", 1500)
+
+# Conversation memory: how many turns are replayed to the model, and how long a
+# quiet conversation is remembered. Bounds growth from both directions — turns
+# bound a busy conversation, the TTL bounds an abandoned one.
+GEMINI_CHAT_HISTORY_TURNS = _int("GEMINI_CHAT_HISTORY_TURNS", 8)
+GEMINI_CHAT_HISTORY_TTL = _int("GEMINI_CHAT_HISTORY_TTL", 1800)
+
+# The reply is truncated to this before it is sent. Telegram's hard limit is
+# 4096 characters; the margin is for the escaping and the length notice.
+GEMINI_CHAT_REPLY_CHARS = _int("GEMINI_CHAT_REPLY_CHARS", 3500)
+
+# Sent by /reset. The one piece of this feature's copy that a user can trigger
+# deliberately, so it lives here with the rest of the wording.
+GEMINI_CHAT_RESET_TEXT = os.getenv(
+    "GEMINI_CHAT_RESET_TEXT",
+    "گفتگو پاک شد. از نو شروع کن 🙂",
+)
+
+# Sent when somebody presses Start in a private chat. Without it the Start button
+# — the first thing anyone presses — produces silence, because /start is a
+# command and the conversational handler deliberately ignores commands.
+GEMINI_CHAT_START_TEXT = os.getenv(
+    "GEMINI_CHAT_START_TEXT",
+    "سلام {name} 👋\n"
+    "هر سوالی داشتی همین‌جا بپرس.\n"
+    "اگه خواستی گفتگو رو از صفر شروع کنی، /reset رو بزن.",
+)
+
+
 

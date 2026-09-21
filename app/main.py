@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 import shutil
@@ -13,12 +14,13 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.constants import ChatMemberStatus
+from telegram.constants import ChatAction, ChatMemberStatus
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     ChatMemberHandler,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -27,11 +29,13 @@ from telegram.ext import (
 from . import (
     ai_intent,
     burst,
+    chat,
     classifier,
     config,
     db,
     detector,
     moderation,
+    net,
     responses,
     vpnbot,
 )
@@ -841,6 +845,199 @@ async def _reply_in_group(
             log.warning("acquisition reply failed: %s", e)
 
 
+# ------------------------------------------------- conversational assistant
+# A policy entirely separate from group acquisition, and the separation is the
+# requirement rather than a nicety: an ordinary group message must never start a
+# chat, and a chat must never produce a trial offer.
+#
+# It is enforced structurally. The assistant is reachable only from
+# `_addressed_to_bot` — a reply to a message this bot sent, or an @mention of
+# this bot — and `on_group_text` returns before classifying when that is true.
+# Neither path can therefore be entered by the other's traffic.
+def _addressed_to_bot(msg, ctx) -> bool:
+    """Whether this message is aimed at the bot rather than at the room.
+
+    Exactly two things count, and both are unambiguous in Telegram's own data:
+
+    * a reply to a message this bot sent, and
+    * an @mention of this bot's own username.
+
+    Nothing else. A message that merely contains the word «ربات», or a question
+    the rules happen to like, is ordinary conversation and stays in the
+    acquisition pipeline. The brief is explicit that seeing a group message is
+    not an invitation to start chatting.
+    """
+    replied = getattr(msg, "reply_to_message", None)
+    if replied is not None:
+        author = getattr(replied, "from_user", None)
+        if author is not None and getattr(author, "id", None) == ctx.bot.id:
+            return True
+
+    username = (getattr(ctx.bot, "username", "") or "").strip().lower()
+    if username and f"@{username}" in (msg.text or "").lower():
+        return True
+    return False
+
+
+def private_text_filter():
+    """Ordinary private text: not a command, not an edited message."""
+    return (
+        filters.TEXT
+        & ~filters.COMMAND
+        & filters.ChatType.PRIVATE
+        & ~filters.UpdateType.EDITED_MESSAGE
+    )
+
+
+def group_text_filter():
+    """Ordinary group text, used by the assistant's own handler.
+
+    The same shape as the acquisition filter on purpose: the two handlers see
+    the same messages and decide between them, rather than one being able to
+    reach traffic the other cannot.
+    """
+    return (
+        filters.TEXT
+        & ~filters.COMMAND
+        & filters.ChatType.GROUPS
+        & ~filters.UpdateType.EDITED_MESSAGE
+    )
+
+
+async def _send_chat(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    reply_to: int | None = None,
+) -> None:
+    """Send one conversational message.
+
+    Escaped, because the body is model output and Telegram is asked to parse
+    HTML: an unescaped angle bracket would be a parse error at best. The typing
+    action is best-effort — it is a courtesy, and failing to show it must not
+    cost the reply.
+    """
+    safe = html.escape(text)
+    try:
+        await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    except TelegramError:
+        pass
+    try:
+        await ctx.bot.send_message(
+            chat_id,
+            safe,
+            parse_mode="HTML",
+            reply_to_message_id=reply_to,
+            disable_web_page_preview=True,
+        )
+    except TelegramError as exc:
+        log.warning("chat reply failed: %s", exc)
+
+
+async def _answer_conversationally(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE, reply_to: int | None = None
+) -> None:
+    """The whole conversational policy, in one place."""
+    msg = update.effective_message
+    room = update.effective_chat
+    user = update.effective_user
+    if not msg or not room or not user or not msg.text or user.is_bot:
+        return
+
+    result = await chat.reply(room.id, user.id, msg.text)
+    if result:
+        log.info(
+            "chat reply to %s in %s turns=%d chars=%d truncated=%s",
+            user.id,
+            room.id,
+            result.turns,
+            len(result.text),
+            result.truncated,
+        )
+        await _send_chat(ctx, room.id, result.text, reply_to)
+        return
+
+    log.info(
+        "chat declined for %s in %s reason=%s",
+        user.id,
+        room.id,
+        result.error or result.skipped,
+    )
+    # Silent for the reasons that are nobody's business — a switched-off feature
+    # should not announce itself every time somebody says hello.
+    if result.message:
+        await _send_chat(ctx, room.id, result.message, reply_to)
+
+
+async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The assistant, in a group. Reached only by an explicit address."""
+    msg = update.effective_message
+    if not msg or not _addressed_to_bot(msg, ctx):
+        return
+    await _answer_conversationally(update, ctx, reply_to=msg.message_id)
+
+
+async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """A private message to the bot is a conversation, by definition."""
+    await _answer_conversationally(update, ctx)
+
+
+async def on_chat_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/reset — forget this conversation.
+
+    The user-facing way to clear the bounded history. Scoped to (chat, user), so
+    it can only ever clear the caller's own conversation, never anybody else's.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    user = update.effective_user
+    if not msg or not room or not user:
+        return
+
+    removed = db.chat_clear(room.id, user.id)
+    log.info("chat reset for %s in %s removed=%d", user.id, room.id, removed)
+
+    private = getattr(room, "type", "") == "private"
+    await _send_chat(
+        ctx,
+        room.id,
+        config.GEMINI_CHAT_RESET_TEXT,
+        None if private else msg.message_id,
+    )
+
+
+async def on_chat_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/start in a private chat — Telegram's Start button, answered.
+
+    Without this a person who presses Start gets silence, because /start is a
+    command and the conversational handler deliberately ignores commands. Private
+    chats only: in a group, /start is noise and answering it would be the bot
+    talking to the room without being addressed.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    user = update.effective_user
+    if not msg or not room or not user:
+        return
+    if getattr(room, "type", "") != "private":
+        return
+    # A plain first name rather than `mention()`: `_send_chat` escapes what it
+    # sends, so an HTML mention would arrive as visible markup.
+    name = (user.first_name or "").strip() or "دوست عزیز"
+    await _send_chat(ctx, room.id, config.GEMINI_CHAT_START_TEXT.format(name=name))
+
+
+def _chat_active() -> bool:
+    """Whether the conversational assistant can answer at all.
+
+    A wrapper rather than a direct ``chat.is_enabled()`` call because
+    ``on_group_text`` binds a local named ``chat`` (its effective chat), which
+    shadows the module for the whole of that function. This keeps one source of
+    truth for the policy without a rename that would touch unrelated handlers.
+    """
+    return chat.is_enabled()
+
+
 async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Offer a VPN test to someone who has just asked for one.
 
@@ -854,6 +1051,13 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not msg or not chat or not user or not msg.text:
         return
     if user.is_bot or chat.id not in config.GROUP_IDS:
+        return
+
+    # A message aimed at the bot is a conversation, not an intent. This is the
+    # boundary between the two AI policies: the assistant has its own handler in
+    # its own group, and returning here is what stops one message from getting
+    # both a chat reply and a trial offer.
+    if _chat_active() and _addressed_to_bot(msg, ctx):
         return
 
     # The layered decision: the rule engine first, and Gemini only for the
@@ -967,6 +1171,17 @@ async def post_init(app: Application) -> None:
         config.GROUP_IDS,
         sorted(config.EXPLICIT_CLASSES),
     )
+    # One line that makes the egress path a fact rather than an assumption. If
+    # the AI ever starts timing out, this is what says whether an address family
+    # was involved, instead of leaving it to be guessed at from a support report.
+    egress = net.describe()
+    log.info(
+        "AI egress: ipv6_usable=%s order=%s prefer=%s global_v6=%d",
+        egress["ipv6_usable"],
+        "->".join(egress["order"]) or "unresolved",
+        "installed" if egress["preferred"] else "not_installed",
+        len(egress["local_ipv6"]),
+    )
     if config.GROUP_TRIAL_ENABLED:
         if vpnbot.is_configured():
             log.info("Group acquisition enabled, VPN bot at %s", config.VPNBOT_API_URL)
@@ -993,11 +1208,52 @@ async def post_init(app: Application) -> None:
         else:
             log.info("Intent AI layer disabled (GEMINI_ENABLED=0); rules only.")
 
+    # The conversational assistant, reported separately and *outside* the block
+    # above: it has its own switch and its own key, and it works whether or not
+    # group acquisition is on. `status()` never contains the key.
+    chat_state = chat.status()
+    if chat_state["active"]:
+        log.info(
+            "Conversational AI active: model=%s daily_limit=%d used_today=%d "
+            "history_turns=%d history_ttl=%ds",
+            chat_state["model"],
+            chat_state["daily_limit"],
+            chat_state["used_today"],
+            chat_state["history_turns"],
+            chat_state["history_ttl"],
+        )
+        if chat_state["shares_google_project"]:
+            # Not a failure, but the one fact that explains a 429 on the
+            # classifier that appears the first time the group is busy: the two
+            # workloads keep separate counters here, but Google's own limit is
+            # per project, so they draw on one allowance. Said once at startup
+            # rather than discovered from a support question.
+            log.warning(
+                "Conversational AI is using the classifier's key "
+                "(GEMINI_CHAT_ALLOW_SHARED_KEY=1). Our counters are separate, "
+                "but Google's rate limit is per project, so a busy chat can "
+                "push the classifier into a 429. Set GEMINI_CHAT_API_KEY from "
+                "a different Google Cloud project for an independent quota."
+            )
+    elif chat_state["enabled"]:
+        log.warning(
+            "GEMINI_CHAT_ENABLED is on but no chat key is available; set "
+            "GEMINI_CHAT_API_KEY, or GEMINI_CHAT_ALLOW_SHARED_KEY=1 to reuse "
+            "the classifier's key. The assistant will not answer until then."
+        )
+    else:
+        log.info("Conversational AI disabled (GEMINI_CHAT_ENABLED=0).")
+
 
 def main() -> None:
     os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
     os.makedirs(config.TMP_DIR, exist_ok=True)
     db.init()
+    # Before anything opens a socket, so every later AI call — classifier and
+    # conversation alike — resolves through the IPv6-first ordering. Best
+    # effort: on a host without global IPv6 it declines and the bot runs
+    # exactly as it did before.
+    net.install_preference()
     if config.MEDIA_ENABLED:
         detector.load_model()
 
@@ -1028,6 +1284,28 @@ def main() -> None:
         # group 0 happened to match first.
         app.add_handler(
             MessageHandler(acquisition_message_filter(), on_group_text), group=1
+        )
+
+    if config.GEMINI_CHAT_ENABLED:
+        # The conversational assistant. Registered even when the key is missing
+        # so that /reset keeps working, and in groups of its own so it cannot
+        # be starved by, or starve, the handlers above. `on_group_chat` returns
+        # immediately unless the message explicitly addresses the bot.
+        #
+        # `block=False` is what keeps a conversation from stalling the bot. A
+        # reply can take up to GEMINI_CHAT_TIMEOUT_SECONDS, and the dispatcher
+        # processes updates one at a time by default — so without this, one
+        # person chatting would pause captchas and media moderation for the
+        # whole group. Non-blocking runs the callback as its own task, so the
+        # rest of the bot keeps working while a reply is being written.
+        app.add_handler(CommandHandler("start", on_chat_start))
+        app.add_handler(CommandHandler("reset", on_chat_reset))
+        app.add_handler(
+            MessageHandler(group_text_filter(), on_group_chat, block=False), group=2
+        )
+        app.add_handler(
+            MessageHandler(private_text_filter(), on_private_text, block=False),
+            group=2,
         )
 
     # chat_member updates must be requested explicitly
