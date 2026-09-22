@@ -2860,6 +2860,59 @@ separate table in the first place.
 .venv-test/bin/python -m pytest tests/test_chat_daily_budget.py -q
 ```
 
+#### Repairing the rows the old rule wrote
+
+The fix stops the over-charging from here on; it does not un-spend what was
+already charged. On 2026-09-22 both chat accounts sat at 503/504 against a cap of
+500, so the group stayed silent until the 08:00 UTC rollover unless the day's
+rows were corrected — which is what "unblock today" required.
+
+The correct value is the provider-served floor, and the only per-day record of
+that is `chat_usage.replies`: every reply needed at least one served provider
+call, so it is a floor on today's real spend. The split *between* accounts is not
+recoverable from any table, so it is even — which is also the shape the
+over-charging itself took (503/504), and the shape `ordered_accounts` produces.
+
+```python
+# run in the container, after the fix is deployed and before the restart below
+day = db.ai_day()
+replies = db._conn.execute(
+    "SELECT replies FROM chat_usage WHERE day=?", (day,)
+).fetchone()[0]
+for slot in ("1", "2"):
+    db._conn.execute(
+        "UPDATE gemini_daily SET calls=? WHERE workload='chat' AND slot=? AND day=?",
+        (replies // 2, slot, day),
+    )
+db._conn.commit()
+```
+
+Two things about doing this on a running deployment:
+
+* **The cache makes a restart necessary.** `Account.daily_calls` caches the
+  counter per day and only re-reads when the *day* changes, so the live process
+  keeps returning 503/504 until it is restarted. A restart rebuilds it from the
+  table; the startup log then shows the corrected figure.
+* **This is a one-off for rows written by the old rule.** From this build on the
+  counter is right by construction, and no scheduled job or migration is needed.
+
+The repair was verified the way the incident was found — by measuring, not by
+asserting:
+
+| check | after |
+| --- | --- |
+| `gemini_daily` `chat` | `{'1': 200, '2': 197}` |
+| `pool.daily_remaining()` | 603 of 1000 |
+| `pool.daily_exhausted()` | `False` |
+| `_daily_allowance_left()` | `True` |
+| startup log | `daily_remaining=603`, `[pool] chat: accounts=2 usable=2` |
+
+And the refund rule was confirmed on the live path rather than in the unit tests
+alone: one logical request that met a `503` and a free-tier `429` before an
+answer came back cost **one** charge (606 → 605), where the old rule would have
+cost three. A real question from the owner was answered at 17:56:39 UTC with
+`sent=True`, which is the only proof that matters.
+
 ---
 
 ## 30. The audit trail says which interface acted
