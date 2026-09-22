@@ -4235,7 +4235,8 @@ async def post_init(app: Application) -> None:
         )
         log.info(
             "Nexus awareness: tick=%.0fs deadline_tick=%.1fs debounce=%.0fs "
-            "max_wait=%.0fs min_interval=%.0fs window=%d msgs/%d chars owner=%s",
+            "max_wait=%.0fs min_interval=%.0fs window=%d msgs/%d chars "
+            "context=%d chars deep=%s owner=%s",
             tick,
             AWARENESS_DEADLINE_TICK_SECONDS,
             float(config.NEXUS_AWARENESS_DEBOUNCE_SECONDS),
@@ -4243,6 +4244,12 @@ async def post_init(app: Application) -> None:
             float(config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS),
             int(config.NEXUS_AWARENESS_WINDOW_MESSAGES),
             int(config.NEXUS_AWARENESS_WINDOW_CHARS),
+            # The staged context, reported for the same reason the window is:
+            # an operator debugging "the assistant seems to know nothing about
+            # this room" needs to see whether the deeper tier is switched on and
+            # how much room the whole thing has, without reading the config.
+            int(config.NEXUS_AWARENESS_CONTEXT_CHARS),
+            "on" if config.NEXUS_AWARENESS_CONTEXT_DEEP else "off",
             # The owner's own switch, read from the persisted row. The jobs are
             # registered on the deploy-time setting either way — that is what
             # lets the owner switch the layer back on without a restart — so
