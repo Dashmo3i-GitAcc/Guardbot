@@ -4108,6 +4108,15 @@ room and a slow context build produce the same number and have different fixes.
 A pass that stops early reports both as `0` rather than as a half-measured
 value, which `test_awareness_latency.py` asserts.
 
+What is left of `batch_ms` after those two is the rest of the prompt assembly:
+the roster, the instruction block, and the staged context of §35.3. Everything
+the model is handed is built **before** the `request` mark for exactly this
+reason — assembled inside the request window it would be counted as model time,
+and the staged context is the one part of a pass whose cost is new. It gets no
+field of its own because it is derivable from the three that are reported, and
+because all of it is Python string work bounded by
+`NEXUS_AWARENESS_CONTEXT_CHARS` and the window budget.
+
 Three candidates were found, and only one of them was a defect:
 
 1. **Tick quantisation — a real defect.** Every room's debounce expired on its

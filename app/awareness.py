@@ -370,6 +370,13 @@ class PassTrace:
         recent messages out of the database and rendering them. Without the
         split, a slow pass and a large room look identical, and the two have
         different fixes.
+
+        What is left of ``batch_ms`` after those two is the rest of the prompt
+        assembly — the roster, the staged context (see
+        ``app/awareness_context.py``) and the instruction block. It is not a
+        field of its own because it is derivable from the three that are, and
+        because everything in it is Python string work bounded by
+        ``NEXUS_AWARENESS_CONTEXT_CHARS`` and the window budget.
         """
         return (
             f"chat={self.chat_id} waited_ms={self.waited_ms():.0f} "

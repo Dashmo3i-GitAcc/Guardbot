@@ -1246,12 +1246,22 @@ async def _awareness_read(
         awareness.skip(chat_id, seen_message_id=max_id)
         return
 
+    # Everything the model is handed is assembled *before* the request mark, so
+    # it lands in ``batch_ms`` — the pre-request stage — rather than in
+    # ``gemini_ms``. That matters for the staged context more than it looks: it
+    # is the one part of this pass whose cost is new, and a promise that it is
+    # bounded is only checkable if it is not counted as model time. (The
+    # ``ctx_ms``/``window_ms`` split covers the tool declarations and the
+    # transcript; what is left of ``batch_ms`` is this assembly.)
+    prompt_context = (
+        _awareness_context(chat_id, messages=messages, anchor=speaker)
+        + awareness.instruction_block(chat_id, messages=messages)
+        + (context or "")
+    )
     trace.mark("request")
     result = await chat.awareness(
         transcript,
-        _awareness_context(chat_id, messages=messages, anchor=speaker)
-        + awareness.instruction_block(chat_id, messages=messages)
-        + (context or ""),
+        prompt_context,
         tools=tools,
         on_tool=on_tool,
     )

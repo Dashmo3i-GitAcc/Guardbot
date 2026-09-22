@@ -576,6 +576,46 @@ def test_the_transcript_the_pass_reads_carries_recency():
     assert "(+5m)" in awareness.render(CHAT, messages=rows)
 
 
+def test_the_staged_context_is_measured_as_batch_time_and_not_as_model_time(monkeypatch):
+    """The new work must land in ``batch_ms``, not in ``gemini_ms``.
+
+    Assembling the prompt inside the request window would count a slow context
+    build as model time — the one part of this pass whose cost is new would be
+    invisible, and the promise that it is bounded would not be checkable from
+    the log. So everything the model is handed is built before the ``request``
+    mark, and that is what this asserts.
+    """
+    stamps: dict[str, float] = {}
+    real_context = main._awareness_context
+
+    def _context(chat_id, **kwargs):
+        stamps["context"] = time.monotonic()
+        return real_context(chat_id, **kwargs)
+
+    async def _turn(*_args, **_kwargs):
+        return [], "", None
+
+    traces: list = []
+
+    class RecordingTrace(awareness.PassTrace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            traces.append(self)
+
+    monkeypatch.setattr(main, "_awareness_context", _context)
+    monkeypatch.setattr(main, "_awareness_turn", _turn)
+    monkeypatch.setattr(awareness, "PassTrace", RecordingTrace)
+
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    install_awareness(monkeypatch, decision={"relevant": False, "respond": False})
+    asyncio.run(main._awareness_pass(ctx_for(FakeBot()), CHAT, pending_row()))
+
+    assert traces, "the pass should have produced a trace"
+    request_at = traces[0].marks.get("request")
+    assert request_at is not None
+    assert stamps["context"] < request_at
+
+
 # ══ 4. Awareness is not response ══════════════════════════════════════════
 def test_an_irrelevant_conversation_produces_no_message(monkeypatch):
     bot = FakeBot()
