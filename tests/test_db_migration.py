@@ -218,13 +218,16 @@ def test_the_people_table_round_trips(pre_nexus_db):
     assert rows[0]["message_count"] == 2
 
 
-# ── The two tables Group Awareness added ──────────────────────────────────
+# ── The tables Group Awareness added ──────────────────────────────────────
 # Same property, one layer later: an upgrade from the Nexus-era database must
 # not need a migration step, and the room window must survive a restart.
 def test_the_awareness_tables_are_created_on_an_existing_database(pre_nexus_db):
     tables = _tables(pre_nexus_db)
     assert "group_messages" in tables
     assert "awareness_state" in tables
+    # The owner's spoken switch, added later still, and additive for the same
+    # reason: an existing database picks it up on restart with no migration.
+    assert "awareness_control" in tables
 
 
 def test_the_room_window_survives_an_restart(pre_nexus_db):

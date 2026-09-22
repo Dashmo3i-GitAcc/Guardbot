@@ -45,7 +45,6 @@ SOURCE_MODEL = "model"
 SOURCE_AGENT = "agent"
 SOURCE_AWARENESS = "awareness"
 SOURCE_MODERATION = "moderation"
-SOURCE_CAPTCHA = "captcha"
 
 SOURCES = (
     SOURCE_ADMIN,
@@ -53,7 +52,6 @@ SOURCES = (
     SOURCE_AGENT,
     SOURCE_AWARENESS,
     SOURCE_MODERATION,
-    SOURCE_CAPTCHA,
 )
 
 # Bounds. A search is a bounded read; these are the ceilings a caller cannot
@@ -298,27 +296,6 @@ def _moderation_events(*, since=0):
     ]
 
 
-def _captcha_events(*, chat_id=0):
-    """Challenges still waiting in a room. Ids and deadlines only."""
-    if not chat_id:
-        return []
-    now = int(time.time())
-    out = []
-    for cid, user_id, msg_id in db.expired_captchas(now + MAX_WINDOW_SECONDS):
-        if int(cid) != int(chat_id):
-            continue
-        out.append(
-            _event(
-                at=now,
-                source=SOURCE_CAPTCHA,
-                summary=f"pending challenge for user {user_id}",
-                target_id=user_id,
-                chat_id=cid,
-            )
-        )
-    return out[:MAX_EVENTS]
-
-
 # ── The public reads ──────────────────────────────────────────────────────
 def search_events(
     *,
@@ -367,8 +344,6 @@ def search_events(
                 events += _awareness_events(chat_id=chat_id)
             elif name == SOURCE_MODERATION:
                 events += _moderation_events(since=start)
-            elif name == SOURCE_CAPTCHA:
-                events += _captcha_events(chat_id=chat_id)
         except Exception as exc:  # noqa: BLE001 - one source failing is not the read failing
             log.exception("could not read %s events", name)
             events.append(

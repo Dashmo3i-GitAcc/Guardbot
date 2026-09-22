@@ -107,12 +107,12 @@ this file.
   | File | Responsibility |
   |---|---|
   | `app/config.py` | every setting, from environment variables |
-  | `app/db.py` | SQLite: `users` (strikes/violations) and `captchas` |
+  | `app/db.py` | SQLite: `users` (strikes/violations) and the operational tables |
   | `app/burst.py` | pure, bounded instant-flood tracker (no Telegram, no I/O) |
   | `app/detector.py` | raw detections only; NudeNet + ffmpeg frame sampling + the scene classifier |
   | `app/decision.py` | the policy: `MediaAnalysis` → `SAFE`/`REVIEW`/`EXPLICIT` |
   | `app/moderation.py` | executing a decision (delete); no Telegram import |
-  | `app/main.py` | Telegram wiring: captcha handlers + the media/flood pipeline |
+  | `app/main.py` | Telegram wiring: the media/flood pipeline |
 
   The detector/policy split is deliberate: `detector.py` produces raw
   detections, `decision.py` owns *which* classes and *which* confidence count
@@ -305,8 +305,6 @@ the pipeline can be exercised repeatedly without a manual unrestrict.
 - Only `WHITELIST_USER_IDS` (bot owners) are exempt. That is the owner rule.
 - **Telegram admins are not exempt** — not from content moderation and not from
   the flood rule. Do not reintroduce an administrator check in `on_media`.
-- The captcha path still uses `is_admin`; that is a different, older rule and is
-  unchanged.
 
 ### 4.8 Out of scope by default
 
@@ -351,12 +349,11 @@ The Bot API and Telegram's media model have hard limits. Design within them.
 - **Handlers and filters.** The media handler is registered with a combined
   filter (photo, video, animation, video note, all stickers, image/video
   documents) **and** `filters.ChatType.GROUPS`. A new media type or a changed
-  filter changes what is inspected. `chat_member` updates must be requested in
-  `allowed_updates` or the captcha silently stops working.
+  filter changes what is inspected.
 - **Only bot owners are immune.** `WHITELIST_USER_IDS` short-circuits the media
   path. Telegram admins are deliberately **not** exempt. `is_admin` (with a
-  300 s `_admin_cache`) still guards the captcha path; do not use it to skip
-  media moderation again.
+  300 s `_admin_cache`) answers a different, older question and must not be used
+  to skip media moderation.
 - **Media types.** Photo, GIF/animation, video, video note, static sticker,
   video sticker and image/video documents are analysed. Animated `.tgs`
   (Lottie) stickers cannot be decoded by ffmpeg and are analysed through their
@@ -376,7 +373,7 @@ The Bot API and Telegram's media model have hard limits. Design within them.
   detector/ffmpeg code directly on the event loop.
 - **Rate limits and API failures.** `TelegramError` is the expected failure
   mode for every API call. Catch it narrowly where a call is optional (report,
-  evidence upload, captcha delete) and let the media pipeline's outer
+  evidence upload) and let the media pipeline's outer
   fail-open handler cover the rest. Never let an API failure delete or punish.
 - **`drop_pending_updates=True`** is deliberate: on restart the bot does not
   process a backlog of old messages.
@@ -3393,7 +3390,7 @@ Because the gate is silent by design — a refused member simply gets no answer 
 `NEXUS_ACTORS_ONLY_OFF_LABEL`). The line and the gate read the same config value,
 so the report cannot disagree with the behaviour; a test pins that.
 
-**A private chat is not a smaller group, and §41 is the difference.**
+**A private chat is not a smaller group, and §40 is the difference.**
 `NEXUS_ACTORS_ONLY` is a statement about a *group*, where everybody can already
 read everybody; it deliberately does not reach private chat, where there is one
 reader. The two gates are separate functions — `nexus.accepts` for a room and
@@ -4218,58 +4215,9 @@ And, in the same file, the cases that must still be caught: genuinely explicit
 material with a local HARD verdict, with an AI `explicit` verdict, and with an
 uncertain AI verdict.
 
-## 38. The captcha stops banning people who verified
+## 38. "Him" means him
 
-### 38.1 The bug, and why it was a race rather than a threshold
-
-A member joined, saw «من ربات نیستم», pressed it, and was banned about two
-minutes later anyway. The challenge was removed on success and the ban was
-applied by a reaper that re-read the challenge table — so the two should not
-have been able to disagree.
-
-They could, because the reaper's decision was made *before* the network call
-that answers the button. The click handler deleted the challenge, then called
-`restrictChatMember`; the reaper had already read the row and had already
-decided. On a slow Telegram call the ban was applied to somebody who had
-verified.
-
-### 38.2 Claim, then act, then restore on failure
-
-`db.claim_captcha(chat_id, user_id, *, before)` is an atomic
-DELETE-and-report: it removes the row and tells the caller whether it was the
-one that removed it. The click handler claims before the network call, so the
-reaper can never see a row for a click that is in flight; if the Telegram call
-fails, the row is restored with a `CAPTCHA_RETRY_GRACE_SEC` (15 s) extension so
-the member is not punished for a transient error.
-
-`db.claim_expired_captcha(chat_id, user_id, *, now)` does the same for the
-reaper: it re-reads and deletes *per row*, so a challenge that was answered
-between the query and the decision is no longer there to act on. The reaper's
-loop now re-checks authoritative state at the moment it acts rather than at the
-moment it planned.
-
-`on_member_update` early-returns when a challenge already exists, so a duplicate
-join does not restart the clock on somebody who is already being asked.
-
-### 38.3 The rule that was not implemented
-
-"120 s passed → ban" was never implemented, and the brief is explicit about why:
-the enforcement is for a user who is genuinely still unverified at the deadline,
-and only then. A verified user has no challenge, so the reaper has nothing to
-claim, so nothing happens. The whole fix is making "has a challenge" and
-"verified" the same question.
-
-### 38.4 Tests
-
-`tests/test_captcha.py` (29 tests): join → button → verify → timeout → **no
-ban**; join → timeout → still unverified → enforcement; duplicate click;
-duplicate join; restart between join and verification; a stale timeout; two
-users in one group; the same user in two groups; a callback from the wrong user;
-a callback from the wrong chat; and the restore-on-failure path.
-
-## 39. "Him" means him
-
-### 39.1 The bug was not the model
+### 38.1 The bug was not the model
 
 «این کاربر رو ساکت کن» worked. «درش بیار» answered that it could not be done,
 while the assistant held `unmute_member` the whole time. Two defects, neither in
@@ -4287,7 +4235,7 @@ Gemini's understanding of Persian:
    both "you cannot do this" and "here is the tool that does this" is answered
    by refusing.
 
-### 39.2 State the server's record, and scope the persona
+### 38.2 State the server's record, and scope the persona
 
 `admin_tools.recent_actions_block` appends this actor's recent *successful*
 actions in this room to the trusted context, read from `audit_recent_actions`.
@@ -4309,7 +4257,7 @@ holds tools, and the offending persona line is now scoped to the tool-free case.
 `TOOL_AMENDMENT` is also in `chat.__all__`, because a prompt fragment that
 matters should be nameable.
 
-### 39.3 Tests
+### 38.3 Tests
 
 `tests/test_admin_continuation.py` (25 tests): the block appears for the owner
 and not for a guest; it lists only successes; it is scoped by actor and by room;
@@ -4318,9 +4266,9 @@ demoted actor gets the same refusal they would have got without it; the persona
 no longer claims it cannot run operations when it holds tools; and the
 tool-free path is unchanged.
 
-## 40. The coding-agent bridge: Telegram → Nexus → CodeBuddy → Telegram
+## 39. The coding-agent bridge: Telegram → Nexus → CodeBuddy → Telegram
 
-### 40.1 What was asked for, and the one thing that shaped the design
+### 39.1 What was asked for, and the one thing that shaped the design
 
 The request was that the owner be able to talk to Nexus in the group in natural
 language and have it hand real coding work to a coding agent, with the result
@@ -4344,7 +4292,7 @@ execution half cannot be in the container, and the bridge is **two processes
 that meet over a directory**: the container owns the decision and the database,
 the host owns the shell and the repository.
 
-### 40.2 The bridge is an operation, not a front door
+### 39.2 The bridge is an operation, not a front door
 
 The single most important structural decision: `codebuddy_task` is a row in
 `admin_service.OPERATIONS`, with `kind=OP_SYSTEM` and `permission="agent.request"`.
@@ -4360,7 +4308,7 @@ vocabulary as a ban. The alternative — a second handler that "just" forwards a
 message — would have been a second answer to "who may do this", which is the
 thing §34 exists to prevent.
 
-### 40.3 The model may ask; it may not decide
+### 39.3 The model may ask; it may not decide
 
 `agent.request` is held by **no role bundle**, exactly like `nexus.control`. An
 administrator who is promoted to every role still does not hold it, and
@@ -4384,7 +4332,7 @@ and `parse_write_call` refuses any argument the tool schema does not declare, so
 a smuggled `owner=true` is dropped before it can reach anything. Both facts are
 tested.
 
-### 40.4 The repository allowlist is an indirection, not a filter
+### 39.4 The repository allowlist is an indirection, not a filter
 
 `agent_bridge.DEFAULT_REPOSITORIES` maps a logical name to one directory. A
 request carries the *name*; `repository_path(name)` produces the path. A path is
@@ -4402,7 +4350,7 @@ refuses a request whose `repo_path` is not what the name means *there*. Two
 independent checks, because they are two: a single shared source would make a
 mistake in it a mistake in both.
 
-### 40.5 The operation vocabulary, and the danger classifier
+### 39.5 The operation vocabulary, and the danger classifier
 
 Ten operations, and the list is closed — an operation outside it is refused,
 because an open vocabulary means the danger table can be bypassed by inventing a
@@ -4425,7 +4373,7 @@ the task text as well, and **the text can only add danger, never remove it**.
 The asymmetry is the point: a false positive costs one confirmation, a false
 negative costs an unconfirmed production change.
 
-### 40.6 A dangerous request is recorded and not published
+### 39.6 A dangerous request is recorded and not published
 
 This is the central safety property, and it is enforced by the *absence* of a
 file. A dangerous request is written to `agent_tasks` with
@@ -4437,7 +4385,7 @@ Belt and braces: `waiting_for_owner` has exactly one legal exit, and it is
 `queued`. `running` is not reachable from it, so even a forged `started` line
 could not move an unapproved task into execution. Both are tested.
 
-### 40.7 Approval is the owner's, server-side, and unambiguous
+### 39.7 Approval is the owner's, server-side, and unambiguous
 
 The brief's rule about vague language is implemented in
 `agent_bridge.resolve_confirmation`, which is pure and takes the waiting list as
@@ -4466,7 +4414,7 @@ Two meanings share `waiting_for_owner`, and they are told apart by `started_at`:
   the waiting list, because confirming one would re-run work that was already
   under way. They are answered with `answer_agent_task` instead.
 
-### 40.8 Answering a question is not a backdoor approval
+### 39.8 Answering a question is not a backdoor approval
 
 `agent_service.resume` appends the owner's answer to the task and requeues it —
 and it **recomputes the danger** over the enriched text. An answer that turns an
@@ -4475,7 +4423,7 @@ ordinary task into "yes, and then deploy it" is caught: the task goes back to
 not carry. A task that never started cannot be resumed at all, because an answer
 to a question it never asked is not an approval of it.
 
-### 40.9 The two halves meet over a directory
+### 39.9 The two halves meet over a directory
 
 `app/agent_spool.py` defines the wire, and it imports nothing but the standard
 library — which is what makes it safe for the host runner to import. That is not
@@ -4501,7 +4449,7 @@ Why not a socket: a port would need a listener, a firewall decision and a shared
 secret, and the runner would have to be trusted to enforce all three. A
 directory needs none of them, and its permissions are the filesystem's.
 
-### 40.10 The host runner, and what it refuses
+### 39.10 The host runner, and what it refuses
 
 `tools/agent_runner.py` claims a request by creating a lock with `O_CREAT|O_EXCL`
 — atomic everywhere, no lock manager — and then re-validates the parts that are
@@ -4522,7 +4470,7 @@ The timeout is enforced by a watchdog thread rather than by the read loop,
 because the read loop is exactly what a hung child stops doing. A CLI that
 starts, prints nothing and never exits is the failure this was written after.
 
-### 40.11 Carrying a long answer back
+### 39.11 Carrying a long answer back
 
 `agent_bridge.reply_plan` decides between ordered chunks, a document, or both,
 and returns a plan rather than performing it — so the decision is testable
@@ -4538,7 +4486,7 @@ fault than losing an answer. Progress is throttled by count and by interval,
 because a chatty agent must not become a chatty bot; the result is never
 throttled.
 
-### 40.12 Secrets
+### 39.12 Secrets
 
 The brief is explicit that no API key, bot token, Gemini key, DeepSeek key, SSH
 credential or server password may appear in Telegram, in a log, in a commit, in
@@ -4556,7 +4504,7 @@ OpenRouter keys, GitHub tokens, `key = value` assignments for the usual names,
 and PEM private-key blocks. The bridge's own tests and this document contain no
 credential, and neither does the audit row.
 
-### 40.13 Isolation from the awareness allowance
+### 39.13 Isolation from the awareness allowance
 
 A coding task must not consume the assistant's daily allowance. The mechanism is
 that the bridge never reaches the Gemini pool at all: the agent is a host
@@ -4568,7 +4516,7 @@ a test can assert — and the test checks the import graph as well as the
 behaviour, so a future change that routed the agent through the pool would have
 to do it deliberately.
 
-### 40.14 The lifecycle, and what a restart does
+### 39.14 The lifecycle, and what a restart does
 
 `queued → running → succeeded | failed | cancelled | timed_out`, with
 `waiting_for_owner` reachable from `running` (the agent asked a question) and
@@ -4590,7 +4538,7 @@ A restart is handled in `agent_poller.recover` and `agent_service.recover`:
   which is what lets it be retried;
 * a running task is never republished, so a restart cannot duplicate execution.
 
-### 40.15 How it runs the agent, and the deployment
+### 39.15 How it runs the agent, and the deployment
 
 The bridge is complete on both sides, and the runner drives the CLI through the
 mechanism that actually works on this host — measured, not assumed.
@@ -4669,7 +4617,7 @@ The full sequence:
 21. Run the suites: `pytest` in `/root/guardbot`, and the VPN Bot suite in
     `/opt/vpn-bot`.
 
-### 40.16 Tests
+### 39.16 Tests
 
 | file | tests | what it covers |
 |---|---|---|
@@ -4677,7 +4625,7 @@ The full sequence:
 | `tests/test_agent_service.py` | 61 | submit, the member and administrator refusals, the dangerous path, approval and ambiguity, answering a question, cancelling, the status report, recovery, and the same path through `admin_service.execute` and `parse_write_call` |
 | `tests/test_agent_transport.py` | 59 | the spool's atomicity and offsets, partial-line handling, delivery order, once-only delivery across a process, chunking and documents, redaction on the wire, the timeout, recovery, and the runner's own validation, argv and stream parsing |
 
-### 40.17 Configuration
+### 39.17 Configuration
 
 | variable | default | what it does |
 |---|---|---|
@@ -4708,12 +4656,12 @@ commands cannot describe the same state two ways.
 `agent_tasks` is created with `CREATE TABLE IF NOT EXISTS`, so there is no
 migration step and an existing database picks it up on restart.
 
-## 41. A private chat is the owner's, and one request gets one reply
+## 40. A private chat is the owner's, and one request gets one reply
 
 §34 answers who may talk to Nexus *in a room*. This section is about the other
 door, and about the two ways the assistant was answering twice.
 
-### 41.1 The requirement, and why it is not a setting
+### 40.1 The requirement, and why it is not a setting
 
 The owner's instruction was unambiguous: in a private chat, Nexus answers the
 owner and nobody else. Not "administrators too", not "administrators if
@@ -4730,7 +4678,7 @@ owner and nobody else. Not "administrators too", not "administrators if
 
 So it is not a permission and not a flag. It is a second gate.
 
-### 41.2 Two gates, not one setting
+### 40.2 Two gates, not one setting
 
 `app/nexus.py` holds both, and they are separate functions with separate
 docstrings because they are separate rules:
@@ -4756,7 +4704,7 @@ Three properties fall out of writing it this way, and each is a test:
 | being an administrator cannot open it | `accepts(admin) is True` and `accepts_private(admin) is False`, asserted together in one test. If they ever agree, the private boundary has been folded back into the group one. |
 | OFFLINE binds the owner too | the offline state is the owner's own instruction, so it applies to the owner in their own channel. `accepts_private` checks it first. |
 
-### 41.3 Refused before the model, and before the record
+### 40.3 Refused before the model, and before the record
 
 The gate runs in `main.on_private_text` **before** `_answer_conversationally`,
 which means a non-owner's message is refused before `chat.reply` is reached. Two
@@ -4781,7 +4729,7 @@ in a log:
 private chat refused user=556 role=admin source=config online=True
 ```
 
-### 41.4 One request, one reply — the duplicate that was already there
+### 40.4 One request, one reply — the duplicate that was already there
 
 Separately from the boundary, the owner reported that Nexus sometimes answered
 the same thing twice. There were **two independent defects**, and they needed
@@ -4817,7 +4765,7 @@ answer being written *right now*, which the window cannot show yet, and
 `awareness.nexus_has_the_last_word` covers the answer written *before this
 process started*, which the marker cannot know about.
 
-### 41.5 One request, one reply — the duplicate that was missing entirely
+### 40.5 One request, one reply — the duplicate that was missing entirely
 
 **The second defect: no `update_id` deduplication at all.** Telegram retries a
 delivery when it does not receive a 200 promptly, and python-telegram-bot makes
@@ -4854,7 +4802,7 @@ not grow without bound. A missing or zero `update_id` is refused rather than
 recorded, because a row keyed on zero would suppress every future update that
 also failed to carry an id.
 
-### 41.6 Tests
+### 40.6 Tests
 
 | file | tests | what it covers |
 |---|---|---|
@@ -4862,12 +4810,12 @@ also failed to carry an id.
 | `tests/test_update_dedup.py` | 13 | first and second delivery, distinct updates, zero and missing ids refused, eight threads racing for one claim, the guard passing the first and raising `ApplicationHandlerStop` on a duplicate, the off switch, DB-failure tolerance, the handler group asserted from the source, prune, and the reaper |
 | `tests/test_awareness.py` | +9 | an addressed message is not answered a second time; a room that was never answered is still answerable; a write confirmation is never withheld; a silent decline leaves the room readable and a spoken one keeps the marker |
 
-## 42. The allowance is a day's, so it is spent across the day
+## 41. The allowance is a day's, so it is spent across the day
 
 This section exists because the owner reported that Gemini sometimes does not
 answer, and the measurement said the reason was not the model.
 
-### 42.1 The two numbers that disagreed
+### 41.1 The two numbers that disagreed
 
 Group Awareness has a floor interval and a daily allowance. They are two numbers
 about the same thing, and they disagreed by a factor of twenty-one:
@@ -4897,7 +4845,7 @@ had already rendered the transcript and built 26 KB of tool declarations before
 the pool told it there was nothing to spend. Awareness was dead for the rest of
 the day, which is what "Gemini doesn't answer" looks like from the group.
 
-### 42.2 The gap is derived, not constant
+### 41.2 The gap is derived, not constant
 
 ```python
 def _awareness_allowance_gap(now=None) -> float:
@@ -4932,7 +4880,7 @@ And the check sits **in front of the transcript render**. A pass the pool cannot
 serve now costs a dictionary lookup and a cached counter read, where before it
 cost a prompt.
 
-### 42.3 The credential is the other half, and it is the operator's to fix
+### 41.3 The credential is the other half, and it is the operator's to fix
 
 The application's own counters were never the binding constraint. Awareness and
 chat both resolve to `GEMINI_CHAT_API_KEY` on this deployment, verified by
@@ -4971,7 +4919,7 @@ is the fail-closed direction and it is reported at boot. Pacing also cuts the
 instantaneous competition for a shared project by roughly twenty times, because
 the same 200 requests are spread over a day instead of an hour.
 
-### 42.4 Tests
+### 41.4 Tests
 
 `tests/test_awareness_latency.py` — eleven more tests: the day clock at each
 boundary, a spent allowance waiting for the rollover, a small allowance spread
@@ -5000,9 +4948,9 @@ the model reports a zero model stage rather than borrowing somebody else's
 duration; and `sent` is the same value the function returns, because the caller
 uses it to decide whether the ambient path may still speak.
 
-## 43. What is kept, what is windowed, and what is never touched
+## 42. What is kept, what is windowed, and what is never touched
 
-### 43.1 Two retention rules that never ran
+### 42.1 Two retention rules that never ran
 
 Auditing growth turned up something worse than a missing rule. Two rules were
 already written, already documented as running, and had **no caller at all**:
@@ -5029,18 +4977,18 @@ path and never pruning is what they were already doing by accident:
 * the pool's windows are applied from `gemini_pool.generate`, once per logical
   request rather than once per provider attempt.
 
-### 43.2 The one table that needed a new rule
+### 42.2 The one table that needed a new rule
 
 `gemini_events` is the only table in the schema that grows with *activity*
 rather than with the number of accounts, days or people. It gets a 90-day window,
 chosen to still answer "why was this rate-limited last month" — a question that
-was asked for real during the incident that produced §42, and a shorter window
+was asked for real during the incident that produced §41, and a shorter window
 would have discarded the evidence. It also gets `idx_gemini_events_at`: the
 existing dedup index ends in `at`, so it cannot serve the range scan a delete by
 age needs, and without it the sweep would read the whole table every two hundred
 requests — a worse problem than the growth.
 
-### 43.3 What is deliberately not bounded
+### 42.3 What is deliberately not bounded
 
 | table | decision | why |
 |---|---|---|
@@ -5054,9 +5002,9 @@ The four reporting tables are asserted as an *absence* — no prune function is
 applied to them — so a later "add a TTL everywhere" pass has to delete that test
 deliberately rather than inherit the decision.
 
-## 44. The audit trail says with what authority, and proves what it cannot hold
+## 43. The audit trail says with what authority, and proves what it cannot hold
 
-### 44.1 The two fields that were missing
+### 43.1 The two fields that were missing
 
 The brief lists nine things an audit row has to carry. Seven of them were there.
 The two that were not were the two nothing was asking for:
@@ -5083,7 +5031,7 @@ request id, because a typed command is not a request from the assistant and has
 none, so the column stays empty rather than being filled with something that
 only looks like an identifier.
 
-### 44.2 What must never be recorded, asserted two ways
+### 43.2 What must never be recorded, asserted two ways
 
 Either half alone is weak: a shape test can pass while a leak happens through a
 different door, and a sentinel test can pass while a different secret leaks. So
@@ -5104,7 +5052,7 @@ the boot report really does describe the sentinel by its masked tail, so the
 "no leak" assertion cannot pass by looking at an empty pool. A passing test that
 proves nothing is worse than a failing one.
 
-### 44.3 The permission model, end to end
+### 43.3 The permission model, end to end
 
 For reference, the whole path an administrative action takes, with the file that
 owns each step:
@@ -5112,7 +5060,7 @@ owns each step:
 | step | owner | what it enforces |
 |---|---|---|
 | 1. identity | `rbac.resolve` | the role comes from the owner id in configuration, the config admins, or the `admins` table — never from the message |
-| 2. the actor may talk to Nexus at all | `nexus.accepts` (room) / `nexus.accepts_private` (direct) | §34 and §41 |
+| 2. the actor may talk to Nexus at all | `nexus.accepts` (room) / `nexus.accepts_private` (direct) | §34 and §40 |
 | 3. the message is addressed to Nexus | `main._nexus_directed` | a reply to the bot, an `@mention`, an alias, or a configured name |
 | 4. shape | `admin_service.execute` step 1 | a closed `OPERATIONS` vocabulary; no chat or no actor is refused before the replay lookup, so a malformed request cannot probe the idempotency table |
 | 5. system state | `execute` step 2 | an AI request is refused while Nexus is offline; the typed commands are the documented fallback and are not |
@@ -5128,12 +5076,12 @@ promotion dialog can express them and an administrator promoted to every role
 still does not hold them. That is what makes "only the owner" a property of the
 tables rather than a check somebody has to remember.
 
-## 45. Identity: a handle, and turning a reference into one person
+## 44. Identity: a handle, and turning a reference into one person
 
 The brief asks for two things that are easy to conflate and must not be: an
 **internal UUID** for each person, and **deterministic identity resolution**.
 
-### 45.1 The handle is a name, not a credential
+### 44.1 The handle is a name, not a credential
 
 `identities(user_id PRIMARY KEY, uuid UNIQUE, created_at, last_seen)` in
 `app/db.py`, minted once on first sight by `db.identity_ensure`, which is called
@@ -5157,7 +5105,7 @@ A person who has not spoken since this shipped has no handle yet and
 `identity.describe` reports `uuid: ""`. That is deliberate: minting on a read
 path would make a lookup a write.
 
-### 45.2 Resolution is exact, and ambiguity is a question
+### 44.2 Resolution is exact, and ambiguity is a question
 
 `identity.resolve(query, chat_id=...)` accepts a numeric Telegram id, an internal
 uuid, an `@username`, a display name or an alias, and answers with one of four
@@ -5175,7 +5123,7 @@ diacritics and the zero-width joiner, so «ميلاد» and «میلاد» are o
 `identity.resolve` adds the id, uuid and username keys and delegates the name
 case to it rather than growing a second, weaker matcher.
 
-### 45.3 Where it plugs in
+### 44.3 Where it plugs in
 
 * `people.remember` mints the handle (never fatal; a failure leaves the
   Telegram id, which is authoritative anyway).
@@ -5185,7 +5133,7 @@ case to it rather than growing a second, weaker matcher.
   uuid are all resolvable by the assistant through one path.
 * `agent_data.agent_task_view` reports `actor_uuid` alongside `actor_id`.
 
-### 45.4 How resolution has been ending, as a rate
+### 44.4 How resolution has been ending, as a rate
 
 The brief asks for identity resolution success and ambiguity to be visible, and
 that is the one awareness-side signal nothing else stores: a name matching two
@@ -5204,14 +5152,14 @@ This is not a write on the message path. `resolve` is reached when a person asks
 *about* a person, through `resolve_person`; the hot path calls `identity.ensure`,
 which is a different function.
 
-## 46. What the assistant may read, and the two boundaries around it
+## 45. What the assistant may read, and the two boundaries around it
 
 `app/agent_data.py` is the operational data layer. The brief asks for extensive
 read access to logs and structured events *and* for no secret ever reaching the
 model; those are in tension exactly once, and this module is where it is
 resolved.
 
-### 46.1 No generic query, and no row copied through
+### 45.1 No generic query, and no row copied through
 
 There is no `execute_sql`, and no parameter anywhere becomes SQL text. Each
 function knows the one question it answers, and each answer is a dict built
@@ -5220,7 +5168,7 @@ default, because nothing here does `SELECT *` into a return value. That is what
 makes "secret-bearing columns are structurally excluded" a property rather than
 a promise.
 
-### 46.2 Redaction at the boundary
+### 45.2 Redaction at the boundary
 
 Every string that leaves passes through `redact`, which delegates to
 `agent_bridge.redact` — one pattern list, not two that could drift. It is the
@@ -5229,9 +5177,9 @@ token that ended up somewhere it was never meant to be (an error string, a task
 result). `test_agent_data.py` plants real bot tokens in audit details, in an
 awareness summary and in a task error, and asserts they do not survive.
 
-### 46.3 The sources
+### 45.3 The sources
 
-`search_events` correlates six sources into one shape, filtered by the ids the
+`search_events` correlates five sources into one shape, filtered by the ids the
 server already uses — actor, target, room, time — and never by message content,
 because this bot does not keep message content for a search to find:
 
@@ -5242,14 +5190,13 @@ because this bot does not keep message content for a search to find:
 | `agent` | `agent_tasks` | coding-agent task lifecycle |
 | `awareness` | `awareness_state` | what Nexus currently understands about a room |
 | `moderation` | `moderation_usage` | today's moderation counters |
-| `captcha` | `captchas` | pending join challenges |
 
 `nexus_diagnostics(chat_id)` answers «چرا نکسوس جواب نداد؟» from the state that
 decided it — the switch, the awareness layer, the pending batch, recent
 refusals, recent model events — and states a reason in words rather than leaving
 the model to infer one.
 
-### 46.4 The tools, and why they carry no `chat_id`
+### 45.4 The tools, and why they carry no `chat_id`
 
 Four read-only tools are exposed (`get_identity`, `search_events`,
 `get_nexus_diagnostics`, `get_service_status`), gated on `moderation.review` —
@@ -5268,7 +5215,7 @@ bounded in practice because the full set is only attached when the last human
 speaker in a room is an administrator — a member's message still costs no
 declarations at all.
 
-### 46.5 Exposure is a courtesy; the dispatch is the boundary
+### 45.5 Exposure is a courtesy; the dispatch is the boundary
 
 A declaration tells the model what it may ask for. It does not stop the model
 from asking for something else, and a hallucinated tool name is not a
@@ -5283,7 +5230,7 @@ computed separately they eventually disagree, and the disagreement is invisible
 until it is a leak. `test_ops_tools.py` asserts the pair for every
 permission-gated tool in the registry, not only the four new ones.
 
-## 47. Integrations: what exists, what does not, and saying so
+## 46. Integrations: what exists, what does not, and saying so
 
 `app/service_adapters.py` is a **capability registry**, not an integration. It
 exists because the failure mode of the alternative is worse than not having the
@@ -5302,7 +5249,7 @@ What is actually true on this deployment:
 
 | integration | state | operations |
 |---|---|---|
-| VPN bot (`app/vpnbot.py`) | available when `VPNBOT_API_URL` and `VPNBOT_SHARED_SECRET` are set | `health`, `status`, `acquisition.invite`, `subscription.lookup`, `service.status`, and six owner-only administrative writes — see §50 |
+| VPN bot (`app/vpnbot.py`) | available when `VPNBOT_API_URL` and `VPNBOT_SHARED_SECRET` are set | `health`, `status`, `acquisition.invite`, `subscription.lookup`, `service.status`, and six owner-only administrative writes — see §48 |
 | OpenVPN | **absent** | none — no integration exists |
 | TQI panel | **absent** | none — this bot holds no panel credentials |
 | coding agent (`app/agent_bridge.py`) | available when `AGENT_ENABLED` and a repository allowlist are set | `task.submit/status/confirm/cancel` |
@@ -5328,43 +5275,7 @@ exist.
 The shared secret is read only to decide *whether* the client is configured — a
 boolean — and `test_service_adapters.py` asserts it cannot appear in the report.
 
-## 48. Captcha expiry is a policy, not a timer that bans
-
-`config.CAPTCHA_ON_EXPIRE` selects what happens when a challenge runs out of
-time, and the requirement it exists to satisfy is narrow: expiry must not mean
-"banned". A timer is not evidence that somebody is a bot.
-
-* `kick` (default, and the long-standing behaviour) — ban then immediate unban,
-  so the person may rejoin. `test_captcha_expiry.py` asserts the unban always
-  accompanies the ban, in every mode: a kick is not a permanent ban.
-* `restrict` — kept in the group, kept unable to post, and handed a fresh
-  challenge with a fresh deadline (`CAPTCHA_RETRY_TEXT`). Nothing removes them.
-* `none` — no member action at all.
-
-An unrecognised value falls back to `kick` rather than silently disabling
-verification, and that fallback is tested. The original race fix — claim the row
-before the network call, so a member who verified is never acted on by a stale
-timer — is unchanged and still asserted in `tests/test_captcha.py`.
-
-### 48.1 The callback data is parsed by shape, not by splitting
-
-`on_captcha_click` used to do `_, target = q.data.split(":")`. The handler is
-registered behind `^cap:\d+$`, so on the real path that was safe — but a handler
-that *assumes* its filter ran is one registration edit away from a traceback on
-crafted callback data, and a traceback is not a refusal. A crafted
-`callback_data` is attacker-controlled, which makes this the one input in the
-captcha flow that is.
-
-`_captcha_callback_target` now returns the id or `None`, and `None` is answered
-with an empty acknowledgement: no exception, no unmute, no information about
-what this bot recognises. `CAPTCHA_CALLBACK_PATTERN` is a named constant so the
-filter and the parser can be asserted to accept exactly the same strings — if
-one is wider than the other, one of them is a hole. Non-ASCII digits
-(`cap:١٢`) are accepted by both, because `\d` in a `str` pattern is
-Unicode-aware and `int` parses them; that agreement is recorded in the test
-rather than "fixed", since the target still has to equal the presser's own id.
-
-## 49. The weak-internet repetition, and its cause
+## 47. The weak-internet repetition, and its cause
 
 The reported symptom was that the assistant seemed to answer everything with the
 "your internet is weak" sentence. It was investigated rather than patched, and
@@ -5391,7 +5302,7 @@ The awareness side needed no change: the live window showed Nexus moving between
 topics normally. What was repeating was the deterministic reply, not the
 conversation.
 
-## 50. The escalation path is closed by name, not by accident
+## 48. The escalation path is closed by name, not by accident
 
 The requirement is one sentence: *Gemini must never be able to change its own
 permission or role.* It was already true — but only incidentally, and that is a
@@ -5435,7 +5346,7 @@ load-bearing: a test asserts that **no** `ROLE_PERMISSIONS` bundle carries an
 owner-only permission, so "an administrator can be given `nexus.control`" is not
 a policy that could be set wrongly — it is a state the suite refuses to reach.
 That is the same property the new `vpn.read` / `vpn.manage` permissions rely on
-(§51).
+(§49).
 
 Tests: `tests/test_rbac.py` and `tests/test_ai_admin.py` cover self-promotion and
 self-demotion through both interfaces, that the refusal is *not* reported as a
@@ -5444,9 +5355,9 @@ the guard does not change the reason for any other operation, that an actor can
 still change somebody else's role, and that no role bundle carries an owner-only
 permission.
 
-## 51. The VPN operational surface: powerful, and under the owner's hand
+## 49. The VPN operational surface: powerful, and under the owner's hand
 
-### 51.1 What was asked, and the four pieces it became
+### 49.1 What was asked, and the four pieces it became
 
 The owner's decision was explicit: Nexus should have **real operational reach
 over the VPN project** — full administrative capability where the project needs
@@ -5456,14 +5367,14 @@ Owner can issue a sensitive command. Four independent pieces:
 1. **VPN reads** — subscription, service and integration status.
 2. **VPN writes** — six operations, three of which move money or bulk-reject
    orders and sit behind an explicit owner confirmation.
-3. **A closed escalation path** — §50.
+3. **A closed escalation path** — §48.
 4. **Awareness gets its own credential** — §35, and it no longer falls back to
    the chat pool.
 
 Plus the standing requirements: one central gateway, RBAC, an operation
 allowlist, an audit log, and fail-closed authorisation.
 
-### 51.2 There is no second gateway
+### 49.2 There is no second gateway
 
 `app/admin_service.py` **is** the gateway. The brief forbids a parallel
 architecture, so nothing here adds one. The precedent is `codebuddy_task` →
@@ -5484,7 +5395,7 @@ has not been pointed at is refused before anything is recorded**, rather than
 discovered later as an unreachable host. Either way it lands in `admin_audit` as
 a refusal.
 
-### 51.3 Owner-only, permanently, and structurally
+### 49.3 Owner-only, permanently, and structurally
 
 `vpn.read` and `vpn.manage` are appended to `PERMISSIONS` — last, because
 `main.py` uses that tuple as a **positional bitmask** and inserting in the middle
@@ -5493,12 +5404,12 @@ would silently renumber every stored permission — and to
 
 The consequence is worth stating plainly: "an administrator edits a customer's
 balance" is not refused, it is **inexpressible**. There is no role an
-administrator can be promoted to that carries the permission, and §50's test
+administrator can be promoted to that carries the permission, and §48's test
 proves no bundle carries an owner-only permission. So the answer to "could a
 sufficiently senior administrator do this?" is no at the level of the role
 table, not no at the level of a check somebody has to remember to write.
 
-### 51.4 The two-step write, and why the second step is a reference
+### 49.4 The two-step write, and why the second step is a reference
 
 `vpn_balance`, `vpn_orders_sweep` and `vpn_transaction_status` are recorded and
 **not executed**. `app/vpn_service.py` writes a row into `vpn_pending_ops` and
@@ -5537,13 +5448,13 @@ cannot drift. The waiting list is scoped to the room the operation was asked in,
 which is the fail-closed direction: the wrong answer is "nothing is waiting",
 never "here, the other group's operation".
 
-The claim is a compare-and-swap on one row, like the captcha claim and for the
-same reason: two confirmations arriving together must not both execute. It is
-taken *before* the call and **released again only when the failure was a
+The claim is a compare-and-swap on one row, like the update-dedup claim and for
+the same reason: two confirmations arriving together must not both execute. It
+is taken *before* the call and **released again only when the failure was a
 transport one** — a refusal from the VPN bot is a decision, and re-asking would
 produce the same answer.
 
-### 51.5 Fail-closed, in four outcomes rather than one
+### 49.5 Fail-closed, in four outcomes rather than one
 
 `OUTCOME_VPN_UNAVAILABLE`, `OUTCOME_VPN_REFUSED`, `OUTCOME_VPN_ERROR` and
 `OUTCOME_VPN_AWAITING_CONFIRMATION`, because they are four different next steps
@@ -5562,7 +5473,7 @@ assert the audit row, one for the immediate path and one for the two-step path �
 the second is the one that matters, because it is the path where "it went
 through" would be most plausible and most damaging.
 
-### 51.6 The redactor is local, and that is the point
+### 49.6 The redactor is local, and that is the point
 
 A VPN service is described by a *connection string*, and that string is the
 credential: `vless://…` and its siblings carry the client id in the fragment,
@@ -5572,7 +5483,7 @@ the generic redactor does not have — and they are **not** added to
 
 The reason is that a bare 32-hex rule is right for a panel client id and wrong
 for this bot's own identity handle, which is 32 lowercase hex characters and is
-*deliberately* a non-secret — it is how a person is addressed (§45). A global
+*deliberately* a non-secret — it is how a person is addressed (§44). A global
 rule would quietly rewrite it everywhere and break the thing the identity layer
 exists to provide. `agent_data.redact_vpn` composes the generic redactor with the
 VPN patterns, and `test_the_vpn_redactor_is_not_the_global_one` asserts both
@@ -5586,7 +5497,7 @@ object on its own side before serialising, including on **write** responses —
 a write response that embeds a subscription link leaks exactly as much as a read
 does — so the two narrowings are independent and either one alone would hold.
 
-### 51.7 The tool set: five declarations, and the cost of them
+### 49.7 The tool set: five declarations, and the cost of them
 
 Three reads (`vpn_subscription_lookup`, `vpn_service_status`, `get_vpn_status`),
 one write tool (`vpn_admin`) and one confirmation (`confirm_vpn_operation`).
@@ -5612,7 +5523,7 @@ still passes — and `test_no_vpn_tool_can_name_an_actor_a_room_or_a_permission`
 asserts it for these five specifically. The actor and the room come from the
 caller, never from the arguments.
 
-### 51.8 The other side of the wire
+### 49.8 The other side of the wire
 
 The VPN bot (`/opt/vpn-bot`, a separate repository on its own branch) gained
 eleven internal endpoints: the health probe and acquisition invite it already
@@ -5641,7 +5552,7 @@ Every write records the acting operator in the VPN bot's **own** audit table as
 is narrowed through the same allowlist a read uses, because a write response
 leaks exactly as much as a read.
 
-### 51.9 The honest limitation
+### 49.9 The honest limitation
 
 `operator_id` is **asserted** by guardbot and not independently verified by the
 VPN bot. The HMAC proves which *service* asked; the VPN bot trusts guardbot's
@@ -5655,7 +5566,7 @@ unrecoverable operations, the VPN bot's independent kill switch, and narrowing
 `INTERNAL_API_ALLOW_CIDRS` to `127.0.0.1/32` — guardbot runs with
 `network_mode: host`, so it does not need the Docker bridge range.
 
-### 51.10 Configuration
+### 49.10 Configuration
 
 | variable | default | what it does |
 |---|---|---|
@@ -5668,7 +5579,7 @@ unrecoverable operations, the VPN bot's independent kill switch, and narrowing
 Rollback needs no code change on either side: `INTERNAL_API_ADMIN_ENABLED=0`
 closes the write surface, and unsetting `VPNBOT_API_URL` closes all of it.
 
-### 51.11 Tests
+### 49.11 Tests
 
 `tests/test_vpn_admin.py` (57) covers authority — every one of the seven
 operations refused for an administrator, with the VPN bot never reached — the

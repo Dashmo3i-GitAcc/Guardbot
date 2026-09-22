@@ -66,15 +66,13 @@ over the current code.
 GuardBot is a **production Telegram moderation bot** for the owner's groups. It
 has:
 
-1. **Captcha for new members** — restrict on join, inline button to confirm,
-   kick on timeout.
-2. **Conservative explicit-media moderation** — every photo / video / GIF /
+1. **Conservative explicit-media moderation** — every photo / video / GIF /
    sticker is checked locally with NudeNet (plus an optional REVIEW-only scene
    classifier), and clearly explicit adult genital media is deleted.
-3. **An instant media-flood rule** — more than `BURST_MAX_ITEMS`
+2. **An instant media-flood rule** — more than `BURST_MAX_ITEMS`
    GIFs/stickers inside `BURST_WINDOW_SECONDS` restricts the sender and removes
    only that burst's messages.
-4. **A repeated-violation ladder** — a confirmed explicit deletion warns and
+3. **A repeated-violation ladder** — a confirmed explicit deletion warns and
    counts; the third restricts for `MUTE_HOURS`.
 
 It is **not** a general NSFW, profanity, text, link, username, raid or
@@ -279,7 +277,6 @@ against the repository when this file was created.
   7. `docs: document flood detection, violation ladder and scene stage`
      (this file's update — see `git log -1` for its hash)
 - **What is done:**
-  - Captcha for new members (restrict → inline button → kick on timeout).
   - Conservative explicit-media moderation for photos, videos, GIFs, video
     notes, static/video stickers and image/video documents, with animated
     `.tgs` analysed through their static preview thumbnail.

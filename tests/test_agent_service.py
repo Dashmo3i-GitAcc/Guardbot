@@ -105,7 +105,7 @@ class FakeGateway:
 
 
 def _submit(
-    *, actor=OWNER, repository="guardbot", task="fix the captcha bug",
+    *, actor=OWNER, repository="guardbot", task="fix the flood bug",
     operation="edit", reply_mode="", chat=CHAT,
 ):
     return asyncio.run(

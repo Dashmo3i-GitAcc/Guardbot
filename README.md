@@ -1,6 +1,6 @@
 # GuardBot
 
-Captcha for new members + conservative explicit-media moderation on every
+Conservative explicit-media moderation on every
 photo / video / GIF / sticker, plus an instant media-flood rule. Everything
 runs on your server. No media leaves it.
 
@@ -32,10 +32,7 @@ and then reused. Wait for `Detector ready.` and, if enabled,
 ## Before you start (Telegram side)
 
 1. Make the bot admin with: Delete Messages, Ban Users (Restrict Members)
-2. Captcha needs `chat_member` updates, which only work if the bot is an **admin**
-3. Turn OFF "Approve New Members" (join requests) if you want the captcha
-   to do the gatekeeping automatically, otherwise both run
-4. BotFather: Group Privacy may be left **on**. A bot that is an
+2. BotFather: Group Privacy may be left **on**. A bot that is an
    **administrator** receives every group message either way, and that is what
    lets the assistant notice an administrator's message without being replied
    to. A bot that is only a *member* receives commands, replies and mentions and
@@ -346,7 +343,7 @@ that is broken.
 
 The execution half is a separate host process, `tools/agent_runner.py`, because
 the container ships neither Node nor the CodeBuddy CLI. Pointing `AGENT_CLI` at a
-working invocation is a deployment step — see `AgentMD.md` §40.
+working invocation is a deployment step — see `AgentMD.md` §39.
 
 ## Test in a private test group first
 
@@ -415,7 +412,7 @@ docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot \
   half and runs outside the container; which invocation it uses is a deployment
   decision, and on this host the CLI's headless mode needs a credential and a
   free loopback port that the bot cannot supply. Everything on the bot's side of
-  the bridge is implemented and tested regardless — see `AgentMD.md` §40.15.
+  the bridge is implemented and tested regardless — see `AgentMD.md` §39.15.
 * A coding task's output is whatever the agent printed, redacted and bounded. The
   bot does not verify that a change was made or that a test passed; it relays
   what the agent said and records it. A claim in an agent's summary is a claim.

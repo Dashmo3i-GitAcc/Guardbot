@@ -368,7 +368,7 @@ def test_the_prompt_states_the_marker_the_runner_looks_for():
 # They are what ``redact`` has to match, so they have to look like the real
 # thing; the bot token is the example Telegram prints in its own API
 # documentation and the rest are obviously-fake filler. No live key appears in
-# this file, and none may be added — see ``AgentMD.md`` §40.12.
+# this file, and none may be added — see ``AgentMD.md`` §39.12.
 def test_a_question_is_found_by_its_marker():
     text = "I read the files.\nQUESTION: should I push the branch?\n"
     assert agent_bridge.question_in(text) == "should I push the branch?"

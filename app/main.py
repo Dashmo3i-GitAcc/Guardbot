@@ -21,7 +21,6 @@ from telegram.ext import (
     Application,
     ApplicationHandlerStop,
     CallbackQueryHandler,
-    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -216,8 +215,8 @@ async def is_admin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -
     return ok
 
 
-# Callback-data prefix for the admin-report self-delete button. Short and
-# unique so it can never collide with the captcha button ("cap:<id>").
+# Callback-data prefix for the admin-report self-delete button. Short, and
+# matched exactly by the handler that reads it.
 REPORT_DELETE_CALLBACK = "report_delete"
 
 
@@ -249,136 +248,6 @@ async def report(ctx: ContextTypes.DEFAULT_TYPE, text: str) -> None:
 def mention(user) -> str:
     name = (user.full_name or str(user.id)).replace("<", "").replace(">", "")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
-
-
-# ------------------------------------------------------------ captcha
-async def on_member_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fires when someone joins. Works for public groups and join-requests."""
-    cm = update.chat_member
-    if cm.chat.id not in config.GROUP_IDS or not config.CAPTCHA_ENABLED:
-        return
-
-    old, new = cm.old_chat_member.status, cm.new_chat_member.status
-    joined = old in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED) and new in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.RESTRICTED,
-    )
-    if not joined:
-        return
-
-    user = cm.new_chat_member.user
-    if user.is_bot or await is_admin(ctx, cm.chat.id, user.id):
-        return
-
-    chat_id = cm.chat.id
-    # Idempotent against a redelivered join update. Without this a duplicate
-    # event stacks a second challenge — and, worse, a second deadline — on
-    # somebody who is already being challenged.
-    if db.get_captcha(chat_id, user.id):
-        return
-    try:
-        await ctx.bot.restrict_chat_member(chat_id, user.id, permissions=MUTED)
-    except TelegramError as e:
-        log.warning("restrict failed for %s: %s", user.id, e)
-        return
-
-    text = config.CAPTCHA_TEXT.format(
-        name=user.full_name, timeout=config.CAPTCHA_TIMEOUT_SEC
-    )
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(config.CAPTCHA_BUTTON, callback_data=f"cap:{user.id}")]]
-    )
-    msg = await ctx.bot.send_message(chat_id, text, reply_markup=kb)
-    db.add_captcha(
-        chat_id, user.id, msg.message_id, int(time.time()) + config.CAPTCHA_TIMEOUT_SEC
-    )
-
-
-# The callback data of a challenge button. Named rather than inline so the
-# filter that decides what reaches the handler and the parser that reads it can
-# be asserted to accept the same strings — see ``tests/test_captcha.py``.
-CAPTCHA_CALLBACK_PATTERN = r"^cap:\d+$"
-
-
-def _captcha_callback_target(data) -> int | None:
-    """The user id in a ``cap:<digits>`` callback, or ``None`` for anything else.
-
-    The handler is registered with the pattern ``^cap:\\d+$``, so on the real
-    path this has already been filtered — but a handler that *assumes* its
-    filter ran is one registration change away from a traceback on crafted
-    callback data, and a traceback is not a refusal. Every malformed shape is
-    therefore answered with ``None`` rather than by raising: no data at all, the
-    wrong prefix, a non-numeric id, extra segments, an empty id, a negative id.
-    ``str.isdigit`` is what rejects the last three, and it is also why the parse
-    is done by shape instead of by splitting and unpacking.
-    """
-    if not isinstance(data, str):
-        return None
-    parts = data.split(":")
-    if len(parts) != 2 or parts[0] != "cap" or not parts[1].isdigit():
-        return None
-    return int(parts[1])
-
-
-async def on_captcha_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    target = _captcha_callback_target(q.data if q is not None else None)
-    if target is None:
-        # Not a challenge we issued, or not shaped like one. Answering with an
-        # empty acknowledgement stops Telegram's client-side spinner without
-        # telling the presser anything about what this bot recognises.
-        if q is not None:
-            try:
-                await q.answer()
-            except TelegramError:
-                pass
-        return
-    if q.from_user is None or q.from_user.id != target:
-        await q.answer("این دکمه برای شما نیست.", show_alert=True)
-        return
-    if q.message is None:
-        # Telegram omits the message on a callback from an inaccessible one.
-        # There is no challenge row we could act on without its chat, so this
-        # is a no-op rather than a guess.
-        return
-
-    chat_id = q.message.chat.id
-    # Claim the challenge BEFORE the network call, not after it.
-    #
-    # This ordering is the whole fix. Verification used to read the row, await
-    # ``restrict_chat_member``, and only then delete the row — so for the length
-    # of that round-trip the row still said "unverified", and a reaper tick in
-    # that window would kick the member while this handler went on to answer
-    # "✅ تأیید شد". Claiming first makes the two sides a compare-and-swap on one
-    # row: the loser finds nothing and does nothing.
-    if not db.claim_captcha(chat_id, q.from_user.id, before=int(time.time())):
-        # Already verified, already expired, or already reaped. In every case
-        # there is nothing here to act on.
-        await q.answer("مهلت تمام شده.", show_alert=True)
-        return
-
-    try:
-        await ctx.bot.restrict_chat_member(chat_id, q.from_user.id, permissions=FULL)
-    except TelegramError as e:
-        log.warning("unrestrict failed: %s", e)
-        # Put the challenge back, or a transient Telegram failure would strand
-        # the member muted with no row and no way to verify. The deadline is
-        # extended by the grace period so a retry is actually possible.
-        db.add_captcha(
-            chat_id,
-            q.from_user.id,
-            q.message.message_id,
-            int(time.time()) + config.CAPTCHA_RETRY_GRACE_SEC,
-        )
-        await q.answer("خطا، دوباره امتحان کن.", show_alert=True)
-        return
-
-    log.info("captcha verified chat=%s user=%s", chat_id, q.from_user.id)
-    await q.answer("✅ تأیید شد")
-    try:
-        await q.message.delete()
-    except TelegramError:
-        pass
 
 
 async def on_any_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -419,99 +288,6 @@ async def on_any_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     log.info("duplicate update dropped update_id=%s", update_id)
     raise ApplicationHandlerStop
-
-
-async def captcha_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Runs every 10s: kick users who didn't solve the captcha in time.
-
-    Every step here re-reads authoritative state immediately before acting, and
-    the claim is atomic, so a member who verified between this loop's query and
-    this row's turn is never touched. The list from ``expired_captchas`` is a
-    work queue, not a verdict.
-    """
-    now = int(time.time())
-    for chat_id, user_id, msg_id in db.expired_captchas(now):
-        # Compare-and-swap: False means the row is gone, so somebody verified
-        # (or another tick already handled it). Do nothing.
-        if not db.claim_expired_captcha(chat_id, user_id, now=now):
-            continue
-        # Promoted to admin during the challenge: Telegram will not let us
-        # restrict them, and kicking an administrator would be a worse outcome
-        # than letting an unverified admin through. Unmute and move on.
-        if await is_admin(ctx, chat_id, user_id):
-            log.info("captcha: %s is an admin now; releasing instead", user_id)
-            try:
-                await ctx.bot.restrict_chat_member(chat_id, user_id, permissions=FULL)
-            except TelegramError:
-                pass
-            continue
-        try:
-            await _captcha_expire(ctx, chat_id, user_id)
-        except TelegramError as e:
-            log.warning("captcha expiry failed %s: %s", user_id, e)
-        try:
-            await ctx.bot.delete_message(chat_id, msg_id)
-        except TelegramError:
-            pass
-
-
-async def _captcha_expire(ctx, chat_id: int, user_id: int) -> None:
-    """Apply the configured expiry policy to one unsolved challenge.
-
-    The policy is configuration because the right answer is a judgement about
-    the community, not a fact about the code, and because the brief is explicit
-    that expiry must not mean "banned". Three modes, none of which is a ban:
-
-    * ``kick`` — ban then immediate unban, so the person may rejoin. The
-      long-standing behaviour and the default.
-    * ``restrict`` — keep them unable to post and hand them a fresh challenge
-      with a fresh deadline. They stay in the group, unverified.
-    * ``none`` — no member action; the row is dropped and Telegram's own state
-      is left as it is.
-
-    Whatever the mode, the member is never permanently banned by a timer: the
-    ``kick`` path unbans in the same breath, and the other two never ban at all.
-    """
-    mode = getattr(config, "CAPTCHA_ON_EXPIRE", "kick")
-    if mode == "none":
-        log.info("captcha expired (no action) chat=%s user=%s", chat_id, user_id)
-        return
-    if mode == "restrict":
-        # Re-mute and re-challenge. The mute is re-applied rather than assumed,
-        # because a member may have been released for some other reason and the
-        # point of this mode is that they are still unverified.
-        try:
-            await ctx.bot.restrict_chat_member(chat_id, user_id, permissions=MUTED)
-        except TelegramError as e:
-            log.warning("captcha re-restrict failed for %s: %s", user_id, e)
-        name = ""
-        try:
-            member = await ctx.bot.get_chat_member(chat_id, user_id)
-            name = getattr(getattr(member, "user", None), "full_name", "") or ""
-        except TelegramError:
-            name = ""
-        text = config.CAPTCHA_RETRY_TEXT.format(
-            name=name or "دوست عزیز", timeout=config.CAPTCHA_TIMEOUT_SEC
-        )
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton(config.CAPTCHA_BUTTON, callback_data=f"cap:{user_id}")]]
-        )
-        try:
-            fresh = await ctx.bot.send_message(chat_id, text, reply_markup=kb)
-            db.add_captcha(
-                chat_id,
-                user_id,
-                fresh.message_id,
-                int(time.time()) + config.CAPTCHA_TIMEOUT_SEC,
-            )
-        except TelegramError as e:
-            log.warning("captcha re-challenge failed for %s: %s", user_id, e)
-        log.info("captcha expired, re-challenged chat=%s user=%s", chat_id, user_id)
-        return
-    # ``kick``: ban + unban = a removal the member can undo by rejoining.
-    await ctx.bot.ban_chat_member(chat_id, user_id)
-    await ctx.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
-    log.info("captcha expired, kicked chat=%s user=%s", chat_id, user_id)
 
 
 # ------------------------------------------------------ admin report button
@@ -4746,11 +4522,11 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def update_dedup_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Forget the update ids Telegram will never send again.
 
-    One indexed DELETE, and it is on its own timer rather than on the captcha
-    reaper's: the two have nothing to do with each other, and a failure in one
-    must not stop the other. Nothing is lost by pruning — an id older than the
-    window will not be re-delivered, and if it somehow were, the update would
-    simply be handled, which is the behaviour before this table existed.
+    One indexed DELETE, and it is on its own timer rather than folded into
+    another job's: a failure in one must not stop the other. Nothing is lost by
+    pruning — an id older than the window will not be re-delivered, and if it
+    somehow were, the update would simply be handled, which is the behaviour
+    before this table existed.
     """
     if not config.UPDATE_DEDUP_ENABLED:
         return
@@ -4764,7 +4540,6 @@ async def update_dedup_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(app: Application) -> None:
-    app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
     if config.UPDATE_DEDUP_ENABLED:
         interval = max(60.0, float(config.UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS))
         app.job_queue.run_repeating(update_dedup_reaper, interval=interval, first=interval)
@@ -5143,12 +4918,6 @@ def main() -> None:
         app.add_handler(TypeHandler(Update, on_any_update), group=-1)
 
     app.add_handler(
-        ChatMemberHandler(on_member_update, ChatMemberHandler.CHAT_MEMBER)
-    )
-    app.add_handler(
-        CallbackQueryHandler(on_captcha_click, pattern=CAPTCHA_CALLBACK_PATTERN)
-    )
-    app.add_handler(
         CallbackQueryHandler(on_report_delete, pattern=r"^report_delete$")
     )
 
@@ -5182,9 +4951,9 @@ def main() -> None:
         # `block=False` is what keeps a conversation from stalling the bot. A
         # reply can take up to GEMINI_CHAT_TIMEOUT_SECONDS, and the dispatcher
         # processes updates one at a time by default — so without this, one
-        # person chatting would pause captchas and media moderation for the
-        # whole group. Non-blocking runs the callback as its own task, so the
-        # rest of the bot keeps working while a reply is being written.
+        # person chatting would pause media moderation for the whole group.
+        # Non-blocking runs the callback as its own task, so the rest of the bot
+        # keeps working while a reply is being written.
         app.add_handler(CommandHandler("start", on_chat_start))
         app.add_handler(CommandHandler("reset", on_chat_reset))
         app.add_handler(
@@ -5252,12 +5021,13 @@ def main() -> None:
             group=4,
         )
 
-    # chat_member updates must be requested explicitly
+    # Only the update kinds something is actually registered for. Telegram
+    # delivers everything else to nobody, and asking for it would be a queue of
+    # updates with no handler.
     app.run_polling(
         allowed_updates=[
             Update.MESSAGE,
             Update.CALLBACK_QUERY,
-            Update.CHAT_MEMBER,
         ],
         drop_pending_updates=True,
     )

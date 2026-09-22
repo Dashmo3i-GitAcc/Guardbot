@@ -549,7 +549,7 @@ TOOLS: dict[str, ToolSpec] = {
         kind=KIND_READ,
         permission="moderation.review",
         parameters=(
-            ("source", "STRING", "admin|model|agent|awareness|moderation|captcha|all"),
+            ("source", "STRING", "admin|model|agent|awareness|moderation|all"),
             ("since", "INTEGER", "Unix timestamp to search from. Optional."),
         ),
     ),

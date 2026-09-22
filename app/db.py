@@ -1,4 +1,4 @@
-"""Tiny SQLite store: strikes (confirmed moderation actions) and captchas."""
+"""Tiny SQLite store: strikes (confirmed moderation actions) and the rest."""
 import sqlite3
 import threading
 import time
@@ -36,12 +36,6 @@ def init() -> None:
             chat_id INTEGER, user_id INTEGER,
             strikes INTEGER DEFAULT 0,
             first_seen INTEGER,
-            PRIMARY KEY (chat_id, user_id))"""
-    )
-    _conn.execute(
-        """CREATE TABLE IF NOT EXISTS captchas (
-            chat_id INTEGER, user_id INTEGER,
-            message_id INTEGER, deadline INTEGER,
             PRIMARY KEY (chat_id, user_id))"""
     )
     # When we last offered someone a VPN test, and what came of it. Kept in the
@@ -688,73 +682,6 @@ def get_strikes(chat_id: int, user_id: int) -> int:
             (chat_id, user_id),
         ).fetchone()
     return row[0] if row else 0
-
-
-# ---- captcha ----
-def add_captcha(chat_id: int, user_id: int, message_id: int, deadline: int) -> None:
-    _exec(
-        "INSERT OR REPLACE INTO captchas VALUES (?,?,?,?)",
-        (chat_id, user_id, message_id, deadline),
-    )
-
-
-def get_captcha(chat_id: int, user_id: int):
-    with _lock:
-        return _conn.execute(
-            "SELECT message_id, deadline FROM captchas WHERE chat_id=? AND user_id=?",
-            (chat_id, user_id),
-        ).fetchone()
-
-
-def remove_captcha(chat_id: int, user_id: int) -> None:
-    _exec("DELETE FROM captchas WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-
-
-def claim_captcha(chat_id: int, user_id: int, *, before: int) -> bool:
-    """Atomically take the challenge if it is still pending and unexpired.
-
-    Returns True for exactly one caller. This is the fix for the bug where a
-    member verified successfully and was banned anyway: verification used to be
-    "read the row, await a network call, then delete the row", which left a
-    window in which the reaper could read the same row and act on it. The
-    deletion is now the claim, in one statement, so the two sides cannot both
-    win — whichever DELETE returns a row is the only one that proceeds.
-
-    ``before`` is the current time: a row whose deadline has already passed is
-    not claimable here, because that is the reaper's case to handle.
-    """
-    with _lock:
-        cur = _conn.execute(
-            "DELETE FROM captchas WHERE chat_id=? AND user_id=? AND deadline>?",
-            (int(chat_id), int(user_id), int(before)),
-        )
-        _conn.commit()
-        return cur.rowcount == 1
-
-
-def claim_expired_captcha(chat_id: int, user_id: int, *, now: int) -> bool:
-    """The reaper's half of the same compare-and-swap.
-
-    Returns True only when the row was still present *and* still expired at the
-    moment of the delete. A member who verified a moment ago has no row left, so
-    this returns False and the reaper does nothing — which is the behaviour the
-    owner asked for: a completed verification can never be undone by a timer.
-    """
-    with _lock:
-        cur = _conn.execute(
-            "DELETE FROM captchas WHERE chat_id=? AND user_id=? AND deadline<=?",
-            (int(chat_id), int(user_id), int(now)),
-        )
-        _conn.commit()
-        return cur.rowcount == 1
-
-
-def expired_captchas(now: int):
-    with _lock:
-        return _conn.execute(
-            "SELECT chat_id, user_id, message_id FROM captchas WHERE deadline<=?",
-            (now,),
-        ).fetchall()
 
 
 # ---- group acquisition cooldown ----
@@ -1472,8 +1399,8 @@ def admin_reset() -> None:
 
     For tests and for an operator starting over, in the same spirit as
     :func:`pool_reset`. Note what it does *not* touch — the moderation strikes
-    in ``users`` and the captcha rows are not administrative state and are not
-    this function's to erase.
+    in ``users`` are not administrative state and are not this function's to
+    erase.
     """
     with _lock:
         _conn.execute("DELETE FROM admins")
@@ -2317,7 +2244,7 @@ def vpn_pending_get(request_id: str) -> dict | None:
 def vpn_pending_claim(request_id: str, *, now: int | None = None) -> bool:
     """Take ownership of one pending operation. ``True`` for the winner only.
 
-    A compare-and-swap on one row, like the captcha claim and for the same
+    A compare-and-swap on one row, like the update-dedup claim and for the same
     reason: two confirmations arriving together must not both execute. The
     loser finds the row already claimed and does nothing.
     """

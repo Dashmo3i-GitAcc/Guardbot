@@ -128,9 +128,9 @@ def test_the_conversational_handlers_do_not_block_the_dispatcher():
     """A reply can take up to 25s; the dispatcher must not wait for it.
 
     Updates are processed one at a time unless a handler opts out, so without
-    `block=False` one person chatting would pause captchas and media moderation
-    for the whole group. Asserted on the registration because the flag lives
-    there, and `main()` needs a live token to run.
+    `block=False` one person chatting would pause media moderation for the whole
+    group. Asserted on the registration because the flag lives there, and
+    `main()` needs a live token to run.
     """
     import inspect
 

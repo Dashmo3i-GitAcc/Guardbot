@@ -53,55 +53,6 @@ ADMIN_LOG_CHAT = int(os.getenv("ADMIN_LOG_CHAT", "0")) or None
 # Extra user IDs that are always immune (besides real chat admins)
 WHITELIST_USER_IDS = set(_int_list(os.getenv("WHITELIST_USER_IDS", "")))
 
-# ---------------- Captcha ----------------
-CAPTCHA_ENABLED = _bool("CAPTCHA_ENABLED", True)
-CAPTCHA_TIMEOUT_SEC = _int("CAPTCHA_TIMEOUT_SEC", 120)
-CAPTCHA_TEXT = os.getenv(
-    "CAPTCHA_TEXT",
-    "سلام {name} 👋\nبرای اینکه بتونی پیام بدی، ظرف {timeout} ثانیه دکمه‌ی زیر رو بزن.",
-)
-CAPTCHA_BUTTON = os.getenv("CAPTCHA_BUTTON", "✅ من ربات نیستم")
-
-# How long a member has to retry after the unmute call fails on a click that was
-# otherwise valid. The challenge row is claimed (deleted) before the network
-# call, so a failure has to put it back or the member is left muted with no row
-# and no way to verify themselves. Short, because it exists to cover a transient
-# Telegram error, not to extend the challenge.
-CAPTCHA_RETRY_GRACE_SEC = _int("CAPTCHA_RETRY_GRACE_SEC", 15)
-
-# What happens when a challenge runs out of time without being solved.
-#
-# This is configuration because the right answer is a policy decision and not a
-# fact about the code. The three modes, and what each means for the member:
-#
-#   * ``kick``    — remove them from the group (ban then immediate unban, so
-#                   they may rejoin and try again). This is the long-standing
-#                   behaviour and remains the default, so an existing deployment
-#                   is unchanged by this setting's introduction.
-#   * ``restrict``— keep them unable to post and refresh the challenge, giving
-#                   them a fresh deadline and a fresh button. They stay in the
-#                   group and stay unverified; nothing removes them.
-#   * ``none``    — take no member action at all. The challenge row is dropped
-#                   and the member is left as Telegram has them. Only appropriate
-#                   where an operator has some other verification in place.
-#
-# What none of these is: a permanent ban on a timer. ``kick`` is not a ban —
-# the unban is immediate and the person may rejoin — and the two alternatives
-# are milder still. An unrecognised value falls back to ``kick`` so that a typo
-# cannot silently turn verification off.
-CAPTCHA_ON_EXPIRE = os.getenv("CAPTCHA_ON_EXPIRE", "kick").strip().lower()
-CAPTCHA_EXPIRE_MODES = ("kick", "restrict", "none")
-if CAPTCHA_ON_EXPIRE not in CAPTCHA_EXPIRE_MODES:
-    CAPTCHA_ON_EXPIRE = "kick"
-
-# The copy used in ``restrict`` mode when the challenge is refreshed. ``{name}``
-# and ``{timeout}`` are filled the same way ``CAPTCHA_TEXT`` is.
-CAPTCHA_RETRY_TEXT = os.getenv(
-    "CAPTCHA_RETRY_TEXT",
-    "سلام {name} 👋\nهنوز تأیید نشدی. برای اینکه بتونی پیام بدی، ظرف {timeout} "
-    "ثانیه دکمه‌ی زیر رو بزن.",
-)
-
 # ---------------- Explicit media moderation ----------------
 MEDIA_ENABLED = _bool("MEDIA_ENABLED", True)
 
@@ -1308,7 +1259,7 @@ UPDATE_DEDUP_ENABLED = _bool("UPDATE_DEDUP_ENABLED", True)
 # bound, and the table costs a few hundred bytes a day at this bot's traffic.
 UPDATE_DEDUP_TTL_SECONDS = _int("UPDATE_DEDUP_TTL_SECONDS", 24 * 3600)
 # How often the claimed ids are swept. The sweep is one indexed DELETE, so it
-# runs on the captcha reaper's existing timer rather than on one of its own.
+# runs on its own timer rather than being folded into another job's.
 UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS = _float(
     "UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS", 3600.0
 )
@@ -1362,7 +1313,7 @@ AGENT_MAX_TURNS = _int("AGENT_MAX_TURNS", 40)
 # foreground ``-p`` never returns). What is left to configure is the executable
 # and any *extra* flags, and both live in the runner's own environment rather
 # than here — the container never names the program that runs. See AgentMD.md
-# §40.15.
+# §39.15.
 AGENT_CLI = os.getenv("AGENT_CLI", "codebuddy")
 AGENT_CLI_ARGS = _str_list(os.getenv("AGENT_CLI_ARGS", ""))
 
