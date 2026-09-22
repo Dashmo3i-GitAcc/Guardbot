@@ -30,11 +30,15 @@ def conv_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TRANSCRIBE_API_KEY", "test-transcribe-key")
     monkeypatch.setattr(config, "TRANSCRIBE_ALLOW_SHARED_KEY", False)
     monkeypatch.setattr(config, "BOT_ALIASES", [])
-    # The sender is an administrator, because that is who Nexus answers. The
-    # actor gate is what makes this necessary and it has its own suite; running
-    # these as a guest would test the gate rather than the media pipeline.
-    monkeypatch.setattr(config, "CONFIG_ADMINS", [f"{USER_ID}:moderator"])
-    monkeypatch.setattr(config, "OWNER_USER_ID", 0)
+    # The sender is the owner, because a private chat with the bot is the
+    # owner's channel and nobody else's — see ``nexus.accepts_private`` and
+    # ``tests/test_private_boundary.py``. The actor gate is what makes this
+    # necessary and it has its own suite; running these as a guest, or as a
+    # non-owner administrator, would test the gate rather than the media
+    # pipeline. The owner is also an actor in a group, so the group tests below
+    # exercise the same policy they did before.
+    monkeypatch.setattr(config, "CONFIG_ADMINS", [])
+    monkeypatch.setattr(config, "OWNER_USER_ID", USER_ID)
     # And the administrative tool path is switched off, so a turn goes through
     # the plain transport these tests stub. What is under test here is how media
     # and voice are prepared and routed, not what a model can ask for; the tool

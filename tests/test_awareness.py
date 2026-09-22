@@ -1294,3 +1294,194 @@ def test_the_ambient_context_tells_the_model_to_find_its_target_by_id():
     # not been collapsed into one.
     directed = admin_tools.build_context(principal=rbac.resolve(ADMIN), chat_id=CHAT)
     assert "no replied-to message in this turn" in directed
+
+
+# ══ One request, one reply ════════════════════════════════════════════════
+# A message addressed to Nexus in a group is answered directly *and* sits in the
+# room window, so the next awareness pass used to read it as an unanswered
+# question and answer it again. That is the duplicate the owner reported.
+#
+# The fix is a suppression of the *response*, never of the read: the batch is
+# still understood and still recorded, because moving the watermark past one
+# message would silently mark every earlier unread message as understood too —
+# trading a duplicate reply for a lost event, which is the worse failure.
+def test_an_addressed_message_is_not_answered_a_second_time(monkeypatch):
+    """The direct path is answering this very message, so the pass must not."""
+    bot = FakeBot()
+    capture(CHAT, OWNER, awareness.ROLE_OWNER, "mo", "نکسوس سلام")
+    main._nexus_addressed[CHAT] = pending_row()["max_id"]
+    install_awareness(
+        monkeypatch,
+        decision={
+            "topic": "greeting",
+            "summary": "the owner greeted the assistant",
+            "relevant": True,
+            "respond": True,
+            "message": "سلام دوباره",
+        },
+    )
+
+    asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
+
+    assert bot.messages == []
+    # The understanding still happened: only the reply was withheld.
+    assert awareness.state(CHAT).get("summary") == "the owner greeted the assistant"
+
+
+def test_the_window_alone_suppresses_a_repeat_reply(monkeypatch):
+    """After a restart the marker is gone. The stored window still knows.
+
+    The assistant's own turn is recorded when its reply goes out, so the
+    question "does this room still need an answer" can be asked of the window
+    rather than of a process-local flag — and the window survives a restart.
+    """
+    bot = FakeBot()
+    capture(CHAT, OWNER, awareness.ROLE_OWNER, "mo", "نکسوس سلام")
+    awareness.capture(CHAT, 0, awareness.ROLE_NEXUS, "", "سلام، در خدمتم")
+    main._nexus_addressed.clear()
+    install_awareness(
+        monkeypatch,
+        decision={"relevant": True, "respond": True, "message": "سلام دوباره"},
+    )
+
+    asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
+
+    assert bot.messages == []
+
+
+def test_a_room_the_assistant_has_not_answered_is_still_answerable(monkeypatch):
+    """The guard must not become a mute button.
+
+    Without this the two tests above would pass for the wrong reason: a
+    suppression that always fires would look identical to a correct one.
+    """
+    bot = FakeBot()
+    capture(CHAT, OWNER, awareness.ROLE_OWNER, "mo", "نکسوس سلام")
+    main._nexus_addressed.clear()
+    install_awareness(
+        monkeypatch,
+        decision={"relevant": True, "respond": True, "message": "سلام"},
+    )
+
+    asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
+
+    assert bot.messages == ["سلام"]
+
+
+def test_a_write_confirmation_is_never_withheld_as_a_duplicate(monkeypatch):
+    """An action that ran must be acknowledged, whatever the guard says.
+
+    The action has already happened by the time the reply is composed, so
+    silence here would be a change nobody was told about — worse than a
+    repeated sentence.
+    """
+    bot = FakeBot()
+    capture(CHAT, OWNER, awareness.ROLE_OWNER, "mo", "این کاربر رو بن کن")
+    awareness.capture(CHAT, 0, awareness.ROLE_NEXUS, "", "چشم")
+    main._nexus_addressed[CHAT] = pending_row()["max_id"]
+    install_awareness(
+        monkeypatch,
+        decision={"relevant": True, "respond": False},
+        call=("ban_member", {"target_user_id": STRANGER}),
+    )
+
+    asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
+
+    assert ("ban", CHAT, STRANGER) in bot.actions, "the action must have run"
+    assert bot.messages, "and it must have been acknowledged"
+
+
+def test_the_group_handler_marks_an_addressed_message_as_answered(monkeypatch):
+    """The marker is set by the handler, before the answer is awaited.
+
+    Setting it *after* the reply would leave the race open: a model call is a
+    suspension point, and the awareness pass can run during it.
+    """
+    bot = FakeBot()
+    answered: list[str] = []
+
+    async def _reply(chat_id, user_id, body, **kwargs):
+        answered.append(body)
+        return chat.ChatReply(answered=True, text="سلام", turns=1)
+
+    monkeypatch.setattr(main.chat, "reply", _reply)
+    asyncio.run(
+        main.on_group_chat(
+            update_for(message(text="نکسوس سلام", message_id=77), actor=OWNER),
+            ctx_for(bot),
+        )
+    )
+
+    assert answered == ["نکسوس سلام"]
+    assert main._nexus_addressed[CHAT] == 77
+
+
+def test_a_silent_decline_leaves_the_room_readable(monkeypatch):
+    """A withheld answer is not an answer, so the guard must not fire.
+
+    Otherwise a failure on the direct path would silence the room entirely: the
+    direct path says nothing, and the ambient path is told not to either.
+
+    Note which declines are silent. A rate limit is *not* one of them — it has a
+    sentence in ``chat._MESSAGES`` and is sent — so this uses a reason the
+    transport has no copy for, which is the only shape that really says nothing.
+    """
+
+    async def _reply(chat_id, user_id, body, **kwargs):
+        return chat.ChatReply(answered=False, skipped="no_copy_for_this", turns=1)
+
+    monkeypatch.setattr(main.chat, "reply", _reply)
+    asyncio.run(
+        main.on_group_chat(
+            update_for(message(text="نکسوس سلام", message_id=77), actor=OWNER),
+            ctx_for(FakeBot()),
+        )
+    )
+
+    assert main._nexus_addressed.get(CHAT, 0) == 0
+
+
+def test_a_decline_that_speaks_keeps_the_marker(monkeypatch):
+    """If the person was told something, the room has been answered.
+
+    A rate limit is the case that matters: the reply is a sentence rather than a
+    model answer, but it is a reply, and the ambient path must not add a second
+    one on top of it.
+    """
+    bot = FakeBot()
+
+    async def _reply(chat_id, user_id, body, **kwargs):
+        return chat.ChatReply(answered=False, skipped="rate_limit", turns=1)
+
+    monkeypatch.setattr(main.chat, "reply", _reply)
+    asyncio.run(
+        main.on_group_chat(
+            update_for(message(text="نکسوس سلام", message_id=77), actor=OWNER),
+            ctx_for(bot),
+        )
+    )
+
+    assert bot.messages == ["یه کم سریع داری پیام می‌دی 🙂 چند لحظه صبر کن."]
+    assert main._nexus_addressed.get(CHAT, 0) == 77
+
+
+# ── The guard, as a reading of the window ─────────────────────────────────
+def test_the_last_word_belongs_to_the_assistant_only_after_it_spoke():
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "m", "یک پیام")
+    assert awareness.nexus_has_the_last_word(CHAT) is False
+
+    awareness.capture(CHAT, 0, awareness.ROLE_NEXUS, "", "پاسخ")
+    assert awareness.nexus_has_the_last_word(CHAT) is True
+
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "m", "یک پیام تازه")
+    assert awareness.nexus_has_the_last_word(CHAT) is False
+
+
+def test_a_room_with_only_the_assistants_words_counts_as_answered():
+    """Nothing was asked, so there is nothing to answer."""
+    awareness.capture(CHAT, 0, awareness.ROLE_NEXUS, "", "پاسخ خودم")
+    assert awareness.nexus_has_the_last_word(CHAT) is True
+
+
+def test_an_empty_room_has_no_last_word():
+    assert awareness.nexus_has_the_last_word(CHAT) is False

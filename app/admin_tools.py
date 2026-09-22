@@ -649,6 +649,25 @@ def build_context(
         + ("yes" if nexus.is_actor(principal) else "no")
         + "\n"
     )
+    # The two gates are not the same question, and a model that is told only the
+    # first one will promise an answer it cannot give. A private chat belongs to
+    # the owner alone; a group answers its administrators. Stating both is the
+    # same rule the rest of this block follows — say what the server knows, so
+    # the right answer is the easy one — and it grants nothing: the gate itself
+    # is in ``app/main.py`` and is not reachable from here.
+    lines.append(
+        "Actor may talk to Nexus in this chat: "
+        + (
+            "yes"
+            if (
+                nexus.accepts_private(principal)
+                if chat_type == "private"
+                else nexus.accepts(principal)
+            )
+            else "no"
+        )
+        + "\n"
+    )
 
     lines.append(f"Nexus state: {nexus.state()}\n")
     lines.append(f"Chat id: {chat_id}\n")

@@ -185,7 +185,7 @@ def is_actor(principal: rbac.Principal) -> bool:
 
 
 def accepts(principal: rbac.Principal) -> bool:
-    """Whether Nexus will process anything from this principal right now.
+    """Whether Nexus will process anything from this principal **in a group**.
 
     Two conditions, and both are needed: the actor must be authorized, and the
     layer must be awake. When ``NEXUS_ACTORS_ONLY`` is off an ordinary member is
@@ -196,12 +196,48 @@ def accepts(principal: rbac.Principal) -> bool:
     state is the owner's own instruction, and the way back is an explicit
     command or an addressed state phrase, both of which are handled before this
     is consulted.
+
+    This is **not** the private-chat gate. A group has a room full of people who
+    can already see each other's messages, so answering an administrator there
+    discloses nothing that was not already public; a private chat has exactly
+    one reader and no such argument applies. See ``accepts_private``.
     """
     if not is_online():
         return False
     if is_actor(principal):
         return True
     return not config.NEXUS_ACTORS_ONLY
+
+
+def accepts_private(principal: rbac.Principal) -> bool:
+    """Whether Nexus will answer **in a private chat**. The owner, and nobody else.
+
+    This is a second boundary rather than a stricter reading of ``accepts``, and
+    the difference is the whole point of having two functions:
+
+    * ``NEXUS_ACTORS_ONLY`` does not widen it. That switch restores the earlier
+      "answer anybody in the group" behaviour; it was never a statement about
+      private messages, and reading it as one would silently reopen this door
+      the first time an operator flipped it for an unrelated reason.
+    * Being an administrator does not widen it. ``is_actor`` deliberately says
+      yes to administrators, because a group's moderation is theirs to run — but
+      a private chat with this bot is the owner's, and "an administrator" is not
+      a lesser kind of owner. Nothing an administrator types, claims, or is
+      promoted to can make this return true.
+    * A private chat carries no room context, so there is nothing here that an
+      administrator could legitimately need to see.
+
+    The owner is resolved from their Telegram id by ``app/rbac.py`` and never
+    from anything in the message, so a claim of ownership in the text of a
+    message cannot reach this. When Nexus is offline the owner is refused too,
+    for the same reason ``accepts`` refuses them: the offline state is the
+    owner's own instruction.
+    """
+    if not is_online():
+        return False
+    if principal is None:
+        return False
+    return bool(principal.is_owner)
 
 
 # ── Addressing ────────────────────────────────────────────────────────────

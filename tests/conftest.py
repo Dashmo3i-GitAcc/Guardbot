@@ -30,13 +30,18 @@ def fresh_nexus_state():
     and both are read as "how long has it been", so a value left behind by one
     test would make the next one's wait or purge depend on test order.
     """
-    from app import awareness, nexus
+    from app import awareness, main, nexus
 
     nexus.reset_state()
     awareness.reset_timers()
+    # The duplicate-reply marker: a room id left behind by one test would make
+    # the next test's ambient pass refuse to answer, which is exactly the kind of
+    # order-dependent failure that hides a real defect.
+    main._nexus_addressed.clear()
     yield
     nexus.reset_state()
     awareness.reset_timers()
+    main._nexus_addressed.clear()
 
 
 def local_only_moderation(monkeypatch, *, threshold: float = 0.45) -> None:

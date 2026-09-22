@@ -528,6 +528,47 @@ def speaker(chat_id: int) -> dict | None:
     return None
 
 
+def nexus_has_the_last_word(chat_id: int) -> bool:
+    """Whether the assistant's own turn is the newest thing in the window.
+
+    This is the duplicate-reply guard, and it is a *reading of the conversation*
+    rather than a flag somebody has to remember to set.
+
+    The problem it closes: a message addressed to Nexus in a group is answered
+    directly by ``app/main.py``, and it is also in the room window, so the next
+    awareness pass reads it again and may answer it a second time. The obvious
+    fix — move the watermark past the answered message — is the wrong one, and
+    dangerously so: the watermark is a single high-water id
+    (``db.group_pending`` filters ``id > seen_message_id``), so advancing it past
+    one message silently marks every *earlier* unread message as understood too.
+    That trades a duplicate reply for a lost event, which is the worse of the two
+    failures and the one the brief forbids outright.
+
+    So the batch is still read and still recorded — understanding is the point —
+    and only the *response* is suppressed. The condition is "did the assistant
+    speak after the last human did", which is exactly the question "does this
+    room still need an answer", and it is derived from the window rather than
+    from a process-local flag for three reasons: the window is persisted, so a
+    restart does not resurrect the duplicate; it cannot drift out of sync with
+    what the model is shown, because it *is* what the model is shown; and it
+    fails in the safe direction — a direct answer that never went out leaves no
+    assistant turn behind, so the pass is free to answer rather than leaving the
+    person with silence.
+    """
+    rows = window(chat_id)
+    last_human = -1
+    for index, message in enumerate(rows):
+        if (message.get("role") or "") != ROLE_NEXUS:
+            last_human = index
+    if last_human < 0:
+        # Nothing but the assistant's own words. There is no question here to
+        # answer, so "the assistant has the last word" is the true answer.
+        return bool(rows)
+    return any(
+        (message.get("role") or "") == ROLE_NEXUS for message in rows[last_human + 1 :]
+    )
+
+
 def memory_block(chat_id: int) -> str:
     """What Nexus understood about this room a moment ago.
 

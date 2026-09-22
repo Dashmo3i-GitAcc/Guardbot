@@ -1431,6 +1431,20 @@ _awareness_sweeping = False
 # silence. The deadline can only make a pass *earlier*; it cannot make one
 # happen that the policy would have refused.
 _awareness_ready_at: dict[int, float] = {}
+
+# The highest message id in each room that the *addressed* path is answering, or
+# has answered. One integer per room, and it exists to close the one race the
+# window cannot: ``awareness.nexus_has_the_last_word`` is read from the stored
+# window, and the assistant's turn only lands in that window once the reply has
+# been sent — which is seconds after the message arrived, because a model call
+# is in between. A pass that runs in that gap would see an unanswered question
+# and answer it, and the room would get two replies after all.
+#
+# So the marker is set *before* the answer is awaited and cleared only if no
+# answer went out. A message that was never answered leaves no marker behind, so
+# the ambient path is free to try — which is what keeps this from turning a rate
+# limit into silence.
+_nexus_addressed: dict[int, int] = {}
 # The deadline tick's own interval. One second is below the resolution anybody
 # can perceive as "late" and costs a dictionary scan.
 AWARENESS_DEADLINE_TICK_SECONDS = 1.0
@@ -1606,7 +1620,37 @@ async def _awareness_read(
     # The response decision. ``writes`` forces a reply because the action has
     # already happened; otherwise the model's own judgement decides, and it is
     # then filtered by whether this speaker is one Nexus answers at all.
-    wants_to_speak = bool(decision.get("respond")) or bool(counters.get("writes"))
+    #
+    # The one thing that can override the model's judgement in the *silent*
+    # direction is the duplicate guard: if this batch has already been answered,
+    # answering again is the bug the owner reported as "one request, two
+    # replies". The batch has still been read and recorded above — only the
+    # reply is withheld — so nothing is lost and no watermark is moved.
+    #
+    # Two conditions, because there are two ways a batch can be answered and
+    # only one of them is visible in the window:
+    #
+    #   * ``_nexus_addressed`` covers the answer that is *being* written right
+    #     now, which the window cannot show yet;
+    #   * ``nexus_has_the_last_word`` covers the answer that was written before
+    #     this process started, which the marker cannot know about.
+    #
+    # A write tool's confirmation is never suppressed: the action has already
+    # happened, and an unacknowledged change is worse than a repeated sentence.
+    already_answered = int(max_id) <= _nexus_addressed.get(chat_id, 0)
+    if not already_answered:
+        already_answered = awareness.nexus_has_the_last_word(chat_id)
+    if already_answered:
+        log.info(
+            "awareness withheld a reply: the batch was already answered chat=%s "
+            "max_id=%s responded=%s",
+            chat_id,
+            max_id,
+            bool(decision.get("respond")),
+        )
+    wants_to_speak = bool(counters.get("writes")) or (
+        bool(decision.get("respond")) and not already_answered
+    )
     if not wants_to_speak:
         return
     if not nexus.accepts(principal):
@@ -2413,7 +2457,7 @@ async def _answer_conversationally(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
     reply_to: int | None = None,
-) -> None:
+) -> bool:
     """The whole conversational policy for a message that was **aimed** at Nexus.
 
     This path is now reached by exactly one thing: a message that addressed the
@@ -2432,19 +2476,25 @@ async def _answer_conversationally(
     Text and media take the same road once the message has been prepared: the
     only difference is that an attachment contributes parts and, for voice, a
     transcript instead of a body.
+
+    Returns whether a reply actually went out. The caller needs that answer for
+    one reason: a group message that was aimed here must stop the awareness pass
+    from answering the same thing again, but only if this path really did answer
+    it. A withheld answer is not a duplicate, and suppressing the ambient reply
+    for it would turn a rate limit into silence.
     """
     msg = update.effective_message
     room = update.effective_chat
     user = update.effective_user
     if not msg or not room or not user or user.is_bot:
-        return
+        return False
 
     # A message the moderator just deleted must not be answered. Without this
     # an explicit photo addressed to the bot would be removed and then replied
     # to, which is both confusing and a reference to content that is gone.
     if was_deleted(room.id, getattr(msg, "message_id", 0)):
         log.info("chat skipped: the message was just deleted by moderation")
-        return
+        return False
 
     parts: list | None = None
     kind = ""
@@ -2481,7 +2531,9 @@ async def _answer_conversationally(
                 else config.GEMINI_CHAT_UNREADABLE_TEXT,
                 reply_to,
             )
-            return
+            # Something was said, so this turn is answered even though no model
+            # was consulted. The person asked and got an honest sentence back.
+            return True
 
     # The administrative half of this turn. Built from server-side values only,
     # and empty for a room where the person asking is not an administrator —
@@ -2530,7 +2582,7 @@ async def _answer_conversationally(
         if result.voice:
             if await _send_voice(ctx, room.id, result.voice, reply_to):
                 _awareness_note_reply(room.id, result.text)
-                return
+                return True
             # The upload failed; the text is still the answer and is sent below.
             log.warning("voice reply failed; falling back to text")
         if await _send_chat(ctx, room.id, result.text, reply_to):
@@ -2538,7 +2590,10 @@ async def _answer_conversationally(
             # awareness pass has to understand — otherwise it reads questions
             # and never its own answers, and repeats itself.
             _awareness_note_reply(room.id, result.text)
-        return
+            return True
+        # Telegram refused the send. Nothing was said, so the room is still
+        # unanswered and the ambient path is free to try.
+        return False
 
     log.info(
         "chat declined for %s in %s reason=%s",
@@ -2549,7 +2604,8 @@ async def _answer_conversationally(
     # Silent for the reasons that are nobody's business — a switched-off feature
     # should not announce itself every time somebody says hello.
     if result.message:
-        await _send_chat(ctx, room.id, result.message, reply_to)
+        return bool(await _send_chat(ctx, room.id, result.message, reply_to))
+    return False
 
 
 async def _send_voice(
@@ -2648,17 +2704,44 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await _awareness_promptly(ctx, room.id)
         return
 
-    await _answer_conversationally(update, ctx, reply_to=msg.message_id)
+    # This message is being answered here, so it must not also be answered by the
+    # awareness pass — that is the "one request, two replies" defect. The marker
+    # is set before the answer is awaited, because a model call is a suspension
+    # point and the pass can run during it; it is cleared if nothing went out, so
+    # a refused or failed answer leaves the room readable rather than silent.
+    _nexus_addressed[room.id] = max(
+        _nexus_addressed.get(room.id, 0), int(getattr(msg, "message_id", 0) or 0)
+    )
+    if not await _answer_conversationally(update, ctx, reply_to=msg.message_id):
+        _nexus_addressed.pop(room.id, None)
 
 
 async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """A private message to the bot is a conversation, by definition.
+    """A private message to the bot. The owner's own channel, and only theirs.
 
-    The same gate applies, minus the addressing question: a DM has no room to
-    address Nexus in front of, so it is always aimed at Nexus. An unauthorized
-    sender is still refused before the model is consulted — a private chat is
-    not a way around the group policy, and "the bot answers DMs from anybody" is
-    exactly the hole the brief closes.
+    The private boundary is a *different* gate from the group one, not a
+    stricter setting of it. In a group, an administrator is answered because the
+    room is already public and moderating it is their job; a private chat has
+    exactly one reader, so the only defensible rule is that it belongs to the
+    owner. ``nexus.accepts_private`` is that rule, and it is deliberately not
+    reachable by ``NEXUS_ACTORS_ONLY``, by an administrator role, or by anything
+    written in the message.
+
+    Two consequences, both intended and both stated here so they are not
+    rediscovered as bugs:
+
+    * an unauthorized sender is refused **silently**, before any model call and
+      before any history is written. That matches the group policy for a
+      non-actor — being ignored is not announced — and it means a stranger
+      cannot spend this deployment's model allowance by talking to the bot in
+      private;
+    * because the refusal happens before ``chat.reply``, a non-owner's private
+      message never enters ``chat_messages`` at all. There is therefore nothing
+      for a later turn — theirs or anybody else's — to read.
+
+    ``/start`` and ``/reset`` are registered separately and stay available to
+    everyone: they touch only the caller's own ``(chat_id, user_id)`` history,
+    which is the one thing a private chat can safely own.
     """
     msg = update.effective_message
     room = update.effective_chat
@@ -2673,9 +2756,23 @@ async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     # look up.
     principal = rbac.resolve(user.id)
 
+    # The owner's spoken state command still works here, and it is checked
+    # first: it is the only way back when Nexus is already off, and it reaches
+    # the transition through ``admin_service``, which re-authorises it against
+    # ``nexus.control``. It grants nothing by itself.
     if await _nexus_state_command(update, ctx, principal, _message_text(msg)):
         return
-    if not nexus.accepts(principal):
+
+    if not nexus.accepts_private(principal):
+        # One line, and the reason is the point: "the owner's assistant stayed
+        # silent" and "the bot is broken" must not look the same in a log.
+        log.info(
+            "private chat refused user=%s role=%s source=%s online=%s",
+            user.id,
+            principal.role,
+            principal.source,
+            nexus.is_online(),
+        )
         return
     await _answer_conversationally(update, ctx)
 

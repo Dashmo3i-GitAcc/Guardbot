@@ -748,7 +748,17 @@ def test_a_private_message_from_a_member_is_refused(monkeypatch):
     assert calls == []
 
 
-def test_a_private_message_from_an_admin_is_answered(monkeypatch):
+def test_a_private_message_from_an_admin_is_refused(monkeypatch):
+    """An administrator is an actor in a group and **not** in private.
+
+    This assertion is the inverse of what this test said before the private
+    boundary existed, and the change is deliberate rather than a regression. A
+    group is already public, so answering an administrator there discloses
+    nothing new — which is why ``nexus.accepts`` still says yes to them. A
+    private chat has exactly one reader, so it belongs to the owner, and being
+    an administrator is not a lesser kind of owner. See
+    ``nexus.accepts_private`` and ``tests/test_private_boundary.py``.
+    """
     bot = FakeBot()
     calls = install_model(monkeypatch, text="سلام")
     update = update_for(message(text="سلام"), actor=MODERATOR, chat_id=MODERATOR,
@@ -756,7 +766,21 @@ def test_a_private_message_from_an_admin_is_answered(monkeypatch):
 
     asyncio.run(main.on_private_text(update, SimpleNamespace(bot=bot, args=[])))
 
+    assert calls == [], "an administrator must not reach the model in private"
+    assert bot.messages == []
+
+
+def test_a_private_message_from_the_owner_is_answered(monkeypatch):
+    """The other half of the boundary, so the pair cannot drift apart."""
+    bot = FakeBot()
+    calls = install_model(monkeypatch, text="سلام")
+    update = update_for(message(text="سلام"), actor=OWNER, chat_id=OWNER,
+                        chat_type="private")
+
+    asyncio.run(main.on_private_text(update, SimpleNamespace(bot=bot, args=[])))
+
     assert len(calls) == 1
+    assert bot.messages == ["سلام"]
 
 
 # ══ 4. Context and target resolution ══════════════════════════════════════
