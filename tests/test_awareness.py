@@ -1285,15 +1285,38 @@ def test_the_trusted_context_never_calls_the_owner_a_creator_for_anyone_else():
         )
 
 
-def test_the_ambient_context_tells_the_model_to_find_its_target_by_id():
+def test_the_ambient_context_does_not_deny_the_referent_the_server_knows():
+    """The ambient block used to say "there is no referent, ask".
+
+    That sentence was true of the old design and is a bug in the new one: the
+    room window records what each message replied to, so an instruction sent as
+    a reply *does* have a referent and the server can name it. The block now
+    defers to the server's reading instead of contradicting it, which is the fix
+    for «این رو سکوت کن» producing «کی رو می‌خوای ساکت کنی؟».
+    """
     text = admin_tools.build_context(
         principal=rbac.resolve(ADMIN), chat_id=CHAT, ambient=True
     )
-    assert "user id that actually appears in the transcript" in text
+    assert "The server's reading of the instruction in this batch" in text
+    # The rule that replaced the old one, stated so the model cannot miss it.
+    assert "reuse a target from an earlier instruction" in text
     # And the non-ambient block still says the other thing, so the two paths have
     # not been collapsed into one.
     directed = admin_tools.build_context(principal=rbac.resolve(ADMIN), chat_id=CHAT)
     assert "no replied-to message in this turn" in directed
+
+
+def test_the_ambient_context_never_claims_there_is_no_referent_outright():
+    """The blanket denial is gone, and it must not come back.
+
+    Asserted separately from the sentence above because it is the actual defect:
+    a block that tells the model a referent cannot exist will make it ask a
+    question whose answer was in the message all along.
+    """
+    text = admin_tools.build_context(
+        principal=rbac.resolve(ADMIN), chat_id=CHAT, ambient=True
+    )
+    assert "no referent on their own" not in text
 
 
 # ══ One request, one reply ════════════════════════════════════════════════
@@ -1485,3 +1508,249 @@ def test_a_room_with_only_the_assistants_words_counts_as_answered():
 
 def test_an_empty_room_has_no_last_word():
     assert awareness.nexus_has_the_last_word(CHAT) is False
+
+
+# ══ The instruction: who asked, and who it is about ═══════════════════════
+# The block below is the fix for the two halves of one reported defect: an
+# instruction that could not be carried out because the server would not say who
+# it was about, and an instruction that was carried out on the *wrong* person
+# because the target of an earlier one survived in the conversation. Both are
+# attribution, so both are pinned here rather than in the prompt.
+def captured(chat_id, user_id, role, name, text, **extra):
+    """Insert a window row with the capture-time hints the handler writes."""
+    db.group_capture(
+        chat_id, user_id, role, name, text, keep=100, **extra
+    )
+
+
+def test_a_promotion_is_visible_to_the_very_next_render():
+    """The role on a row is when they typed; the role shown is what they hold now.
+
+    This is the reported bug in one assertion: an administrator promoted a
+    minute ago was still labelled a member in the transcript, so the model
+    reasoned — correctly, from what it was given — that the person had no
+    authority, and refused them. The stored label is not allowed to be the
+    answer when the authority model has a fresher one.
+    """
+    captured(CHAT, MEMBER, "member", "Reza", "سلام", message_id=1)
+    rows = db.group_window(CHAT, limit=10)
+    assert awareness.roles_for(rows)[MEMBER] == "member"
+
+    db.admin_set(MEMBER, "admin", ["moderation.ban"], granted_by=OWNER)
+
+    rows = db.group_window(CHAT, limit=10)
+    assert awareness.roles_for(rows)[MEMBER] == "admin"
+    assert "[admin] Reza" in awareness.render(CHAT, messages=rows)
+    # The row itself still records how they stood when they spoke. History is
+    # not rewritten; it is simply not used as the answer.
+    assert rows[-1]["role"] == "member"
+
+
+def test_the_anchor_is_the_instruction_not_the_newest_message():
+    """A member's trailing message must not become the person who asked.
+
+    The bug this replaces: an administrator replies to a nuisance with «این رو
+    سکوت کن», a member posts something a moment later, and the pass — reading
+    the newest human message — built the tool surface for the *member*, who
+    holds no permissions. The refusal was a true statement about the wrong
+    person.
+    """
+    captured(
+        CHAT, ADMIN, "admin", "Ali", "این رو ساکت کن",
+        actor=True, message_id=5, reply_user_id=MEMBER, reply_name="Nuisance",
+    )
+    captured(CHAT, MEMBER, "member", "Reza", "خب", message_id=6)
+    rows = db.group_window(CHAT, limit=10)
+
+    assert awareness.anchor(CHAT, messages=rows)["user_id"] == ADMIN
+
+    # With no instruction at all, the newest human message is still the answer:
+    # that is the conversation, and nothing else in the batch claims otherwise.
+    db.awareness_reset()
+    captured(CHAT, MEMBER, "member", "Reza", "خب", message_id=6)
+    rows = db.group_window(CHAT, limit=10)
+    assert awareness.anchor(CHAT, messages=rows)["user_id"] == MEMBER
+
+
+def test_the_instruction_block_names_the_actor_the_role_and_the_reply_target():
+    """The server states who asked, with what authority, and about whom.
+
+    Three facts, each one closing a way the assistant previously guessed: the
+    actor's id and *current* role, the id the instruction points at through its
+    reply edge, and the explicit rule that an older target is background.
+    """
+    captured(CHAT, MEMBER, "member", "Nuisance", "مزاحم شده", message_id=4)
+    captured(
+        CHAT, ADMIN, "admin", "Ali", "این رو ساکت کن",
+        actor=True, message_id=5,
+        reply_user_id=MEMBER, reply_name="Nuisance", reply_message_id=4,
+    )
+    rows = db.group_window(CHAT, limit=10)
+    block = awareness.instruction_block(CHAT, messages=rows)
+
+    assert str(ADMIN) in block
+    assert "admin" in block
+    assert str(MEMBER) in block
+    # The reply is stated as a fact, and the reuse rule is stated as a rule.
+    assert "was a **reply**" in block
+    assert "never reuse it" in block
+    # And the no-reply branch says the opposite thing rather than nothing.
+    db.awareness_reset()
+    captured(
+        CHAT, ADMIN, "admin", "Ali", "این رو ساکت کن", actor=True, message_id=5
+    )
+    rows = db.group_window(CHAT, limit=10)
+    assert "was not a reply" in awareness.instruction_block(CHAT, messages=rows)
+
+
+def test_a_member_message_is_never_stated_as_an_instruction():
+    """Conversation is not an instruction, and the block must not invent one."""
+    captured(CHAT, MEMBER, "member", "Reza", "این رو ساکت کن", directed=True)
+    rows = db.group_window(CHAT, limit=10)
+    assert awareness.instruction_block(CHAT, messages=rows) == ""
+
+
+def test_the_transcript_marks_a_call_differently_from_a_mention():
+    """«نکسوس گفت که...» is context; «نکسوس ساکتش کن» is a call.
+
+    Both spell the name exactly, so both are *found* — the difference is the
+    grade, and it is what stops a quotation from looking like an instruction.
+    """
+    captured(CHAT, ADMIN, "admin", "Ali", "نکسوس گفت که فلانی رو ساکت کنه",
+             message_id=1)
+    captured(CHAT, ADMIN, "admin", "Ali", "نکسوس ساکتش کن",
+             directed=True, message_id=2)
+    rows = db.group_window(CHAT, limit=10)
+    lines = awareness.render(CHAT, messages=rows).splitlines()
+
+    assert "⋯ about you" in lines[0]
+    assert "⟶ to you" in lines[1]
+
+
+# ══ What the bot itself may do ════════════════════════════════════════════
+# The reported bug: the assistant said Telegram had not given it permission to
+# mute, and then — after being shown the bot's rights — discovered it did, and
+# muted. The permission was never missing; the knowledge was. These pin the
+# answer as something read rather than guessed.
+def test_an_unreadable_right_set_is_reported_as_unknown_never_as_a_refusal():
+    text = admin_tools.bot_rights_block(
+        {"status": "", "rights": {}, "error": "telegram lookup failed"}
+    )
+    assert "unknown" in text
+    assert "Do not tell anybody you lack a permission" in text
+    # Nothing is rendered as a denied right: an unknown must not read as "no".
+    assert "=no" not in text
+
+
+def test_the_rights_block_states_what_is_held_and_what_it_enables():
+    text = admin_tools.bot_rights_block(
+        {
+            "status": "administrator",
+            "rights": {"can_restrict_members": True, "can_delete_messages": False},
+            "error": "",
+        }
+    )
+    assert "can_restrict_members=yes" in text
+    assert "can_delete_messages=no" in text
+    assert "mute_member" in text
+    assert "delete_message" in text
+
+
+# ══ Naming the target of an action ════════════════════════════════════════
+def test_a_user_action_result_carries_the_name_and_the_username():
+    """An announcement has to say *who*, and the server supplies the who."""
+    from app import people
+
+    people.remember(
+        SimpleNamespace(
+            id=MEMBER, first_name="Reza", last_name="Ahmadi", username="reza"
+        ),
+        CHAT,
+    )
+    info = admin_tools.target_identity(
+        SimpleNamespace(operation="mute_member", target_id=MEMBER), chat_id=CHAT
+    )
+    assert info["user_id"] == MEMBER
+    assert info["name"] == "Reza Ahmadi"
+    assert info["username"] == "@reza"
+    assert info["handle"] == "@reza"
+
+
+def test_a_target_without_a_username_falls_back_to_the_id():
+    from app import people
+
+    people.remember(
+        SimpleNamespace(id=STRANGER, first_name="Nobody", last_name="", username=""),
+        CHAT,
+    )
+    info = admin_tools.target_identity(
+        SimpleNamespace(operation="ban_member", target_id=STRANGER), chat_id=CHAT
+    )
+    assert info["username"] == ""
+    assert info["handle"] == str(STRANGER)
+
+
+def test_a_message_operation_is_not_described_as_a_person():
+    """A delete's target id is a message id, and must never name a member."""
+    info = admin_tools.target_identity(
+        SimpleNamespace(operation="delete_message", target_id=555), chat_id=CHAT
+    )
+    assert info == {}
+
+
+# ══ Resolving several people at once ══════════════════════════════════════
+def test_resolve_many_agrees_with_resolve_for_every_id():
+    """The bulk read is a wrapper, not a second authority model."""
+    db.admin_set(MEMBER, "admin", ["moderation.ban"], granted_by=OWNER)
+
+    many = rbac.resolve_many([OWNER, SENIOR, ADMIN, MODERATOR, MEMBER, 0])
+    assert 0 not in many
+    for user_id in (OWNER, SENIOR, ADMIN, MODERATOR, MEMBER):
+        one = rbac.resolve(user_id)
+        assert many[user_id].role == one.role
+        assert many[user_id].permissions == one.permissions
+        assert many[user_id].source == one.source
+
+
+# ══ Speech in the room window ═════════════════════════════════════════════
+def test_an_actors_voice_note_is_transcribed_into_the_window(monkeypatch):
+    """An administrator who speaks an instruction is giving an instruction."""
+    async def fake_transcribe(ref, *, download):
+        return SimpleNamespace(ok=True, text="این رو ساکت کن", error="", skipped="")
+
+    monkeypatch.setattr(main.transcribe, "transcribe_ref", fake_transcribe)
+    voice = SimpleNamespace(
+        file_id="f1", file_unique_id="u1", mime_type="audio/ogg",
+        file_size=1234, duration=3,
+    )
+    run(main.on_group_chat, message(message_id=9, voice=voice), FakeBot(),
+        actor=ADMIN)
+
+    row = db.group_window(CHAT, limit=5)[-1]
+    assert row["text"] == "این رو ساکت کن"
+    assert row["kind"] == "voice"
+    assert row["actor"] is True
+
+
+def test_a_members_voice_note_is_recorded_as_its_kind_and_nothing_is_spent(
+    monkeypatch,
+):
+    """The room is read to understand the people who can act."""
+    calls: list = []
+
+    async def fake_transcribe(ref, *, download):
+        calls.append(ref)
+        return SimpleNamespace(ok=True, text="x", error="", skipped="")
+
+    monkeypatch.setattr(main.transcribe, "transcribe_ref", fake_transcribe)
+    voice = SimpleNamespace(
+        file_id="f1", file_unique_id="u1", mime_type="audio/ogg",
+        file_size=1234, duration=3,
+    )
+    run(main.on_group_chat, message(message_id=9, voice=voice), FakeBot(),
+        actor=MEMBER)
+
+    assert calls == []
+    row = db.group_window(CHAT, limit=5)[-1]
+    assert row["text"] == "[voice]"
+    assert row["actor"] is False

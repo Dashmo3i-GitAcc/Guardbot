@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import re
 
-from . import config, db, rbac
+from . import addressing, config, db, rbac
 
 log = logging.getLogger("guardbot.nexus")
 
@@ -241,37 +241,28 @@ def accepts_private(principal: rbac.Principal) -> bool:
 
 
 # ── Addressing ────────────────────────────────────────────────────────────
+# The recognition itself lives in ``app/addressing.py``, and it moved there when
+# it stopped being a word-list comparison. A group writes an assistant's name the
+# way it is pronounced, not the way a config file spells it — «نکسی», «نکس»,
+# «نکسوسو», «نکسووووس», «nexsus» are all the same call — and the matcher that
+# reads those is a piece of orthography with its own tests rather than three
+# lines in the middle of the trigger policy. What stays here is the *use* of it.
 def names() -> tuple[str, ...]:
     """The configured names Nexus answers to. Lowercased, deduplicated."""
-    seen: list[str] = []
-    for name in config.NEXUS_NAMES or ():
-        cleaned = (name or "").strip().lower()
-        if cleaned and cleaned not in seen:
-            seen.append(cleaned)
-    return tuple(seen)
-
-
-def _mentions(text: str, word: str) -> bool:
-    """Whole-word, case-insensitive match.
-
-    Escaped before it becomes a pattern, because the names come from
-    configuration and an operator typing ``.`` should get a literal dot rather
-    than a wildcard. Whole-word matching matters more here than anywhere else:
-    the Persian ban stem «بن» appears inside «بنظر» and «بنفش», and a substring
-    match would turn ordinary conversation into an administrative instruction.
-    """
-    if not text or not word:
-        return False
-    try:
-        return re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text) is not None
-    except re.error:
-        return False
+    return addressing.names()
 
 
 def is_named(text: str) -> bool:
-    """Whether the message calls Nexus by one of its names."""
-    low = (text or "").lower()
-    return any(_mentions(low, name) for name in names())
+    """Whether the message calls Nexus by name.
+
+    Delegates to the graded matcher and keeps only its strong reading. The
+    distinction matters: this function decides whether ``app/main.py`` answers a
+    message *now*, so it is allowed to be conservative. The weak reading — the
+    name is present but nothing shows it is a call — is not this function's
+    business; it is ``addressing.mentioned``, and ``app/awareness.py`` reads it
+    directly to mark a transcript line the assistant was talked about in.
+    """
+    return addressing.addressed(text)
 
 
 # ── The urgency hint ──────────────────────────────────────────────────────
@@ -296,22 +287,13 @@ def is_named(text: str) -> bool:
 # and a missing word costs a few seconds. Recall is still the right bias, because
 # an instruction that arrives late is worse than one that arrives promptly, but
 # the bias is now about latency rather than about correctness.
-_ACTION_WORDS = (
-    # Persian: the moderation verbs and the colloquial stems a group actually
-    # uses. Both the bare imperative and the common attached-pronoun forms.
-    "بن", "بنش", "بنشون", "بنشونش", "آنبن", "انبن", "آنبنش", "انبنش",
-    "اخراج", "اخراجش", "بیرون", "بنداز", "بندازش", "حذف", "حذفش", "پاک", "پاکش",
-    "ساکت", "ساکتش", "خفه", "خفهش", "محدود", "محدودش", "اخطار", "اخطارش",
-    "ادمین", "ادمینش", "مدیر", "مدیرش", "ارتقا", "تنزل", "مسدود", "مسدودش",
-    "بلاک", "بلاکش", "آزاد", "ازاد", "رفع", "ممنوع", "توقیف", "قطع",
-    "دسترسی", "دسترسیش", "سطح", "سطحش", "نقش", "نقشش", "رول", "رولش",
-    "محروم", "تعلیق", "بنکن",
-    "محدودیت", "محدودیتش", "نتونه", "نتونن", "نذار", "نزار",
-    # English: the same verbs, because a group is not monolingual.
-    "ban", "unban", "mute", "unmute", "kick", "promote", "demote", "warn",
-    "delete", "remove", "restrict", "admin", "moderator", "role", "roles",
-    "permission", "permissions", "revoke", "suspend",
-)
+#
+# The lexicon itself now lives in ``app/addressing.py``, because the name matcher
+# there needs the same verbs for a different purpose — telling «نکسوس ساکتش کن»
+# (a call, with an instruction after the name) from «نکسوس گفت که...» (a
+# quotation). One list, two readers, so the two can never disagree about which
+# words are moderation.
+_ACTION_WORDS = addressing.ACTION_WORDS
 
 
 def _action_words() -> frozenset[str]:
@@ -355,6 +337,26 @@ def looks_actionable(text: str) -> bool:
 
 
 # ── The owner's state phrases ─────────────────────────────────────────────
+def _mentions(text: str, phrase: str) -> bool:
+    """Whole-word, case-insensitive match of a fixed phrase.
+
+    This is the *phrase* matcher, and it is not the name matcher above: the
+    owner's state phrases are fixed strings whose meaning is their wording, so
+    they are compared as written. Escaped before it becomes a pattern, because a
+    phrase comes from configuration and an operator typing ``.`` should get a
+    literal dot rather than a wildcard. Whole-word matching matters here for the
+    same reason it always does in this language: the Persian ban stem «بن»
+    appears inside «بنظر» and «بنفش», and a substring match would turn ordinary
+    conversation into an administrative instruction.
+    """
+    if not text or not phrase:
+        return False
+    try:
+        return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
+    except re.error:
+        return False
+
+
 # The one place where a fixed phrase list is the correct design rather than a
 # shortcut. Turning Nexus off must keep working when Nexus is already off, and
 # when Gemini is unreachable, and when the daily allowance is spent — so it

@@ -445,6 +445,26 @@ def resolve(user_id: int) -> Principal:
     corrupted or hand-edited row grants nothing rather than everything.
     """
     user_id = int(user_id)
+    # The three reads are ordered by cost and stopped at the first that answers,
+    # which is the same shape the logic below has. The owner is a configuration
+    # read and no query; a configured administrator is the same; only a stranger
+    # or a stored administrator costs a database read, and this function runs on
+    # every group message.
+    if user_id and user_id == owner_id():
+        return _principal(user_id, {}, None)
+    configured = _config_admins()
+    if user_id in configured:
+        return _principal(user_id, configured, None)
+    return _principal(user_id, configured, db.admin_get(user_id))
+
+
+def _principal(user_id: int, configured: dict[int, str], row: dict | None) -> Principal:
+    """Build one principal from already-read inputs.
+
+    Split out of ``resolve`` so that the bulk form below cannot drift from it.
+    The authority rules are stated once, here, and both readers go through them:
+    the owner by id, then the environment, then the stored row, then a guest.
+    """
     if user_id and user_id == owner_id():
         return Principal(
             user_id=user_id,
@@ -453,7 +473,6 @@ def resolve(user_id: int) -> Principal:
             source="owner",
         )
 
-    configured = _config_admins()
     if user_id in configured:
         role = configured[user_id]
         return Principal(
@@ -463,7 +482,6 @@ def resolve(user_id: int) -> Principal:
             source="config",
         )
 
-    row = db.admin_get(user_id)
     if row:
         role = row["role"] if row["role"] in ROLE_PERMISSIONS else ROLE_HELPER
         granted = frozenset(p for p in row["permissions"] if p in PERMISSION_SET)
@@ -481,6 +499,33 @@ def resolve(user_id: int) -> Principal:
         )
 
     return guest(user_id)
+
+
+def resolve_many(user_ids) -> dict[int, Principal]:
+    """Resolve several ids in one pass. Same answers, one round of reads.
+
+    Added for the room transcript, which labels every speaker in a window with
+    the role they hold *now*. The point of doing that is that a promotion is
+    visible to the very next awareness pass rather than to the next restart —
+    and the point of *this* function is that saying so costs one query and one
+    config parse instead of forty of each.
+
+    It is a wrapper, not a second implementation: every id goes through
+    ``_principal``, which is the same function ``resolve`` calls.
+    """
+    ids = {int(uid) for uid in user_ids if uid}
+    if not ids:
+        return {}
+    configured = _config_admins()
+    stored: dict[int, dict] = {}
+    try:
+        stored = {int(row["user_id"]): row for row in db.admin_list()}
+    except Exception:  # noqa: BLE001 - a missing overlay is a guest, not a crash
+        log.exception("could not read the stored administrators")
+    return {
+        uid: _principal(uid, configured, stored.get(uid))
+        for uid in ids
+    }
 
 
 def is_owner(user_id: int) -> bool:

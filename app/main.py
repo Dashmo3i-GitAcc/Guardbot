@@ -104,6 +104,13 @@ _bot_identity: dict = {
     "name": "",
     "aliases": (),
     "resolved": False,
+    # Telegram's own answer to "may this bot read ordinary group messages
+    # without being addressed", from ``getMe``. Recorded because it is a fact
+    # about the deployment that changes what the assistant can honestly claim:
+    # with privacy mode on and no administrator promotion, it simply does not
+    # receive the messages the awareness layer is supposed to be reading, and an
+    # assumption about that would be the worst kind of wrong.
+    "reads_all_group_messages": False,
 }
 
 # Messages this process has just deleted, so the conversational handler does not
@@ -158,13 +165,17 @@ async def load_identity(app: Application) -> None:
         name=(me.first_name or "").strip(),
         aliases=tuple(a.strip().lower() for a in config.BOT_ALIASES if a.strip()),
         resolved=True,
+        reads_all_group_messages=bool(
+            getattr(me, "can_read_all_group_messages", False)
+        ),
     )
     log.info(
-        "Bot identity: id=%s username=%s name=%s aliases=%d",
+        "Bot identity: id=%s username=%s name=%s aliases=%d reads_all=%s",
         _bot_identity["id"],
         f"@{_bot_identity['username']}" if _bot_identity["username"] else "-",
         _bot_identity["name"] or "-",
         len(_bot_identity["aliases"]),
+        _bot_identity["reads_all_group_messages"],
     )
 
 
@@ -1589,7 +1600,9 @@ _nexus_addressed: dict[int, int] = {}
 AWARENESS_DEADLINE_TICK_SECONDS = 1.0
 
 
-def _awareness_capture(room, user, msg, text: str, principal) -> bool:
+async def _awareness_capture(
+    ctx, room, user, msg, text: str, principal, *, directed: bool = False
+) -> bool:
     """Record one received group message into the room window. No AI call.
 
     Called for every message the bot can actually receive — including ordinary
@@ -1600,7 +1613,38 @@ def _awareness_capture(room, user, msg, text: str, principal) -> bool:
 
     Media is recorded as its *kind* and never as bytes, on the same rule the
     moderation path follows: the window is text, and it has to stay text or one
-    photograph becomes a row every later prompt has to carry.
+    photograph becomes a row every later prompt has to carry. **Speech is the one
+    exception**, and it is not really an exception: a voice note from an actor is
+    transcribed, so what the room records is the words that were spoken rather
+    than the string «[voice]». An administrator who says an instruction out loud
+    instead of typing it is giving an instruction, and a window that shows only
+    that something was said would make the assistant deaf to exactly the people
+    it is supposed to be listening to.
+
+    Only an **actor's** speech is transcribed. A member's voice note is recorded
+    as its kind, because the room is read to understand the people who can act,
+    and transcribing every voice note in a busy group would spend the speech
+    quota on the messages that can never become an instruction. A note that
+    cannot be read — too long, no speech, a failed download — keeps the kind
+    marker, so the window degrades rather than losing the message.
+
+    A **directed** voice note is not transcribed here. The conversational path
+    transcribes it a moment later to answer it, and doing it twice would be two
+    speech calls for one sentence; the answered turn and its reply are both in
+    the window, so the context is not lost.
+
+    The reply edge is written as columns rather than folded into the body, which
+    is the change that made «این رو سکوت کن» resolvable. It used to be a
+    bracketed sentence appended to the text — «[در پاسخ به X (123)] ...» — which
+    put the one fact an instruction needs inside a string the model had to parse
+    and then contradicted it in the trusted context by saying there was no
+    referent. As a column it is structure, the renderer draws it as an edge, and
+    ``awareness.instruction_block`` can state it as the answer to "who".
+
+    ``directed`` and ``actor`` are recorded because they are what
+    ``awareness.anchor`` uses to decide which message a pass is *about*. They are
+    hints for attribution and nothing else; the authority for anything the turn
+    does is resolved again from the id.
 
     Nothing is captured while Nexus is switched off. Recording a group's
     conversation is part of what the assistant does, so "off" has to mean off:
@@ -1610,24 +1654,59 @@ def _awareness_capture(room, user, msg, text: str, principal) -> bool:
     """
     if not awareness.capture_enabled() or not nexus.is_online():
         return False
+    actor = nexus.is_actor(principal)
     body = (text or "").strip()
+    kind = ""
     ref = media.describe(msg)
     if ref is not None:
         kind = getattr(ref, "kind", "") or "media"
-        body = f"[{kind}] {body}".strip() if body else f"[{kind}]"
+        spoken = ""
+        if actor and not directed and getattr(ref, "is_transcribable", False):
+            spoken = await _transcribe_for_awareness(ctx, ref)
+        body = spoken or (f"[{kind}] {body}".strip() if body else f"[{kind}]")
     if not body:
         return False
-    # The reply marker matches the one ``nexus.observe`` writes, and for the
-    # same reason: "این کاربر خیلی مزاحم شده" is only usable by a later "بنش کن"
-    # if the window records *who* it was about.
-    reply_user_id, reply_name, _ = _reply_context(msg)
-    if reply_user_id:
-        who = f"{reply_name} ({reply_user_id})" if reply_name else str(reply_user_id)
-        body = f"[در پاسخ به {who}] {body}"
+    reply_user_id, reply_name, reply_message_id = _reply_context(msg)
     name = getattr(user, "full_name", "") or getattr(user, "first_name", "") or ""
     return awareness.capture(
-        room.id, user.id, awareness.role_of(principal), name, body
+        room.id,
+        user.id,
+        awareness.role_of(principal),
+        name,
+        body,
+        message_id=int(getattr(msg, "message_id", 0) or 0),
+        reply_user_id=reply_user_id,
+        reply_name=reply_name,
+        reply_message_id=reply_message_id,
+        directed=directed,
+        actor=actor,
+        kind=kind,
     )
+
+
+async def _transcribe_for_awareness(ctx, ref) -> str:
+    """The words in an actor's voice note, or ``""`` if they cannot be read.
+
+    Never raises and never reports a problem to the room: this is a read of a
+    message for the assistant's own understanding, and a note nobody could
+    transcribe must not become a reason the room stops being read or the sender
+    is told anything. An empty answer means "keep the kind marker", which is the
+    same row the capture would have written before this existed.
+    """
+    try:
+        result = await transcribe.transcribe_ref(
+            ref, download=lambda fid: _download_file(ctx, fid)
+        )
+    except Exception:  # noqa: BLE001 - a room read is never worth a failure
+        log.exception("could not transcribe a voice note for the room window")
+        return ""
+    if not result.ok:
+        log.info(
+            "awareness: voice note not transcribed (%s)",
+            result.error or result.skipped,
+        )
+        return ""
+    return (result.text or "").strip()
 
 
 def _awareness_note_reply(chat_id: int, text: str) -> None:
@@ -1693,9 +1772,18 @@ async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
 async def _awareness_read(
     ctx, chat_id: int, row: dict, trace: awareness.PassTrace
 ) -> None:
-    """The body of one pass. See ``_awareness_pass`` for the contract."""
+    """The body of one pass. See ``_awareness_pass`` for the contract.
+
+    The room is read **once** and everything is derived from that one read:
+    the anchor, the transcript, and the roles. It used to be read three times —
+    once for the speaker, once for the transcript, once for the participants —
+    which was three queries per pass for one answer, and the seam between them
+    was a real bug rather than only a cost: the speaker could be a different
+    message than the one the transcript ended with.
+    """
     max_id = int(row.get("max_id") or 0)
-    speaker = awareness.speaker(chat_id)
+    messages = awareness.window(chat_id)
+    speaker = awareness.anchor(chat_id, messages=messages)
     if speaker is None:
         # Nothing but the assistant's own words; there is no conversation to
         # read and no one to answer.
@@ -1705,12 +1793,14 @@ async def _awareness_read(
     actor_id = int(speaker.get("user_id") or 0)
     principal = rbac.resolve(actor_id)
     counters: dict = {"writes": 0}
-    tools, context, on_tool = _awareness_turn(ctx, chat_id, actor_id, counters)
+    tools, context, on_tool = await _awareness_turn(
+        ctx, chat_id, actor_id, speaker=speaker, counters=counters
+    )
     # The seam between building what the model is handed and reading the room.
     # See ``PassTrace.summary``: without it a large room and a slow pass are the
     # same number, and only one of them is worth optimising.
     trace.mark("context")
-    transcript = awareness.render(chat_id)
+    transcript = awareness.render(chat_id, messages=messages)
     trace.mark("window")
     if not transcript:
         awareness.skip(chat_id, seen_message_id=max_id)
@@ -1719,7 +1809,9 @@ async def _awareness_read(
     trace.mark("request")
     result = await chat.awareness(
         transcript,
-        _awareness_context(chat_id) + (context or ""),
+        _awareness_context(chat_id)
+        + awareness.instruction_block(chat_id, messages=messages)
+        + (context or ""),
         tools=tools,
         on_tool=on_tool,
     )
@@ -2441,7 +2533,7 @@ def _reply_context(msg) -> tuple[int, str, int]:
     )
 
 
-def _admin_turn_core(
+async def _admin_turn_core(
     *,
     actor_id: int,
     chat_id: int,
@@ -2496,6 +2588,16 @@ def _admin_turn_core(
         if not names:
             return None, "", None
 
+        # The bot's own rights, so that "I do not have that permission" is a
+        # fact the model read rather than one it assumed. Best-effort and
+        # outside the try's failure contract below: a lookup that fails yields
+        # no block, which degrades the context rather than removing the tools.
+        try:
+            rights = await _bot_rights(gateway.ctx, chat_id)
+        except Exception:  # noqa: BLE001 - context, never worth the tool surface
+            log.exception("could not read the bot's rights for the context block")
+            rights = None
+
         context = admin_tools.build_context(
             principal=principal,
             chat_id=chat_id,
@@ -2506,6 +2608,7 @@ def _admin_turn_core(
             reply_name=reply_name,
             reply_message_id=reply_message_id,
             bot_username=bot_username,
+            bot_rights=rights,
             ambient=ambient,
         )
         tools = admin_tools.declarations_for(principal)
@@ -2628,6 +2731,13 @@ def _admin_turn_core(
             "operation": result.operation,
             "outcome": result.outcome,
             "target_user_id": result.target_id,
+            # Who it happened to, in the words an answer can use: the name, the
+            # @username, and a handle that is always writable. Empty for an
+            # operation whose subject is not a person. See
+            # ``admin_tools.target_identity`` — the announcement must name the
+            # target, and this is where the name comes from rather than from a
+            # second lookup the model would have to remember to make.
+            "target": admin_tools.target_identity(result, chat_id=chat_id),
             # The Persian sentence and the English gloss: the first is what to
             # convey, the second is why, and the model is expected to write its
             # own words around them rather than repeat either.
@@ -2642,10 +2752,10 @@ def _admin_turn_core(
     return tools, context, on_tool
 
 
-def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
+async def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
     """The administrative half of one addressed conversational turn."""
     reply_user_id, reply_name, reply_message_id = _reply_context(msg)
-    return _admin_turn_core(
+    return await _admin_turn_core(
         actor_id=int(user.id),
         chat_id=room.id,
         chat_title=getattr(room, "title", "") or "",
@@ -2661,20 +2771,37 @@ def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
     )
 
 
-def _awareness_turn(ctx, chat_id: int, actor_id: int, counters: dict | None = None):
+async def _awareness_turn(
+    ctx,
+    chat_id: int,
+    actor_id: int,
+    *,
+    speaker: dict | None = None,
+    counters: dict | None = None,
+):
     """The administrative half of one awareness pass.
 
     Same core, same authority, different framing: there is no single message
     being answered, so the trusted context says so and the model is told to find
-    its target in the transcript by id. The tool surface is the last human
-    speaker's — see ``awareness.speaker`` for why that is the safe attribution.
+    its target in the transcript by id. The tool surface is the anchor's — see
+    ``awareness.anchor`` for why that is the safe attribution, and note that it
+    is the *newest instruction* rather than the newest message.
+
+    ``speaker`` is the anchor, and its reply edge is passed through as the real
+    reply context. That is what turns «این رو سکوت کن» from a sentence with no
+    referent into an instruction with a target: the same fields the addressed
+    path has always had, filled in from the message the instruction was sent as
+    a reply to.
     """
-    return _admin_turn_core(
+    return await _admin_turn_core(
         actor_id=int(actor_id),
         chat_id=int(chat_id),
         chat_title="",
         chat_type="",
-        message_id=0,
+        message_id=int((speaker or {}).get("message_id") or 0),
+        reply_user_id=int((speaker or {}).get("reply_user_id") or 0),
+        reply_name=str((speaker or {}).get("reply_name") or ""),
+        reply_message_id=int((speaker or {}).get("reply_message_id") or 0),
         bot_username=getattr(ctx.bot, "username", "") or "",
         bot_id=getattr(ctx.bot, "id", 0),
         gateway=TelegramGateway(ctx),
@@ -2806,7 +2933,7 @@ async def _answer_conversationally(
     # No write-counter is passed: this turn was asked for something, so it is
     # answered either way. The counter exists for the ambient path, where a
     # reply has to be earned by an action having actually run.
-    tools, context, on_tool = _ai_admin_turn(update, ctx, msg, room, user)
+    tools, context, on_tool = await _ai_admin_turn(update, ctx, msg, room, user)
 
     # The room, appended to the trusted block. This is what makes an addressed
     # answer *informed* rather than isolated: "پس همون کاری که گفتی رو بکن" is
@@ -2924,12 +3051,20 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     principal = rbac.resolve(user.id)
     text = _message_text(msg)
 
+    # 1a. Is this aimed at Nexus? Computed once and used twice — by the capture,
+    #     which records it as a hint for choosing the pass's anchor, and by the
+    #     routing below, which answers it. Asking twice would be two chances for
+    #     the two answers to differ, and it is a regex pass over the message.
+    directed = _nexus_directed(msg, ctx)
+
     # 1b. Awareness. Captured for **everybody**, before every gate, and at no
     #     AI cost: understanding the room is the feature, and a member whose
     #     message is understood is still a member who cannot act. The role label
     #     written here comes from `rbac.resolve` above and from nothing the
     #     sender wrote.
-    if _awareness_capture(room, user, msg, text, principal):
+    if await _awareness_capture(
+        ctx, room, user, msg, text, principal, directed=directed
+    ):
         # The room now has something unread, so give it a deadline at the
         # debounce rather than leaving it to the sweeper's next tick. Coalesced
         # by assignment: each later message pushes the same deadline out, which
@@ -2951,7 +3086,7 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 4. Aimed at Nexus, or left to the room. Only the first is understood
     #    here; everything else is the awareness layer's job.
-    if not _nexus_directed(msg, ctx):
+    if not directed:
         # Watch without replying: the message joins this administrator's own
         # bounded context, and nothing is sent and nothing is spent.
         if nexus.is_actor(principal):
@@ -3274,13 +3409,83 @@ async def _bot_right(ctx, chat_id: int, right: str) -> bool:
     Checked before attempting an operation the API will refuse, so a refusal can
     be reported as "I do not have the permission here" rather than as a generic
     failure. Telegram still enforces it; this only makes the message useful.
+
+    A **negative** answer is never served from the cache. The cache exists so
+    that the common case — the bot has the right, as it does in a group it
+    administers — costs no API call, and so that the trusted context can state
+    the bot's capabilities without a round trip per turn. A cached "no" would be
+    the opposite trade: it would make the bot refuse something it can do for as
+    long as the entry lived, which is precisely the defect the owner reported as
+    «می‌گه تلگرام اجازه نداده» and then doing it after a fresh look.
     """
+    rights = (await _bot_rights(ctx, chat_id)).get("rights") or {}
+    if rights.get(right):
+        return True
+    fresh = (await _bot_rights(ctx, chat_id, fresh=True)).get("rights") or {}
+    return bool(fresh.get(right))
+
+
+# The administrator flags this bot can hold, by the names the Bot API uses in
+# ``ChatMemberAdministrator``. Nothing here is invented: a name that is not a
+# real flag would always read False and would turn into a false "the bot cannot
+# do that" in the context block, which is the failure this exists to prevent.
+BOT_RIGHT_FIELDS = (
+    "can_manage_chat",
+    "can_delete_messages",
+    "can_restrict_members",
+    "can_promote_members",
+    "can_change_info",
+    "can_invite_users",
+    "can_pin_messages",
+    "can_manage_video_chats",
+    "can_post_messages",
+    "can_edit_messages",
+    "can_delete_stories",
+    "is_anonymous",
+)
+
+# The bot's own rights in a chat, with a short TTL. See ``_bot_right`` for why a
+# negative is never served from here, and ``_bot_rights_block`` in
+# ``app/admin_tools.py`` for the other consumer: the model is told what the bot
+# can actually do here, so that "I do not have that permission" is a fact it read
+# rather than a fact it assumed.
+_bot_rights_cache: dict[int, tuple[float, dict]] = {}
+
+
+async def _bot_rights(ctx, chat_id: int, *, fresh: bool = False) -> dict:
+    """What the bot may do in this chat, from Telegram's own record.
+
+    ``{"status": ..., "rights": {...}, "error": ...}``, and never raises. A
+    lookup that fails answers with an empty right set and an ``error``, which the
+    context block renders as "unknown" rather than as "no" — an unknown must not
+    read as a refusal, because the whole point is to stop the assistant
+    inventing one.
+    """
+    chat_id = int(chat_id or 0)
+    if not chat_id:
+        return {"status": "", "rights": {}, "error": "no chat id"}
+    now = time.monotonic()
+    ttl = max(0.0, float(config.BOT_RIGHTS_TTL_SECONDS))
+    cached = _bot_rights_cache.get(chat_id)
+    if not fresh and cached and ttl and (now - cached[0]) < ttl:
+        return cached[1]
     try:
-        me = await ctx.bot.get_chat_member(chat_id, ctx.bot.id)
+        member = await ctx.bot.get_chat_member(chat_id, ctx.bot.id)
     except TelegramError as e:
         log.warning("could not read my own chat member status: %s", e)
-        return False
-    return bool(getattr(me, right, False))
+        # Deliberately not cached: a transient Telegram failure must not become a
+        # minute of the bot believing it has no permissions.
+        return {"status": "", "rights": {}, "error": "telegram lookup failed"}
+    status = str(getattr(member, "status", "") or "")
+    answer = {
+        "status": status,
+        "rights": {
+            field: bool(getattr(member, field, False)) for field in BOT_RIGHT_FIELDS
+        },
+        "error": "",
+    }
+    _bot_rights_cache[chat_id] = (now, answer)
+    return answer
 
 
 class TelegramGateway:
@@ -3305,6 +3510,10 @@ class TelegramGateway:
 
     async def bot_right(self, chat_id: int, right: str) -> bool:
         return await _bot_right(self.ctx, chat_id, right)
+
+    async def bot_rights(self, chat_id: int) -> dict:
+        """Every right this bot holds here, for the read tool and the context."""
+        return await _bot_rights(self.ctx, chat_id)
 
     async def promote(self, chat_id: int, user_id: int, rights: dict) -> None:
         await self.bot.promote_chat_member(chat_id, user_id, **rights)

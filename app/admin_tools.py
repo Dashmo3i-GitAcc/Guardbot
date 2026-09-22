@@ -40,7 +40,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import admin_service, agent_data, config, db, nexus, rbac, vpnbot
+from . import admin_service, agent_data, config, db, identity, nexus, rbac, vpnbot
 
 log = logging.getLogger("guardbot.admin.tools")
 
@@ -527,6 +527,18 @@ TOOLS: dict[str, ToolSpec] = {
         kind=KIND_READ,
         permission="moderation.review",
     ),
+    "get_bot_rights": ToolSpec(
+        name="get_bot_rights",
+        description=(
+            "What this bot itself is allowed to do in this group, read from "
+            "Telegram's own record of its administrator rights. Call this before "
+            "saying you cannot do something: if the answer says the right is "
+            "held, you have it. Never claim a missing permission without "
+            "checking here first."
+        ),
+        kind=KIND_READ,
+        permission="commands.use",
+    ),
     # -- the VPN bot: owner only, reads and writes alike ---------------------
     # Five declarations rather than eleven, and the split is not cosmetic. The
     # three reads answer questions; the one write tool carries an ``operation``
@@ -817,6 +829,7 @@ def build_context(
     reply_name: str = "",
     reply_message_id: int = 0,
     bot_username: str = "",
+    bot_rights: dict | None = None,
     ambient: bool = False,
 ) -> str:
     """The trusted-context block for one turn.
@@ -905,6 +918,10 @@ def build_context(
         lines.append(f"This message id: {message_id}\n")
     if bot_username:
         lines.append(f"This bot's username: @{bot_username}\n")
+    # What the bot itself can do here, before the target rules. It is placed
+    # early because it is the fact a refusal is most often built on, and the
+    # block below is where the model is told never to invent one.
+    lines.append(bot_rights_block(bot_rights))
 
     if reply_user_id:
         lines.append(
@@ -917,11 +934,14 @@ def build_context(
     elif ambient:
         lines.append(
             "This turn comes from reading the group's conversation rather than "
-            "from one message addressed to you. There is no single replied-to "
-            "message, so 'this user' and 'them' have no referent on their own. "
-            "If you decide to act, the target must be a user id that actually "
-            "appears in the transcript above; if you cannot tell which person is "
-            "meant, ask instead of guessing.\n"
+            "from one message addressed to you. The server's reading of the "
+            "instruction in this batch — who gave it, and the person it points "
+            "at — is stated above; follow it. If it names a target, use that id. "
+            "If it does not, and the message that gave the instruction was not a "
+            "reply, then «این» and «این کاربر» have no referent and the target "
+            "has to come from the person the conversation is visibly about — or "
+            "you ask. What you must not do is reuse a target from an earlier "
+            "instruction: a previous exchange is background, not a referent.\n"
         )
     else:
         lines.append(
@@ -934,6 +954,21 @@ def build_context(
         "an id, ask for one — never pick a person by name, and never choose "
         "between two similar names. If somebody names a target in words, use "
         "resolve_person; if it answers with several candidates, ask which one.\n"
+    )
+    # How to report what happened. The defect this closes is a real one the
+    # owner described: an action carried out and announced as «این کاربر ساکت
+    # شد», which tells the room nothing about who was silenced. Every write
+    # result now carries a ``target`` object with the name, the @username and a
+    # handle that is always writable, so the answer has no excuse for being
+    # vague — and the rule is stated here because the model has to *use* the
+    # field rather than paraphrase the outcome.
+    lines.append(
+        "\nWhen you report an action you carried out, name the person it "
+        "happened to: their name, and their @username when the result gives one, "
+        "and otherwise the numeric id from the result's target handle. «این "
+        "کاربر» and «این شخص» are never an answer — if the result carries a "
+        "target, use it. The same rule holds for every operation: mute, ban, "
+        "unmute, unban, delete, promote, demote.\n"
     )
     # The operational-history tools, stated as a rule rather than a list. The
     # list is in the tool declarations; what the model needs to be told is the
@@ -951,6 +986,118 @@ def build_context(
         )
     lines.append(recent_actions_block(principal, chat_id=chat_id))
     lines.append(agent_block(principal, chat_id=chat_id))
+    return "".join(lines)
+
+
+# ── What this bot may do here ─────────────────────────────────────────────
+# The tool names each Telegram right enables, in this application's vocabulary.
+# Derived from ``rbac.TELEGRAM_RIGHTS_FOR_ACTION`` rather than invented, so the
+# block the model reads and the check the service makes cannot describe
+# different sets of rights.
+_RIGHT_TOOLS = {
+    "can_delete_messages": ("delete_message",),
+    "can_restrict_members": (
+        "mute_member",
+        "unmute_member",
+        "ban_member",
+        "unban_member",
+    ),
+    "can_promote_members": ("promote_member", "demote_member"),
+}
+
+
+def _tools_for_rights(rights: dict) -> tuple[list[str], list[str]]:
+    """Which tool names the bot's rights enable here, and which they do not."""
+    allowed: list[str] = []
+    refused: list[str] = []
+    for right, tools in _RIGHT_TOOLS.items():
+        (allowed if rights.get(right) else refused).extend(tools)
+    return sorted(set(allowed)), sorted(set(refused))
+
+
+async def _bot_rights_answer(gateway, chat_id: int) -> dict:
+    """The read tool's answer: the raw rights plus what they enable.
+
+    The raw flags are included because they are the evidence, and the derived
+    lists because they are the answer to the question the model actually has —
+    "can I mute in this group". A tool that returned only the flags would leave
+    the model to map `can_restrict_members` onto a mute by itself, which is the
+    kind of inference that produces a confident wrong sentence.
+    """
+    answer = await gateway.bot_rights(chat_id)
+    rights = answer.get("rights") or {}
+    allowed, refused = _tools_for_rights(rights)
+    return {
+        "status": answer.get("status") or "",
+        "rights": rights,
+        "tools_available_here": allowed,
+        "tools_refused_by_telegram_here": refused,
+        "error": answer.get("error") or "",
+    }
+
+
+def bot_rights_block(rights: dict | None) -> str:
+    """The bot's own capabilities, stated from Telegram's record.
+
+    This block exists because of a defect the owner described precisely: the
+    assistant told an administrator it did not have permission to mute, and then
+    — after being shown a screenshot and looking again — discovered it did, and
+    muted. The permission was never missing; the *knowledge* was. A model that
+    has to guess at its own capabilities guesses conservatively, and a
+    conservative guess about a permission is a refusal that is not true.
+
+    So the answer is stated rather than inferred, and it is stated as a rule the
+    model can act on: check here before claiming you cannot. An unknown answer —
+    Telegram unreachable — is rendered as unknown, never as "no", because an
+    unknown rendered as a refusal is the same bug in a new place.
+    """
+    if not rights:
+        return ""
+    status = str(rights.get("status") or "")
+    if not status:
+        return (
+            "\n── What this bot may do here ──\n"
+            "Telegram could not be reached to read the bot's own rights in this "
+            "chat, so they are unknown. Do not tell anybody you lack a "
+            "permission on the strength of this: try the action, and report what "
+            "actually happened.\n"
+        )
+
+    flags = rights.get("rights") or {}
+    allowed, refused = _tools_for_rights(flags)
+    lines = [
+        "\n── What this bot itself may do in this group "
+        "(read from Telegram, not a guess) ──\n",
+        f"Telegram reports this bot's status in this chat as: {status}.\n",
+        "Its rights here: "
+        + ", ".join(f"{name}={'yes' if value else 'no'}" for name, value in flags.items())
+        + ".\n",
+    ]
+    if status not in ("administrator", "creator"):
+        lines.append(
+            "The bot is not an administrator here, so every administrative tool "
+            "will be refused by Telegram. Say that plainly if somebody asks for "
+            "one.\n"
+        )
+    if allowed:
+        lines.append(
+            "The moderation tools that will work in this chat: "
+            + ", ".join(allowed)
+            + ".\n"
+        )
+    if refused:
+        lines.append(
+            "These will be refused by Telegram here, and only these: "
+            + ", ".join(refused)
+            + ".\n"
+        )
+    lines.append(
+        "Never tell anybody you lack a permission without checking this first, "
+        "and never say it at all when a line above says yes — if the right is "
+        "held and the call still fails, report the failure honestly instead of "
+        "describing it as a missing permission. You may re-check at any time "
+        "with get_bot_rights.\n"
+    )
     return "".join(lines)
 
 
@@ -1258,6 +1405,51 @@ def _coerce_user_id(args: dict) -> int:
         return 0
 
 
+def target_identity(result, *, chat_id: int = 0) -> dict:
+    """Who a write result was carried out on, as an answer should name them.
+
+    The result of an action used to carry the target's numeric id and nothing
+    else, which left the model two ways to describe it and both of them bad: look
+    the person up again — a second call for a fact the service already had — or
+    say "this user", which tells a group nothing. The brief asks for the name and
+    the ``@username`` when there is one, so the server supplies them here rather
+    than hoping the model assembles them.
+
+    Only for operations whose subject is a **person**. A delete's
+    ``result.target_id`` is a message id (see ``AdminResult``), and describing a
+    message id as a member would put a stranger's name in an announcement — so
+    the operation's kind decides, not the presence of a number.
+
+    Three fields and no more, chosen rather than copied through: this value is
+    repeated into a group, and a broader record would make an announcement a way
+    to read an identity. ``handle`` is the one field an answer can always use —
+    the ``@username`` when it exists, and otherwise the id, which is the only
+    handle that cannot be wrong.
+    """
+    operation = admin_service.OPERATIONS.get(getattr(result, "operation", ""))
+    if operation is None or operation.kind != admin_service.OP_USER:
+        return {}
+    try:
+        user_id = int(getattr(result, "target_id", 0) or 0)
+    except (TypeError, ValueError):
+        return {}
+    if user_id <= 0:
+        return {}
+    info: dict = {}
+    try:
+        info = identity.describe(user_id, chat_id=chat_id)
+    except Exception:  # noqa: BLE001 - naming a target is never worth a failure
+        log.exception("could not read the target identity for a result")
+    username = str(info.get("username") or "").strip().lstrip("@")
+    name = str(info.get("name") or "").strip()
+    return {
+        "user_id": user_id,
+        "name": name,
+        "username": f"@{username}" if username else "",
+        "handle": f"@{username}" if username else str(user_id),
+    }
+
+
 def _coerce_int(args: dict, key: str) -> int:
     """One integer argument, or 0. Never raises on a model's malformed value."""
     try:
@@ -1451,6 +1643,11 @@ async def run_read_tool(
 
     if name == "get_service_status":
         return agent_data.service_status()
+
+    if name == "get_bot_rights":
+        if gateway is None:
+            return {"error": "telegram is not reachable"}
+        return await _bot_rights_answer(gateway, chat_id)
 
     # -- the VPN reads: owner only, and never a credential -------------------
     if name == "vpn_subscription_lookup":

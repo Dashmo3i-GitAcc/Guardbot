@@ -3700,10 +3700,23 @@ pass covers several speakers, and the tool surface is built for one principal.
 If that principal were "the highest-ranked person in the batch", a member's
 trailing message could ride on the owner's authority: the owner says something
 harmless, a member then writes «بنش کن», and the model acts with a tool surface
-it was handed because of somebody else. So `awareness.speaker` returns the **last
-human message** in the window and the pass is attributed to *that* person. A tool
-call can then only ever be authorised against the person who actually spoke last,
-which is the rule the addressed path already follows.
+it was handed because of somebody else. So `awareness.anchor` picks the message
+the pass is *about*, and the pass is attributed to that person: the newest
+message that either addressed Nexus or came from somebody with authority, and
+failing both, the newest human message. A member's trailing message can never
+become the anchor while an administrator's instruction is in the batch, which is
+the property that matters. A tool call can then only ever be authorised against
+the person who gave the instruction, which is the rule the addressed path
+already follows.
+
+The rule replaced an earlier one — "the last human message in the window" — and
+the replacement is the fix for a bug the owner reported twice: an administrator
+replies to a nuisance with «این رو سکوت کن», an ordinary member posts something
+a moment later, and the pass built the tool surface for *the member*. A member
+holds no permissions, so the assistant answered «من دسترسی ندارم» — a true
+statement about the wrong person. The anchor's `actor` and `directed` flags are
+capture-time *hints* for choosing that message; they are never authority, which
+is re-resolved from the anchor's id by `app/admin_service.py`.
 
 An ordinary member's instruction therefore does not merely get refused — it is
 refused *as a member's*, because the request that reaches `admin_service` carries

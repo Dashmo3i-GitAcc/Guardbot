@@ -54,7 +54,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from . import config, db, rbac
+from . import addressing, config, db, rbac
 
 log = logging.getLogger("guardbot.awareness")
 
@@ -128,6 +128,14 @@ def capture(
     role: str,
     name: str,
     text: str,
+    *,
+    message_id: int = 0,
+    reply_user_id: int = 0,
+    reply_name: str = "",
+    reply_message_id: int = 0,
+    directed: bool = False,
+    actor: bool = False,
+    kind: str = "",
 ) -> bool:
     """Append one received message to the room window. Never raises, never calls AI.
 
@@ -145,6 +153,13 @@ def capture(
     ``NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS`` — because a bound that is
     measured in hours does not need to be enforced once per message, and this is
     the hottest path in the feature.
+
+    The reply edge and the two hints are stored as **columns**, not folded into
+    the text. That is the whole difference between an assistant that can resolve
+    «این رو سکوت کن» sent as a reply and one that has to ask who you meant: the
+    referent is a fact about the row, and a fact about the row is something the
+    renderer can show and the pass can read without guessing at a bracketed
+    sentence somebody might have typed themselves.
     """
     global _purged_at
     if not capture_enabled():
@@ -161,6 +176,13 @@ def capture(
             name,
             body,
             keep=max(1, int(config.NEXUS_AWARENESS_MAX_ROWS)),
+            message_id=message_id,
+            reply_user_id=reply_user_id,
+            reply_name=reply_name,
+            reply_message_id=reply_message_id,
+            directed=directed,
+            actor=actor,
+            kind=kind,
         )
     except Exception:  # noqa: BLE001 - a capture is never worth a crash
         log.exception("could not record a room message")
@@ -256,24 +278,109 @@ def window(chat_id: int, *, limit: int = 0) -> list[dict]:
 
 
 # ── Rendering the window for the model ────────────────────────────────────
-def _line(message: dict) -> str:
-    """One transcript line: who, how they stand, and what they said.
+def roles_for(messages: list[dict]) -> dict[int, str]:
+    """Every speaker's role **as it stands now**, in one pass.
+
+    This is what makes a promotion visible to the next awareness pass instead of
+    to the next restart. The role stored on a row is the role its sender held
+    when they typed, and using it would mean an administrator promoted a minute
+    ago is still labelled a member in the transcript the model reads — so the
+    model would reason, correctly, that the person has no authority, and the
+    owner would see exactly the bug they reported: «ادمینش کردم ولی به حرفش
+    گوش نمی‌ده».
+
+    The stored label is still there and is still used when it is all there is.
+    What it is not allowed to be is the *answer* when the authority model has a
+    fresher one, because ``app/rbac.py`` is the only thing that decides a role.
+    """
+    ids = {int(m.get("user_id") or 0) for m in messages}
+    ids.discard(0)
+    if not ids:
+        return {}
+    try:
+        principals = rbac.resolve_many(ids)
+    except Exception:  # noqa: BLE001 - a render must never fail on a lookup
+        log.exception("could not resolve the roles for the room window")
+        return {}
+    return {uid: role_of(p) for uid, p in principals.items()}
+
+
+def _line(message: dict, roles: dict[int, str] | None = None) -> str:
+    """One transcript line: who, how they stand, what they said, and to whom.
 
     The id is included because it is what a later action has to name — the
     trusted-context block insists on ids and nothing else, so showing the id
-    beside each speaker is what lets the model connect "بنش کن" to a real
+    beside each speaker is what lets the model connect «بنش کن» to a real
     person without inventing one.
+
+    The reply edge is the part that was missing, and it is the reason this
+    function is longer than it looks like it needs to be. An instruction is very
+    often a *reply*: somebody answers a member's message with «این رو سکوت کن»,
+    and the only thing in the world that says who «این» is is the edge. Written
+    as a bracketed sentence inside the body it was invisible to the model's
+    reasoning about structure; written here, as `↩ reply-to`, it is the shape of
+    the conversation and the model can follow it.
+
+    How Nexus figured in the message is marked in two grades, and the split is
+    the whole point of ``app/addressing.py``:
+
+    * ``⟶ to you`` — the message called the assistant. This is the strong grade,
+      and it is the same one that decides whether the message is answered
+      directly, so the transcript and the routing agree by construction.
+    * ``⋯ about you`` — the assistant's name came up without anybody calling it:
+      «نکسوس گفت که...». This is context and never a trigger. It is written here
+      rather than left for the model to infer from a name appearing in the body,
+      because inferring it from the text is exactly what makes a quotation look
+      like an instruction.
+
+    Both marks come from the one matcher; nothing here re-reads the name itself.
     """
     role = message.get("role") or ROLE_MEMBER
-    name = (message.get("name") or "").strip() or "?"
-    user_id = int(message.get("user_id") or 0)
+    if roles:
+        role = roles.get(int(message.get("user_id") or 0)) or role
     body = (message.get("text") or "").replace("\n", " ").strip()
     if role == ROLE_NEXUS:
         return f"[{role}] {body}"
-    return f"[{role}] {name} ({user_id}): {body}"
+
+    name = (message.get("name") or "").strip() or "?"
+    user_id = int(message.get("user_id") or 0)
+    head = f"[{role}] {name} ({user_id})"
+    reply_user_id = int(message.get("reply_user_id") or 0)
+    if reply_user_id:
+        reply_name = (message.get("reply_name") or "").strip() or "?"
+        head += f" ↩ reply-to {reply_name} ({reply_user_id})"
+    head += _address_mark(message)
+    return f"{head}: {body}"
 
 
-def render(chat_id: int, *, limit: int = 0, budget: int = 0) -> str:
+def _address_mark(message: dict) -> str:
+    """How this message involved Nexus: called, talked about, or neither.
+
+    ``directed`` is the stored strong grade, written at capture time by the same
+    matcher that routes the message, so it is read rather than recomputed. The
+    weak grade is recomputed here, over the body, because it is *not* stored: a
+    row that merely used the name is not worth a column, and the matcher is a
+    regex pass over one line.
+
+    A stored ``directed`` is believed even if the text no longer reads as a call
+    — a message could have been edited, and the record of how the server read it
+    at the time is the fact the routing already acted on.
+    """
+    if message.get("directed"):
+        return " ⟶ to you"
+    body = (message.get("text") or "").strip()
+    if body and addressing.mentioned(body):
+        return " ⋯ about you"
+    return ""
+
+
+def render(
+    chat_id: int,
+    *,
+    limit: int = 0,
+    budget: int = 0,
+    messages: list[dict] | None = None,
+) -> str:
     """The room transcript, oldest first, bounded by characters.
 
     Bounded from the **old** end: when the budget runs out the oldest messages
@@ -281,16 +388,20 @@ def render(chat_id: int, *, limit: int = 0, budget: int = 0) -> str:
     a conversation is understood from what was just said — and it preserves the
     order of everything that remains, which is the property that makes the
     transcript readable as a conversation rather than as a bag of lines.
+
+    ``messages`` lets the caller hand in a window it has already read, so a pass
+    reads the room once instead of once per question it asks about it.
     """
     limit = max(1, int(limit or config.NEXUS_AWARENESS_WINDOW_MESSAGES))
     budget = max(200, int(budget or config.NEXUS_AWARENESS_WINDOW_CHARS))
-    messages = window(chat_id, limit=limit)
-    if not messages:
+    rows = messages if messages is not None else window(chat_id, limit=limit)
+    if not rows:
         return ""
+    roles = roles_for(rows)
     kept: list[str] = []
     used = 0
-    for message in reversed(messages):
-        line = _line(message)
+    for message in reversed(rows):
+        line = _line(message, roles)
         cost = len(line) + 1
         if kept and used + cost > budget:
             break
@@ -522,22 +633,133 @@ def state(chat_id: int) -> dict:
         return {}
 
 
-def speaker(chat_id: int) -> dict | None:
-    """The most recent **human** message in the room, or ``None``.
+def anchor(chat_id: int, *, messages: list[dict] | None = None) -> dict | None:
+    """The message a pass is *about* — who is asking, and what they asked.
 
-    This is who an ambient reply is attributed to, and the choice is a security
-    property rather than a convenience. The alternative — attributing the pass
-    to the highest-ranked person in the batch — would let a member's trailing
-    message ride on the owner's authority: the owner says something harmless,
-    a member then writes "بنش کن", and the model acts with a tool surface it was
-    handed because of somebody else. Attributing to the last human speaker means
-    a tool call can only ever be authorised against the person who actually
-    spoke last, which is the same rule the addressed path follows.
+    This replaced "the last human message in the window" as the attribution
+    rule, and the replacement is the fix for a bug the owner reported twice:
+    an administrator says «این رو سکوت کن» as a reply, an ordinary member posts
+    something a moment later, and the pass — reading the newest human message —
+    built the tool surface for *the member*. A member holds no permissions, so
+    the assistant had no mute tool and answered «من دسترسی ندارم», which is a
+    true statement about the wrong person.
+
+    The rule is one line and deliberately so: the newest message that either
+    addressed Nexus or came from somebody with authority, and failing both, the
+    newest human message. A member's trailing message can never become the
+    anchor while an administrator's instruction is in the batch, which is the
+    property that matters — and when there is no instruction at all, the newest
+    human message is still the right answer, because that is the conversation.
+
+    ``actor`` is a *capture-time hint*, not authority. It is used to choose which
+    message to build the turn around; the tool surface and every action are still
+    authorised from the anchor's id by ``app/admin_service.py``.
     """
-    for message in reversed(window(chat_id)):
-        if (message.get("role") or "") != ROLE_NEXUS:
-            return message
-    return None
+    rows = messages if messages is not None else window(chat_id)
+    humans = [m for m in rows if (m.get("role") or "") != ROLE_NEXUS]
+    if not humans:
+        return None
+    candidates = [m for m in humans if m.get("directed") or m.get("actor")]
+    return (candidates or humans)[-1]
+
+
+def target_of(message: dict) -> dict | None:
+    """The person a message is aimed at, from its reply edge. ``None`` if none.
+
+    The single reading of the reply columns, so that the transcript, the trusted
+    context and any later action all describe the same referent. It returns a
+    plain dict rather than a ``User`` or an id because both of those lose half of
+    what an announcement needs: the id is what a request must carry, and the name
+    and username are what the answer must show.
+    """
+    if not message:
+        return None
+    user_id = int(message.get("reply_user_id") or 0)
+    if not user_id:
+        return None
+    return {
+        "user_id": user_id,
+        "name": (message.get("reply_name") or "").strip(),
+        "message_id": int(message.get("reply_message_id") or 0),
+    }
+
+
+def instruction_block(chat_id: int, *, messages: list[dict] | None = None) -> str:
+    """The server's reading of the instruction in this batch, stated as fact.
+
+    This is the block that replaced a sentence telling the model there was *no
+    referent*. That sentence was accurate about the old design and wrong about
+    this one: the room window now records what each message replied to, so "this
+    user" very often does have a referent and the server can name it.
+
+    Three things are stated, and each one closes a reported defect:
+
+    * **who is asking** — the anchor's id, role and permissions, from
+      ``app/rbac.py``. A promoted administrator is described with the authority
+      they hold *now*, which is what stops the assistant from telling them it
+      cannot do the thing it is about to be authorised to do.
+    * **what the current instruction points at** — the reply edge, as an id. This
+      is the answer to "who do you want me to mute".
+    * **that an older target is not this target** — because the other half of the
+      defect was the opposite mistake: a previous instruction's target surviving
+      in the conversation history and being reused for a new instruction that
+      named nobody. Saying so explicitly is what makes the difference between
+      background and referent.
+
+    Never raises. A block that cannot be built is simply absent, which leaves the
+    model with the transcript — degraded, not wrong.
+    """
+    rows = messages if messages is not None else window(chat_id)
+    who = anchor(chat_id, messages=rows)
+    if who is None:
+        return ""
+    actor_id = int(who.get("user_id") or 0)
+    try:
+        principal = rbac.resolve(actor_id)
+    except Exception:  # noqa: BLE001 - context, never worth a crash
+        log.exception("could not resolve the anchor's principal")
+        return ""
+    if not principal.is_admin:
+        # A member's message is conversation, not an instruction, and describing
+        # it as one would invite the model to act on it.
+        return ""
+
+    lines = [
+        "\n── The instruction in this batch (read by the server) ──\n",
+        f"The most recent message that concerns you or comes from somebody with "
+        f"authority was sent by Telegram user id {actor_id}"
+        + (f" ({who.get('name')})" if who.get("name") else "")
+        + f", whose role is {principal.role} and who may ask for: "
+        + (", ".join(sorted(principal.permissions)) or "nothing")
+        + ".\n",
+    ]
+    target = target_of(who)
+    if target:
+        lines.append(
+            "That message was a **reply** to Telegram user id "
+            f"{target['user_id']}"
+            + (f" ({target['name']})" if target["name"] else "")
+            + ". If it says «این», «اینو», «همین», «این کاربر» or names nobody, "
+            "that id is who it means — resolve it with get_identity if you need "
+            "the username, and use the id in the tool call.\n"
+        )
+    else:
+        lines.append(
+            "That message was not a reply, so «این» and «این کاربر» have no "
+            "referent in it. If it names nobody, look at the transcript for the "
+            "person it is plainly about; if you cannot tell, ask — but do not "
+            "reach back to a target from an earlier instruction.\n"
+        )
+    lines.append(
+        "An instruction's target is decided by *that instruction*: the reply it "
+        "was sent as, the person it names, or the person the conversation is "
+        "visibly about at that moment. A target from an earlier exchange is "
+        "background, not a referent — never reuse it because it happens to be "
+        "the most recent one you can see. This is the single most important "
+        "thing to get right here, because naming the wrong person is the worst "
+        "mistake available to you.\n"
+    )
+    return "".join(lines)
 
 
 def nexus_has_the_last_word(chat_id: int) -> bool:

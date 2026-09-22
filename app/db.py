@@ -426,6 +426,36 @@ def init() -> None:
             text TEXT NOT NULL,
             at INTEGER NOT NULL)"""
     )
+    # The reply edge, stored as structure rather than as words in the body.
+    #
+    # This is the fix for the defect the owner reported as "it asks who you want
+    # to mute, ten minutes after you told it". The reply target used to be
+    # written into ``text`` as a bracketed sentence — «[در پاسخ به X (123)] ...» —
+    # which put the one fact an instruction needs inside a string the model had
+    # to parse, and which the trusted-context block then flatly contradicted by
+    # saying there was no referent. As columns it is a fact about the row, the
+    # renderer can show it as an edge, and the pass can read it without guessing.
+    #
+    # ``directed`` records whether the message addressed Nexus at capture time,
+    # and ``actor`` whether its sender held any authority then. Both are hints
+    # for choosing the anchor; neither is authority, because authority is
+    # re-resolved from the id on every turn.
+    _ensure_column("group_messages", "message_id", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column("group_messages", "reply_user_id", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column("group_messages", "reply_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(
+        "group_messages", "reply_message_id", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column("group_messages", "directed", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column("group_messages", "actor", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column("group_messages", "kind", "TEXT NOT NULL DEFAULT ''")
+    # The room's own newest id, so the anchor query does not have to scan. The
+    # index above covers (chat_id, id) already; this one covers the directed
+    # filter, which is the shape the anchor actually asks for.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_messages_directed "
+        "ON group_messages(chat_id, directed, id)"
+    )
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_group_messages_chat "
         "ON group_messages(chat_id, id)"
@@ -2294,10 +2324,16 @@ def group_window(
     Scoped by ``chat_id`` and by nothing else, which is the isolation: a room's
     conversation is never visible to another room, because no query here can be
     asked without a chat id.
+
+    Every column is returned, including the reply edge and the two capture-time
+    hints, because the caller renders a *conversation* rather than a list of
+    lines: who replied to whom is the structure that makes «این رو سکوت کن»
+    resolvable at all.
     """
     limit = max(1, int(limit))
     sql = (
-        "SELECT id, user_id, role, name, text, at FROM group_messages "
+        "SELECT id, user_id, role, name, text, at, message_id, reply_user_id, "
+        "reply_name, reply_message_id, directed, actor, kind FROM group_messages "
         "WHERE chat_id=?"
     )
     args: list = [int(chat_id)]
@@ -2318,6 +2354,13 @@ def group_window(
             "name": str(r[3]),
             "text": str(r[4]),
             "at": int(r[5]),
+            "message_id": int(r[6] or 0),
+            "reply_user_id": int(r[7] or 0),
+            "reply_name": str(r[8] or ""),
+            "reply_message_id": int(r[9] or 0),
+            "directed": bool(r[10]),
+            "actor": bool(r[11]),
+            "kind": str(r[12] or ""),
         }
         for r in reversed(rows)
     ]
@@ -2331,6 +2374,13 @@ def group_capture(
     text: str,
     *,
     keep: int,
+    message_id: int = 0,
+    reply_user_id: int = 0,
+    reply_name: str = "",
+    reply_message_id: int = 0,
+    directed: bool = False,
+    actor: bool = False,
+    kind: str = "",
 ) -> int:
     """Append one message and trim the room, in **one** transaction.
 
@@ -2344,13 +2394,18 @@ def group_capture(
     The trim is not optional and not deferred: a flood that outruns the age
     bound is what makes the window grow, and the two statements are only safe
     apart because neither can be seen without the other.
+
+    The reply edge and the two hints are optional so that the two callers which
+    have nothing to say about them — the assistant's own turn, and a test — do
+    not have to pass them.
     """
     role = role if role in GROUP_ROLES else "member"
     keep = max(1, int(keep))
     with _lock:
         cur = _conn.execute(
-            "INSERT INTO group_messages (chat_id, user_id, role, name, text, at) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO group_messages (chat_id, user_id, role, name, text, at, "
+            "message_id, reply_user_id, reply_name, reply_message_id, directed, "
+            "actor, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 int(chat_id),
                 int(user_id),
@@ -2358,6 +2413,13 @@ def group_capture(
                 (name or "")[:120],
                 (text or "")[:GROUP_MESSAGE_MAX_CHARS],
                 int(time.time()),
+                int(message_id or 0),
+                int(reply_user_id or 0),
+                (reply_name or "")[:120],
+                int(reply_message_id or 0),
+                1 if directed else 0,
+                1 if actor else 0,
+                (kind or "")[:32],
             ),
         )
         row_id = int(cur.lastrowid or 0)

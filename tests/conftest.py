@@ -38,10 +38,16 @@ def fresh_nexus_state():
     # the next test's ambient pass refuse to answer, which is exactly the kind of
     # order-dependent failure that hides a real defect.
     main._nexus_addressed.clear()
+    # The bot's own Telegram rights, which are cached per chat with a TTL. A
+    # test that gives its fake bot a permission would otherwise hand that
+    # permission to the next test's fake bot, and the failure would read as a
+    # security bug — "it muted without the right" — rather than as a cache.
+    main._bot_rights_cache.clear()
     yield
     nexus.reset_state()
     awareness.reset_timers()
     main._nexus_addressed.clear()
+    main._bot_rights_cache.clear()
 
 
 def local_only_moderation(monkeypatch, *, threshold: float = 0.45) -> None:

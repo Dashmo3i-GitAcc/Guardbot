@@ -1011,9 +1011,10 @@ def test_ai_administration_off_means_no_tools_are_built(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
     monkeypatch.setattr(config, "GEMINI_CHAT_API_KEY", "k")
 
-    tools, context, on_tool = main._ai_admin_turn(
+    tools, context, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=OWNER)
     )
+)
 
     assert tools is None and context == "" and on_tool is None
 
@@ -1045,9 +1046,10 @@ def test_an_admin_talking_to_the_bot_gets_the_tools(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
     monkeypatch.setattr(config, "GEMINI_CHAT_API_KEY", "k")
 
-    tools, context, on_tool = main._ai_admin_turn(
+    tools, context, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=OWNER)
     )
+)
 
     assert tools
     assert str(OWNER) in context
@@ -1055,9 +1057,10 @@ def test_an_admin_talking_to_the_bot_gets_the_tools(monkeypatch):
 
 
 def test_an_ordinary_member_talking_to_the_bot_gets_none():
-    tools, context, on_tool = main._ai_admin_turn(
+    tools, context, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=MEMBER)
     )
+)
 
     assert tools is None and context == "" and on_tool is None
 
@@ -1069,9 +1072,10 @@ def test_the_runner_routes_a_write_tool_through_the_service(monkeypatch):
     gateway = FakeGateway()
     monkeypatch.setattr(main, "TelegramGateway", lambda ctx: gateway)
 
-    _, _, on_tool = main._ai_admin_turn(
+    _, _, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=OWNER)
     )
+)
     answer = run(on_tool("ban_member", {"target_user_id": MEMBER}))
 
     assert answer["ok"] is True
@@ -1086,9 +1090,10 @@ def test_the_runner_refuses_a_write_tool_for_a_non_admin(monkeypatch):
     monkeypatch.setattr(main, "TelegramGateway", lambda ctx: gateway)
 
     # A helper gets tools, so the runner exists — and the helper may not ban.
-    _, _, on_tool = main._ai_admin_turn(
+    _, _, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=HELPER)
     )
+)
     answer = run(on_tool("ban_member", {"target_user_id": MEMBER}))
 
     assert answer["ok"] is False
@@ -1101,9 +1106,10 @@ def test_the_runner_reports_a_refusal_with_a_reason_to_explain(monkeypatch):
     gateway = FakeGateway()
     monkeypatch.setattr(main, "TelegramGateway", lambda ctx: gateway)
 
-    _, _, on_tool = main._ai_admin_turn(
+    _, _, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=MODERATOR)
     )
+)
     answer = run(on_tool("ban_member", {"target_user_id": MEMBER}))
 
     assert answer["ok"] is False
@@ -1117,9 +1123,10 @@ def test_the_runner_answers_read_tools_without_touching_authority(monkeypatch):
     gateway = FakeGateway()
     monkeypatch.setattr(main, "TelegramGateway", lambda ctx: gateway)
 
-    _, _, on_tool = main._ai_admin_turn(
+    _, _, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=MODERATOR)
     )
+)
     answer = run(on_tool("get_member", {"user_id": MEMBER}))
 
     assert answer["application"]["user_id"] == MEMBER
@@ -1130,9 +1137,10 @@ def test_the_runner_reports_an_unknown_tool(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
     monkeypatch.setattr(config, "GEMINI_CHAT_API_KEY", "k")
 
-    _, _, on_tool = main._ai_admin_turn(
+    _, _, on_tool = asyncio.run(main._ai_admin_turn(
         _update(), _ctx(), _message(), _chat(), SimpleNamespace(id=OWNER)
     )
+)
     answer = run(on_tool("rm_rf", {}))
 
     assert "error" in answer
@@ -1142,13 +1150,14 @@ def test_the_reply_target_reaches_the_context(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
     monkeypatch.setattr(config, "GEMINI_CHAT_API_KEY", "k")
 
-    _, context, _ = main._ai_admin_turn(
+    _, context, _ = asyncio.run(main._ai_admin_turn(
         _update(),
         _ctx(),
         _message(reply_user=MEMBER, reply_message=4),
         _chat(),
         SimpleNamespace(id=OWNER),
     )
+)
 
     assert str(MEMBER) in context
 

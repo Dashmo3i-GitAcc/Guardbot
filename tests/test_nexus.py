@@ -1450,8 +1450,13 @@ def test_nexus_does_not_touch_the_acquisition_or_moderation_workloads():
         "ai_intent", "gemini_pool",
     ):
         assert module not in imported, module
-    # And what it does import is the minimum: configuration, storage, authority.
-    assert imported <= {"config", "db", "rbac"}
+    # And what it does import is the minimum: configuration, storage, authority,
+    # and the name matcher. ``addressing`` is text and nothing else — it reads
+    # ``config`` for the configured names and touches no database, no model and
+    # no other workload — which is why it is allowed here where the modules
+    # above are not. It is named explicitly rather than waved through so that a
+    # future import cannot hide behind it.
+    assert imported <= {"config", "db", "rbac", "addressing"}
 
 
 def test_the_acquisition_handler_still_yields_to_an_addressed_message():

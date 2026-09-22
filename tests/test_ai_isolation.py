@@ -423,21 +423,39 @@ def test_the_transcription_workload_cannot_execute_a_telegram_action():
         assert forbidden not in source, forbidden
 
 
-def test_ordinary_group_voice_is_not_routed_into_any_workload():
-    """Nothing transcribes a group voice note on arrival.
+def test_a_members_group_voice_is_not_routed_into_any_workload():
+    """A group voice note is transcribed on arrival in exactly one case.
 
-    Asserted structurally: `transcribe` is called from exactly the two places
-    that explicitly ask for it, and neither is a general group handler.
+    That case is an **actor's** note that is not addressed to Nexus. A directed
+    note is transcribed by the conversational path a moment later, and an
+    ordinary member's note is recorded as its kind and spends nothing — which is
+    the half of this boundary that has not moved, and the half that keeps a busy
+    group from draining the speech quota.
+
+    The brief adds the other half deliberately: an administrator who gives an
+    instruction out loud is giving an instruction, and a room window that showed
+    only «[voice]» would make the assistant deaf to the people it is meant to be
+    listening to. So this asserts the *gate* rather than a call count.
     """
     from app import main
 
+    capture = inspect.getsource(main._awareness_capture)
+    assert "_transcribe_for_awareness" in capture
+    # The gate, in order: the actor is decided first, and the transcription is
+    # behind both that and "not directed".
+    assert capture.index("actor = nexus.is_actor") < capture.index(
+        "await _transcribe_for_awareness"
+    )
+    assert "actor and not directed" in capture
+
+    # And the call sites are still the ones that explicitly ask for it: the
+    # awareness read, the conversational path, and the transcription command.
     source = inspect.getsource(main)
     callers = [
         line for line in source.splitlines()
         if "transcribe.transcribe" in line and not line.strip().startswith("#")
     ]
-    assert len(callers) == 2, callers
-    # One is the conversational path, one is the transcription-only command.
+    assert len(callers) == 3, callers
     assert any("transcribe_ref" in line for line in callers)
 
 

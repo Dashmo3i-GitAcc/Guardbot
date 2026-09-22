@@ -1023,6 +1023,15 @@ NEXUS_AWARENESS_ACTION_TEXT = os.getenv(
     "انجام شد ✅",
 )
 
+# How long the bot's own Telegram rights in a chat are trusted before being
+# re-read. Short, because it is a *capability* rather than a secret: a bot
+# promoted or demoted a moment ago should be described correctly almost at once,
+# and a stale answer is what produces the defect the owner reported — the
+# assistant announcing it has no permission while holding it.
+#
+# A negative is never served from the cache at all; see ``main._bot_right``.
+BOT_RIGHTS_TTL_SECONDS = _float("BOT_RIGHTS_TTL_SECONDS", 45.0)
+
 
 # ---------------- Gemini: moderation / content understanding ------------------
 # A **third** independent Gemini workload. It is not the acquisition classifier

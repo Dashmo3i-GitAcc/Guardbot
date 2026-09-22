@@ -365,8 +365,10 @@ def test_a_member_is_offered_no_tool_surface_at_all():
     """No tools means no context block either — nothing is built for them."""
     act("mute_member", actor_id=OWNER, target_id=MEMBER)
 
-    tools, context, on_tool = main._admin_turn_core(
-        actor_id=MEMBER, chat_id=CHAT, gateway=FakeGateway(), bot_id=BOT_ID
+    tools, context, on_tool = asyncio.run(
+        main._admin_turn_core(
+            actor_id=MEMBER, chat_id=CHAT, gateway=FakeGateway(), bot_id=BOT_ID
+        )
     )
 
     assert tools is None
@@ -378,8 +380,10 @@ def test_an_administrator_is_offered_the_tool_that_undoes_their_own_action():
     """The other half of the bug: the tool has to be there to be called."""
     act("mute_member", actor_id=OWNER, target_id=MEMBER)
 
-    tools, context, on_tool = main._admin_turn_core(
-        actor_id=OWNER, chat_id=CHAT, gateway=FakeGateway(), bot_id=BOT_ID
+    tools, context, on_tool = asyncio.run(
+        main._admin_turn_core(
+            actor_id=OWNER, chat_id=CHAT, gateway=FakeGateway(), bot_id=BOT_ID
+        )
     )
 
     assert tools  # the declaration list the model is handed
