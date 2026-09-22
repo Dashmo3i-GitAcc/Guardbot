@@ -3386,6 +3386,13 @@ Because the gate is silent by design — a refused member simply gets no answer 
 `NEXUS_ACTORS_ONLY_OFF_LABEL`). The line and the gate read the same config value,
 so the report cannot disagree with the behaviour; a test pins that.
 
+**A private chat is not a smaller group, and §41 is the difference.**
+`NEXUS_ACTORS_ONLY` is a statement about a *group*, where everybody can already
+read everybody; it deliberately does not reach private chat, where there is one
+reader. The two gates are separate functions — `nexus.accepts` for a room and
+`nexus.accepts_private` for a direct message — and an administrator is an actor
+in the first and not in the second.
+
 ## 35. Nexus Group Awareness: understanding the room
 
 §34 answers *who may talk to Nexus and what it may do*. This section answers a
@@ -4571,3 +4578,421 @@ commands cannot describe the same state two ways.
 
 `agent_tasks` is created with `CREATE TABLE IF NOT EXISTS`, so there is no
 migration step and an existing database picks it up on restart.
+
+## 41. A private chat is the owner's, and one request gets one reply
+
+§34 answers who may talk to Nexus *in a room*. This section is about the other
+door, and about the two ways the assistant was answering twice.
+
+### 41.1 The requirement, and why it is not a setting
+
+The owner's instruction was unambiguous: in a private chat, Nexus answers the
+owner and nobody else. Not "administrators too", not "administrators if
+`NEXUS_ACTORS_ONLY` is off". The reasoning is the same reasoning that makes
+`NEXUS_ACTORS_ONLY` correct in a group, read the other way round:
+
+* in a **group**, an administrator is answered because the room is already
+  public and moderating it is their job. Answering them discloses nothing that
+  the other forty people in the room cannot already read;
+* in a **private chat**, there is exactly one reader. Every message the bot
+  stores, every turn of context it carries and every answer it produces is
+  therefore the owner's property, and answering an administrator would hand a
+  third party a window into the owner's own channel.
+
+So it is not a permission and not a flag. It is a second gate.
+
+### 41.2 Two gates, not one setting
+
+`app/nexus.py` holds both, and they are separate functions with separate
+docstrings because they are separate rules:
+
+```python
+def accepts(principal) -> bool:          # a group
+    ...
+    return principal.is_owner or principal.is_admin   # subject to NEXUS_ACTORS_ONLY
+
+def accepts_private(principal) -> bool:  # a private chat
+    if not is_online():
+        return False
+    if principal is None:
+        return False
+    return bool(principal.is_owner)
+```
+
+Three properties fall out of writing it this way, and each is a test:
+
+| property | why it matters |
+|---|---|
+| `NEXUS_ACTORS_ONLY` cannot open it | turning the group switch off restores "answer anybody" *in a group*. Reading it as a statement about private messages would silently reopen this door the first time an operator flipped it for an unrelated reason. |
+| being an administrator cannot open it | `accepts(admin) is True` and `accepts_private(admin) is False`, asserted together in one test. If they ever agree, the private boundary has been folded back into the group one. |
+| OFFLINE binds the owner too | the offline state is the owner's own instruction, so it applies to the owner in their own channel. `accepts_private` checks it first. |
+
+### 41.3 Refused before the model, and before the record
+
+The gate runs in `main.on_private_text` **before** `_answer_conversationally`,
+which means a non-owner's message is refused before `chat.reply` is reached. Two
+consequences, both asserted against the transport seam rather than inferred from
+silence:
+
+* **no model call happens.** The test replaces `chat.reply` with a stub that
+  records every call and asserts the list is empty. A refusal the bot prints
+  while still calling the API is not a refusal;
+* **no row is written.** This is the one that is easy to lose in a refactor,
+  because it is invisible in the reply: a bot that answers only the owner but
+  stores everybody's messages looks correct from the outside. The test asserts
+  `chat_messages` is empty after an administrator's private message, and that
+  the owner's history is not readable from another scope.
+
+Refusal is silent, matching the group policy for a non-actor: being ignored is
+not announced. One log line records it, and the reason is the point — "the
+owner's assistant stayed silent" and "the bot is broken" must not look the same
+in a log:
+
+```
+private chat refused user=556 role=admin source=config online=True
+```
+
+### 41.4 One request, one reply — the duplicate that was already there
+
+Separately from the boundary, the owner reported that Nexus sometimes answered
+the same thing twice. There were **two independent defects**, and they needed
+different fixes.
+
+**The first: the ambient path re-answering an addressed message.** A message
+aimed at Nexus is answered by `_answer_conversationally`. It *also* joins the
+room window, because the awareness layer reads the whole room — so the next
+awareness pass could read it, decide it was relevant, and answer it again.
+
+The obvious fix is wrong. Advancing the awareness watermark past an addressed
+message would stop the re-answer, but it would also mark the messages *before*
+it as read, and those would never be read at all. **Losing events to prevent a
+duplicate is a worse bug than the duplicate.**
+
+So the response is suppressed and nothing else is:
+
+```python
+_nexus_addressed[room.id] = max(_nexus_addressed.get(room.id, 0), message_id)
+if not await _answer_conversationally(...):
+    _nexus_addressed.pop(room.id, None)
+```
+
+The marker is set *before* the answer is awaited, because a model call is a
+suspension point and the pass can run during it; and it is cleared if nothing
+went out, so a refused or failed answer leaves the room readable rather than
+silent. A withheld answer is not a duplicate, and suppressing the ambient reply
+for one would turn a rate limit into silence.
+
+There is a second condition, because there are two ways a batch can be answered
+and only one of them is visible in the window: `_nexus_addressed` covers the
+answer being written *right now*, which the window cannot show yet, and
+`awareness.nexus_has_the_last_word` covers the answer written *before this
+process started*, which the marker cannot know about.
+
+### 41.5 One request, one reply — the duplicate that was missing entirely
+
+**The second defect: no `update_id` deduplication at all.** Telegram retries a
+delivery when it does not receive a 200 promptly, and python-telegram-bot makes
+no promise about the order of two deliveries of the same update. Nothing in the
+codebase had ever looked at `update_id`.
+
+The fix is a claim table and a guard handler:
+
+```sql
+CREATE TABLE seen_updates (update_id INTEGER PRIMARY KEY, at INTEGER NOT NULL)
+```
+
+```python
+def update_claim(update_id: int) -> bool:
+    """True for the first delivery, False for every later one. Atomic."""
+    cur = _conn.execute(
+        "INSERT OR IGNORE INTO seen_updates (update_id, at) VALUES (?, ?)",
+        (int(update_id), int(time.time())),
+    )
+    return cur.rowcount == 1
+```
+
+`INSERT OR IGNORE` plus `rowcount` is the whole of the concurrency story: the
+primary key makes it atomic, so two threads racing the same `update_id` produce
+exactly one winner without a lock of ours. The guard runs as a `TypeHandler` in
+handler group `-1`, which is the only place that is guaranteed to see every
+update before any other handler; a duplicate raises `ApplicationHandlerStop` so
+nothing else runs.
+
+What it deliberately does *not* do is advance any watermark. A duplicate
+delivery is discarded; the first delivery's effects are untouched, and the
+claimed id is pruned after `UPDATE_DEDUP_TTL_SECONDS` (24 h) so the table does
+not grow without bound. A missing or zero `update_id` is refused rather than
+recorded, because a row keyed on zero would suppress every future update that
+also failed to carry an id.
+
+### 41.6 Tests
+
+| file | tests | what it covers |
+|---|---|---|
+| `tests/test_private_boundary.py` | 10 | the owner is answered; an administrator and a member are refused with **zero** model calls and **zero** rows written; the owner's history is not readable from another scope; an administrator claiming ownership in the message text is still refused; `accepts_private` with `NEXUS_ACTORS_ONLY` off, and offline |
+| `tests/test_update_dedup.py` | 13 | first and second delivery, distinct updates, zero and missing ids refused, eight threads racing for one claim, the guard passing the first and raising `ApplicationHandlerStop` on a duplicate, the off switch, DB-failure tolerance, the handler group asserted from the source, prune, and the reaper |
+| `tests/test_awareness.py` | +9 | an addressed message is not answered a second time; a room that was never answered is still answerable; a write confirmation is never withheld; a silent decline leaves the room readable and a spoken one keeps the marker |
+
+## 42. The allowance is a day's, so it is spent across the day
+
+This section exists because the owner reported that Gemini sometimes does not
+answer, and the measurement said the reason was not the model.
+
+### 42.1 The two numbers that disagreed
+
+Group Awareness has a floor interval and a daily allowance. They are two numbers
+about the same thing, and they disagreed by a factor of twenty-one:
+
+| setting | default | what it means |
+|---|---|---|
+| `NEXUS_AWARENESS_MIN_INTERVAL_SECONDS` | `20` | the shortest gap between two passes in one room |
+| `NEXUS_AWARENESS_DAILY_LIMIT` | `200` | provider requests the awareness workload may spend in one API day |
+
+A room that is at all busy reaches the floor once every twenty seconds. Two
+hundred passes at twenty seconds is **sixty-seven minutes**. So on any active
+day the allowance was spent before lunch and every pass after that failed.
+
+Measured on the live deployment before the change:
+
+```
+$ sqlite3 guardbot.db "SELECT calls FROM gemini_daily WHERE workload='awareness'"
+203
+$ docker logs guardbot --since 6h | grep -c pool_empty
+282
+$ docker logs guardbot --since 6h | grep 'awareness pass did not complete' | head -1
+2026-09-22 04:16:49 awareness pass did not complete chat=... error=pool_empty
+```
+
+203 requests spent by 04:15, then 141 consecutive failed passes — each of which
+had already rendered the transcript and built 26 KB of tool declarations before
+the pool told it there was nothing to spend. Awareness was dead for the rest of
+the day, which is what "Gemini doesn't answer" looks like from the group.
+
+### 42.2 The gap is derived, not constant
+
+```python
+def _awareness_allowance_gap(now=None) -> float:
+    floor = max(1.0, float(config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS))
+    pool = gemini_pool.pool_for("awareness")
+    if pool is None or not pool.daily_budget:
+        return floor
+    remaining = pool.daily_remaining(now)
+    if remaining <= 0:
+        return max(floor, db.ai_day_seconds_left(now))
+    return max(floor, db.ai_day_seconds_left(now) / remaining)
+```
+
+Four properties, and each is a test with the clock pinned to the start of an API
+day so the arithmetic is exact rather than nearly right:
+
+| situation | gap | why |
+|---|---|---|
+| 200 left, a full day ahead | 432 s | the allowance defines the pace |
+| 5000 left, a full day ahead | 20 s | the floor, because the allowance is not the constraint — this is what keeps the change from slowing anything down in the case where it was never the problem |
+| 200 left, one second to the rollover | 20 s | the counter resets whether or not it was used, so what is left is worth spending |
+| 0 left | until the rollover | there is nothing to spend, and retrying fills the log with a failure that is already known |
+
+`db.ai_day_seconds_left` is derived from the same UTC-8 offset as `db.ai_day`,
+because the reset it counts down to is the provider's, not local midnight.
+
+The brake is **per room**, not global. The allowance is one number for the
+workload, but a room read a moment ago must not stop a different room from being
+read — otherwise the first room to speak owns the whole day.
+
+And the check sits **in front of the transcript render**. A pass the pool cannot
+serve now costs a dictionary lookup and a cached counter read, where before it
+cost a prompt.
+
+### 42.3 The credential is the other half, and it is the operator's to fix
+
+The application's own counters were never the binding constraint. Awareness and
+chat both resolve to `GEMINI_CHAT_API_KEY` on this deployment, verified by
+computing the key fingerprints and matching them against `gemini_accounts`
+rather than inferred from the configuration:
+
+```
+GEMINI_CHAT_API_KEY      fp=ad4bfbe4591c  mask=****S-TA
+awareness slot 1         fp=ad4bfbe4591c  mask=****S-TA
+```
+
+One key is one Google project, and Google applies limits per project — so the
+two workloads share a provider-side rate limit that no per-workload counter can
+partition. The consequence is in the same data: 143 rate-limited conversational
+turns out of 543, 26%.
+
+`gemini_pool.shared_credentials()` used to exclude awareness from the boot
+warning, on the grounds that it is a "mode" of the conversation. That reasoning
+is true of `tts` and false of awareness: `tts` runs inside a turn that already
+happened, so it cannot take an allowance from a request nobody has made yet,
+while awareness runs on its own timer in its own rooms whether or not anybody is
+talking to the assistant. It is now reported:
+
+```
+Gemini credential ****S-TA is used by more than one workload (awareness, chat).
+Google applies limits per project, so these share one allowance even though each
+workload keeps its own counters. Use a key from a different project for each
+workload to keep them independent.
+```
+
+The remaining action is an operator's: set `GEMINI_AWARENESS_API_KEY` from a
+third Google project. The warning stops when they do, which is what makes it
+actionable rather than permanent noise. Pacing also cuts the instantaneous
+competition for the shared project by roughly twenty times, because the same 200
+requests are spread over a day instead of an hour.
+
+### 42.4 Tests
+
+`tests/test_awareness_latency.py` — eleven more tests: the day clock at each
+boundary, a spent allowance waiting for the rollover, a small allowance spread
+across the rest of the day, a generous allowance never slowing below the floor,
+the end of the day spending what is left, a pool with no budget not being paced
+at all, a room never read not being held back, the brake being per room, a room
+not being read once the allowance is spent, and the allowance being checked
+before the prompt is built.
+
+`tests/test_gemini_pool.py` — two more: awareness sharing the chat key is
+reported, and awareness with its own key is not.
+
+`tests/test_chat_latency.py` — nine tests for the other half of the question.
+The addressed path now logs its own timeline in the same shape as
+`awareness timing`, because "it took four seconds" was previously an impression
+with nothing behind it:
+
+```
+chat timing user=999 chat=999 prepare_ms=0 gemini_ms=9 send_ms=0 total_ms=9 sent=True kind=text
+```
+
+Durations only, never the question and never the answer. Every exit that reaches
+the clock logs exactly one line, including the early ones, because an early
+return is precisely when a timeline is most useful; a turn that never consults
+the model reports a zero model stage rather than borrowing somebody else's
+duration; and `sent` is the same value the function returns, because the caller
+uses it to decide whether the ambient path may still speak.
+
+## 43. What is kept, what is windowed, and what is never touched
+
+### 43.1 Two retention rules that never ran
+
+Auditing growth turned up something worse than a missing rule. Two rules were
+already written, already documented as running, and had **no caller at all**:
+
+| function | its docstring said | reality |
+|---|---|---|
+| `db.daily_prune` | "called on the pool path" | no caller |
+| `admin_tools.prune` | "called from the administrative path" | no caller |
+
+So the audit trail and the per-day spend table were both unbounded in practice,
+and the only thing between them and the operator noticing was a docstring
+describing a call site that did not exist. A retention rule that is not called is
+indistinguishable from no retention rule, except that it reads as though the
+problem were handled.
+
+Both now hang off a path that already runs, with a counter — the pattern
+`people` established, because pruning on every call would run DELETEs on a hot
+path and never pruning is what they were already doing by accident:
+
+* the administrative windows are applied from `admin_service._record`, which is
+  the one place every request arrives regardless of outcome. A trail that only
+  bounded itself on success would grow fastest on the requests that were denied,
+  which are the ones a burst of probing produces;
+* the pool's windows are applied from `gemini_pool.generate`, once per logical
+  request rather than once per provider attempt.
+
+### 43.2 The one table that needed a new rule
+
+`gemini_events` is the only table in the schema that grows with *activity*
+rather than with the number of accounts, days or people. It gets a 90-day window,
+chosen to still answer "why was this rate-limited last month" — a question that
+was asked for real during the incident that produced §42, and a shorter window
+would have discarded the evidence. It also gets `idx_gemini_events_at`: the
+existing dedup index ends in `at`, so it cannot serve the range scan a delete by
+age needs, and without it the sweep would read the whole table every two hundred
+requests — a worse problem than the growth.
+
+### 43.3 What is deliberately not bounded
+
+| table | decision | why |
+|---|---|---|
+| `admin_audit` | windowed, never truncated | accountability survives a retention rule; it does not survive a rule that empties the table. A test ages one row, runs the sweep, and asserts exactly one row was removed — a test that only checked "old rows are gone" would pass for an implementation that deleted the table |
+| `admin_requests` | windowed | the window must be at least as long as the replay window, which `config.py` enforces when it reads the two settings |
+| `ai_usage`, `chat_usage`, `moderation_usage`, `transcript_usage` | **no window** | one row per day each, so a year is 1,460 rows and a few tens of kilobytes. There is nothing to save, and a window would destroy the only month-over-month history the owner has. "Control growth" is not a licence to delete data that is not growing |
+| `users`, `intent_offers`, `people` | bounded by rows and age | keyed by person, not by time; `people` already has both a row bound and an age bound |
+| `chat_messages`, `group_messages` | already pruned | by TTL, on their own paths |
+
+The four reporting tables are asserted as an *absence* — no prune function is
+applied to them — so a later "add a TTL everywhere" pass has to delete that test
+deliberately rather than inherit the decision.
+
+## 44. The audit trail says with what authority, and proves what it cannot hold
+
+### 44.1 The two fields that were missing
+
+The brief lists nine things an audit row has to carry. Seven of them were there.
+The two that were not were the two nothing was asking for:
+
+| field | what it answers | why it was missing |
+|---|---|---|
+| `role` | *with what authority* did this happen? | the trail recorded **who** acted and never with what standing. That stops being answerable the moment a role changes: an administrator who is later demoted leaves a trail saying they acted, and not whether they were entitled to |
+| `request_id` | which request produced this row? | the outcome a person saw and the row that recorded it were linked only by matching actor, chat, operation and target by hand |
+
+Both are additive columns on a table already in production, so both go through
+`db._ensure_column`, and `tests/test_db_migration.py` covers the migration and
+the reading of rows that predate it.
+
+The role is resolved from `rbac` **at write time** and never taken from the
+request, and that direction is the point: the request is the thing being
+audited, so a request that named its own authority would be writing its own
+alibi. It is the same rule as `AdminRequest` having no `is_owner` field — here
+the claim *is* expressible, because `role` exists on the request, so the test is
+that it is ignored. And because it is stamped rather than recomputed, a test
+ages a row across a demotion and asserts it still reads `helper`.
+
+The typed-command path stamps the same fields from `main._audit`. It has no
+request id, because a typed command is not a request from the assistant and has
+none, so the column stays empty rather than being filled with something that
+only looks like an identifier.
+
+### 44.2 What must never be recorded, asserted two ways
+
+Either half alone is weak: a shape test can pass while a leak happens through a
+different door, and a sentinel test can pass while a different secret leaks. So
+`tests/test_audit_hygiene.py` asserts both.
+
+**Structurally** — the schema has no column wide enough for a conversation, and
+`detail` is truncated to 300 characters on write, so no caller can use it as a
+text column even by accident. The column list itself is asserted, so adding a
+`body TEXT` column later is a deliberate act that fails a test rather than
+something a reviewer has to notice.
+
+**Behaviourally** — a sentinel credential placed in the configuration appears in
+no audit row and no log line, including the boot report, which is the one place
+a pool is described. That test was vacuous on its first run: every pool reported
+`accounts=0`, because `GEMINI_POOLS` is built from the environment at import
+time and patching the individual setting changed nothing. It now asserts that
+the boot report really does describe the sentinel by its masked tail, so the
+"no leak" assertion cannot pass by looking at an empty pool. A passing test that
+proves nothing is worse than a failing one.
+
+### 44.3 The permission model, end to end
+
+For reference, the whole path an administrative action takes, with the file that
+owns each step:
+
+| step | owner | what it enforces |
+|---|---|---|
+| 1. identity | `rbac.resolve` | the role comes from the owner id in configuration, the config admins, or the `admins` table — never from the message |
+| 2. the actor may talk to Nexus at all | `nexus.accepts` (room) / `nexus.accepts_private` (direct) | §34 and §41 |
+| 3. the message is addressed to Nexus | `main._nexus_directed` | a reply to the bot, an `@mention`, an alias, or a configured name |
+| 4. shape | `admin_service.execute` step 1 | a closed `OPERATIONS` vocabulary; no chat or no actor is refused before the replay lookup, so a malformed request cannot probe the idempotency table |
+| 5. system state | `execute` step 2 | an AI request is refused while Nexus is offline; the typed commands are the documented fallback and are not |
+| 6. replay and idempotency | `execute` step 3 | `admin_requests`, keyed by request id |
+| 7. authority | `execute` step 4 → `rbac.authorize` | the operation's permission against the resolved principal, plus owner protection and hierarchy |
+| 8. target | `execute` step 5 | a real target, not the bot, not higher-ranked |
+| 9. Telegram's own rights | `execute` step 6 → `Gateway.bot_right` | the bot must hold the right it is about to use |
+| 10. the call | `execute` step 7 → `_apply` | the only place a Telegram mutation happens |
+| 11. the record | `admin_service._record` | actor, role, action, target, chat, outcome, timestamp, request id, interface, and the failure reason |
+
+`nexus.control` and `agent.request` are held by **no role bundle**, so no
+promotion dialog can express them and an administrator promoted to every role
+still does not hold them. That is what makes "only the owner" a property of the
+tables rather than a check somebody has to remember.
