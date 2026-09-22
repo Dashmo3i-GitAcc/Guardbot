@@ -973,9 +973,27 @@ NEXUS_AWARENESS_MIN_INTERVAL_SECONDS = _float(
 
 # The bounded window itself: how many recent messages are shown, and how many
 # characters they may occupy in total. Both bounds are applied — a count bound
-# alone lets forty long messages become a huge prompt, and a character bound
-# alone lets a flood of one-word messages push the real context out.
-NEXUS_AWARENESS_WINDOW_MESSAGES = _int("NEXUS_AWARENESS_WINDOW_MESSAGES", 40)
+# alone lets a hundred and fifty long messages become a huge prompt, and a
+# character bound alone lets a flood of one-word messages push the real context
+# out.
+#
+# The count was 40, and on this deployment that made the character bound
+# decorative rather than a second guard: the room's messages average eighteen
+# characters, so forty of them occupy about 700 of the 6000 available and the
+# count was the only bound that ever applied. The price of that is coverage, and
+# it is measured rather than theoretical. A pass runs once every ~8.7 minutes —
+# the daily allowance spread evenly across the API day, see
+# ``_awareness_allowance_gap`` in ``app/main.py`` — and 106 messages arrived
+# between two consecutive passes, so a 40-message window read at most 38% of
+# them. Worse, a pass records the *newest* unread id as understood, so the other
+# 62% were not read late, they were not read at all.
+#
+# 150 is sized so that one pass covers the interval it is spaced at, leaving the
+# character bound to do the trimming when the messages are long. It costs
+# nothing in the currency that is actually rationed: ``NEXUS_AWARENESS_DAILY_LIMIT``
+# counts *requests*, not tokens, so reading more of the same conversation per
+# pass is free, and the prompt stays bounded by the character budget either way.
+NEXUS_AWARENESS_WINDOW_MESSAGES = _int("NEXUS_AWARENESS_WINDOW_MESSAGES", 150)
 NEXUS_AWARENESS_WINDOW_CHARS = _int("NEXUS_AWARENESS_WINDOW_CHARS", 6000)
 
 # How long a captured message is kept. The window is a *recent* view of the

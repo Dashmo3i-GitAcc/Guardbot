@@ -78,7 +78,10 @@ def awareness_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "NEXUS_AWARENESS_DEBOUNCE_SECONDS", 8.0)
     monkeypatch.setattr(config, "NEXUS_AWARENESS_MAX_WAIT_SECONDS", 45.0)
     monkeypatch.setattr(config, "NEXUS_AWARENESS_MIN_INTERVAL_SECONDS", 20.0)
-    monkeypatch.setattr(config, "NEXUS_AWARENESS_WINDOW_MESSAGES", 40)
+    # The window is deliberately *not* pinned: its shipped size is a property
+    # this suite asserts (see ``test_the_default_window_covers_one_allowance_
+    # interval``), and a test that wants a different window passes one in
+    # explicitly. Pinning it here would make that assertion test the pin.
     monkeypatch.setattr(config, "NEXUS_AWARENESS_WINDOW_CHARS", 6000)
     monkeypatch.setattr(config, "NEXUS_AWARENESS_RETENTION_SECONDS", 3600)
     monkeypatch.setattr(config, "NEXUS_AWARENESS_MAX_ROWS", 400)
@@ -310,6 +313,35 @@ def test_the_rendered_window_keeps_the_newest_messages():
     rendered = awareness.render(CHAT, limit=40, budget=300)
     assert "message-39" in rendered
     assert "message-00" not in rendered
+
+
+# The live room's measured traffic during an active stretch: 106 messages
+# arrived in the 8.7 minutes between two consecutive passes on 2026-09-22.
+# Named as a constant because the window's size is only meaningful against it.
+BUSY_MESSAGES_PER_MINUTE = 12.0
+
+
+def test_the_default_window_covers_one_allowance_interval():
+    """The window must hold what arrives between two passes.
+
+    Three numbers are coupled and none of them is meaningful alone: the daily
+    allowance decides how often a pass may run, the room's traffic decides how
+    much accumulates in that time, and the window decides how much of it the
+    pass actually reads. When the window is the smallest of the three the loss
+    is *silent*, because a pass records the newest unread id as understood — so
+    whatever the window did not contain is not read late, it is not read at all.
+    Measured on the live deployment before this test existed: 106 messages
+    arrived between two consecutive passes against a 40-message window, so at
+    most 38% of the conversation was read and the rest was lost.
+
+    Asserting the relationship rather than the number is the point: raising the
+    daily allowance shortens the interval and the window may shrink with it, and
+    lowering the window below the interval must fail here rather than quietly in
+    the group.
+    """
+    interval_seconds = 86400.0 / config.NEXUS_AWARENESS_DAILY_LIMIT
+    arrived = BUSY_MESSAGES_PER_MINUTE * interval_seconds / 60.0
+    assert config.NEXUS_AWARENESS_WINDOW_MESSAGES >= arrived
 
 
 def test_old_context_is_discarded_by_the_retention_policy():

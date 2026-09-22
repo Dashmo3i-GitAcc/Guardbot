@@ -3521,8 +3521,21 @@ Four properties, each of them deliberate:
   `chat_id`. A prompt cannot contain another group's conversation.
 * **Two bounds, both applied.** `NEXUS_AWARENESS_WINDOW_MESSAGES` (a count) and
   `NEXUS_AWARENESS_WINDOW_CHARS` (a character budget). A count bound alone lets
-  forty long messages become a huge prompt; a character bound alone lets a flood
-  of one-word messages push the real context out.
+  a hundred and fifty long messages become a huge prompt; a character bound
+  alone lets a flood of one-word messages push the real context out.
+
+  The count is **sized against the cadence, not chosen for itself**, and the two
+  are coupled through the daily allowance. `_awareness_allowance_gap` spends
+  `NEXUS_AWARENESS_DAILY_LIMIT` evenly across the API day, so a limit of 200
+  means one pass every ~8.7 minutes whatever the room is doing; a busy room
+  produces far more than a small window can hold in that time, and because a
+  pass records the *newest* unread id as understood, whatever the window did not
+  contain is never read later. Measured here: 106 messages arrived between two
+  consecutive passes against a 40-message window, so at most 38% of the
+  conversation was read. The window is therefore set to cover one interval
+  (150), and the character budget remains the guard on prompt size. Lowering the
+  window below the interval re-introduces the loss silently, which is why the
+  two numbers belong in the same paragraph.
 
 Retention is a third bound and a separate one: `NEXUS_AWARENESS_RETENTION_SECONDS`
 drops rows by age and `NEXUS_AWARENESS_MAX_ROWS` caps the table per chat, because
@@ -3946,7 +3959,7 @@ database already held are untouched. No migration step is needed.
 | `NEXUS_AWARENESS_DEBOUNCE_SECONDS` | `8` | wait for the room to go quiet |
 | `NEXUS_AWARENESS_MAX_WAIT_SECONDS` | `45` | starvation ceiling |
 | `NEXUS_AWARENESS_MIN_INTERVAL_SECONDS` | `20` | floor between two passes |
-| `NEXUS_AWARENESS_WINDOW_MESSAGES` | `40` | window size, count bound |
+| `NEXUS_AWARENESS_WINDOW_MESSAGES` | `150` | window size, count bound |
 | `NEXUS_AWARENESS_WINDOW_CHARS` | `6000` | window size, character bound |
 | `NEXUS_AWARENESS_RETENTION_SECONDS` | `3600` | row age bound |
 | `NEXUS_AWARENESS_MAX_ROWS` | `400` | per-chat row ceiling |
