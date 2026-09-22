@@ -557,6 +557,78 @@ def test_generation_families_are_excluded():
         assert gemini_pool.capabilities_of(name) is None, name
 
 
+# ── Live models: reachable, but only by a workload that asked for one ─────
+LIVE_MODELS = [
+    "gemini-3.8-live",
+    "gemini-3.1-flash-live-preview",
+    "gemini-2.5-flash-native-audio-latest",
+]
+
+
+def test_a_live_model_is_recognised_as_live():
+    for name in LIVE_MODELS:
+        assert gemini_pool.is_live(name) is True, name
+        caps = gemini_pool.capabilities_of(name)
+        assert caps is not None and gemini_pool.LIVE in caps, name
+        # It listens and it speaks. A model that only listened would be a
+        # transcription model, not a conversation.
+        assert gemini_pool.AUDIO_IN in caps and gemini_pool.AUDIO_OUT in caps, name
+
+
+def test_a_live_transcription_model_is_not_offered_as_bidirectional():
+    """The one live model that can only listen must not be given ``audio_out``.
+
+    ``gemini-3.5-transcribe-live`` refuses the AUDIO response modality outright,
+    so a workload that expects to be answered in speech must not be able to
+    select it. The capability table is where that is prevented, because it is
+    the only place that knows what the family can do.
+    """
+    caps = gemini_pool.capabilities_of("gemini-3.5-transcribe-live")
+    assert caps is not None
+    assert gemini_pool.AUDIO_IN in caps
+    assert gemini_pool.AUDIO_OUT not in caps
+
+
+def test_no_existing_workload_can_be_handed_a_live_model():
+    """The gate that makes admitting live models safe.
+
+    ``{audio_in} <= {text, audio_in, audio_out, live}`` is true, so without the
+    explicit ``LIVE`` check in ``models_for`` the transcription workload would
+    start being offered streaming models — and so, in principle, would anything
+    else that shares a modality with them. This asserts the property for every
+    workload the deployment actually configures.
+    """
+    for spec in config.GEMINI_POOLS:
+        if gemini_pool.LIVE in spec["capabilities"]:
+            continue
+        pool = make_pool(
+            workload=spec["workload"],
+            models=[*TEXT_MODELS, *LIVE_MODELS, "gemini-3.5-transcribe"],
+            capabilities=spec["capabilities"],
+            allow_experimental=True,
+        )
+        offered = pool.models_for(pool.accounts[0], time.time())
+        assert not [name for name in offered if gemini_pool.is_live(name)], (
+            spec["workload"],
+            offered,
+        )
+
+
+def test_a_live_workload_is_offered_exactly_the_bidirectional_models():
+    pool = make_pool(
+        workload="live_voice",
+        models=[*TEXT_MODELS, *LIVE_MODELS, "gemini-3.5-transcribe-live"],
+        capabilities=frozenset(
+            {gemini_pool.AUDIO_IN, gemini_pool.AUDIO_OUT, gemini_pool.LIVE}
+        ),
+        allow_experimental=True,
+    )
+
+    offered = pool.models_for(pool.accounts[0], time.time())
+
+    assert offered == LIVE_MODELS
+
+
 def test_preview_models_are_excluded_unless_opted_in():
     assert gemini_pool.is_experimental("gemini-2.5-pro-preview-tts") is True
     pool = make_pool(models=["gemini-2.5-pro-preview-tts", TEXT_MODELS[0]])

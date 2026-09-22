@@ -61,6 +61,14 @@ from . import (
     transcribe,
     vpnbot,
 )
+# Nexus Voice Live: the same assistant, reached through a voice chat. Imported
+# as a package because the router needs three things from it and they belong to
+# different layers — the phrase vocabulary, the session manager that is the one
+# gate on whether a call may start, and the transport that carries it.
+from .voice_live import commands as voice_commands
+from .voice_live import errors as voice_errors
+from .voice_live import session as voice_session
+from .voice_live import telegram_voice
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -1782,6 +1790,154 @@ async def _owner_state_command(
     return True
 
 
+# ── Nexus Voice Live: the owner's spoken commands ─────────────────────────
+def _voice_refusal_text(reason: str) -> str:
+    """The sentence for a refusal from the manager, chosen by its reason.
+
+    The *gate* is ``VoiceLiveManager.refusal`` and it is asked once, in
+    ``_owner_voice_command``. This function only picks which sentence to say, so
+    that the four ways a call cannot start are answered with four different
+    sentences — they need four different fixes, and a single "could not" sends
+    the operator looking in the wrong place.
+    """
+    if reason == voice_errors.REASON_DISABLED:
+        # ``disabled`` deliberately covers two facts, because from the gate's
+        # point of view they are the same fact: no call starts here. They are
+        # not the same fact to the owner, though — one is a decision they made
+        # about the feature and the other about the assistant — so the sentence
+        # distinguishes them while the gate does not.
+        return (
+            config.GEMINI_LIVE_OFF_TEXT
+            if not config.GEMINI_LIVE_ENABLED
+            else config.GEMINI_LIVE_NEXUS_OFF_TEXT
+        )
+    if reason == voice_errors.REASON_BUSY:
+        return config.GEMINI_LIVE_BUSY_TEXT
+    return config.GEMINI_LIVE_UNAVAILABLE_TEXT
+
+
+async def _owner_voice_command(
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+    actor: rbac.Principal,
+    text: str,
+) -> bool:
+    """Handle the owner's spoken voice-live commands. True when it was one.
+
+    Model-free, like the assistant's own on/off switch and for the same reason:
+    opening a call cannot depend on the model, because the model is what a call
+    is *for*. A fixed phrase list is the right design here, not a shortcut, and
+    this is the second place in the Nexus layer where the wording is matched
+    rather than understood.
+
+    **This runs before the assistant's switch, and it stands down for it.** The
+    two vocabularies share a verb — «نکسوس بیا» turns the assistant on, «نکسوس
+    بیا بیرون» leaves a call — so a message that reads as a switch is left to
+    ``_owner_state_command`` rather than claimed here. Without that, a phrase an
+    operator added to the join list could silently stop the owner from turning
+    the assistant back on, which is the one command that has to keep working.
+
+    Two conditions beyond that, and both are required:
+
+    * the speaker must be the owner, resolved from their Telegram id — never
+      from what they wrote about themselves;
+    * the words must ask for exactly one direction. ``commands.action_for``
+      refuses a contradiction rather than guessing, because the guess would open
+      or close a voice channel.
+
+    Starting a call is not done here either. It goes to
+    ``VoiceLiveManager.start``, which is the one place that answers "may a call
+    start here", and that answer is checked under a lock so two commands
+    arriving together cannot both win.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return False
+    if not actor.is_owner:
+        return False
+    action = voice_commands.action_for(text)
+    if not action:
+        return False
+    # A phrase that also reads as the assistant's switch *is* the switch.
+    # ``names_layer=True`` makes the reading deliberately wider than the
+    # router's own, which is the safe direction for a guard: the more messages
+    # count as a switch, the fewer this router can shadow.
+    if nexus.command_from(text, names_layer=True) is not None:
+        return False
+
+    manager = voice_session.manager()
+    if action == voice_commands.LEAVE:
+        stopped = await manager.stop(room.id, reason="owner")
+        log.info("owner voice command leave chat=%s stopped=%s", room.id, stopped)
+        await _reply_in_group(
+            ctx,
+            room.id,
+            config.GEMINI_LIVE_LEFT_TEXT
+            if stopped
+            else config.GEMINI_LIVE_NOT_IN_CALL_TEXT,
+            reply_to=msg.message_id,
+        )
+        return True
+
+    # Join. The transport is built here rather than held, because a transport is
+    # per call: it is a login and a socket, and a process-wide one would be one
+    # call's credentials quietly reused by the next.
+    transport = telegram_voice.build()
+    reason = manager.refusal(room.id, transport=transport)
+    if reason:
+        log.info(
+            "owner voice command join refused chat=%s actor=%s reason=%s",
+            room.id,
+            actor.user_id,
+            reason,
+        )
+        await _reply_in_group(
+            ctx, room.id, _voice_refusal_text(reason), reply_to=msg.message_id
+        )
+        return True
+    try:
+        await manager.start(
+            room.id,
+            transport=transport,
+            gateway=TelegramGateway(ctx),
+            bot_id=getattr(ctx.bot, "id", 0),
+        )
+    except voice_errors.SessionConflict:
+        # ``refusal`` cannot see this one: it is a race, not a state, and the
+        # manager's lock is what makes it impossible for two commands to both
+        # pass the check and both start.
+        await _reply_in_group(
+            ctx, room.id, config.GEMINI_LIVE_BUSY_TEXT, reply_to=msg.message_id
+        )
+        return True
+    except voice_errors.VoiceLiveError as exc:
+        # Every failure between the gate and a live session lands here — a
+        # refused join, a provider that will not open, a spent allowance. The
+        # reason goes to the log and never to the group: it can name a provider
+        # decision, and the room is not the audience for that.
+        log.warning(
+            "owner voice command join failed chat=%s actor=%s reason=%s",
+            room.id,
+            actor.user_id,
+            exc.reason,
+        )
+        await _reply_in_group(
+            ctx, room.id, config.GEMINI_LIVE_FAILED_TEXT, reply_to=msg.message_id
+        )
+        return True
+    log.info(
+        "owner voice command join chat=%s actor=%s model=%s",
+        room.id,
+        actor.user_id,
+        config.GEMINI_LIVE_MODEL,
+    )
+    await _reply_in_group(
+        ctx, room.id, config.GEMINI_LIVE_JOINED_TEXT, reply_to=msg.message_id
+    )
+    return True
+
+
 def _nexus_status_text() -> str:
     """The operator's view of Nexus: the state, who changed it, and the mode."""
     described = nexus.describe()
@@ -1847,6 +2003,14 @@ def _nexus_status_text() -> str:
         lines.append(identity.resolution_line())
     except Exception:  # noqa: BLE001
         log.exception("could not build the identity resolution line")
+    # Nexus Voice Live: whether it is switched on, on what, and how many calls
+    # are up. A machine-key line like the two above it, so an operator can
+    # answer "why did it not join" without reading a log — and so that the
+    # default-off flag is visible rather than inferred.
+    try:
+        lines.append(voice_session.status_line())
+    except Exception:  # noqa: BLE001 - a status line is never worth a crash
+        log.exception("could not build the voice live line")
     return "\n".join(lines)
 
 
@@ -2632,9 +2796,15 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # room that never falls quiet.
         _awareness_schedule(room.id)
 
-    # 2. The owner's spoken state command. Checked first because it is the one
-    #    thing that must work when Nexus is already off — the model is not
-    #    consulted at all in that state, so this is the only way back.
+    # 2. The owner's spoken commands, before the model and before anything
+    #    else. Voice Live is checked first so that its phrases are decided by
+    #    their own vocabulary, and it stands down for anything that reads as the
+    #    assistant's switch — see ``_owner_voice_command`` for why that ordering
+    #    is the safe one. The switch is second because it is the one thing that
+    #    must work when Nexus is already off: the model is not consulted in that
+    #    state at all, so it is the only way back.
+    if await _owner_voice_command(update, ctx, principal, text):
+        return
     if await _owner_state_command(update, ctx, principal, text):
         return
 

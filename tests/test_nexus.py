@@ -1472,16 +1472,20 @@ def test_the_acquisition_and_assistant_filters_still_overlap():
     assert main.acquisition_message_filter() is not None
 
 
-def test_the_gemini_pool_keeps_its_workloads_and_adds_only_awareness():
-    """The original five are intact, and awareness is a deliberate sixth.
+def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones():
+    """The original five are intact; awareness and live_voice are deliberate
+    additions, each with its own reason.
 
     This test used to assert that Nexus added *no* sixth workload, and that was
     the right invariant while the assistant only ever answered one message at a
     time. Group Awareness changes it on purpose: reading the room is a different
     job from answering a person, it runs on its own schedule, and it must not be
-    able to spend the allowance somebody is waiting on an answer to. So it gets
-    its own pool entry — and the five that were there before are still there,
-    unrenamed and unmerged, which is the half of this that must never change.
+    able to spend the allowance somebody is waiting on an answer to. Voice Live
+    changes it a second time for the same reason: a call holds a stream open for
+    minutes, and a live conversation must not be able to spend the allowance a
+    text conversation is waiting on. So there are two additions — and the five
+    that were there before are still there, unrenamed and unmerged, which is the
+    half of this that must never change.
     """
     from app import gemini_pool
 
@@ -1501,6 +1505,7 @@ def test_the_gemini_pool_keeps_its_workloads_and_adds_only_awareness():
         "transcribe",
         "tts",
         "awareness",
+        "live_voice",
     }
 
 

@@ -2054,6 +2054,243 @@ GEMINI_AWARENESS_CIRCUIT_SECONDS = _float(
     "GEMINI_AWARENESS_CIRCUIT_SECONDS", 300.0
 )
 
+# ── Nexus Voice Live ──────────────────────────────────────────────────────
+#
+# A live voice call: Nexus joins a Telegram voice chat and holds a realtime,
+# spoken, bidirectional conversation. It is the same Nexus — the same awareness,
+# the same authority model, the same audit trail — reached through a voice
+# interface rather than a text one. It is not a second assistant.
+#
+# The flag defaults to **off**, and that default is the point rather than
+# caution for its own sake. A live call is the only thing this bot does that
+# holds a socket open for minutes, spends an allowance in a stream rather than
+# per request, and joins a channel other people are in. A deployment that has
+# not opted in must not be able to reach any of that, so the gate is a
+# configuration read on the path itself and not a promise in a comment.
+GEMINI_LIVE_ENABLED = _bool("GEMINI_LIVE_ENABLED", False)
+
+# The model preference order, measured rather than assumed. On real Persian
+# speech synthesised by this project's own TTS, the time from end of utterance to
+# the first audio byte was:
+#
+#   gemini-3.8-live                 1.12 s   (fa-IR)
+#   gemini-3.1-flash-live-preview   1.12 s   (fa-IR)
+#   gemini-2.5-flash-native-audio   2.21 s   (auto-detect only)
+#
+# The purpose-built native-audio model is the obvious choice and it is the wrong
+# one: it is twice as slow here and it refuses every explicit Persian language
+# code, so it can only be used on auto-detect. The general live model is first
+# for that reason, and the flash preview is the fallback because it measured
+# identically.
+GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live").strip()
+GEMINI_LIVE_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_LIVE_FALLBACK_MODELS", "gemini-3.1-flash-live-preview")
+)
+
+# Its own credential, with the shared pool as an opt-in — the same shape every
+# other workload has. A live call is the most expensive thing here by the
+# minute, so the default is isolation: an operator who wants calls to draw on
+# the shared keys has to say so.
+GEMINI_LIVE_API_KEY = os.getenv("GEMINI_LIVE_API_KEY", "").strip()
+GEMINI_LIVE_ALLOW_SHARED_KEY = _bool("GEMINI_LIVE_ALLOW_SHARED_KEY", False)
+
+# Per account, like chat's and awareness's, and its own number for the same
+# reason those two are separate from each other: a live call must not be able to
+# spend the allowance somebody is waiting on a text answer for. The unit is
+# *connections*, not minutes — the pool rations requests, and one call is one
+# request — so this is a cap on how many calls one credential will start in an
+# API day, not on how long they last. Session length is bounded separately, by
+# ``GEMINI_LIVE_MAX_SECONDS``.
+GEMINI_LIVE_DAILY_LIMIT = _int("GEMINI_LIVE_DAILY_LIMIT", 60)
+
+# How long the provider is given to accept a connection. A live session is
+# opened once per call, so this is a connect timeout and not a per-turn one —
+# there is no per-turn deadline to set, because the turn is a stream.
+GEMINI_LIVE_TIMEOUT_SECONDS = _float("GEMINI_LIVE_TIMEOUT_SECONDS", 30.0)
+
+# Persian, first-class. The native-audio family rejects ``fa-IR`` and accepts
+# only auto-detect; the general live models accept it, which is the second
+# reason they are preferred. Kept configurable because a deployment serving a
+# different language should not have to edit code.
+GEMINI_LIVE_LANGUAGE = os.getenv("GEMINI_LIVE_LANGUAGE", "fa-IR").strip()
+
+# The voice the model speaks in. A prebuilt name; an unknown one is refused by
+# the provider at setup, which surfaces as ``setup_rejected`` rather than as
+# silence.
+GEMINI_LIVE_VOICE = os.getenv("GEMINI_LIVE_VOICE", "Puck").strip()
+
+# ── Ceilings ──────────────────────────────────────────────────────────────
+# A live call is the one workload that can hold a resource for an unbounded
+# time, so every dimension of that is bounded here rather than left to the
+# operator to notice.
+#
+# Concurrent calls. One is the honest default for a single-group deployment: two
+# simultaneous calls would mean two provider sessions, two voice channels and
+# two allowances spent, and nothing in the feature needs it.
+GEMINI_LIVE_MAX_SESSIONS = _int("GEMINI_LIVE_MAX_SESSIONS", 1)
+
+# How long one call may last before it is ended. Not a technical limit — a
+# policy one: a session left open holds a provider connection and a voice
+# channel, and the failure mode of "it was never closed" is expensive and
+# silent. An hour is far longer than a conversation and far shorter than a leak.
+GEMINI_LIVE_MAX_SECONDS = _int("GEMINI_LIVE_MAX_SECONDS", 3600)
+
+# How long a call with nobody speaking is kept open. The room being empty and
+# the room being quiet are the same thing from here, and both mean nobody is
+# waiting for an answer.
+GEMINI_LIVE_IDLE_SECONDS = _int("GEMINI_LIVE_IDLE_SECONDS", 180)
+
+# ── Reconnect ─────────────────────────────────────────────────────────────
+# A dropped provider session is retried, with backoff, up to this many times.
+# The call stays joined to Telegram across the retries: leaving and rejoining a
+# voice chat every time a socket hiccups would be far more disruptive than the
+# hiccup.
+GEMINI_LIVE_RECONNECT_ATTEMPTS = _int("GEMINI_LIVE_RECONNECT_ATTEMPTS", 3)
+GEMINI_LIVE_RECONNECT_BACKOFF_SECONDS = _float(
+    "GEMINI_LIVE_RECONNECT_BACKOFF_SECONDS", 1.5
+)
+
+# ── Barge-in ──────────────────────────────────────────────────────────────
+# Whether speech over the top of Nexus stops it. On by default because a
+# conversation where you cannot interrupt is not a conversation — but it is a
+# switch, because the provider's own detector is what decides, and a deployment
+# where it misbehaves needs a way to turn the *reaction* off without turning the
+# feature off.
+GEMINI_LIVE_BARGE_IN = _bool("GEMINI_LIVE_BARGE_IN", True)
+
+# ── Awareness ─────────────────────────────────────────────────────────────
+# How long a context snapshot is reused before it is rebuilt. This is the number
+# that makes "refreshable during a call" affordable: a snapshot is assembled
+# from the room's own records, and rebuilding it on every utterance would run a
+# query per sentence. The *conversation* is continuous regardless — only the
+# server-side context is cached.
+GEMINI_LIVE_CONTEXT_TTL_SECONDS = _float("GEMINI_LIVE_CONTEXT_TTL_SECONDS", 45.0)
+
+# The ceiling on the context block handed to a live session. Deliberately the
+# same shape as the awareness ceiling and a separate number, because a live
+# session re-sends its context as part of the session rather than per request,
+# and the two budgets should not move together by accident.
+GEMINI_LIVE_CONTEXT_CHARS = _int("GEMINI_LIVE_CONTEXT_CHARS", 1500)
+
+# ── Spoken actions ────────────────────────────────────────────────────────
+# The model may *ask* for an administrative action; it may never perform one.
+# What it produces is a structured request that goes through the same
+# authorisation and the same audit trail as every other action in this bot.
+#
+# Two limits, because a spoken action is the one thing here with a side effect
+# in a chat other people are watching. The cooldown stops a model that has
+# misheard from repeating the same request in a loop; the per-session ceiling
+# stops a long call from becoming an unbounded run of them.
+GEMINI_LIVE_ACTION_COOLDOWN_SECONDS = _float(
+    "GEMINI_LIVE_ACTION_COOLDOWN_SECONDS", 3.0
+)
+GEMINI_LIVE_MAX_ACTIONS = _int("GEMINI_LIVE_MAX_ACTIONS", 20)
+
+# ── The deterministic commands ────────────────────────────────────────────
+# Bringing Nexus into a voice chat and taking it out are *commands*, not
+# requests to a model: they must work with no model, no network and no
+# allowance, for the same reason the spoken on/off switch does. So they are
+# matched as phrases, before any conversational path is reached, and they are
+# owner-only.
+#
+# They are deliberately phrases rather than a ``/command``: the point is to be
+# able to say them out loud, which is what this whole feature is for.
+GEMINI_LIVE_JOIN_PHRASES = _str_list(
+    os.getenv(
+        "GEMINI_LIVE_JOIN_PHRASES",
+        "نکسوس برو ویس‌کال,نکسوس برو ویس چت,نکسوس بیا تو ویس,برو ویس‌کال",
+    )
+)
+GEMINI_LIVE_LEAVE_PHRASES = _str_list(
+    os.getenv(
+        "GEMINI_LIVE_LEAVE_PHRASES",
+        "نکسوس بیا بیرون,نکسوس بیا بیرون از ویس,از ویس‌کال بیا بیرون,بیا بیرون از ویس",
+    )
+)
+
+# How the *layer* is named, for the same purpose ``NEXUS_AWARENESS_NAMES``
+# serves for the awareness layer: so a phrase that names voice live is
+# recognised as being about this layer and not about the assistant's own
+# on/off switch. See ``app/nexus.py``'s vocabulary and §35.15 of AgentMD for
+# why the two vocabularies are kept apart.
+GEMINI_LIVE_NAMES = _str_list(
+    os.getenv("GEMINI_LIVE_NAMES", "ویس‌کال,ویس چت,ویس,voice live,voice")
+)
+
+# What the owner is told when one of those commands is used. Every outcome gets
+# its own sentence, because the four failures need four different fixes and a
+# single "could not" would send the operator looking in the wrong place: the
+# feature being switched off is a decision, a missing transport is a
+# configuration, a busy group is a state, and a refused join is Telegram.
+#
+# None of them names a credential, a model or an id.
+GEMINI_LIVE_JOINED_TEXT = os.getenv(
+    "GEMINI_LIVE_JOINED_TEXT", "نکسوس آمد داخل ویس‌کال و گوش می‌دهد."
+).strip()
+GEMINI_LIVE_LEFT_TEXT = os.getenv(
+    "GEMINI_LIVE_LEFT_TEXT", "نکسوس از ویس‌کال بیرون آمد."
+).strip()
+GEMINI_LIVE_NOT_IN_CALL_TEXT = os.getenv(
+    "GEMINI_LIVE_NOT_IN_CALL_TEXT", "نکسوس الان داخل ویس‌کال نیست."
+).strip()
+# The feature is off. A decision, not a fault, so it is said plainly rather
+# than apologised for.
+GEMINI_LIVE_OFF_TEXT = os.getenv(
+    "GEMINI_LIVE_OFF_TEXT", "قابلیت ویس‌کال روی این نصب خاموش است."
+).strip()
+# On, but nothing here can carry a call. The transport reports which of the two
+# things is missing and this sentence does not guess at it.
+GEMINI_LIVE_UNAVAILABLE_TEXT = os.getenv(
+    "GEMINI_LIVE_UNAVAILABLE_TEXT",
+    "الان نمی‌توانم داخل ویس‌کال بیایم؛ ورودی ویس‌کال روی این نصب آماده نیست.",
+).strip()
+GEMINI_LIVE_BUSY_TEXT = os.getenv(
+    "GEMINI_LIVE_BUSY_TEXT", "الان یک تماس صوتی در این گروه باز است."
+).strip()
+GEMINI_LIVE_FAILED_TEXT = os.getenv(
+    "GEMINI_LIVE_FAILED_TEXT", "نتوانستم داخل ویس‌کال بیایم."
+).strip()
+# The feature is on, but the assistant itself is switched off. A call *is* the
+# assistant, so a call cannot start while the assistant has been told to stop —
+# and the sentence says which of the two switches is in the way, because the
+# owner's next action is different for each.
+GEMINI_LIVE_NEXUS_OFF_TEXT = os.getenv(
+    "GEMINI_LIVE_NEXUS_OFF_TEXT", "نکسوس خاموش است؛ اول روشنش کن."
+).strip()
+
+# ── The transport ─────────────────────────────────────────────────────────
+# Which implementation carries the call. ``auto`` uses the real one when it is
+# usable and reports ``not_configured`` when it is not, which is the honest
+# answer on a build or an account that cannot hold a call yet.
+#
+# The missing piece is a **credential**, not a library: ``ntgcalls 2.2.5``
+# publishes ``cp312-manylinux_2_28_x86_64`` wheels, so ``py-tgcalls`` installs
+# on this deployment's interpreter. What is absent is the ``api_id``/``api_hash``
+# pair and the logged-in MTProto session that joining a voice chat requires. An
+# earlier version of this comment said no wheel existed, which was wrong and sent
+# the fix in the wrong direction.
+#
+# ``fake`` is for tests and for a deployment that wants the subsystem's plumbing
+# exercised without a voice channel. It is not a way to run this in production:
+# a fake transport joins nothing, the session refuses to hold a production call
+# on one, and the feature says so rather than pretending.
+GEMINI_LIVE_TRANSPORT = os.getenv("GEMINI_LIVE_TRANSPORT", "auto").strip().lower()
+
+# The MTProto credentials the real transport needs. A *user* session, not the
+# bot token: the Bot API has no method to join a voice chat at all — verified
+# against all 277 public ``Bot`` methods — so this feature cannot be built on the
+# bot's own credentials and must not pretend to be. Empty by default, and the
+# transport reports ``not_configured`` until both are set.
+TELEGRAM_API_ID = _int("TELEGRAM_API_ID", 0)
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+# Where the MTProto session is stored. Inside the data volume, like the key
+# store, so it survives a container rebuild — and deliberately a separate file,
+# because it is a login and not a setting.
+GEMINI_LIVE_SESSION_PATH = os.getenv(
+    "GEMINI_LIVE_SESSION_PATH", "/data/voice_live.session"
+)
+
+
 GEMINI_POOLS = [
     {
         "workload": "intent",
@@ -2174,6 +2411,40 @@ GEMINI_POOLS = [
         # observant Nexus must not be able to spend the allowance a person is
         # waiting on an answer to.
         "daily_budget": max(1, NEXUS_AWARENESS_DAILY_LIMIT),
+    },
+    {
+        # The live voice call. Its own workload, for the same reason awareness
+        # has one: a call spends a connection and holds it for minutes, and it
+        # must not be able to spend the allowance a text answer is waiting on —
+        # nor the other way round.
+        "workload": "live_voice",
+        "keys": _pool_key_list(
+            GEMINI_LIVE_API_KEY,
+            "GEMINI_LIVE_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_LIVE_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(GEMINI_LIVE_MODEL, GEMINI_LIVE_FALLBACK_MODELS),
+        # ``live`` is the gate, not a modality: it is what keeps these
+        # streaming-only models out of every other workload's candidate set, and
+        # what keeps a model that cannot stream out of this one. ``audio_out`` is
+        # required as well, so a live *transcription* model — which can listen
+        # and cannot speak — is never selected for a conversation.
+        "capabilities": frozenset({"audio_in", "audio_out", "live"}),
+        # The live models are previews and previews are reachable only when an
+        # operator names one, which is exactly what the two settings above do.
+        "allow_experimental": True,
+        # No retries at the pool level. A call is a stream, not a request: there
+        # is no partial answer to fail over from, and a second attempt after a
+        # failure is the session's own reconnect logic — which knows whether the
+        # session was ever established and can resume rather than restart.
+        "retries": 0,
+        "backoff": 0.0,
+        "timeout": _deadline(GEMINI_LIVE_TIMEOUT_SECONDS),
+        # Per account. One call is one request, so this caps how many calls one
+        # credential will start in an API day; how long each may last is bounded
+        # by ``GEMINI_LIVE_MAX_SECONDS``.
+        "daily_budget": max(1, GEMINI_LIVE_DAILY_LIMIT),
     },
 ]
 

@@ -337,7 +337,7 @@ def looks_actionable(text: str) -> bool:
 
 
 # ── The owner's state phrases ─────────────────────────────────────────────
-def _mentions(text: str, phrase: str) -> bool:
+def mentions(text: str, phrase: str) -> bool:
     """Whole-word, case-insensitive match of a fixed phrase.
 
     This is the *phrase* matcher, and it is not the name matcher above: the
@@ -348,6 +348,12 @@ def _mentions(text: str, phrase: str) -> bool:
     same reason it always does in this language: the Persian ban stem «بن»
     appears inside «بنظر» and «بنفش», and a substring match would turn ordinary
     conversation into an administrative instruction.
+
+    Public because it is the one place this rule is written. The voice-live
+    commands are the same kind of thing — a fixed phrase list whose meaning is
+    its wording, matched before any model is consulted — and a second copy of
+    this regex is a second answer to "does this message contain that phrase"
+    that would drift the first time either list changed.
     """
     if not text or not phrase:
         return False
@@ -452,6 +458,24 @@ _NEGATIONS = (
 )
 
 
+def negated(text: str) -> bool:
+    """Whether a message contains a negation, which cancels a spoken command.
+
+    Public because the voice-live commands need the same rule, and for the same
+    reason: «برو ویس‌کال نکن» contains the join phrase and asks for the opposite
+    of joining. A second copy of this list would be a second answer to "did the
+    owner say not to", and the two would drift the first time one was widened.
+
+    Deliberately over-broad, exactly as it is for the switch — see the comment
+    on the list. A blocked command costs the owner one repeat; an obeyed
+    negation costs a call they said not to open.
+    """
+    low = (text or "").lower()
+    if not low:
+        return False
+    return any(mentions(low, word) for word in _NEGATIONS)
+
+
 def command_from(text: str, *, names_layer: bool = False) -> str | None:
     """The state an owner's phrase asks for, or ``None``.
 
@@ -469,12 +493,12 @@ def command_from(text: str, *, names_layer: bool = False) -> str | None:
     low = (text or "").lower()
     if not low:
         return None
-    if any(_mentions(low, word) for word in _NEGATIONS):
+    if negated(low):
         return None
     off_phrases = _OFF_PHRASES + (_OFF_PHRASES_NAMED if names_layer else ())
     on_phrases = _ON_PHRASES + (_ON_PHRASES_NAMED if names_layer else ())
-    wants_off = any(_mentions(low, phrase) for phrase in off_phrases)
-    wants_on = any(_mentions(low, phrase) for phrase in on_phrases)
+    wants_off = any(mentions(low, phrase) for phrase in off_phrases)
+    wants_on = any(mentions(low, phrase) for phrase in on_phrases)
     if wants_off == wants_on:
         # Both, or neither. Neither is an ordinary message; both is a
         # contradiction, and guessing at a contradiction is how a bot ends up

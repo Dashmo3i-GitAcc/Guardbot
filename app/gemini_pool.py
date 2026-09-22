@@ -78,9 +78,27 @@ IMAGE = "image"
 VIDEO = "video"
 AUDIO_IN = "audio_in"
 AUDIO_OUT = "audio_out"
+# Bidirectional streaming, and the one capability that is *opt-in* rather than
+# additive. A model that carries it speaks the Live API and nothing else: it has
+# no ``generateContent`` at all, so offering it to an ordinary workload does not
+# merely risk a 400 — it guarantees one.
+#
+# Which is why the candidate filter below treats it as a gate rather than as
+# another modality to satisfy: a model carrying ``LIVE`` is offered **only** to a
+# workload that declares ``LIVE``. Without that rule, adding this capability
+# would quietly widen every existing workload, because ``{audio_in} <=
+# {text, audio_in, audio_out, live}`` is true and the transcription workload
+# would start being handed models it cannot call.
+LIVE = "live"
 
 _MULTIMODAL = frozenset({TEXT, IMAGE, VIDEO, AUDIO_IN})
 _TEXT_ONLY = frozenset({TEXT})
+# What a live model is, said once. A live *transcription* model is deliberately
+# not given ``AUDIO_OUT``: the provider rejects the AUDIO modality on those, so
+# the capability table is the place that keeps a real-time conversation from
+# being pointed at a model that can only listen.
+_LIVE_BIDIRECTIONAL = frozenset({TEXT, AUDIO_IN, AUDIO_OUT, LIVE})
+_LIVE_INBOUND = frozenset({TEXT, AUDIO_IN, LIVE})
 
 # Families that exist in ``models.list`` but must never be selected for the
 # bot's workloads. Every one of these would either fail outright or answer a
@@ -92,9 +110,13 @@ _TEXT_ONLY = frozenset({TEXT})
 #   aqa          a question-answering endpoint with its own method
 #   *computer-use*, *robotics*, *antigravity*  agentic/simulated environments
 #   *deep-research*  multi-step research agents, not a single completion
-#   *native-audio*, *-live*  bidirectional streaming only, no generateContent
 #   *omni*       a separate experimental family; not validated for production
 #   nano-banana-*  image generation under an internal codename
+#
+# ``native-audio`` and ``-live`` used to be listed here too, and they are now
+# handled by ``is_live`` instead — the difference being that "never select this"
+# was the right answer while nothing could speak the Live API, and "select this
+# only for a workload that asked for it" is the right answer now that one does.
 _EXCLUDED_MARKERS = (
     "veo",
     "lyria",
@@ -103,10 +125,25 @@ _EXCLUDED_MARKERS = (
     "robotics",
     "antigravity",
     "deep-research",
-    "native-audio",
     "omni",
     "nano-banana",
 )
+
+
+def is_live(model: str) -> bool:
+    """Whether this model is a bidirectional-streaming (Live API) model.
+
+    Two naming conventions, because the provider uses both: the ``-live`` family
+    and the ``native-audio`` family. Both are unreachable through
+    ``generateContent``, so both belong to the same answer.
+
+    Stated as its own function because it is asked in two places that must agree
+    — ``capabilities_of`` decides what the model *is*, and ``Pool.models_for``
+    decides who may be offered it — and a second inline copy of this string test
+    is how those two answers come apart.
+    """
+    name = (model or "").strip().lower()
+    return "-live" in name or "native-audio" in name
 
 
 def is_experimental(model: str) -> bool:
@@ -130,10 +167,23 @@ def capabilities_of(model: str) -> frozenset[str] | None:
     docstring), so this is a curated statement about model *families*. It is
     deliberately conservative: an unrecognised name returns None rather than
     being optimistically assumed to be multimodal.
+
+    Live models are checked first and answered as their own family, because the
+    two tests below would each get them wrong in a different direction: the
+    exclusion list would throw them away, and the ``transcribe`` branch would
+    call a live transcription model bidirectional when it can only listen.
     """
     name = (model or "").strip().lower()
     if not name:
         return None
+    if is_live(name):
+        # ``transcribe`` before the general case, for the same reason the
+        # ``-tts`` branch below is checked before ``-image``: a live model may
+        # be named for the one direction it supports, and the narrower answer is
+        # the true one. ``gemini-3.5-transcribe-live`` accepts audio and refuses
+        # the AUDIO response modality, so it must never be offered to a workload
+        # that expects to be answered in speech.
+        return _LIVE_INBOUND if "transcribe" in name else _LIVE_BIDIRECTIONAL
     if any(marker in name for marker in _EXCLUDED_MARKERS):
         return None
     if name == "aqa":
@@ -146,8 +196,6 @@ def capabilities_of(model: str) -> frozenset[str] | None:
         return frozenset({TEXT, AUDIO_OUT})
     if "transcribe" in name:
         return frozenset({AUDIO_IN})
-    if name.endswith("-live") or "-live-" in name:
-        return None
     if name.startswith("gemma"):
         # Gemma is text-in, text-out. It has no image or audio input, and
         # offering it to the moderation or transcription workloads would
@@ -1054,10 +1102,11 @@ class Pool:
     def models_for(self, account: Account, now: float) -> list[str]:
         """The models to try for one account. Preference order, or rotation.
 
-        Filtered three ways: the model must be capable of this workload, it must
-        not be an experimental release unless that was opted into, and — when
-        discovery has answered for this credential — the provider must actually
-        list it.
+        Filtered four ways: the model must be capable of this workload, it must
+        not be an experimental release unless that was opted into, it must not be
+        a streaming-only model unless this workload speaks the Live API, and —
+        when discovery has answered for this credential — the provider must
+        actually list it.
 
         With ``rotate_models`` the surviving names are re-ordered by
         ``_rotation_key``: the models that have actually answered, rotated
@@ -1082,6 +1131,13 @@ class Pool:
                 continue
             caps = capabilities_of(name)
             if caps is None or not self.capabilities <= caps:
+                continue
+            # A streaming-only model is offered to nobody who did not ask for
+            # one. Stated as a gate rather than left to the subset test above,
+            # because ``{audio_in} <= {text, audio_in, audio_out, live}`` is
+            # true — so without this line, giving the model a capability would
+            # also hand it to the transcription workload, which cannot call it.
+            if LIVE in caps and LIVE not in self.capabilities:
                 continue
             if is_experimental(name) and not self.allow_experimental:
                 continue

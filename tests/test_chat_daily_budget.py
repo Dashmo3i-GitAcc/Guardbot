@@ -292,16 +292,22 @@ def test_the_other_workloads_have_no_daily_allowance():
     change how much of the provider those workloads may use, which is not what
     the conversational fix was about.
 
-    ``awareness`` is the one addition since, and it is a *deliberate* second
-    entry rather than an accident: the awareness pass runs on its own workload
+    ``awareness`` is the first addition since, and it is a *deliberate* entry
+    rather than an accident: the awareness pass runs on its own workload
     precisely so that an observant assistant cannot spend the allowance a person
     is waiting on an answer to. Giving it an allowance of its own is what makes
     that separation real — without one it would draw on the provider until the
-    room went quiet. The three workloads that are neither conversation nor
-    awareness — intent, moderation, transcription — still have none, and that is
-    the property this test exists to hold.
+    room went quiet.
+
+    ``live_voice`` is the second, for the same reason one step further: a call
+    holds a stream open for minutes and cannot be rationed by length the way a
+    single request can, so what it is rationed by is *how many calls a day* one
+    account may open — one session is one request, and the session's own length
+    is capped separately. The workloads that are neither conversation nor
+    awareness — intent, moderation, transcription, tts — still have none, and
+    that is the property this test exists to hold.
     """
-    allowed = {"chat", "awareness"}
+    allowed = {"chat", "awareness", "live_voice"}
     for spec in config.GEMINI_POOLS:
         if spec["workload"] in allowed:
             assert spec["daily_budget"] >= 1
