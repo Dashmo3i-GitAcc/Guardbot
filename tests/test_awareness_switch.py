@@ -25,7 +25,9 @@ Nothing here talks to Telegram or to Google. ``chat.reply`` and the awareness
 transport are replaced, so "did a model call happen" is exact.
 """
 import asyncio
+import re
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -48,7 +50,10 @@ def switch_env(monkeypatch):
     The awareness names are pinned to the production default rather than left to
     the environment, because the whole point of the first tests below is *which
     spellings the owner actually types* — a suite that read them from a real
-    ``.env`` would pass or fail depending on the machine.
+    ``.env`` would pass or fail depending on the machine. That includes «پایش»,
+    which is the one entry that is a *description* of the layer rather than a
+    name for it; it is in the list because the owner addresses the layer that
+    way («قطع کن این پایش رو»).
     """
     monkeypatch.setattr(config, "OWNER_USER_ID", OWNER)
     monkeypatch.setattr(config, "CONFIG_ADMINS", [f"{ADMIN}:admin", f"{MODERATOR}:moderator"])
@@ -57,7 +62,9 @@ def switch_env(monkeypatch):
     monkeypatch.setattr(config, "NEXUS_OBSERVE_ADMINS", True)
     monkeypatch.setattr(config, "NEXUS_NAMES", ["nexus", "نکسوس"])
     monkeypatch.setattr(
-        config, "NEXUS_AWARENESS_NAMES", ["awareness", "اورنس", "آگاهی", "اگاهی"]
+        config,
+        "NEXUS_AWARENESS_NAMES",
+        ["awareness", "اورنس", "آگاهی", "اگاهی", "پایش"],
     )
     monkeypatch.setattr(config, "NEXUS_AWARENESS_ENABLED", True)
     monkeypatch.setattr(config, "GEMINI_AWARENESS_API_KEY", "test-awareness-key")
@@ -203,6 +210,24 @@ def test_a_name_inside_a_longer_word_is_not_the_layer():
     assert awareness.named("") is False
 
 
+def test_the_shipped_default_names_every_spelling_the_owner_uses():
+    """The fixture pins the names, so the *shipped* default is not covered here.
+
+    That matters, because the bug this vocabulary work fixes was a missing entry
+    in this default: the owner says «قطع کن این پایش رو», the router found no
+    awareness name in it, and silenced the assistant. The list is a setting so an
+    operator can trim it — but what ships has to include the words the owner
+    actually says.
+    """
+    source = Path(config.__file__).read_text(encoding="utf-8")
+    literal = re.search(
+        r'os\.getenv\(\s*"NEXUS_AWARENESS_NAMES"\s*,\s*"([^"]*)"', source
+    )
+    assert literal, "the default is no longer a literal this test can read"
+    shipped = {name.strip() for name in literal.group(1).split(",")}
+    assert {"awareness", "اورنس", "آگاهی", "اگاهی", "پایش"} <= shipped
+
+
 def test_the_layer_and_the_assistant_are_told_apart():
     """The disambiguation the whole feature rests on.
 
@@ -223,6 +248,77 @@ def test_the_verb_alone_still_resolves_for_both():
     assert nexus.command_from("آگاهی روشن") == nexus.ONLINE
 
 
+def test_the_owners_own_phrasings_are_understood_when_the_layer_is_named():
+    """The report that produced this work: fourteen ways of saying it, one worked.
+
+    Each phrase below is one the owner actually types. The layer is named in
+    every one, which is what licenses the wider half of the vocabulary — see
+    ``command_from``'s ``names_layer`` argument.
+    """
+    for text, expected in (
+        ("آگاهی رو راه بنداز", nexus.ONLINE),
+        ("اورنس رو بیار بالا", nexus.ONLINE),
+        ("اورنس بیا بالا", nexus.ONLINE),
+        ("اورنس بیدار کن", nexus.ONLINE),
+        ("اورنس چشاتو باز کن", nexus.ONLINE),
+        ("اورنس وصل شو به محیط", nexus.ONLINE),
+        ("اورنس رو بیار پایین", nexus.OFFLINE),
+        ("آگاهی رو خاموشش کن", nexus.OFFLINE),
+        ("اورنس رو قطعش کن", nexus.OFFLINE),
+        ("اورنس چشاتو ببند", nexus.OFFLINE),
+        ("اورنس استراحت کن", nexus.OFFLINE),
+        ("اورنس دیگه نبین", nexus.OFFLINE),
+    ):
+        assert nexus.command_from(text, names_layer=True) == expected, text
+
+
+def test_the_same_phrases_say_nothing_without_a_name():
+    """The other half of the contract, and the safety property.
+
+    Every phrase above is also ordinary speech — «بیا پایین» is "come
+    downstairs", «راه بنداز» is "get it going", «چشاتو باز کن» is "open your
+    eyes". Without a name to attach them to they must resolve to nothing, or a
+    moderator telling somebody to come downstairs would have silenced the bot.
+    """
+    for text in (
+        "بیا پایین خونه ما",
+        "برو پایین طبقه همکف",
+        "کار رو راه بنداز",
+        "بیا بالا ببینم چه خبره",
+        "چشاتو باز کن",
+        "چشاتو ببند",
+        "استراحت کن",
+        "دیگه نبین",
+        "وصل شو به محیط",
+        "راه بنداز",
+    ):
+        assert nexus.command_from(text) is None, text
+
+
+def test_the_description_of_the_layer_counts_as_naming_it():
+    """«قطع کن این پایش رو» was silencing the whole assistant.
+
+    «پایش» is a *description* of what the layer does rather than a name for it,
+    which is why it is a setting. It resolves to the layer like any other name,
+    so the instruction lands on the reading and not on the assistant.
+    """
+    assert awareness.named("قطع کن این پایش رو") is True
+    assert awareness.named("پایش رو قطع کن") is True
+    # A name on its own is not an instruction.
+    assert nexus.command_from("پایش وضعیت گروه خوبه؟", names_layer=True) is None
+
+
+def test_a_refusal_survives_the_wider_vocabulary():
+    """Widening the lists must not open a way past the negations."""
+    for text in (
+        "اورنس رو خاموش نکن",
+        "نکسوس بیا پایین نشو",
+        "اورنس رو خاموش کن بعد روشن کن",
+        "آگاهی رو راه بنداز، ولی الان نه",
+    ):
+        assert nexus.command_from(text, names_layer=True) is None, text
+
+
 # ══ 2. Routing: the right switch, from one sentence ═══════════════════════
 def test_awareness_off_does_not_switch_the_assistant_off():
     """The bug this feature was asked for: «آگاهی خاموش» must not silence Nexus."""
@@ -236,6 +332,53 @@ def test_awareness_off_does_not_switch_the_assistant_off():
 def test_the_transliteration_routes_to_awareness_too():
     bot = FakeBot()
     run(main.on_group_chat, message(text="اورنس خاموش"), bot, actor=OWNER)
+
+    assert awareness.running() is False
+    assert nexus.is_online() is True
+
+
+def test_stop_this_watching_lands_on_the_reading_not_the_assistant():
+    """The phrase from the report, end to end.
+
+    «قطع کن این پایش رو» names the layer by describing it, so it must reach the
+    awareness switch. Before the vocabulary work the router read «قطع کن» alone
+    and silenced the *assistant* — the exact failure the whole two-switch design
+    exists to prevent.
+    """
+    bot = FakeBot()
+    run(main.on_group_chat, message(text="قطع کن این پایش رو"), bot, actor=OWNER)
+
+    assert awareness.running() is False, "the reading was not switched off"
+    assert nexus.is_online() is True, "the assistant was silenced instead"
+
+
+def test_an_idiom_with_no_layer_named_moves_no_switch():
+    """The guard that makes the wider vocabulary safe, end to end.
+
+    The message *is* aimed at the bot — it replies to one of its own — so the
+    addressed check passes and the decision falls through to ``command_from``.
+    «بیا پایین» is in the named-only half, and no layer is named, so it must
+    still resolve to nothing. This is the case that used to silence the bot.
+    """
+    bot = FakeBot()
+    run(
+        main.on_group_chat,
+        message(
+            text="بیا پایین",
+            reply_to_message=SimpleNamespace(from_user=SimpleNamespace(id=BOT_ID)),
+        ),
+        bot,
+        actor=OWNER,
+    )
+
+    assert awareness.running() is True
+    assert nexus.is_online() is True
+
+
+def test_the_same_idiom_moves_the_switch_once_the_layer_is_named():
+    """The positive half of the gate, so it is a gate and not a wall."""
+    bot = FakeBot()
+    run(main.on_group_chat, message(text="اورنس بیا پایین"), bot, actor=OWNER)
 
     assert awareness.running() is False
     assert nexus.is_online() is True

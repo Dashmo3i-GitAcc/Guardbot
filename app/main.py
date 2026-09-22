@@ -1684,11 +1684,14 @@ async def _owner_state_command(
     if not actor.is_owner:
         return False
     about_awareness = awareness.named(text)
-    if not (
-        nexus.is_named(text) or about_awareness or _addressed_to_bot(msg, ctx)
-    ):
+    names_a_layer = nexus.is_named(text) or about_awareness
+    if not (names_a_layer or _addressed_to_bot(msg, ctx)):
         return False
-    wanted = nexus.command_from(text)
+    # ``names_a_layer`` is passed rather than recomputed because it is exactly
+    # the fact that decides whether the ambiguous half of the vocabulary applies:
+    # «بیا پایین» and «راه بنداز» are commands about the layer when the layer is
+    # named and ordinary speech otherwise.
+    wanted = nexus.command_from(text, names_layer=names_a_layer)
     if wanted is None:
         return False
 

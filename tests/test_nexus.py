@@ -1742,6 +1742,36 @@ def test_a_contradictory_state_phrase_resolves_to_nothing():
     assert nexus.command_from("نکسوس روشن شو خاموش شو") is None
 
 
+def test_the_wider_vocabulary_needs_the_name_and_the_default_is_the_tight_one():
+    """``names_layer`` is opt-in, and the tight reading is what a caller gets.
+
+    The parameter exists so that a phrase which is only unambiguous *because* the
+    layer is named can be understood — «بیا پایین» is a state command about the
+    layer and "come downstairs" about anything else. The default must stay
+    ``False``: a caller that has not worked the name out must not accidentally
+    get the wider reading, because a misfiring *off* phrase is silence, and
+    silence is indistinguishable from a crash.
+    """
+    assert nexus.command_from("بیا پایین") is None
+    assert nexus.command_from("بیا پایین", names_layer=True) == nexus.OFFLINE
+    assert nexus.command_from("راه بنداز") is None
+    assert nexus.command_from("راه بنداز", names_layer=True) == nexus.ONLINE
+
+
+def test_the_two_directions_are_spelled_symmetrically():
+    """«offline» was on the off list and «online» was on neither.
+
+    The bare word «on» is not a phrase — it is far too common in English prose —
+    but «online» is unambiguous, and a vocabulary that understood "nexus
+    offline" and not "nexus online" could only ever be turned off by an English
+    speaker.
+    """
+    assert nexus.command_from("nexus offline") == nexus.OFFLINE
+    assert nexus.command_from("nexus online") == nexus.ONLINE
+    assert nexus.command_from("awareness off") is None
+    assert nexus.command_from("awareness on") is None
+
+
 def test_the_owner_can_always_come_back_online():
     """The most important property of the whole state machine."""
     for phrase in ("نکسوس روشن شو", "نکسوس برگرد", "nexus come back online"):

@@ -810,12 +810,21 @@ NEXUS_NAMES = _str_list(os.getenv("NEXUS_NAMES", "nexus,نکسوس"))
 # have to work, or the owner says the word they actually use and nothing happens,
 # which is exactly the bug that produced this setting.
 #
+# «پایش» is here for a different reason than the rest, and it is the reason the
+# list has to include *descriptions* and not only names. The owner says «قطع کن
+# این پایش رو» — "stop this watching" — and without this entry the router reads
+# the verb «قطع کن», finds no awareness name, and silences the *assistant*
+# instead of the layer the owner was talking about. That is the exact confusion
+# this list exists to prevent, so the word that describes the layer counts as
+# naming it. It is a setting precisely so an operator who finds «پایش» too
+# general can take it out without touching code.
+#
 # Matched as whole words, case-insensitively, and used only to decide *which
 # switch* a spoken command is about. It is not an authority of any kind: the
 # speaker is checked against the owner id separately, and the transition itself
 # goes through ``app/admin_service.py`` like every other administrative act.
 NEXUS_AWARENESS_NAMES = _str_list(
-    os.getenv("NEXUS_AWARENESS_NAMES", "awareness,اورنس,آگاهی,اگاهی")
+    os.getenv("NEXUS_AWARENESS_NAMES", "awareness,اورنس,آگاهی,اگاهی,پایش")
 )
 
 # Whether Nexus records what an authorized administrator says when they are not

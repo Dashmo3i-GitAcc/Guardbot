@@ -368,6 +368,37 @@ def _mentions(text: str, phrase: str) -> bool:
 # that contains a negation, resolves to nothing at all and the owner is expected
 # to use ``/nexus on`` — refusing to guess is the correct behaviour for a
 # switch that changes whether the bot speaks.
+#
+# ── Two lists, and a second pair that needs the layer to be named ─────────
+# These lists started as the direct imperatives and missed how the owner actually
+# speaks: of fourteen real phrasings, one worked. Widening them is the right fix
+# — it is data, it keeps the path model-free, and it is the same move
+# ``NEXUS_AWARENESS_NAMES`` already represents. But the two directions are not
+# equally safe to widen, and the asymmetry decides where a phrase goes:
+#
+# * an **on** phrase that misfires costs an answer — the assistant says something
+#   when it was not asked to. Cheap, and visible.
+# * an **off** phrase that misfires costs the assistant. It goes silent, and
+#   silence is indistinguishable from a crash, a spent allowance or a network
+#   fault. Expensive, and it reads as something being broken.
+#
+# The first pair is consulted always. It holds the phrasings whose direction is
+# unambiguous on their own: the imperatives, and the object-pronoun forms
+# («خاموشش کن» — "turn it off") that are how this language actually conjugates.
+#
+# The second pair is consulted **only when the message names a layer** — see the
+# ``names_layer`` argument to :func:`command_from`. It holds the phrasings that
+# are perfectly clear about the layer and perfectly ambiguous about everything
+# else: «بیا پایین» is how the owner says "come down from awareness" and also how
+# one says "come downstairs"; «راه بنداز» is "get it going" about anything;
+# «چشاتو باز کن» is "open your eyes" about anything. Matching those on their own
+# would put the assistant's own switch behind an idiom — a moderator telling
+# somebody to come downstairs would have silenced the bot.
+#
+# Requiring the name costs the owner one word («اورنس چشاتو باز کن») and buys the
+# property that a phrase can only move a switch when the message says which
+# switch it means. It is also why these cannot simply be added to the first pair:
+# there, the direction is the whole of the meaning.
 _OFF_PHRASES = (
     "خاموش شو", "خاموش کن", "خاموش باش", "خاموش", "قطع کن", "متوقف کن",
     "برو آفلاین", "آفلاین شو", "افلاین شو", "دیگه جواب نده", "جواب نده",
@@ -379,8 +410,37 @@ _ON_PHRASES = (
     "روشن شو", "روشن کن", "روشن", "برگرد", "بازگرد", "فعال شو", "فعال کن",
     "آنلاین شو", "انلاین شو", "بیا آنلاین", "جواب بده", "پاسخ بده", "بیدار شو",
     "شروع کن",
+    # «offline» was on the off list and «online» was on neither, so the two
+    # directions disagreed about what counts as a phrase. This is the missing
+    # half, and it is unambiguous in a way that the bare word «on» is not.
+    "online",
     "come back online", "come online", "go online", "back online", "turn on",
     "wake up", "enable",
+)
+# Consulted only when the message names Nexus or the awareness layer.
+_OFF_PHRASES_NAMED = (
+    # "Turn it off", "cut it off" — the object is a pronoun, and the layer is
+    # the only thing the message names, which is what makes it unambiguous.
+    "خاموشش کن", "خاموشش", "قطعش کن", "قطعش",
+    # Directional, and only meaningful about something already running.
+    "بیا پایین", "بیار پایین", "بیارش پایین", "برو پایین",
+    # Idioms that mean "stop watching" about the layer and "take a rest" or
+    # "stop looking" about a person.
+    "استراحت کن", "دیگه نبین", "چشاتو ببند",
+)
+_ON_PHRASES_NAMED = (
+    "روشنش کن", "روشنش", "فعالش کن",
+    # «بیدار شو» is above and «بیدار کن» was missing, which is the difference
+    # between "wake up" and "wake it up" — and the owner says the second.
+    "بیدار کن",
+    # "Get it going" — the owner's «آگاهی رو راه بنداز». «راه» is a separate
+    # word from the verb, so the compound is listed as written.
+    "راه بنداز", "راه بینداز", "راه انداز",
+    # The mirror of the off list's «بیا پایین».
+    "بیا بالا", "بیار بالا", "بیارش بالا",
+    # "Connect to the environment", "open your eyes" — about the layer when the
+    # layer is named, about anything otherwise.
+    "وصل شو", "چشاتو باز کن",
 )
 # A negation anywhere in the message cancels the whole thing. Over-broad on
 # purpose: "don't go offline" and "روشن شو، خاموش نشو" both resolve to nothing,
@@ -392,20 +452,29 @@ _NEGATIONS = (
 )
 
 
-def command_from(text: str) -> str | None:
+def command_from(text: str, *, names_layer: bool = False) -> str | None:
     """The state an owner's phrase asks for, or ``None``.
 
     Purely textual: this says what the words ask for, never whether the person
     saying them may have it. The caller checks that the speaker is the owner,
     and the transition itself goes through ``app/admin_service.py``.
+
+    ``names_layer`` says whether the message names Nexus or the awareness layer,
+    and it is a fact about the text rather than about the speaker, so it does not
+    weaken the sentence above. It widens the vocabulary to the phrases that are
+    only unambiguous *because* the layer is named — «بیا پایین», «چشاتو باز کن»,
+    «راه بنداز» — and the default is ``False`` so that a caller which has not
+    worked the name out cannot accidentally get the wider reading.
     """
     low = (text or "").lower()
     if not low:
         return None
     if any(_mentions(low, word) for word in _NEGATIONS):
         return None
-    wants_off = any(_mentions(low, phrase) for phrase in _OFF_PHRASES)
-    wants_on = any(_mentions(low, phrase) for phrase in _ON_PHRASES)
+    off_phrases = _OFF_PHRASES + (_OFF_PHRASES_NAMED if names_layer else ())
+    on_phrases = _ON_PHRASES + (_ON_PHRASES_NAMED if names_layer else ())
+    wants_off = any(_mentions(low, phrase) for phrase in off_phrases)
+    wants_on = any(_mentions(low, phrase) for phrase in on_phrases)
     if wants_off == wants_on:
         # Both, or neither. Neither is an ordinary message; both is a
         # contradiction, and guessing at a contradiction is how a bot ends up

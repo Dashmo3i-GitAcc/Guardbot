@@ -4340,7 +4340,7 @@ database already held are untouched. No migration step is needed.
 | `GEMINI_AWARENESS_CIRCUIT_FAILURES` | `5` | failures before the breaker opens |
 | `GEMINI_AWARENESS_CIRCUIT_SECONDS` | `300` | how long the breaker stays open |
 | `NEXUS_AWARENESS_ON_LABEL` / `_OFF_LABEL` | `فعال` / `غیرفعال` | the `/nexus status` line |
-| `NEXUS_AWARENESS_NAMES` | `awareness,اورنس,آگاهی,اگاهی` | the words that name *this layer* in a spoken switch (§35.14) |
+| `NEXUS_AWARENESS_NAMES` | `awareness,اورنس,آگاهی,اگاهی,پایش` | the words that name *this layer* in a spoken switch (§35.14, §35.15) |
 | `NEXUS_AWARENESS_OFF_DONE_TEXT` / `_ON_DONE_TEXT` | see `.env.example` | the two confirmations for the spoken switch |
 | `NEXUS_AWARENESS_ALREADY_TEXT` | `آگاهی از قبل {state} بود.` | said when the switch is already in the asked-for state |
 | `NEXUS_AWARENESS_CONFIG_OFF_TEXT` | see `.env.example` | said when the owner asks for the layer back but the master switch is off |
@@ -4421,11 +4421,72 @@ command cannot cover is the deploy-time master being off: «آگاهی روشن�
 the row and the layer still does not run, so the reply says a restart is needed
 rather than reporting the half that changed.
 
-`tests/test_awareness_switch.py` (32 tests) pins the owner's real spellings, the
+`tests/test_awareness_switch.py` (40 tests) pins the owner's real spellings, the
 disambiguation in both directions, owner-only authority, every "off means off"
 path, the reply never saying the assistant is off, persistence across a
 restart, the no-op label, the master switch not being overridable by a message,
 and that no reply ever carries the key.
+
+### 35.15 The vocabulary, and the half of it that needs a name
+
+The owner reported that the spoken switch barely understood them: of fourteen
+phrasings they actually use, **one** worked. The tempting reading — "hardcoded
+keyword matching is the root problem, replace it with a semantic layer" — is
+wrong here, and it is worth recording why, because the correct fix looks like a
+compromise and is not one.
+
+`command_from` is not a shortcut for understanding language. It is a
+**dead-man's switch**: turning the assistant off has to keep working when the
+assistant is already off, when the model is unreachable, and when the daily
+allowance is spent. A path that needed the model to decide whether to turn the
+model off could not do that. So the fix was to widen the *data*, not to add a
+layer — and the same reasoning already governs `NEXUS_AWARENESS_NAMES`.
+
+Widening it is not symmetric, and the asymmetry is what shaped the design:
+
+* an **on** phrase that misfires costs an answer. The assistant says something
+  when it was not asked to — cheap, and visible.
+* an **off** phrase that misfires costs the assistant. It goes silent, and
+  silence is indistinguishable from a crash, a spent allowance, or a network
+  fault. Expensive, and it reads as something being broken.
+
+So the phrases are split into two pairs:
+
+| pair | consulted | holds |
+|---|---|---|
+| `_OFF_PHRASES` / `_ON_PHRASES` | always | phrasings whose direction is unambiguous alone: the imperatives, and the object-pronoun forms («خاموشش کن» — "turn it off") that are how this language actually conjugates |
+| `_OFF_PHRASES_NAMED` / `_ON_PHRASES_NAMED` | **only when the message names a layer** | phrasings that are clear about the layer and ambiguous about everything else |
+
+The second pair is gated by `command_from(text, names_layer=...)`, a
+keyword-only argument whose default is `False` so a caller that has not worked
+the name out cannot accidentally get the wider reading. `main._owner_state_command`
+computes the fact once (`nexus.is_named(text) or awareness.named(text)`) and
+passes it, so the same flag decides both which vocabulary applies and which
+switch is meant.
+
+The gating exists because of a concrete over-match. «بیا پایین» is how the owner
+says "come down from awareness" and also how anyone says "come downstairs", so a
+first attempt that consulted it unconditionally turned «بیا پایین خونه ما» into
+`nexus_offline` — a moderator talking about going downstairs would have silenced
+the bot. Requiring the name costs the owner one word («اورنس بیا پایین») and buys
+the property that a phrase can only move a switch when the message says *which*
+switch it means. The same applies to «راه بنداز» ("get it going" about anything),
+«چشاتو باز کن» ("open your eyes" about anything), «استراحت کن» and «دیگه نبین».
+
+Two smaller corrections came out of the same pass. `"online"` was added to
+`_ON_PHRASES` because `"offline"` was already on the off list and `"online"` was
+on neither — an English speaker could turn the assistant off by voice and not
+back on. And the negations still win over everything: «اورنس رو خاموش نکن» and
+«آگاهی رو راه بنداز، ولی الان نه» both resolve to `None`, because the cost of
+refusing is one `/nexus on` and the cost of guessing is a bot that silences
+itself because somebody said "not yet".
+
+`tests/test_awareness_switch.py` and `tests/test_nexus.py` pin the owner's real
+phrasings, the refusal of each of them without a name, the end-to-end routing of
+«قطع کن این پایش رو» to the layer rather than the assistant, and — as a
+source-literal check — that the *shipped* default in `app/config.py` still names
+every spelling the owner uses, since the test fixture pins the names and would
+otherwise hide a missing entry.
 
 ## 36. The assistant reads a room when its own clock expires
 
@@ -6197,7 +6258,7 @@ three isolation properties: the stop, the deletion, and that a non-key message i
 left to the dispatcher.
 
 `tests/test_gemini_pool.py` gained the `reload`/`probe` seams; the whole suite is
-2060 passing.
+2070 passing.
 
 ### 50.12 Discoverability: the menu, and the button
 
