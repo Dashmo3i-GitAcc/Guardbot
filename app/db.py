@@ -318,6 +318,59 @@ def init() -> None:
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_gemini_daily_day ON gemini_daily(day)"
     )
+    # The conversational layer's runtime state.
+    #
+    # One row, enforced by the primary key rather than by a convention: there is
+    # one Nexus, so "which state is it in" must have exactly one answer. A
+    # per-chat row would let the bot be offline in one group and online in
+    # another, which is not a distinction the owner asked for and is one more
+    # way for the two to disagree.
+    #
+    # Persisted rather than held in memory because a restart must not silently
+    # change a security posture. If the owner has switched Nexus off, a redeploy
+    # has to bring it back up switched off — an in-memory flag would bring it up
+    # answering, which is the failure this table exists to prevent.
+    #
+    # `changed_by` and `reason` are the audit breadcrumb that survives the audit
+    # table's own retention window. They hold a Telegram user id and a short
+    # machine string, never a message body.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS nexus_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            state TEXT NOT NULL,
+            changed_at INTEGER NOT NULL DEFAULT 0,
+            changed_by INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '')"""
+    )
+    # Who has spoken in a monitored group, so a name can be resolved to the
+    # Telegram user id that actually identifies somebody.
+    #
+    # This table holds **metadata only**: the name, the username and when they
+    # were last seen. It never holds a message body, and there is no column for
+    # one. It exists for exactly one job — turning "Milad" into an id — and it
+    # is deliberately not an authorization source: nothing here grants a
+    # permission, and a row is written for every speaker, including people with
+    # no role at all.
+    #
+    # Keyed by (chat_id, user_id) rather than by user_id alone so a person's
+    # context stays with the room they were seen in, and pruned on both a row
+    # count and an age, because a table that only grows is a table that
+    # eventually stops being written to.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS people (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            first_name TEXT NOT NULL DEFAULT '',
+            last_name TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            message_count INTEGER NOT NULL DEFAULT 0,
+            first_seen INTEGER NOT NULL DEFAULT 0,
+            last_seen INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id))"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_people_last_seen ON people(last_seen)"
+    )
     _conn.commit()
 
 
@@ -1353,4 +1406,183 @@ def pool_reset() -> None:
         _conn.execute("DELETE FROM gemini_models")
         _conn.execute("DELETE FROM gemini_events")
         _conn.execute("DELETE FROM gemini_discovery")
+        _conn.commit()
+
+
+# ── Nexus: the conversational layer's runtime state ───────────────────────
+def nexus_state_get() -> dict | None:
+    """The stored state row, or None when nothing has ever been written.
+
+    ``None`` is not the same fact as "offline": it means the deployment has
+    never recorded a state, which is the normal state of a fresh install and the
+    reason the caller supplies the default rather than this function inventing
+    one.
+    """
+    with _lock:
+        row = _conn.execute(
+            "SELECT state, changed_at, changed_by, reason FROM nexus_state WHERE id=1"
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "state": str(row[0] or ""),
+        "changed_at": int(row[1] or 0),
+        "changed_by": int(row[2] or 0),
+        "reason": str(row[3] or ""),
+    }
+
+
+def nexus_state_set(state: str, *, actor_id: int = 0, reason: str = "") -> dict:
+    """Write the one state row and return it. Last write wins, by design.
+
+    The state is a single fact about the deployment rather than an append-only
+    record, so an update is correct here where it would be wrong for the audit
+    table. The audit trail keeps the history; this keeps the current answer.
+    """
+    row = {
+        "state": str(state or ""),
+        "changed_at": int(time.time()),
+        "changed_by": int(actor_id or 0),
+        "reason": str(reason or "")[:200],
+    }
+    _exec(
+        """INSERT INTO nexus_state (id, state, changed_at, changed_by, reason)
+           VALUES (1,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+               state=excluded.state,
+               changed_at=excluded.changed_at,
+               changed_by=excluded.changed_by,
+               reason=excluded.reason""",
+        (row["state"], row["changed_at"], row["changed_by"], row["reason"]),
+    )
+    return row
+
+
+def nexus_state_reset() -> None:
+    """Forget the state row. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM nexus_state")
+        _conn.commit()
+
+
+# ── People: identity memory, metadata only ────────────────────────────────
+def people_remember(
+    chat_id: int,
+    user_id: int,
+    *,
+    first_name: str = "",
+    last_name: str = "",
+    username: str = "",
+) -> None:
+    """Record or refresh one speaker's name metadata.
+
+    An upsert rather than an insert, because the useful thing is the *latest*
+    name: Telegram lets a person rename themselves at any time, and a table that
+    kept every historical name would answer "who is Milad" with a list of people
+    who used to be called that.
+
+    ``message_count`` is a number, not a message. It is the one signal that
+    distinguishes somebody who speaks from somebody who was seen once, and it is
+    named for what it is so that a reviewer reading the schema sees immediately
+    that there is no column here capable of holding a conversation.
+    """
+    now = int(time.time())
+    _exec(
+        """INSERT INTO people
+               (chat_id, user_id, first_name, last_name, username,
+                message_count, first_seen, last_seen)
+           VALUES (?,?,?,?,?,1,?,?)
+           ON CONFLICT(chat_id, user_id) DO UPDATE SET
+               first_name=excluded.first_name,
+               last_name=excluded.last_name,
+               username=excluded.username,
+               message_count=people.message_count + 1,
+               last_seen=excluded.last_seen""",
+        (
+            int(chat_id),
+            int(user_id),
+            (first_name or "")[:120],
+            (last_name or "")[:120],
+            (username or "")[:120],
+            now,
+            now,
+        ),
+    )
+
+
+def people_rows(chat_id: int | None = None, *, limit: int = 0) -> list[dict]:
+    """The recorded people, most recently seen first.
+
+    ``limit`` of 0 means "no bound from here" — the caller is expected to pass
+    the configured ceiling. The ordering is what makes a bounded read useful: if
+    the table has to be cut short, the people who have actually been in the room
+    recently are the ones worth keeping.
+    """
+    sql = (
+        "SELECT chat_id, user_id, first_name, last_name, username, message_count, "
+        "first_seen, last_seen FROM people"
+    )
+    args: tuple = ()
+    if chat_id is not None:
+        sql += " WHERE chat_id=?"
+        args = (int(chat_id),)
+    sql += " ORDER BY last_seen DESC"
+    if limit:
+        sql += " LIMIT ?"
+        args = args + (int(limit),)
+    with _lock:
+        rows = _conn.execute(sql, args).fetchall()
+    return [
+        {
+            "chat_id": int(row[0]),
+            "user_id": int(row[1]),
+            "first_name": str(row[2] or ""),
+            "last_name": str(row[3] or ""),
+            "username": str(row[4] or ""),
+            "message_count": int(row[5] or 0),
+            "first_seen": int(row[6] or 0),
+            "last_seen": int(row[7] or 0),
+        }
+        for row in rows
+    ]
+
+
+def people_prune(*, keep: int = 0, max_age: int = 0) -> int:
+    """Apply the two retention bounds. Returns how many rows were dropped.
+
+    Both bounds are needed and they are not alternatives. The age bound drops
+    somebody who has not been seen for months; the row bound drops the least
+    recently seen rows once the table is over its ceiling. A table with only the
+    first would still grow without limit in a busy group, and one with only the
+    second would keep a person who left a year ago because nobody new arrived.
+    """
+    dropped = 0
+    if max_age and max_age > 0:
+        cutoff = int(time.time()) - int(max_age)
+        with _lock:
+            cur = _conn.execute("DELETE FROM people WHERE last_seen < ?", (cutoff,))
+            _conn.commit()
+            dropped += cur.rowcount
+    if keep and keep > 0:
+        with _lock:
+            cur = _conn.execute(
+                "DELETE FROM people WHERE (chat_id, user_id) NOT IN "
+                "(SELECT chat_id, user_id FROM people "
+                " ORDER BY last_seen DESC LIMIT ?)",
+                (int(keep),),
+            )
+            _conn.commit()
+            dropped += cur.rowcount
+    return dropped
+
+
+def people_count() -> int:
+    with _lock:
+        return int(_conn.execute("SELECT COUNT(*) FROM people").fetchone()[0])
+
+
+def people_reset() -> None:
+    """Forget every recorded person. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM people")
         _conn.commit()

@@ -959,8 +959,25 @@ def _contents(
     system prompt, and prefixing every message with a label would make the
     assistant answer the label instead of the message. Extra parts appear only
     when there is genuinely something extra — media, or a repetition nudge.
+
+    Consecutive turns of the same role are merged, and that is not cosmetic. The
+    history is not always a tidy alternation: an administrator's unaddressed
+    messages are recorded as context by ``app/nexus.py`` (role ``user``), and an
+    addressed message arriving after two of them would produce three ``user``
+    turns in a row. The API wants a conversation, and a run of same-role turns
+    is the shape it rejects — so the merge is what keeps silent observation from
+    breaking the next real turn.
     """
-    contents = [{"role": role, "parts": [{"text": body}]} for role, body in history]
+    contents: list = []
+
+    def add(role: str, parts: list) -> None:
+        if contents and contents[-1]["role"] == role:
+            contents[-1]["parts"].extend(parts)
+        else:
+            contents.append({"role": role, "parts": list(parts)})
+
+    for role, body in history:
+        add(role, [{"text": body}])
 
     turn: list = []
     for part in parts or []:
@@ -978,7 +995,7 @@ def _contents(
         # in the turn, and the instruction is the last thing the model reads.
         turn.append({"text": nudge})
 
-    contents.append({"role": "user", "parts": turn})
+    add("user", turn)
     return contents
 
 

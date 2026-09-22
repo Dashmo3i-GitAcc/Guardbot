@@ -47,7 +47,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Protocol, runtime_checkable
 
-from . import config, db, rbac
+from . import config, db, nexus, rbac
 
 log = logging.getLogger("guardbot.admin")
 
@@ -63,8 +63,14 @@ log = logging.getLogger("guardbot.admin")
 # ``kind`` splits the two shapes a target can take. Most operations act on a
 # *user*; ``delete_message`` acts on a message. Keeping them apart is what stops
 # "delete message 12345" from ever being read as "delete user 12345".
+#
+# The third kind is for an operation whose subject is the bot itself rather than
+# anybody in a chat. There is no target to validate, and inventing one (the
+# actor? the chat?) would mean a state change carried a meaningless id that a
+# later reader would have to reason about.
 OP_USER = "user"
 OP_MESSAGE = "message"
+OP_SYSTEM = "system"
 
 
 @dataclass(frozen=True)
@@ -98,6 +104,14 @@ class Operation:
     # event appears as ``moderation.ban`` before some date and something else
     # after. One vocabulary, stated once, is worth the extra column.
     audit_action: str = ""
+    # Whether this operation requires the conversational layer to be awake.
+    #
+    # True for everything a conversation can ask for, because "is the system in
+    # the state the request assumes" is one of the checks the brief lists for the
+    # execution layer. False for the two operations that *are* the state, which
+    # would otherwise be impossible to perform precisely when they are needed —
+    # turning Nexus back on while it is off.
+    requires_nexus_online: bool = True
 
 
 def _op(
@@ -149,6 +163,33 @@ OPERATIONS: dict[str, Operation] = {
         changes_role=True,
         soft_right=True,
     ),
+    # ── The conversational layer's own state ──────────────────────────────
+    # Two operations rather than one with a parameter, and that is a security
+    # choice rather than a stylistic one. The state is the *name* of the
+    # operation, so there is no argument a model could populate and no argument
+    # ``parse_write_call`` has to validate: a request either is "turn Nexus off"
+    # or it is not. One operation taking a state string would add a free-form
+    # field to the request boundary for the sake of saving a tool declaration.
+    #
+    # ``nexus.control`` is held by the owner and by nobody else, because no role
+    # bundle carries it — see ``app/rbac.py``. So "an administrator silences the
+    # assistant" is not refused, it is inexpressible.
+    "nexus_offline": _op(
+        "nexus_offline",
+        "nexus.control",
+        None,
+        "nexus.offline",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
+    "nexus_online": _op(
+        "nexus_online",
+        "nexus.control",
+        None,
+        "nexus.online",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
 }
 
 # The role names an actor may ask for, mapped to the canonical role. Kept here
@@ -157,6 +198,7 @@ OPERATIONS: dict[str, Operation] = {
 ROLE_ALIASES = {
     "helper": rbac.ROLE_HELPER,
     "moderator": rbac.ROLE_MODERATOR,
+    "admin": rbac.ROLE_ADMIN,
     "senior": rbac.ROLE_SENIOR_ADMIN,
     "senior_admin": rbac.ROLE_SENIOR_ADMIN,
 }
@@ -175,6 +217,10 @@ OUTCOME_TELEGRAM_ERROR = "telegram_error"
 OUTCOME_BAD_TARGET = "bad_target"
 OUTCOME_TARGET_IS_BOT = "target_is_bot"
 OUTCOME_UNKNOWN_ROLE = "unknown_role"
+# The conversational layer is switched off, so a request that came *from* a
+# conversation is refused. Distinct from a denial: nobody lacked authority, the
+# assistant was not supposed to be talking at all.
+OUTCOME_NEXUS_OFFLINE = "nexus_offline"
 # A demotion of somebody who held no application role. Distinct from a refusal:
 # nothing was forbidden, there was simply nothing to remove.
 OUTCOME_NOT_AN_ADMIN = "not_an_admin"
@@ -444,10 +490,10 @@ async def execute(
     """Authorise one request, then carry it out. The whole pipeline, in order.
 
     The order below is the brief's list and it is not negotiable: shape, then
-    replay, then actor, then permission, then target, then Telegram's own
-    rights, then the call. Every step that can refuse does so *before* anything
-    with a side effect has run, so a refusal never leaves a half-finished
-    action behind.
+    system state, then replay, then actor, then permission, then target, then
+    Telegram's own rights, then the call. Every step that can refuse does so
+    *before* anything with a side effect has run, so a refusal never leaves a
+    half-finished action behind.
 
     ``bot_id`` is passed in rather than read from the gateway because the
     gateway's protocol is deliberately about chat operations; the caller knows
@@ -466,7 +512,32 @@ async def execute(
     if not request.chat_id or not request.actor_id:
         return _result(request, OUTCOME_MALFORMED, detail="chat_id/actor_id")
 
-    # 2. Replay window, then idempotency.
+    # 2. Is the system in the state this request assumes?
+    #
+    #    The gate in ``app/main.py`` already refuses to *start* a conversation
+    #    while Nexus is offline, so in the ordinary course of events this branch
+    #    is never reached. It exists because "in the ordinary course" is not the
+    #    same as "always": a tool turn can be in flight when the owner switches
+    #    Nexus off, and the request it eventually produces must not be executed
+    #    by a layer that has been told to stop. The brief lists "current system
+    #    state" among the things the execution layer verifies independently, and
+    #    this is where that check lives.
+    #
+    #    Only the AI interface is refused. The typed commands are the documented
+    #    fallback for exactly the situation where the assistant is unavailable,
+    #    and switching the assistant off must not switch moderation off with it.
+    operation = OPERATIONS.get(request.operation)
+    if (
+        operation.requires_nexus_online
+        and request.interface == INTERFACE_AI
+        and not nexus.is_online()
+    ):
+        decision = rbac.Decision(False, rbac.REASON_NEXUS_OFFLINE)
+        result = _denied(request, decision, OUTCOME_NEXUS_OFFLINE)
+        _record(request, result, decision=decision)
+        return result
+
+    # 3. Replay window, then idempotency.
     if is_stale(request):
         return _result(request, OUTCOME_STALE)
     seen = _seen(request)
@@ -479,18 +550,20 @@ async def execute(
             detail=seen.get("outcome", ""),
         )
 
-    # 3. The target must be real, and must not be the bot itself. Promoting the
+    # 4. The target must be real, and must not be the bot itself. Promoting the
     #    bot is a no-op that looks like a success, and banning it is worse.
+    #    A system operation has no target — it is about the bot itself — so it
+    #    is exempt rather than being made to carry a meaningless id.
     if operation.kind == OP_USER:
         if not request.target_id:
             return _result(request, OUTCOME_BAD_TARGET)
         if bot_id and request.target_id == bot_id:
             return _result(request, OUTCOME_TARGET_IS_BOT)
-    else:
+    elif operation.kind == OP_MESSAGE:
         if not request.message_id:
             return _result(request, OUTCOME_BAD_TARGET, detail="message_id")
 
-    # 4. Authorisation, resolved here, from the id. Nothing the caller said
+    # 5. Authorisation, resolved here, from the id. Nothing the caller said
     #    about itself is trusted, because nothing the caller said about itself
     #    is read.
     decision = authorize(request, actor=actor)
@@ -499,7 +572,7 @@ async def execute(
         _record(request, result, decision=decision)
         return result
 
-    # 5. Telegram's own permission for this action, checked live. Configuration
+    # 6. Telegram's own permission for this action, checked live. Configuration
     #    saying the bot should have a right is not evidence that it has one.
     #    Skipped for the operations whose outcome the application owns — see
     #    ``Operation.soft_right``.
@@ -512,7 +585,7 @@ async def execute(
         _record(request, result)
         return result
 
-    # 6. The call itself. A Telegram failure is reported as a failure, never
+    # 7. The call itself. A Telegram failure is reported as a failure, never
     #    smoothed over — the brief is explicit that the caller must not fabricate
     #    success.
     try:
@@ -582,6 +655,10 @@ async def _apply(request: AdminRequest, operation: Operation, gateway: Gateway) 
         return await _promote(request, gateway)
     elif request.operation == "demote_member":
         return await _demote(request, gateway)
+    elif request.operation == "nexus_offline":
+        nexus.set_state(nexus.OFFLINE, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "nexus_online":
+        nexus.set_state(nexus.ONLINE, actor_id=request.actor_id, reason=request.interface)
     else:  # pragma: no cover - OPERATIONS and this branch move together
         raise ValueError(f"unhandled operation {request.operation}")
     return ""
@@ -734,6 +811,7 @@ def message_for(outcome: str) -> str:
         OUTCOME_TARGET_IS_BOT: config.ADMIN_TARGET_IS_BOT_TEXT,
         OUTCOME_UNKNOWN_ROLE: config.ADMIN_DENIED_TEXT,
         OUTCOME_NOT_AN_ADMIN: config.ADMIN_DEMOTE_NOTHING_TEXT,
+        OUTCOME_NEXUS_OFFLINE: config.NEXUS_OFFLINE_DENIED_TEXT,
     }.get(outcome, config.ADMIN_DENIED_TEXT)
 
 
@@ -752,6 +830,7 @@ REASON_GLOSS = {
     rbac.REASON_UNKNOWN_ROLE: "that role does not exist",
     rbac.REASON_SELF_TARGET: "the target is the person asking",
     rbac.REASON_BAD_TARGET: "the target is not usable",
+    rbac.REASON_NEXUS_OFFLINE: "the assistant is switched off, so it is not acting on anything",
 }
 
 OUTCOME_GLOSS = {
@@ -765,6 +844,7 @@ OUTCOME_GLOSS = {
     OUTCOME_TARGET_IS_BOT: "the target was this bot itself",
     OUTCOME_UNKNOWN_ROLE: "that role does not exist",
     OUTCOME_NOT_AN_ADMIN: "that person holds no administrative role here",
+    OUTCOME_NEXUS_OFFLINE: "the assistant is switched off and did not act",
 }
 
 
@@ -798,12 +878,17 @@ def describe(result: AdminResult) -> dict:
 def ai_available() -> bool:
     """Whether AI-mediated administration can run right now.
 
-    Two conditions, and both must hold: the operator must have switched it on,
-    and there must be a conversational credential to talk to. A switched-on
-    feature with no key is not available, and reporting it as available would be
-    the "silently pretend Gemini succeeded" failure the brief names.
+    Three conditions, and all must hold: the operator must have switched it on,
+    there must be a conversational credential to talk to, and the conversational
+    layer must be awake. A switched-on feature with no key is not available, and
+    reporting it as available would be the "silently pretend Gemini succeeded"
+    failure the brief names. Nexus being offline is the third case, and it is
+    the one an operator is most likely to be confused by — everything looks
+    configured, and nothing answers.
     """
     if not config.ADMIN_AI_ENABLED:
+        return False
+    if not nexus.is_online():
         return False
     from . import chat  # imported late: chat imports this module's config peers
 
@@ -818,17 +903,24 @@ def python_fallback_available() -> bool:
 def mode_status() -> dict:
     """The operational line: which mode is live, and what is behind it.
 
-    Three states rather than two, because "AI is off" and "AI is broken" are
-    different facts and an operator needs to tell them apart:
+    Four states rather than three, because "AI is off", "AI is broken" and "the
+    owner switched Nexus off" are different facts and an operator needs to tell
+    them apart. The fourth is separate from the other three on purpose: it is
+    the only one that is *deliberate*, and an operator looking at a silent bot
+    needs to know whether they are looking at a fault or at their own decision.
 
     * ``ai``       — AI administration is up.
+    * ``offline``  — Nexus is switched off by the owner.
     * ``degraded`` — AI is configured but unavailable; the commands are the way.
     * ``python``   — AI administration is switched off by configuration.
     """
+    online = nexus.is_online()
     ai = ai_available()
     fallback = python_fallback_available()
     if ai:
         mode = "ai"
+    elif not online:
+        mode = "offline"
     elif config.ADMIN_AI_ENABLED and fallback:
         mode = "degraded"
     else:
@@ -838,6 +930,7 @@ def mode_status() -> dict:
         "ai_available": ai,
         "python_fallback": fallback,
         "ai_enabled": bool(config.ADMIN_AI_ENABLED),
+        "nexus_online": online,
     }
 
 
@@ -846,6 +939,8 @@ def mode_line() -> str:
     state = mode_status()
     if state["mode"] == "ai":
         return "AI ADMIN MODE: AVAILABLE"
+    if state["mode"] == "offline":
+        return "AI ADMIN MODE: OFF — NEXUS IS SWITCHED OFF"
     if state["mode"] == "degraded":
         return "AI ADMIN MODE: DEGRADED — PYTHON FALLBACK ACTIVE"
     return "AI ADMIN MODE: OFF — PYTHON COMMANDS ONLY"
@@ -865,6 +960,7 @@ _REFUSAL_OUTCOMES = frozenset({
     OUTCOME_TARGET_IS_BOT,
     OUTCOME_UNKNOWN_ROLE,
     OUTCOME_UNKNOWN_OPERATION,
+    OUTCOME_NEXUS_OFFLINE,
 })
 
 
@@ -895,6 +991,11 @@ def status_report() -> str:
     state = mode_status()
     if state["mode"] == "ai":
         headline = "Conversational administration is answering."
+    elif state["mode"] == "offline":
+        headline = (
+            "Nexus is switched off, so the assistant is not answering anybody. "
+            "The commands still work; /nexus on wakes it."
+        )
     elif state["mode"] == "degraded":
         headline = (
             "Gemini is configured but not answering, so the commands are the "

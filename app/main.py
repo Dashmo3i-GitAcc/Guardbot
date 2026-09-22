@@ -44,6 +44,8 @@ from . import (
     mod_policy,
     moderation,
     net,
+    nexus,
+    people,
     rbac,
     responses,
     text_filters,
@@ -1167,6 +1169,26 @@ async def _reply_in_group(
 # `_addressed_to_bot` — a reply to a message this bot sent, or an @mention of
 # this bot — and `on_group_text` returns before classifying when that is true.
 # Neither path can therefore be entered by the other's traffic.
+#
+# ── Nexus ─────────────────────────────────────────────────────────────────
+# "Nexus" is the name this project gives the conversational layer as a *role*:
+# language understanding, context, intent and orchestration. It is not a model —
+# which model answers is the pool's decision, and nothing here names one.
+#
+# The routing below is the gate the brief asks for, in the order it asks for it,
+# and every step before the last one is a dictionary lookup:
+#
+#   1. who sent it (Telegram's own id, never a name)
+#   2. what role they resolve to (`app/rbac.py`)
+#   3. whether Nexus is awake (`app/nexus.py`)
+#   4. whether the message is aimed at Nexus, or looks like an instruction
+#   5. only then, the model
+#
+# An unauthorized message is refused at step 2 and never reaches Gemini. An
+# authorized message that is not aimed at Nexus is *observed* at step 4 —
+# recorded into that administrator's own bounded context and answered with
+# silence — which is the "watch without replying" requirement, and it costs no
+# AI call either.
 def _addressed_to_bot(msg, ctx) -> bool:
     """Whether this message is aimed at the bot rather than at the room.
 
@@ -1235,6 +1257,228 @@ def _mentions_alias(text: str, alias: str) -> bool:
         return re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text) is not None
     except re.error:
         return False
+
+
+# ------------------------------------------------- Nexus: routing
+# Whether the bot can actually *see* every message in each group. Filled in at
+# startup by asking Telegram for the bot's own membership status, because the
+# answer decides whether silent observation works at all — and an assumption
+# about it would be the worst kind of wrong, since the failure is invisible.
+#
+# The rule, verified against the live deployment on 2026-09-22: this bot has
+# Telegram privacy mode **enabled** (``getMe`` reports
+# ``can_read_all_group_messages=false``) and still receives every ordinary group
+# message, because it is an **administrator** in both groups. A bot promoted to
+# group administrator receives all messages regardless of the privacy setting;
+# a bot that is only a member receives commands, replies to its own messages,
+# mentions, and nothing else. So observation is a capability the deployment
+# holds rather than a property of the code, and the startup line says which.
+_nexus_visibility: dict[int, str] = {}
+
+
+def _nexus_can_observe(chat_id: int) -> bool:
+    """Whether the bot is an administrator here, and so sees every message.
+
+    ``creator`` counts as well as ``administrator``, and the two are the same
+    fact for this purpose: Telegram delivers every group message to a bot that
+    holds either status, whatever the privacy setting says. Keeping the pair
+    together here means the status report and the visibility log cannot disagree
+    about whether a group is observable.
+    """
+    return _nexus_visibility.get(int(chat_id)) in ("administrator", "creator")
+
+
+def _nexus_directed(msg, ctx) -> bool:
+    """Whether this message is aimed at Nexus.
+
+    Two independent signals, both server-checked: the Telegram-native ones (a
+    reply to this bot, an @mention of it, a configured ``BOT_ALIASES`` word) and
+    the Nexus names (``NEXUS_NAMES``), which exist because a group calls the
+    assistant by its role rather than by a username nobody can mention.
+    """
+    if _addressed_to_bot(msg, ctx):
+        return True
+    return nexus.is_named(_message_text(msg))
+
+
+def _nexus_observe(room, user, msg, text: str) -> bool:
+    """Record an unaddressed administrator message as context. Never replies.
+
+    The reply marker is the important part. "این کاربر خیلی مزاحم شده" followed
+    by "بنش کن" only resolves if the first message carried *who* it was about —
+    and the only place that information exists is the reply it was sent as. The
+    id is written into the stored turn because the model is later shown that
+    turn and needs the id, not a name it would have to look up again.
+    """
+    if not nexus.observation_enabled():
+        return False
+    kind = ""
+    ref = media.describe(msg)
+    if ref is not None:
+        kind = getattr(ref, "kind", "") or ""
+    reply_user_id, reply_name, _ = _reply_context(msg)
+    return nexus.observe(
+        room.id,
+        user.id,
+        text,
+        kind=kind,
+        reply_user_id=reply_user_id,
+        reply_name=reply_name,
+    )
+
+
+def _nexus_state_request(operation: str, actor: rbac.Principal, chat_id: int):
+    """One typed state-change request, stamped the way every other one is."""
+    return admin_service.AdminRequest(
+        operation=operation,
+        chat_id=chat_id,
+        actor_id=actor.user_id,
+        request_id=admin_service.new_request_id(),
+        interface=admin_service.INTERFACE_PYTHON,
+        at=int(time.time()),
+    )
+
+
+async def _nexus_state_command(
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+    actor: rbac.Principal,
+    text: str,
+) -> bool:
+    """Handle an owner's spoken state command. Returns True when it was one.
+
+    This path exists because it is the only one that keeps working when it is
+    most needed. Switching Nexus back on cannot depend on the model — Nexus is
+    off, so the model is not being consulted at all, and a Gemini outage must not
+    leave the assistant permanently silent either. A fixed phrase list is the
+    right design here for exactly that reason, and it is why this is the one
+    place in the Nexus layer where the wording is matched rather than understood.
+
+    Three conditions, all required, and the third is what stops the group's
+    conversation from toggling the bot:
+
+    * the speaker must be the owner, resolved from their Telegram id;
+    * the message must be aimed at Nexus, by name or by reply or by mention;
+    * and the words must ask for exactly one direction — ``command_from``
+      refuses a contradiction or a negation rather than guessing.
+
+    The transition itself is not performed here. It becomes a typed request and
+    goes to ``app/admin_service.py``, which re-authorises it against
+    ``nexus.control`` and audits it, exactly like every other action. The model
+    has a tool that reaches the same operation, so there is one implementation
+    and two ways to ask.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return False
+    if not actor.is_owner:
+        return False
+    if not (nexus.is_named(text) or _addressed_to_bot(msg, ctx)):
+        return False
+    wanted = nexus.command_from(text)
+    if wanted is None:
+        return False
+
+    operation = "nexus_online" if wanted == nexus.ONLINE else "nexus_offline"
+    result = await admin_service.execute(
+        _nexus_state_request(operation, actor, room.id),
+        TelegramGateway(ctx),
+        actor=actor,
+        bot_id=getattr(ctx.bot, "id", 0),
+    )
+    if not result.ok:
+        log.info(
+            "nexus state command refused actor=%s wanted=%s outcome=%s reason=%s",
+            actor.user_id,
+            wanted,
+            result.outcome,
+            result.reason,
+        )
+        await _reply_in_group(
+            ctx, room.id, _refusal_text(result), reply_to=msg.message_id
+        )
+        return True
+
+    log.info("nexus state command actor=%s state=%s", actor.user_id, wanted)
+    await _reply_in_group(
+        ctx,
+        room.id,
+        config.NEXUS_ONLINE_DONE_TEXT
+        if wanted == nexus.ONLINE
+        else config.NEXUS_OFFLINE_DONE_TEXT,
+        reply_to=msg.message_id,
+    )
+    return True
+
+
+def _nexus_status_text() -> str:
+    """The operator's view of Nexus: the state, who changed it, and the mode."""
+    described = nexus.describe()
+    changed_at = described["changed_at"]
+    changed = (
+        datetime.fromtimestamp(changed_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if changed_at
+        else config.NEXUS_NEVER_CHANGED_TEXT
+    )
+    changed_by = str(described["changed_by"]) if described["changed_by"] else config.NEXUS_NEVER_CHANGED_TEXT
+    lines = [
+        config.NEXUS_STATUS_TEXT.format(
+            state=nexus.state_label(),
+            changed=changed,
+            changed_by=changed_by,
+            observe=(
+                config.NEXUS_OBSERVE_ON_LABEL
+                if described["observe_admins"]
+                else config.NEXUS_OBSERVE_OFF_LABEL
+            ),
+            mode=admin_service.mode_line(),
+        )
+    ]
+    # Where the deployment cannot actually see the room. Reported rather than
+    # hidden, because "Nexus ignored what I said" and "Nexus never received what
+    # I said" look identical from inside a group and only one of them is a bug.
+    blind = [str(c) for c in config.GROUP_IDS if not _nexus_can_observe(c)]
+    if blind:
+        lines.append(
+            config.NEXUS_VISIBILITY_WARNING.format(chat_id="، ".join(blind))
+        )
+    return "\n".join(lines)
+
+
+async def _nexus_visibility_report(app) -> None:
+    """Ask Telegram what the bot can see in each group. Never fatal.
+
+    This is the honest answer to the brief's "do not assume Telegram delivers
+    every group message". Whether observation works is a property of the
+    deployment — a bot that is only a member of a group receives commands,
+    replies and mentions and nothing else — so it is measured at startup and
+    logged, and a group where it does not hold gets a warning rather than a
+    silent degradation.
+    """
+    for chat_id in config.GROUP_IDS:
+        status = "unknown"
+        try:
+            me = await app.bot.get_chat_member(chat_id, app.bot.id)
+            raw = str(getattr(me, "status", "") or "")
+            status = raw.split(".")[-1].lower() or "unknown"
+        except TelegramError as e:
+            log.warning("could not read my own status in %s: %s", chat_id, e)
+        _nexus_visibility[int(chat_id)] = status
+        if status in ("administrator", "creator"):
+            log.info(
+                "Nexus observation: chat=%s status=%s can_read_all=true",
+                chat_id,
+                status,
+            )
+        else:
+            log.warning(
+                "Nexus observation: chat=%s status=%s can_read_all=false — "
+                "unaddressed administrator messages will NOT reach the bot. "
+                "Promote the bot to administrator in that group to enable it.",
+                chat_id,
+                status,
+            )
 
 
 # Media the assistant will look at when somebody addresses it with an
@@ -1415,7 +1659,7 @@ def _reply_context(msg) -> tuple[int, str, int]:
     )
 
 
-def _ai_admin_turn(update, ctx, msg, room, user):
+def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
     """The tools, trusted context and tool-runner for one conversational turn.
 
     Returns ``(None, "", None)`` — the ordinary, tool-free conversation — in
@@ -1431,6 +1675,10 @@ def _ai_admin_turn(update, ctx, msg, room, user):
     ``app/admin_service.py`` against the same id. That asymmetry is the design —
     exposure is a courtesy that keeps the model from offering things it cannot
     do, and it is never the thing that stops it.
+
+    ``counters`` is the caller's tally of what this turn actually did, and it
+    has exactly one consumer: an unaddressed message gets a visible reply only
+    if a write tool was called. See ``_answer_conversationally``.
     """
     if not config.ADMIN_AI_ENABLED:
         return None, "", None
@@ -1505,6 +1753,15 @@ def _ai_admin_turn(update, ctx, msg, room, user):
                 "error": "the request was malformed, so nothing was executed",
             }
 
+        # Counted *before* the service runs, and counted whether or not it is
+        # allowed. The question this answers is "did the model try to change
+        # something", which is what decides whether an unaddressed message
+        # deserves an answer — a refusal is an answer to a real instruction, and
+        # swallowing it would leave the administrator believing the request was
+        # never seen.
+        if counters is not None:
+            counters["writes"] = counters.get("writes", 0) + 1
+
         result = await admin_service.execute(
             request,
             gateway,
@@ -1525,19 +1782,36 @@ def _ai_admin_turn(update, ctx, msg, room, user):
             # own words around them rather than repeat either.
             "message": result.message,
             "explanation": admin_service.explain(result),
+            # Only meaningful for the two state operations, and harmless
+            # otherwise: it tells the model the state that now holds rather than
+            # leaving it to assume the transition happened.
+            "nexus_state": nexus.state(),
         }
 
     return tools, context, on_tool
 
 
 async def _answer_conversationally(
-    update: Update, ctx: ContextTypes.DEFAULT_TYPE, reply_to: int | None = None
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+    reply_to: int | None = None,
+    *,
+    require_action: bool = False,
 ) -> None:
     """The whole conversational policy, in one place.
 
     Text and media take the same road once the message has been prepared: the
     only difference is that an attachment contributes parts and, for voice, a
     transcript instead of a body.
+
+    ``require_action`` is the difference between the two ways a message can
+    reach Nexus. A message *aimed* at Nexus is a conversation and gets an
+    answer. A message that merely looked like an instruction — an administrator
+    who did not address Nexus but said something the relevance gate recognised —
+    gets a visible reply **only if a write tool was actually called**. That rule
+    is what makes the cheap gate safe: a false positive costs one model call and
+    produces no message, so the bot never talks to the room uninvited, and a real
+    instruction still gets its confirmation.
     """
     msg = update.effective_message
     room = update.effective_chat
@@ -1573,6 +1847,11 @@ async def _answer_conversationally(
             # follows.
             shutil.rmtree(work_dir, ignore_errors=True)
         if parts is None and not text and problem:
+            if require_action:
+                # An unaddressed message with nothing readable in it is not
+                # worth a reply to the room.
+                log.info("chat skipped: unreadable media and no instruction")
+                return
             # Nothing readable, and nothing to say about it either. The two
             # reasons get different sentences: a silent clip is not an
             # unreadable file, and telling somebody their voice note could not
@@ -1591,7 +1870,8 @@ async def _answer_conversationally(
     # The administrative half of this turn. Built from server-side values only,
     # and empty for a room where the person asking is not an administrator —
     # which is the normal case, and costs one dictionary lookup.
-    tools, context, on_tool = _ai_admin_turn(update, ctx, msg, room, user)
+    counters: dict = {"writes": 0}
+    tools, context, on_tool = _ai_admin_turn(update, ctx, msg, room, user, counters)
 
     result = await chat.reply(
         room.id,
@@ -1604,6 +1884,20 @@ async def _answer_conversationally(
         context=context,
         on_tool=on_tool,
     )
+
+    if result and require_action and not counters["writes"]:
+        # The model had something to say but did nothing, and nobody asked it
+        # anything. Staying quiet is the whole point of the observation path —
+        # the turn is still in the administrator's history, so the next real
+        # instruction has the context.
+        log.info(
+            "nexus stayed silent: unaddressed message produced no action "
+            "(actor=%s chat=%s)",
+            user.id,
+            room.id,
+        )
+        return
+
     if result:
         log.info(
             "chat reply to %s in %s turns=%d chars=%d truncated=%s repeated=%s "
@@ -1662,15 +1956,86 @@ async def _send_voice(
 
 
 async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """The assistant, in a group. Reached only by an explicit address."""
+    """The assistant, in a group. The Nexus gate, in order.
+
+    Every step before the model is a lookup, and the order is the requirement
+    rather than a preference: identity, role, state, relevance, and only then an
+    AI call. An ordinary member is refused at the second step and their message
+    never reaches Gemini; an administrator who is not talking to Nexus is
+    recorded as context at the fourth and costs nothing either.
+    """
     msg = update.effective_message
-    if not msg or not _addressed_to_bot(msg, ctx):
+    room = update.effective_chat
+    user = update.effective_user
+    if not msg or not room or not user or user.is_bot:
         return
-    await _answer_conversationally(update, ctx, reply_to=msg.message_id)
+    if was_deleted(room.id, getattr(msg, "message_id", 0)):
+        return
+
+    # Identity memory, before any gate. It is metadata about who speaks —
+    # a name, a username, a timestamp — recorded for every member so that a
+    # later "میلاد رو بن کن" has something to resolve. It grants nothing and it
+    # stores no message.
+    people.remember(user, room.id)
+
+    # 1. Who, resolved from Telegram's own id and this bot's own tables.
+    principal = rbac.resolve(user.id)
+    text = _message_text(msg)
+
+    # 2. The owner's spoken state command. Checked first because it is the one
+    #    thing that must work when Nexus is already off — the model is not
+    #    consulted at all in that state, so this is the only way back.
+    if await _nexus_state_command(update, ctx, principal, text):
+        return
+
+    # 3. Authorized, and awake. Both refusals are silent: an ordinary member is
+    #    not told they were ignored, and a switched-off assistant does not
+    #    announce itself every time somebody speaks.
+    if not nexus.accepts(principal):
+        return
+
+    # 4. Aimed at Nexus, or worth asking about. Neither is understood here —
+    #    `looks_actionable` is a deterministic pre-filter whose only power is to
+    #    decide whether to spend a model call.
+    directed = _nexus_directed(msg, ctx)
+    if not directed and not nexus.looks_actionable(text):
+        # Watch without replying: the message joins this administrator's own
+        # bounded context, and nothing is sent and nothing is spent.
+        if nexus.is_actor(principal):
+            _nexus_observe(room, user, msg, text)
+        return
+
+    await _answer_conversationally(
+        update, ctx, reply_to=msg.message_id, require_action=not directed
+    )
 
 
 async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """A private message to the bot is a conversation, by definition."""
+    """A private message to the bot is a conversation, by definition.
+
+    The same gate applies, minus the addressing question: a DM has no room to
+    address Nexus in front of, so it is always aimed at Nexus. An unauthorized
+    sender is still refused before the model is consulted — a private chat is
+    not a way around the group policy, and "the bot answers DMs from anybody" is
+    exactly the hole the brief closes.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    user = update.effective_user
+    if not msg or not room or not user or user.is_bot:
+        return
+
+    # Identity memory is deliberately *not* recorded here. It exists to resolve
+    # a name somebody said out loud *in a group*, and the brief scopes it to
+    # people who appear in the group — recording a private conversation's
+    # participants would grow the table with names that no group ever needed to
+    # look up.
+    principal = rbac.resolve(user.id)
+
+    if await _nexus_state_command(update, ctx, principal, _message_text(msg)):
+        return
+    if not nexus.accepts(principal):
+        return
     await _answer_conversationally(update, ctx)
 
 
@@ -1777,6 +2142,7 @@ ADMIN_CALLBACK_PREFIX = "adm:"
 _ROLE_CODES = {
     "h": rbac.ROLE_HELPER,
     "m": rbac.ROLE_MODERATOR,
+    "a": rbac.ROLE_ADMIN,
     "s": rbac.ROLE_SENIOR_ADMIN,
 }
 _CODE_ROLES = {role: code for code, role in _ROLE_CODES.items()}
@@ -1788,6 +2154,7 @@ _MASK_PERMISSIONS = tuple(rbac.PERMISSIONS)
 _ROLE_ALIASES = {
     "helper": rbac.ROLE_HELPER,
     "moderator": rbac.ROLE_MODERATOR,
+    "admin": rbac.ROLE_ADMIN,
     "senior": rbac.ROLE_SENIOR_ADMIN,
     "senior_admin": rbac.ROLE_SENIOR_ADMIN,
 }
@@ -2067,6 +2434,73 @@ async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(config.ADMIN_LIST_EMPTY)
     _audit(actor.user_id, "admin.list", "ok", chat_id=room.id)
     await _reply_in_group(ctx, room.id, "\n".join(lines), reply_to=msg.message_id)
+
+
+async def cmd_nexus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/nexus [on|off|status]` — the typed interface to the layer's own state.
+
+    The deterministic counterpart to the spoken command, and the one that always
+    works: no model, no key, no allowance. It exists for the same reason the
+    moderation commands do — an AI feature that can only be controlled by the AI
+    is a feature that can strand itself.
+
+    Reading the state needs only the floor permission, so any administrator can
+    ask what is going on. Changing it needs ``nexus.control``, which is held by
+    the owner alone, and the change goes through ``app/admin_service.py`` where
+    that is decided rather than here.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    arg = (ctx.args[0].lower() if ctx.args else "").strip()
+
+    if arg in ("on", "off"):
+        operation = "nexus_online" if arg == "on" else "nexus_offline"
+        result = await admin_service.execute(
+            _nexus_state_request(operation, actor, room.id),
+            TelegramGateway(ctx),
+            actor=actor,
+            bot_id=getattr(ctx.bot, "id", 0),
+        )
+        if not result.ok:
+            log.info(
+                "nexus command refused actor=%s arg=%s outcome=%s reason=%s",
+                actor.user_id, arg, result.outcome, result.reason,
+            )
+            await _reply_in_group(
+                ctx, room.id, _refusal_text(result), reply_to=msg.message_id
+            )
+            return
+        await _reply_in_group(
+            ctx,
+            room.id,
+            config.NEXUS_ONLINE_DONE_TEXT
+            if arg == "on"
+            else config.NEXUS_OFFLINE_DONE_TEXT,
+            reply_to=msg.message_id,
+        )
+        return
+
+    if arg and arg != "status":
+        await _reply_in_group(
+            ctx, room.id, config.NEXUS_STATUS_HINT, reply_to=msg.message_id
+        )
+        return
+
+    decision = rbac.authorize(actor, "moderation.review")
+    if not decision:
+        _audit(actor.user_id, "nexus.status", decision.reason, chat_id=room.id)
+        await _reply_in_group(ctx, room.id, _deny_text(decision),
+                              reply_to=msg.message_id)
+        return
+    await _reply_in_group(
+        ctx,
+        room.id,
+        f"{config.NEXUS_STATUS_TITLE}\n{_nexus_status_text()}",
+        reply_to=msg.message_id,
+    )
 
 
 async def cmd_pool(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2947,6 +3381,22 @@ async def post_init(app: Application) -> None:
     # depends on it and a failed getMe must be visible in the log rather than
     # discovered as "the bot stopped responding to mentions".
     await load_identity(app)
+    # What we can see, asked of Telegram rather than assumed. This is the answer
+    # to the brief's "do not assume Telegram delivers every group message": the
+    # bot's ability to observe unaddressed administrator messages depends on
+    # being a group administrator, and a deployment that has lost that would
+    # otherwise degrade in silence.
+    await _nexus_visibility_report(app)
+    # The state, and what it means for who gets answered. One line, because
+    # "the assistant is silent" has four different causes and this is the one
+    # that says which.
+    log.info(
+        "Nexus state: %s actors_only=%s observe_admins=%s names=%d",
+        nexus.state(),
+        "on" if config.NEXUS_ACTORS_ONLY else "off",
+        "on" if config.NEXUS_OBSERVE_ADMINS else "off",
+        len(nexus.names()),
+    )
     log.info(
         "GuardBot started. Groups: %s | explicit classes: %s",
         config.GROUP_IDS,
@@ -3183,6 +3633,11 @@ def main() -> None:
     os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
     os.makedirs(config.TMP_DIR, exist_ok=True)
     db.init()
+    # Read the persisted Nexus state before anything can answer. Doing it here
+    # rather than lazily on the first message is deliberate: a deployment that
+    # was switched off must come back up switched off, and a lazy read would let
+    # the first message arrive while the state was still unknown.
+    nexus.load()
     # Before anything opens a socket, so every later AI call — classifier and
     # conversation alike — resolves through the IPv6-first ordering. Best
     # effort: on a host without global IPv6 it declines and the bot runs
@@ -3257,6 +3712,7 @@ def main() -> None:
         ("whoami", cmd_whoami),
         ("admins", cmd_admins),
         ("pool", cmd_pool),
+        ("nexus", cmd_nexus),
         ("promote", cmd_promote),
         ("demote", cmd_demote),
         ("ban", cmd_ban),

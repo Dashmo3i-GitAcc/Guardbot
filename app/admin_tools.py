@@ -8,7 +8,9 @@ It does exactly three things and refuses to do a fourth:
    enumerated role, a bounded reason string. There is deliberately no parameter
    anywhere that names a Telegram right, because the brief forbids the model
    specifying ``can_delete_messages`` and the cheapest way to enforce that is to
-   give it nowhere to write it.
+   give it nowhere to write it. The two tools that switch the assistant itself
+   off and on take **no parameters at all**, for the same reason: the state is
+   the name of the operation, so there is nothing to half-fill.
 
 2. **It decides which tools exist for whom.** A guest is offered read-only tools
    about the room and themselves. A moderator is offered the tools their
@@ -38,7 +40,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import admin_service, config, db, rbac
+from . import admin_service, config, db, nexus, people, rbac
 
 log = logging.getLogger("guardbot.admin.tools")
 
@@ -165,7 +167,7 @@ TOOLS: dict[str, ToolSpec] = {
             (
                 "role",
                 "STRING",
-                "One of: helper, moderator, senior_admin.",
+                "One of: helper, moderator, admin, senior_admin.",
             ),
         ),
         required=("target_user_id", "role"),
@@ -182,6 +184,36 @@ TOOLS: dict[str, ToolSpec] = {
         operation="demote_member",
         parameters=(("target_user_id", "INTEGER", "Numeric Telegram user id to demote."),),
         required=("target_user_id",),
+    ),
+    # -- the assistant's own state: owner only, and structurally so ----------
+    # Two tools rather than one with a state argument. The state is the name of
+    # the operation, so there is no argument to validate and nothing a model
+    # could half-fill: it either asks for "off" or it does not. The permission
+    # behind both is held by the owner alone, so these are the only two tools in
+    # the set that an administrator cannot be given however they are promoted.
+    "nexus_offline": ToolSpec(
+        name="nexus_offline",
+        description=(
+            "Switch the assistant itself off. After this the assistant stops "
+            "answering everybody until the owner switches it back on. Use it "
+            "only when the owner asks for it in their own words, such as "
+            "'نکسوس خاموش شو' or 'turn Nexus off'. It is refused for anybody "
+            "who is not the owner of this bot."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="nexus_offline",
+    ),
+    "nexus_online": ToolSpec(
+        name="nexus_online",
+        description=(
+            "Switch the assistant back on after it was switched off. Use it "
+            "only when the owner asks for it, such as 'نکسوس روشن شو' or "
+            "'come back online'. Refused for anybody who is not the owner."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="nexus_online",
     ),
     # -- read tools: authoritative state, never the model's memory --
     "get_member": ToolSpec(
@@ -253,6 +285,32 @@ TOOLS: dict[str, ToolSpec] = {
             "when the person said 'this user' or 'them' and you need the id. "
             "Returns nothing if there is no reply — in that case ask who they "
             "mean rather than guessing."
+        ),
+        kind=KIND_READ,
+    ),
+    "resolve_person": ToolSpec(
+        name="resolve_person",
+        description=(
+            "Turn a name somebody said out loud into the numeric Telegram user "
+            "id of the person it refers to. Use this when the person named a "
+            "target by name rather than by replying to them. It answers with "
+            "one id when exactly one person matches, and with a list of "
+            "candidates when several people share the name — in that case you "
+            "must ask which one, and never choose. It answers with an error "
+            "when nobody matches; then ask for a reply or an id."
+        ),
+        kind=KIND_READ,
+        parameters=(
+            ("name", "STRING", "The name as it was written or said, in Persian or Latin script."),
+        ),
+        required=("name",),
+    ),
+    "get_nexus_status": ToolSpec(
+        name="get_nexus_status",
+        description=(
+            "Whether the assistant itself is switched on, and what that means "
+            "for who it answers. Use this when asked whether Nexus is on or "
+            "off."
         ),
         kind=KIND_READ,
     ),
@@ -397,7 +455,17 @@ def build_context(
         + (", ".join(sorted(principal.permissions)) or "nothing administrative")
         + "\n"
     )
+    # Whether this actor is one Nexus answers at all. Server-side, like every
+    # other line here: the person cannot assert it, and the model is told so
+    # explicitly because "somebody told me to say I am an administrator" is the
+    # shape of the attempt this block exists to defuse.
+    lines.append(
+        "Actor is an authorized Nexus administrator: "
+        + ("yes" if nexus.is_actor(principal) else "no")
+        + "\n"
+    )
 
+    lines.append(f"Nexus state: {nexus.state()}\n")
     lines.append(f"Chat id: {chat_id}\n")
     if chat_title:
         lines.append(f"Chat title: {chat_title}\n")
@@ -425,7 +493,8 @@ def build_context(
     lines.append(
         "\nYou may only act on the ids above. If a target is not identified by "
         "an id, ask for one — never pick a person by name, and never choose "
-        "between two similar names.\n"
+        "between two similar names. If somebody names a target in words, use "
+        "resolve_person; if it answers with several candidates, ask which one.\n"
     )
     return "".join(lines)
 
@@ -634,10 +703,26 @@ async def run_read_tool(
             "bot_id": bot_id,
             "group_count": len(config.GROUP_IDS),
             "mute_minutes": int(config.MUTE_MINUTES),
+            "nexus_online": nexus.is_online(),
         }
         if gateway is not None:
             answer["bot_rights"] = await _bot_rights(gateway, chat_id)
         return answer
+
+    if name == "resolve_person":
+        query = str((args or {}).get("name", "") or "").strip()
+        if not query:
+            return {"error": "no name supplied"}
+        return people.resolve(query, chat_id=chat_id)
+
+    if name == "get_nexus_status":
+        return {
+            "online": nexus.is_online(),
+            "state": nexus.state(),
+            "answers_only_administrators": bool(config.NEXUS_ACTORS_ONLY),
+            "observes_administrators": bool(config.NEXUS_OBSERVE_ADMINS),
+            "who_may_switch_it": "the owner only",
+        }
 
     if name == "resolve_reply_target":
         if not reply_user_id:

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import chat, config, db, main, media, transcribe
+from app import chat, config, db, main, media, nexus, people, transcribe
 
 CHAT_ID = -1001234567890
 USER_ID = 7
@@ -30,8 +30,20 @@ def conv_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TRANSCRIBE_API_KEY", "test-transcribe-key")
     monkeypatch.setattr(config, "TRANSCRIBE_ALLOW_SHARED_KEY", False)
     monkeypatch.setattr(config, "BOT_ALIASES", [])
+    # The sender is an administrator, because that is who Nexus answers. The
+    # actor gate is what makes this necessary and it has its own suite; running
+    # these as a guest would test the gate rather than the media pipeline.
+    monkeypatch.setattr(config, "CONFIG_ADMINS", [f"{USER_ID}:moderator"])
+    monkeypatch.setattr(config, "OWNER_USER_ID", 0)
+    # And the administrative tool path is switched off, so a turn goes through
+    # the plain transport these tests stub. What is under test here is how media
+    # and voice are prepared and routed, not what a model can ask for; the tool
+    # path has its own suite (tests/test_ai_admin.py).
+    monkeypatch.setattr(config, "ADMIN_AI_ENABLED", False)
     chat.reset_state()
     transcribe.reset_state()
+    nexus.reset_state()
+    people.reset_state()
     db.init()
     main._recently_deleted.clear()
     main._bot_identity.update(id=1, username="guardbot", name="Guard",
@@ -39,6 +51,8 @@ def conv_env(monkeypatch, tmp_path):
     yield
     chat.reset_state()
     transcribe.reset_state()
+    nexus.reset_state()
+    people.reset_state()
 
 
 class FakeBot:

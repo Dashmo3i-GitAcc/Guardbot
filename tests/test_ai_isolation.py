@@ -440,11 +440,34 @@ def test_ordinary_group_voice_is_not_routed_into_any_workload():
 
 
 def test_the_assistant_does_not_run_on_ordinary_group_text():
-    """The boundary, asserted where it lives."""
+    """The boundary, asserted where it lives.
+
+    Two gates, and both are required. `_nexus_directed` decides whether the
+    message is aimed at Nexus; `nexus.accepts` decides whether the sender may
+    reach it at all. A group message that is neither addressed nor an
+    instruction from an administrator is recorded as context and answered with
+    silence — the "watch without replying" requirement.
+    """
     from app import main
 
     source = inspect.getsource(main.on_group_chat)
-    assert "_addressed_to_bot" in source
+    assert "_nexus_directed" in source
+    assert "nexus.accepts" in source
+    # The gate must come before the answer, and the answer before any model call.
+    assert source.index("nexus.accepts") < source.index("_answer_conversationally")
+    assert source.index("_nexus_directed") < source.index("_answer_conversationally")
+
+
+def test_the_assistant_is_gated_on_the_sender_before_anything_is_spent():
+    """Identity and role are resolved before the relevance gate and the model."""
+    from app import main
+
+    source = inspect.getsource(main.on_group_chat)
+    resolve = source.index("rbac.resolve")
+    accepts = source.index("nexus.accepts")
+    actionable = source.index("nexus.looks_actionable")
+    answer = source.index("_answer_conversationally")
+    assert resolve < accepts < actionable < answer
 
 
 def test_the_four_workloads_have_four_separate_switches():

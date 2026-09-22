@@ -2,12 +2,34 @@
 import os
 import sys
 
+import pytest
+
 os.environ.setdefault("BOT_TOKEN", "test-token")
 os.environ.setdefault("GROUP_IDS", "-1001234567890")
 os.environ.setdefault("DB_PATH", ":memory:")
 os.environ.setdefault("TMP_DIR", "/tmp/guardbot-test")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+@pytest.fixture(autouse=True)
+def fresh_nexus_state():
+    """Start every test from a known Nexus state.
+
+    ``app/nexus.py`` caches the runtime state in a module-level variable, and
+    that is deliberate — it is read on every group message and a database hit
+    per message would be wasteful. The cost is that a test which switches Nexus
+    off would leave every later test in a silent bot, which is the kind of
+    cross-test contamination that turns a real failure into an unrelated one.
+
+    Clearing the cache is enough: the next read comes from the database, which
+    is ``:memory:`` per process and empty unless a test wrote to it.
+    """
+    from app import nexus
+
+    nexus.reset_state()
+    yield
+    nexus.reset_state()
 
 
 def local_only_moderation(monkeypatch, *, threshold: float = 0.45) -> None:

@@ -695,6 +695,87 @@ ADMIN_TOOL_GUEST_TOOLS = _bool("ADMIN_TOOL_GUEST_TOOLS", False)
 # the text section, so every operator-facing string is in one place.
 
 
+# ---------------- Nexus: the conversational layer ----------------------------
+# "Nexus" is the name this project gives to the conversational AI layer as a
+# *role*: natural-language understanding, context, intent and orchestration. It
+# is not a model identity. Which provider and which model answer is decided by
+# the pool and by the ``GEMINI_CHAT_*`` settings above, and changing them does
+# not change what Nexus is.
+#
+# The layer is deliberately narrow. Nexus may *ask*; ``app/admin_service.py``
+# decides and executes. Nothing here widens anybody's authority: these settings
+# decide who Nexus listens to, when it is awake, and how much it remembers.
+
+# Whether Nexus answers only authorized administrators, or anybody who addresses
+# it.
+#
+# On by default, and that default is a product decision rather than a technical
+# one: the brief requires that an ordinary member cannot activate the assistant
+# by replying to it, mentioning it, or wording an administrative-sounding
+# request. With this on, an unauthorized message costs one dictionary lookup and
+# is never sent to Gemini.
+#
+# Turning it off restores the earlier behaviour, where the assistant answered any
+# member who addressed it directly. It does not change what an *action* requires
+# — every tool call is authorised against the real actor id either way — so the
+# only thing this switch moves is who gets to have a conversation.
+NEXUS_ACTORS_ONLY = _bool("NEXUS_ACTORS_ONLY", True)
+
+# The names Nexus answers to, in addition to the bot's own username and
+# ``BOT_ALIASES``. A group often calls the assistant by its role name rather
+# than by the bot's Telegram username, and "نکسوس" is not a username anybody
+# can mention with an @.
+#
+# Matched as whole words, case-insensitively, and only for the purposes of
+# deciding that a message is *aimed at Nexus*. It is not an authority of any
+# kind: a stranger writing "نکسوس" is still refused by the actor gate.
+NEXUS_NAMES = _str_list(os.getenv("NEXUS_NAMES", "nexus,نکسوس"))
+
+# Whether Nexus records what an authorized administrator says when they are not
+# talking to it.
+#
+# This is the feature the brief calls "watch without reply": an administrator
+# says something in the room, Nexus stores it in that administrator's own
+# bounded conversation context, and stays silent. It is what lets a later
+# "بنش کن" be understood as a follow-up to "این کاربر خیلی مزاحم شده".
+#
+# Off makes Nexus stateless between addressed messages. On costs one row per
+# administrator message and no AI call at all — the model is not consulted until
+# somebody actually asks for something.
+NEXUS_OBSERVE_ADMINS = _bool("NEXUS_OBSERVE_ADMINS", True)
+
+# Extra words that make an unaddressed message worth consulting the model about.
+#
+# The built-in lexicon lives in ``app/nexus.py`` and covers the Persian and
+# English verbs of moderation. This is the operator's escape hatch for a room
+# whose slang the lexicon does not know: comma separated, matched as whole
+# words. It can only ever cause *more* messages to be looked at — the model still
+# decides what was asked, and ``admin_service`` still decides whether it may
+# happen — so a wrong entry costs one AI call, never an action.
+NEXUS_EXTRA_ACTION_WORDS = _str_list(os.getenv("NEXUS_EXTRA_ACTION_WORDS", ""))
+
+# The identity memory: the mapping from a name somebody said out loud to the
+# Telegram user id that actually identifies them.
+#
+# It records names and usernames only, for people who have spoken in a monitored
+# group. There is no column for a message body. It exists so "میلاد رو بن کن"
+# can be resolved, and it deliberately cannot grant anything — a row is written
+# for every speaker, including people with no role at all, and authority is
+# resolved separately from ``app/rbac.py``.
+NEXUS_PEOPLE_ENABLED = _bool("NEXUS_PEOPLE_ENABLED", True)
+# A ceiling on the table. The least recently seen rows are dropped first, so a
+# busy group keeps the people who are actually present.
+NEXUS_PEOPLE_MAX = _int("NEXUS_PEOPLE_MAX", 5000)
+# And an age bound, so somebody who left months ago does not stay resolvable
+# forever. Pruned on the observation path, since this process has no scheduler.
+NEXUS_PEOPLE_RETENTION = _int("NEXUS_PEOPLE_RETENTION", 90 * 86400)
+# How many candidates a name lookup may return before it is treated as
+# ambiguous. Not a matching threshold — an exact, normalised comparison decides
+# a match — this only bounds what is shown to the model when several people
+# share a name.
+NEXUS_PEOPLE_MAX_CANDIDATES = _int("NEXUS_PEOPLE_MAX_CANDIDATES", 8)
+
+
 # ---------------- Gemini: moderation / content understanding ------------------
 # A **third** independent Gemini workload. It is not the acquisition classifier
 # and not the conversational assistant, and it shares nothing with either: its
@@ -1123,6 +1204,57 @@ ADMIN_CANCELLED_TEXT = os.getenv("ADMIN_CANCELLED_TEXT", "لغو شد.")
 ADMIN_STALE_BUTTON_TEXT = os.getenv(
     "ADMIN_STALE_BUTTON_TEXT",
     "این دکمه دیگه معتبر نیست. دوباره دستور رو بزن.",
+)
+
+# Nexus state copy.
+#
+# The two confirmations are separate sentences rather than one sentence with the
+# state interpolated, because "Nexus is off" and "Nexus is on" are the two facts
+# an owner most needs to read unambiguously — and a templated sentence that got
+# the state wrong would be read as the opposite of what happened.
+NEXUS_OFFLINE_DONE_TEXT = os.getenv(
+    "NEXUS_OFFLINE_DONE_TEXT",
+    "🌙 نکسوس خاموش شد. دیگه جواب نمی‌دم تا خودت روشنم کنی.",
+)
+NEXUS_ONLINE_DONE_TEXT = os.getenv(
+    "NEXUS_ONLINE_DONE_TEXT",
+    "☀️ نکسوس روشن شد. در خدمتم.",
+)
+NEXUS_ALREADY_TEXT = os.getenv(
+    "NEXUS_ALREADY_TEXT",
+    "نکسوس از قبل {state} بود.",
+)
+NEXUS_OFFLINE_DENIED_TEXT = os.getenv(
+    "NEXUS_OFFLINE_DENIED_TEXT",
+    "نکسوس الان خاموشه، پس کاری انجام نمی‌دم.",
+)
+NEXUS_OWNER_ONLY_TEXT = os.getenv(
+    "NEXUS_OWNER_ONLY_TEXT",
+    "فقط مالک ربات می‌تونه نکسوس رو روشن یا خاموش کنه.",
+)
+NEXUS_STATUS_TITLE = os.getenv("NEXUS_STATUS_TITLE", "وضعیت نکسوس:")
+NEXUS_STATUS_TEXT = os.getenv(
+    "NEXUS_STATUS_TEXT",
+    "وضعیت: {state}\n"
+    "آخرین تغییر: {changed}\n"
+    "توسط: {changed_by}\n"
+    "پایش پیام‌های مدیرها: {observe}\n"
+    "{mode}",
+)
+NEXUS_STATE_ONLINE_LABEL = os.getenv("NEXUS_STATE_ONLINE_LABEL", "روشن (ONLINE)")
+NEXUS_STATE_OFFLINE_LABEL = os.getenv("NEXUS_STATE_OFFLINE_LABEL", "خاموش (OFFLINE)")
+NEXUS_OBSERVE_ON_LABEL = os.getenv("NEXUS_OBSERVE_ON_LABEL", "فعال")
+NEXUS_OBSERVE_OFF_LABEL = os.getenv("NEXUS_OBSERVE_OFF_LABEL", "غیرفعال")
+NEXUS_NEVER_CHANGED_TEXT = os.getenv("NEXUS_NEVER_CHANGED_TEXT", "—")
+NEXUS_STATUS_HINT = os.getenv(
+    "NEXUS_STATUS_HINT",
+    "دستورها: /nexus on | /nexus off | /nexus status",
+)
+NEXUS_VISIBILITY_WARNING = os.getenv(
+    "NEXUS_VISIBILITY_WARNING",
+    "⚠️ ربات در گروه {chat_id} ادمین نیست، پس پیام‌های عادی مدیرها را نمی‌بیند و "
+    "نمی‌تواند آن‌ها را برای زمینه‌ی گفتگو ذخیره کند. فقط دستورها، ریپلای‌ها و "
+    "منشن‌ها به آن می‌رسد.",
 )
 
 # Moderation command copy.

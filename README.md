@@ -31,11 +31,16 @@ and then reused. Wait for `Detector ready.` and, if enabled,
 
 ## Before you start (Telegram side)
 
-1. BotFather: Group Privacy -> **Turn off**
-2. Make the bot admin with: Delete Messages, Ban Users (Restrict Members)
-3. Captcha needs `chat_member` updates, which only work if the bot is an **admin**
-4. Turn OFF "Approve New Members" (join requests) if you want the captcha
+1. Make the bot admin with: Delete Messages, Ban Users (Restrict Members)
+2. Captcha needs `chat_member` updates, which only work if the bot is an **admin**
+3. Turn OFF "Approve New Members" (join requests) if you want the captcha
    to do the gatekeeping automatically, otherwise both run
+4. BotFather: Group Privacy may be left **on**. A bot that is an
+   **administrator** receives every group message either way, and that is what
+   lets the assistant notice an administrator's message without being replied
+   to. A bot that is only a *member* receives commands, replies and mentions and
+   nothing else — the assistant then works, but cannot observe. The startup log
+   and `/nexus status` say which situation applies to each group.
 
 ## How media moderation works
 
@@ -236,6 +241,55 @@ is not enough, and neither is a plain "my internet is slow" — see
 
 The container needs `network_mode: host` for this; the reason is in
 `AgentMD.md` §13.6 and in `docker-compose.yml`.
+
+## The assistant (Nexus)
+
+"Nexus" is this project's name for the conversational layer as a **role** —
+understanding language and context, working out intent, and orchestrating. It is
+not a model: which model answers is decided by the `GEMINI_CHAT_*` settings and
+the account pool (`AgentMD.md` §28). Nexus may *ask* for an action; the bot's
+execution layer decides whether it happens.
+
+**Who it answers.** Only authorized administrators — the owner and anybody with a
+stored role. An ordinary member cannot activate it by replying to it, mentioning
+it, or wording a message that looks like an order; their message costs one lookup
+and never reaches Gemini. (Set `NEXUS_ACTORS_ONLY=false` to restore the older
+"answers any member who addresses it" behaviour.)
+
+**What it does with an administrator's message.**
+
+* Addressed to it — by reply, `@mention`, a `BOT_ALIASES` word, or one of
+  `NEXUS_NAMES` (`نکسوس`) — it answers, and can use the moderation tools the
+  person's role holds.
+* Not addressed, but clearly an instruction ("این کاربر رو بن کن") — it asks the
+  model, and replies **only if an action actually ran**. A message that merely
+  looked like an instruction produces no reply.
+* Not addressed and ordinary ("امروز اینجا خیلی شلوغه") — it is stored as context
+  for that administrator's next instruction and answered with **silence**. No
+  model call, no message.
+
+So an administrator never has to reply to the bot for it to know who they are,
+and the bot never talks to the room uninvited.
+
+**Switching it off.** The owner can say «نکسوس خاموش شو» / "Nexus shut down", or
+use the command:
+
+```
+/nexus off      # the assistant stops answering everybody
+/nexus on       # back on — the owner can always do this
+/nexus status   # state, who last changed it, and whether each group is observable
+```
+
+While it is off, the assistant is silent for everybody — including ordinary
+members and their mentions — and nothing is spent on Gemini. The typed
+moderation commands (`/ban`, `/mute`, …) keep working: switching the assistant
+off must not switch moderation off with it. Only the owner can change the state.
+
+**Acting on a target.** A reply is understood ("این رو ساکت کن" acts on the
+person replied to). A name is understood when it is unambiguous ("میلاد رو بن
+کن"), because names of people who speak in the group are remembered against their
+Telegram id. If two people share a name, the bot asks rather than guessing — and
+a name never grants anything: authority always comes from the Telegram id.
 
 ## Test in a private test group first
 

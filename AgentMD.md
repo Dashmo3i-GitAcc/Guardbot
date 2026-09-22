@@ -3016,3 +3016,318 @@ The `source` argument (`media`, `text`, `filter`) is what makes the ladder's
 decisions attributable in the log without the ladder needing to know what a
 filter is. The three callers are the media path, the text path, and
 `on_group_filter` (§32).
+
+## 34. Nexus: who may talk to the assistant, and what it may do about it
+
+"Nexus" is the name this project gives the conversational layer as a **role**:
+natural-language understanding, conversational context, intent detection and
+orchestration. It is not a model, a provider or a credential. Which model
+answers is decided by `GEMINI_CHAT_*` and by the pool (§28); nothing in
+`app/nexus.py` names one, and changing the model changes nothing about the
+architecture below.
+
+The requirement this section documents is a boundary, and it is the same
+boundary §29 draws, seen from the other side:
+
+```
+Human admin → Nexus (understand, resolve, orchestrate)
+            → an authenticated, typed AdminRequest
+            → GuardBot (verify, authorise, execute)
+            → Telegram
+```
+
+Nexus may **ask**. GuardBot decides and executes. A senior admin does not gain a
+capability because the model interpreted their sentence as an instruction, and a
+stranger does not gain one by wording a convincing message. Everything in this
+section is a way of making that true structurally rather than by remembering to
+check it.
+
+### 34.1 The three states of a message
+
+The whole policy, in one place:
+
+| who sent it | addressed to Nexus? | what happens | AI call |
+|---|---|---|---|
+| ordinary member | either | nothing at all | no |
+| authorized admin | no | stored as context in **their own** bounded history | no |
+| authorized admin | yes | a conversation, with the tools their role holds | yes |
+| authorized admin | no, but the words look like an instruction | asked about; a visible reply **only if a write tool ran** | yes |
+
+The last row is the subtle one. A cheap deterministic gate (`nexus.looks_actionable`)
+decides whether an unaddressed message is worth a model call, and that gate is
+allowed to be wrong in the direction of *asking*. What keeps a false positive
+harmless is that an unaddressed turn replies to the room only when
+`_ai_admin_turn`'s tool-runner actually invoked a write tool — `counters["writes"]`.
+A false positive therefore costs one API call and produces no message.
+
+### 34.2 The Telegram reality, measured rather than assumed
+
+The brief is explicit that the implementation must not pretend Nexus can see
+messages it cannot receive. So the deployment was asked, and the answer was:
+
+```
+getMe → can_read_all_group_messages = false     # privacy mode is ON
+getChatMember(bot) in both groups → status = administrator
+```
+
+A bot with privacy mode **enabled** still receives every ordinary group message
+**if it is an administrator in that group**. A bot that is only a *member*
+receives commands, replies to its own messages, mentions, and nothing else —
+regardless of what this code does. So "silent observation" is a capability of
+the deployment, not a property of the code, and the code says which:
+
+* `post_init` calls `_nexus_visibility_report`, which asks `getChatMember` for
+  the bot's own status in every configured group and logs, per group,
+  `can_read_all=true` or a warning that unaddressed messages will not arrive.
+* `/nexus status` repeats the warning for any group where the bot is not an
+  administrator, because "Nexus ignored what I said" and "Nexus never received
+  what I said" look identical from inside a group and only one of them is a bug.
+* `main._nexus_can_observe(chat_id)` is the single place that answers the
+  question; `administrator` and `creator` both count, because Telegram delivers
+  every message to both.
+
+Nothing fakes the capability. If the bot is demoted in a group, observation
+simply stops, and the report says why.
+
+### 34.3 The gate, in order, and every step but the last is a lookup
+
+`main.on_group_chat` is the implementation, and the order is the requirement:
+
+1. **Who** — `rbac.resolve(user.id)`, from Telegram's numeric id. Never a
+   username, a display name, or anything the sender wrote.
+2. **The owner's spoken state command** — checked before the actor gate, because
+   it is the one thing that must work when Nexus is already off.
+3. **Authorized and awake** — `nexus.accepts(principal)`. A guest is refused
+   here, silently, and their message never reaches Gemini.
+4. **Aimed at Nexus, or worth asking** — `_nexus_directed` (a reply to this bot,
+   an `@mention`, a `BOT_ALIASES` word, or a `NEXUS_NAMES` word) or
+   `nexus.looks_actionable`.
+5. **Only then the model.**
+
+Identity is resolved from the id and from nothing else, and this is what makes
+impersonation a non-event: there is no username in the authority path at all.
+`rbac.resolve` takes one argument, and it is an integer.
+
+### 34.4 The relevance gate is a pre-filter, not intent detection
+
+`nexus.looks_actionable` is a whole-word match against a small lexicon of
+Persian and English moderation verbs, plus `NEXUS_EXTRA_ACTION_WORDS` for a
+room whose slang the lexicon does not know. It is deliberately **not** a keyword
+command system:
+
+* Its only power is to decide whether to *ask the model*. It cannot perform,
+  authorise, or refuse anything.
+* Whole-word matching is load-bearing: the Persian ban stem «بن» appears inside
+  «بنظر» ("in my opinion") and «بنفش» ("purple"), and a substring match would
+  turn ordinary conversation into an administrative instruction.
+* Recall is the right bias. A miss costs one ignored instruction; a false
+  positive costs one API call and no message.
+
+Intent is the model's job (§29), and the model's output is a *request* that
+`admin_service` re-authorises.
+
+### 34.5 Observe without replying
+
+An unaddressed message from an authorized administrator is recorded into that
+administrator's own bounded conversation history — the same `(chat_id, user_id)`
+store the model is later shown — and answered with silence. `nexus.observe`
+adds two server-generated markers, and both exist for the same reason: an
+unaddressed message is much less useful without knowing what it was a reaction
+to.
+
+* A media turn is recorded as its *kind* (`[sticker]`, `[voice]`). The bytes are
+  never stored.
+* A reply is recorded with the id of the person replied to:
+  `[در پاسخ به Milad (42)]`. That marker is exactly what a later «بنش کن» needs.
+
+No model call, no Telegram call, no reply. The store is bounded by the same
+`GEMINI_CHAT_HISTORY_TURNS` and `GEMINI_CHAT_HISTORY_TTL` the conversation
+itself uses, and pruned opportunistically on the observation path because this
+process has no scheduler. `chat._contents` merges consecutive same-role turns,
+because observation can produce a run of `user` turns and the API rejects a
+conversation shaped that way.
+
+### 34.6 ONLINE and OFFLINE are real, persisted, and owner-only
+
+`app/nexus.py` holds the state; `db.nexus_state` persists it in a single row.
+`main()` calls `nexus.load()` before anything can answer, so a deployment that
+was switched off comes back up switched off. An unreadable or unrecognised
+stored value falls back to **online** — a corrupted row must not look like a
+switched-off bot.
+
+* The state changes only through `admin_service.execute`, like every other
+  administrative act, and needs `nexus.control` — held by the owner alone.
+* `nexus.set_state` deliberately contains **no** permission check. The authority
+  is in the service, and a second check here would be a second authority model.
+* Every transition is audited (`nexus.offline` / `nexus.online`).
+* While offline, the AI interface is refused at the execution layer
+  (`OUTCOME_NEXUS_OFFLINE`), so a tool turn already in flight when the owner
+  switched off cannot still act. The typed commands are **not** refused:
+  switching the assistant off must not switch moderation off with it.
+
+There are two ways back, and the first is deliberately dumb:
+
+* **Spoken**, by the owner: «نکسوس روشن شو», «نکسوس برگرد», "nexus come back
+  online". Matched as whole words against a fixed phrase list, because it must
+  work when the model is not being consulted at all. A negation anywhere
+  («خاموش نشو») or a contradiction (both directions) resolves to *nothing* and
+  the owner is expected to use `/nexus on` — refusing to guess is the correct
+  behaviour for a switch that changes whether the bot speaks.
+* **Typed**: `/nexus on`, `/nexus off`, `/nexus status`. No model, no key, no
+  allowance.
+
+A bare «خاموش شو» with no name and no reply is **not** a state command: it is
+ordinary conversation, and the bot stays on. `test_the_owner_state_phrase_needs_the_name_or_an_address`
+pins that.
+
+### 34.7 Natural-language administration and target resolution
+
+Administration is not a list of exact sentences. The model receives the eight
+write tools of §29 plus two read tools that make a natural-language target
+resolvable:
+
+* `resolve_person(name)` — turns a spoken name into a numeric id, or into
+  `ambiguous` with candidates, or into `unknown`. It never guesses.
+* `resolve_reply_target()` — the id of the person replied to, from the trusted
+  context the server built.
+
+The trusted-context block tells the model, explicitly, that it may act only on
+the ids it was given and must ask when a target is not identified by an id. The
+server tells it *who the actor is*, *what role they hold*, and *whether they are
+an authorized Nexus administrator* — all from server state, none of it
+assertable by the person typing. A message claiming ownership is a claim, and
+the block says so.
+
+### 34.8 Identity memory resolves; it never authorises
+
+`app/people.py` records name metadata — first name, last name, username,
+timestamps, a message *count* — for people who speak in a monitored group. Three
+rules, each of them a refusal:
+
+* **It grants nothing.** A row is written for every speaker, including people
+  with no role at all. Authority is resolved from the Telegram id in
+  `app/rbac.py`. There is no function in `people.py` that returns a permission.
+* **It never guesses.** Matching is an exact, normalised comparison — never a
+  similarity score, never a prefix. Two people called Milad produce
+  `ambiguous` with the candidates attached, and the model is required to ask.
+  Returning the most likely candidate would be the most dangerous thing this
+  module could do, because the consequence is a ban on the wrong person.
+* **It stores no conversation.** The schema has no column that can hold a
+  message; `message_count` is an integer and is named for what it is.
+
+Normalisation is the part that has to be right for the matching to be useful:
+Persian is written with two letters for the same sound (`ي`/`ی`, `ك`/`ک`), with
+optional diacritics, with Arabic-Indic digits, and with a zero-width non-joiner
+that a reader does not see. `people.normalize` folds all of it, so «ميلاد» and
+«میلاد» resolve to the same person. Queries shorter than three characters are
+refused outright: «بن» is a verb.
+
+### 34.9 The `admin` role, and the one permission nobody can be given
+
+Two additions to the RBAC vocabulary (§25):
+
+* **`admin`** — level 50, between `moderator` and `senior_admin`: a moderator
+  who may also ban. It deliberately carries neither `admins.manage` nor
+  `config.manage`, so "make this person an admin" is not a way to hand out the
+  authority to mint other administrators. Only the owner may create one
+  (`GRANTABLE_ROLES`), because an admin may ban.
+* **`nexus.control`** — in **no** role bundle. It is therefore held by the owner
+  and by nobody else, and it is inexpressible in a grant: `authorize_grant`
+  bounds a permission set by the role's own bundle, so there is no combination
+  of role and permissions that can express it. "An administrator who can silence
+  the assistant" is not refused; it cannot be asked for. `OWNER_ONLY_PERMISSIONS`
+  records the intent, and the suite asserts that no bundle carries it.
+
+`nexus.control` is appended **last** in `PERMISSIONS` on purpose: that tuple is
+the wire format of the promotion dialog's permission bitmask, and inserting
+anywhere else would renumber every existing bit in a dialog that may already be
+open in somebody's Telegram client.
+
+### 34.10 AI resource protection
+
+The order of the gate is also the resource policy. Before any model call:
+
+1. the sender's identity is resolved from the id;
+2. their role is resolved from `rbac`;
+3. the runtime state is read;
+4. the message is tested against the relevance gate.
+
+Steps 1–3 are dictionary lookups and step 4 is a set membership test. An
+unauthorized message is refused at step 2 and never reaches Gemini at all. An
+irrelevant unaddressed message from an administrator is refused at step 4, and
+is recorded as context instead — a database write, not an API call. Only an
+addressed message, or an unaddressed one that names a moderation verb, is worth
+a conversational request.
+
+Nexus adds **no** counter, no workload and no pool of its own. The five
+workloads of §28 are unchanged, and the conversational allowance is still the
+`chat` counter in its own table, per account.
+
+### 34.11 Privacy and retention
+
+Four separate stores, deliberately not one memory:
+
+| store | contents | bound |
+|---|---|---|
+| authority | `admins` table, `OWNER_USER_ID` | explicit, small |
+| identity | `people`: names, usernames, timestamps, a count | `NEXUS_PEOPLE_MAX`, `NEXUS_PEOPLE_RETENTION` |
+| conversation | `chat_history`, keyed `(chat_id, user_id)` | `GEMINI_CHAT_HISTORY_TURNS`, `GEMINI_CHAT_HISTORY_TTL` |
+| audit | `admin_audit`: ids, action, outcome, interface | `ADMIN_ACTIVITY_RETENTION` |
+
+They are separate so that one person's private context cannot leak into
+another's prompt: observation writes to the *speaker's own* `(chat_id, user_id)`
+row, which is the same row the model is shown for that speaker and no other.
+`test_observation_keeps_one_administrator_out_of_another_context` drives that.
+
+No store contains a message body except the conversation history, which is
+bounded and TTL-pruned. No store contains a credential, and nothing in this
+section can render one.
+
+### 34.12 Tests
+
+`tests/test_nexus.py` (127 tests) covers the brief's list as eight groups:
+
+* **Identity** — owner by id, authorized admin, ordinary member refused,
+  username cannot impersonate, model cannot assert an identity through a tool
+  call, the trusted context states the actor's real role.
+* **Routing** — owner and admin reach Nexus without replying; an ordinary member
+  cannot reach it by reply, mention, or wording; an unaddressed admin message is
+  observed without a reply; an unaddressed instruction that *runs* gets its
+  confirmation and appears in the audit trail.
+* **Context** — reply-target resolution, Persian-name resolution, ambiguity
+  requires clarification, the id stays authoritative across a rename, the
+  observed context is bounded, contexts do not leak between administrators.
+* **Commands** — every documented operation, Persian and English variants, and a
+  context-dependent command driven end to end from a reply.
+* **State** — ONLINE/OFFLINE, owner disable and re-enable by words and by
+  `/nexus`, persistence across a restart, a corrupted row does not come up
+  offline, no administrator or member can change it, every transition is audited.
+* **Security** — owner protection, peer hierarchy, the AI interface cannot
+  bypass RBAC, replay, idempotency, bad targets, the bot as target, a Telegram
+  right the bot lacks, a Telegram failure reported rather than faked, and a
+  cross-chat request that cannot be forged through a tool call.
+* **AI isolation** — an irrelevant or unauthorized message costs no model call,
+  observation costs no model call, Nexus imports neither the pool nor any other
+  workload, the acquisition boundary is unchanged, all five pool workloads
+  remain, the chat allowance is still its own counter.
+* **Regression and wiring** — the handlers are registered non-blocking, the
+  state is loaded and the visibility report is run at startup, `/nexus` works,
+  and the state phrases behave.
+
+`tests/test_db_migration.py` additionally proves the two new tables are created
+on an existing database without a migration step, and that the existing rows
+survive.
+
+### 34.13 Configuration
+
+`NEXUS_ACTORS_ONLY` (default true), `NEXUS_NAMES`, `NEXUS_OBSERVE_ADMINS`,
+`NEXUS_EXTRA_ACTION_WORDS`, `NEXUS_PEOPLE_ENABLED`, `NEXUS_PEOPLE_MAX`,
+`NEXUS_PEOPLE_RETENTION`, `NEXUS_PEOPLE_MAX_CANDIDATES`, and the Persian copy for
+the two state transitions and the status report. Each is documented in
+`.env.example`.
+
+`NEXUS_ACTORS_ONLY=true` is a behaviour change from the version before this
+section: the assistant used to answer any member who addressed it directly. It
+now answers authorized administrators only, and a member's message costs one
+dictionary lookup. Setting it to `false` restores the earlier behaviour and
+still changes nothing about what an *action* requires.

@@ -69,9 +69,33 @@ PERMISSIONS = (
     # listed so an administrator can be created who may run the read-only
     # commands and nothing else, without a special case in the handler.
     "commands.use",
+    # Turn the conversational layer (Nexus) on and off.
+    #
+    # This is the one permission that is deliberately in **no** role bundle, so
+    # it is held by the owner and by nobody else. The reason is the same one
+    # that keeps the owner out of the `admins` table: switching Nexus off is a
+    # control over the bot's own behaviour rather than an action inside a group,
+    # and "an administrator who can silence the assistant" is a capability with
+    # no legitimate day-to-day use. Because no role carries it,
+    # ``authorize_grant`` refuses to hand it out even to the owner's own
+    # promotion dialog — there is no combination of role and permission set that
+    # can express it.
+    #
+    # Appended last on purpose: ``PERMISSIONS`` is the wire format of the
+    # promotion dialog's permission bitmask (``main._MASK_PERMISSIONS``), and
+    # inserting anywhere else would renumber every existing bit in a dialog that
+    # may already be open in somebody's Telegram client.
+    "nexus.control",
 )
 
 PERMISSION_SET = frozenset(PERMISSIONS)
+
+# The permissions no role may carry. Asserted against ``ROLE_PERMISSIONS`` in the
+# test suite rather than enforced by a filter here, because a filter would make
+# the omission silent: this list exists so that "nexus.control is owner-only" is
+# a checked property of the tables below rather than a fact somebody has to
+# notice while editing them.
+OWNER_ONLY_PERMISSIONS = frozenset({"nexus.control"})
 
 # The permission implied by every other one. Held by every principal, including
 # a guest, so a handler never has to special-case it.
@@ -83,6 +107,7 @@ BASE_PERMISSION = "commands.use"
 # to their own (the owner is the exception, and is handled by id, not by level).
 ROLE_OWNER = "owner"
 ROLE_SENIOR_ADMIN = "senior_admin"
+ROLE_ADMIN = "admin"
 ROLE_MODERATOR = "moderator"
 ROLE_HELPER = "helper"
 ROLE_GUEST = "guest"
@@ -90,6 +115,7 @@ ROLE_GUEST = "guest"
 ROLE_LEVELS = {
     ROLE_OWNER: 100,
     ROLE_SENIOR_ADMIN: 60,
+    ROLE_ADMIN: 50,
     ROLE_MODERATOR: 40,
     ROLE_HELPER: 20,
     ROLE_GUEST: 0,
@@ -97,6 +123,12 @@ ROLE_LEVELS = {
 
 # What each assignable role carries. `owner` is absent on purpose: it is not
 # assignable, so there is no bundle to look up.
+#
+# `admin` sits between `moderator` and `senior_admin` and is the role the brief
+# calls "Admin": a moderator who may also ban. It deliberately does **not**
+# carry `admins.manage` or `config.manage`, so "make this person an admin" is
+# not a way to hand out the authority to mint other administrators — that is
+# what `senior_admin` is, and only the owner may create one.
 ROLE_PERMISSIONS = {
     ROLE_HELPER: frozenset({BASE_PERMISSION, "moderation.review", "moderation.warn"}),
     ROLE_MODERATOR: frozenset(
@@ -106,6 +138,16 @@ ROLE_PERMISSIONS = {
             "moderation.warn",
             "moderation.delete",
             "moderation.mute",
+        }
+    ),
+    ROLE_ADMIN: frozenset(
+        {
+            BASE_PERMISSION,
+            "moderation.review",
+            "moderation.warn",
+            "moderation.delete",
+            "moderation.mute",
+            "moderation.ban",
         }
     ),
     ROLE_SENIOR_ADMIN: frozenset(
@@ -127,10 +169,13 @@ ROLE_PERMISSIONS = {
 # of the permission-subset rule below, because they catch different mistakes:
 # the subset rule stops "grant something you do not hold", and this stops
 # "create a peer". A senior admin can build the moderation team; only the owner
-# can build another senior admin.
+# can build another senior admin — and only the owner can create an `admin`,
+# because an admin may ban and a senior admin's own grant list deliberately
+# stops one rung lower.
 GRANTABLE_ROLES = {
-    ROLE_OWNER: (ROLE_HELPER, ROLE_MODERATOR, ROLE_SENIOR_ADMIN),
+    ROLE_OWNER: (ROLE_HELPER, ROLE_MODERATOR, ROLE_ADMIN, ROLE_SENIOR_ADMIN),
     ROLE_SENIOR_ADMIN: (ROLE_HELPER, ROLE_MODERATOR),
+    ROLE_ADMIN: (),
     ROLE_MODERATOR: (),
     ROLE_HELPER: (),
     ROLE_GUEST: (),
@@ -150,10 +195,12 @@ PERMISSION_LABELS = {
     "admins.manage": "مدیریت مدیرها",
     "config.manage": "تغییر تنظیمات ربات",
     "commands.use": "استفاده از دستورهای ربات",
+    "nexus.control": "روشن/خاموش کردن نکسوس",
 }
 ROLE_LABELS = {
     ROLE_OWNER: "مالک",
     ROLE_SENIOR_ADMIN: "مدیر ارشد",
+    ROLE_ADMIN: "مدیر",
     ROLE_MODERATOR: "ناظر",
     ROLE_HELPER: "کمک‌ناظر",
     ROLE_GUEST: "کاربر",
@@ -211,6 +258,11 @@ PERMISSION_TELEGRAM_RIGHT = {
     "moderation.warn": None,
     "moderation.review": None,
     "commands.use": None,
+    # Controlling the bot's own conversational layer is not a Telegram
+    # capability at all. There is no right to turn on, and saying so here keeps
+    # the promotion dialog honest: it marks this permission as application-only
+    # rather than offering to tick a Telegram box that does not exist.
+    "nexus.control": None,
 }
 
 # Rights the bot must itself hold before it can grant them to somebody else.
@@ -245,6 +297,11 @@ REASON_CANNOT_GRANT_PERMISSION = "cannot_grant_permission"
 REASON_UNKNOWN_ROLE = "unknown_role"
 REASON_SELF_TARGET = "self_target"
 REASON_BAD_TARGET = "bad_target"
+# Not an authority failure. The actor may hold every permission the action
+# needs; the *system* is in a state where the request cannot be honoured. It
+# lives in this vocabulary anyway because it is a refusal with a reason, and a
+# second place to keep reasons would be a second place for them to drift.
+REASON_NEXUS_OFFLINE = "nexus_offline"
 
 
 @dataclass(frozen=True)
