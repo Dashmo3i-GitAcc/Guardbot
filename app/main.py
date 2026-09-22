@@ -77,19 +77,28 @@ _bursts = burst.BurstTracker(
     max_items=config.BURST_MAX_ITEMS,
 )
 
+# The two permission objects a restriction is expressed with.
+#
+# ``MUTED`` names one field and relies on a Bot API rule: an unspecified field in
+# ``ChatPermissions`` means *false*, so a mute that mentions only
+# ``can_send_messages`` is a total mute. That is the intent, and it is written
+# down here because the rule is invisible in the code — filling in the other
+# fields "for completeness" would turn every mute into a mute that still allows
+# media.
 MUTED = ChatPermissions(can_send_messages=False)
-FULL = ChatPermissions(
-    can_send_messages=True,
-    can_send_audios=True,
-    can_send_documents=True,
-    can_send_photos=True,
-    can_send_videos=True,
-    can_send_video_notes=True,
-    can_send_voice_notes=True,
-    can_send_polls=True,
-    can_send_other_messages=True,
-    can_add_web_page_previews=True,
-)
+#
+# ``FULL`` is the opposite operation and must name *every* field, because the same
+# rule cuts the other way: an omitted field is set to false, so an "unmute" built
+# from a partial list writes a restriction that keeps those permissions denied.
+# This was a live bug. ``FULL`` listed the ten sending permissions and omitted
+# ``can_change_info``, ``can_invite_users``, ``can_pin_messages`` and
+# ``can_manage_topics``; Telegram then reported every unmuted member as
+# ``restricted`` for good, because ``restrict_chat_member`` without ``until_date``
+# makes the record permanent. The Bot API documentation for that method is
+# explicit — "Pass True for all permissions to lift restrictions from a user" —
+# and ``ChatPermissions.all_permissions()`` is exactly that sentence, and cannot
+# fall behind the API the way a hand-written list did.
+FULL = ChatPermissions.all_permissions()
 
 # ── The bot's own identity ────────────────────────────────────────────────
 # Resolved from Telegram at startup with getMe, plus the operator's configured
@@ -3126,6 +3135,16 @@ class TelegramGateway:
         order to explain a situation, not handed the whole ``ChatMember``
         object, which carries fields it has no use for and should not be
         encouraged to reason about.
+
+        ``is_muted`` exists because ``telegram_status`` alone was ambiguous and
+        the ambiguity had a cost. Telegram keeps a member in ``restricted``
+        status for as long as *any* per-member permission is denied — including
+        ones an ordinary person never notices, like ``can_pin_messages``. A model
+        told only "restricted" concludes the person is still silenced, and this
+        one did: it reported them as restricted and called ``unmute_member``
+        again, twice, for a member who could already talk. ``is_muted`` answers
+        the question the tool actually advertises — can this person speak —
+        instead of leaving it to be inferred from a permission field.
         """
         try:
             member = await self.bot.get_chat_member(chat_id, user_id)
@@ -3140,15 +3159,20 @@ class TelegramGateway:
             for right in rbac.TELEGRAM_RIGHTS
             if hasattr(member, right)
         }
+        # A member with no `can_send_messages` attribute is not restricted at
+        # all; one whose attribute is False is silenced. `kicked` has no such
+        # attribute and cannot speak either, which is why it is named here.
+        can_send = getattr(
+            member, "can_send_messages", name not in ("restricted", "kicked")
+        )
         return {
             "user_id": int(user_id),
             "telegram_status": name or str(status),
             "is_telegram_admin": name in ("administrator", "creator"),
             "custom_title": getattr(member, "custom_title", "") or "",
             "is_member": bool(getattr(member, "is_member", name != "left")),
-            "can_send_messages": getattr(
-                member, "can_send_messages", name not in ("restricted", "kicked")
-            ),
+            "can_send_messages": can_send,
+            "is_muted": (not can_send) if name in ("restricted", "kicked") else False,
             "telegram_rights": sorted(k for k, v in rights.items() if v),
         }
 

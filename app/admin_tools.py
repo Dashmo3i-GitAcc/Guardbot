@@ -413,7 +413,12 @@ TOOLS: dict[str, ToolSpec] = {
         name="get_member_status",
         description=(
             "Look up whether one member is currently restricted, banned, an "
-            "administrator, or an ordinary member, according to Telegram."
+            "administrator, or an ordinary member, according to Telegram. "
+            "`is_muted` is the field that answers whether they can speak: a "
+            "member can read as `restricted` while still able to send messages, "
+            "because Telegram keeps that status for any denied permission. Do "
+            "not treat `restricted` alone as \"silenced\", and do not unmute "
+            "somebody whose `is_muted` is false."
         ),
         kind=KIND_READ,
         parameters=(("user_id", "INTEGER", "Numeric Telegram user id to look up."),),

@@ -225,6 +225,10 @@ side effect of another change.
   itself, so there is no reaper. `MUTE_MINUTES=0` means no automatic expiry.
   The unit is **minutes**: the old `MUTE_HOURS` (24) is no longer read, and a
   leftover `MUTE_HOURS` in a live `.env` must stay inert.
+- The operator commands *do* have `unmute`, and it is the one operation that
+  lifts a restriction — which is why its permission set has to be complete. It
+  was not, and it left members permanently restricted; see §33.1. That section
+  is required reading before touching `MUTED` or `FULL`.
 - There is **no ban and no permanent punishment**. Do not add one.
 - One confirmed explicit deletion is one violation, recorded through the
   existing `db.add_strike` / `users.strikes` (do not add a second violation
@@ -3242,6 +3246,75 @@ The `source` argument (`text`, `filter`) is what makes the ladder's decisions
 attributable in the log without the ladder needing to know what a filter is. The
 callers are the text-moderation path and `on_group_filter` (§32).
 
+### 33.1 The two permission sets, and the unmute that was not one
+
+A restriction is expressed with a `ChatPermissions` object, and the Bot API rule
+that governs it is the trap: **an unspecified field means false.** Both constants
+live at the top of `main.py` and they are affected in opposite directions.
+
+`MUTED` names one field — `can_send_messages=False` — and relies on that rule, so
+it is a total mute. That is intended. It is written down because the reliance is
+invisible: filling in the other fields "for completeness" would turn a mute into
+a mute that still allows media.
+
+`FULL` is the opposite operation and must name **every** field, because the same
+rule cuts the other way. This was a live bug. `FULL` listed the ten sending
+permissions and omitted `can_change_info`, `can_invite_users`, `can_pin_messages`
+and `can_manage_topics`. So `gateway.unmute` — which calls
+`restrict_chat_member(permissions=FULL)` with **no `until_date`**, making the
+record permanent — wrote a restriction that kept those four denied, and Telegram
+reported every unmuted member as `restricted` for good.
+
+Measured against the live group: of nine members the bot had muted, the one that
+was never unmuted read as `member` (its timed mute had expired on its own) and
+all eight that were unmuted read as `restricted`. The bot's own unmute was what
+made the restriction permanent.
+
+`FULL` is now `ChatPermissions.all_permissions()`, which is the Bot API
+documentation's own sentence for this operation — "Pass True for all permissions
+to lift restrictions from a user" — and cannot fall behind the API the way a
+hand-written list did. One constant fixes both places that lift a restriction:
+`gateway.unmute` and `_test_unrestrict_job`.
+
+**The second half of the bug was the reporting, and it is why the first half
+turned into repeated actions.** Telegram keeps a member in `restricted` status
+for as long as *any* per-member permission is denied — including one an ordinary
+person never notices, like `can_pin_messages`. `member()` faithfully relayed
+`telegram_status: restricted`, and `get_member_status` handed that to the model,
+which concluded the person was still silenced and called `unmute_member` again.
+One member was unmuted three times, 97 seconds and then 182 seconds apart.
+
+The payload now carries `is_muted`: the answer to the question the tool actually
+advertises — can this person speak — rather than leaving it to be inferred from a
+permission field. The tool description says what the distinction is and says not
+to unmute somebody whose `is_muted` is false. The payload's `telegram_rights`
+was no help here and never could have been: it is built from
+`rbac.TELEGRAM_RIGHTS`, which are *administrator* rights, and for a restricted
+member it is an empty list — the four denied fields share a name with
+administrator rights but are member permissions in that context, and the `if v`
+filter dropped them silently.
+
+Two things this fix deliberately does **not** do. It does not add a state cache:
+`get_member_status` asks Telegram live on every call and there is no column
+anywhere holding a restriction, so there is nothing to keep in sync — the stale
+state was on Telegram, written by this bot. And it does not reset `strikes`:
+strikes are the violation ladder (§33), cumulative by design, and clearing them
+on an unmute would make every mute a free reset.
+
+Members already stuck by the old code are not repaired by the fix; their
+restriction record still exists and each needs one more unmute.
+
+`tests/test_restriction_permissions.py` (22) pins it. The central test enumerates
+every field of `ChatPermissions` — read from the library, not written out — and
+asserts none of them is left denied, so a field added by a future Bot API fails
+the suite rather than silently reintroducing the bug. The four forgotten fields
+are also named individually, because a test that only checked the sending
+permissions is exactly the test that passed against the broken constant. The
+rest pins the calls (`unmute` complete and with no deadline, `mute` timed and
+granting nothing) and the reported status for a plain member, a restricted member
+who can still speak, a genuinely muted one, a banned one, an administrator and
+the owner.
+
 ## 34. Nexus: who may talk to the assistant, and what it may do about it
 
 "Nexus" is the name this project gives the conversational layer as a **role**:
@@ -6117,7 +6190,7 @@ three isolation properties: the stop, the deletion, and that a non-key message i
 left to the dispatcher.
 
 `tests/test_gemini_pool.py` gained the `reload`/`probe` seams; the whole suite is
-2038 passing.
+2060 passing.
 
 ### 50.12 Discoverability: the menu, and the button
 
