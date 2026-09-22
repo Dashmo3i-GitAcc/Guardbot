@@ -2167,3 +2167,52 @@ GEMINI_POOLS = [
         "daily_budget": max(1, NEXUS_AWARENESS_DAILY_LIMIT),
     },
 ]
+
+# ── Credentials the owner may manage from Telegram ────────────────────────
+#
+# The pool reads the environment at boot. These settings are for the other
+# direction: giving one workload a new key without editing `.env` and
+# restarting. `app/key_store.py` holds the store itself; what lives here is
+# where it goes and who is allowed to change it.
+#
+# The path is inside the data volume on purpose. `docker-compose.yml` mounts
+# `./data` at `/data`, and that volume is what survives a container rebuild —
+# a store anywhere else would lose every runtime credential the first time the
+# image was rebuilt, which is precisely the failure this feature exists to
+# avoid. It is a separate file from the database so that a database copy taken
+# for support reasons is not also a keyring.
+GEMINI_KEY_STORE_PATH = os.getenv(
+    "GEMINI_KEY_STORE_PATH", "/data/gemini_keys.json"
+)
+
+# Which workloads may have credentials added or removed from Telegram. The
+# three whose keys the owner is actually rotating, and no others.
+#
+# This is a closed set rather than a setting. `moderation`, `transcribe` and
+# `tts` are deliberately absent: they are reachable read-only in the dashboard
+# so nothing is hidden, but a callback payload that names one of them is
+# refused by `key_store.is_managed` regardless of who sent it. An environment
+# variable here would let a typo widen the set, and the set is the whole of the
+# write surface.
+GEMINI_KEY_MANAGED_WORKLOADS = frozenset({"chat", "awareness", "intent"})
+
+# How long a "send me the key now" prompt stays armed. Long enough to switch
+# apps and copy the key, short enough that a prompt the owner walked away from
+# is not still waiting to swallow the next thing they type.
+GEMINI_KEY_ADD_TTL_SECONDS = _int("GEMINI_KEY_ADD_TTL_SECONDS", 300)
+
+# The deadline for the one verification call made before a key is stored. It
+# lists models rather than generating anything, so it costs no generation quota
+# — but it is still a network round trip, and this is the bound on it.
+GEMINI_KEY_PROBE_TIMEOUT_SECONDS = _float(
+    "GEMINI_KEY_PROBE_TIMEOUT_SECONDS", 15.0
+)
+
+# How many runtime credentials one workload may hold. A ceiling rather than a
+# target: it stops a loop that adds a key per request from growing the store
+# without bound, and it is well above what a deployment needs.
+GEMINI_KEY_MAX_PER_WORKLOAD = _int("GEMINI_KEY_MAX_PER_WORKLOAD", 10)
+
+# The owner's command. Named for what it manages rather than for the provider,
+# so it reads the same way `/pool` does.
+GEMINI_KEYS_COMMAND = os.getenv("GEMINI_KEYS_COMMAND", "keys").strip().lstrip("/")

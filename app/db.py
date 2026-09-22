@@ -1593,13 +1593,25 @@ def pool_event_add(
         return int(cur.lastrowid)
 
 
-def pool_events(limit: int = 20) -> list[dict]:
-    """The newest pool events, newest first. For diagnostics, not for sending."""
+def pool_events(limit: int = 20, workload: str | None = None) -> list[dict]:
+    """The newest pool events, newest first. For diagnostics, not for sending.
+
+    ``workload`` narrows the list to one workload's transitions. It is optional
+    and defaults to None, which is the unfiltered read every existing caller
+    already gets — the owner's dashboard asks per workload, and a report that
+    mixed four workloads' failovers into one list would be unreadable exactly
+    when it is needed.
+    """
+    args: tuple = ()
+    where = ""
+    if workload is not None:
+        where = " WHERE workload=?"
+        args = (str(workload),)
     with _lock:
         rows = _conn.execute(
             "SELECT id, at, workload, kind, slot, model, reason, detail "
-            "FROM gemini_events ORDER BY id DESC LIMIT ?",
-            (max(1, int(limit)),),
+            "FROM gemini_events" + where + " ORDER BY id DESC LIMIT ?",
+            (*args, max(1, int(limit))),
         ).fetchall()
     names = ("id", "at", "workload", "kind", "slot", "model", "reason", "detail")
     return [dict(zip(names, row)) for row in rows]

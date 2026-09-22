@@ -63,7 +63,7 @@ import random
 import re
 import time
 
-from . import config, db
+from . import config, db, key_store
 
 log = logging.getLogger("guardbot.pool")
 
@@ -482,6 +482,27 @@ def mask(key: str) -> str:
     return f"****{tail}" if tail else "****"
 
 
+def redact(text: str, *keys: str) -> str:
+    """Remove any of these credentials from a string.
+
+    Provider error bodies are parsed and stored, and the pool's rule is that a
+    credential never reaches a log, a table or a Telegram message. Most of the
+    errors Google returns quote nothing but the status; the ones that quote the
+    request are exactly the ones worth being careful about, and a key that
+    appeared in a "last error" field would be rendered on the owner's dashboard
+    on every refresh.
+
+    So every detail that leaves a provider call goes through here first. It is
+    cheap, it is unconditional, and it does not depend on knowing which errors
+    are talkative.
+    """
+    out = str(text)
+    for key in keys:
+        if key:
+            out = out.replace(key, "[redacted]")
+    return out
+
+
 # ── Account ───────────────────────────────────────────────────────────────
 class Account:
     """One credential's state within one workload.
@@ -898,6 +919,7 @@ class ModelState:
         self.save()
 
     def describe(self) -> dict:
+        """Everything safe to show the owner about this model. No credential."""
         return {
             "model": self.name,
             "state": self.state,
@@ -907,6 +929,11 @@ class ModelState:
             "rate_limits": self.rate_limits,
             "quota_events": self.quota_events,
             "cooldown_until": self.cooldown_until,
+            # Added for the owner's per-model screen, which asks "when was this
+            # last used" — the one question the account's own counters cannot
+            # answer, because a model can sit unused for days inside an account
+            # that is busy on a different model.
+            "last_use": self.last_use,
         }
 
 
@@ -1375,6 +1402,63 @@ def reset_clients() -> None:
     _clients.clear()
 
 
+async def probe_credential(
+    key: str, *, timeout: float | None = None
+) -> tuple[bool, str, str]:
+    """Check that one credential works, without generating anything.
+
+    Returns ``(ok, kind, detail)``. When ``ok`` is False, ``kind`` is the same
+    failure vocabulary :func:`classify_error` produces, so the caller can tell
+    "the provider says this key is not valid" apart from "the provider could not
+    be reached" and say so in words a human can act on.
+
+    Why ``models.list`` rather than a one-token generation: it answers the only
+    question worth asking — does this credential authenticate against this API —
+    and it consumes no generation quota, which matters because the whole point of
+    adding a key is that the existing ones are running out. It is the same call
+    model discovery already makes.
+
+    The client is built directly rather than through :func:`client_for`, and
+    that is deliberate: the cache is keyed by fingerprint and lives for the
+    process's lifetime, so caching here would keep a rejected credential's
+    client alive for as long as the bot runs.
+
+    The detail is redacted. An error body is the one place a credential could
+    plausibly be echoed back, and this string is stored and rendered.
+    """
+    if not key:
+        return False, "invalid_credential", "no credential"
+    deadline = max(
+        config.MIN_GEMINI_DEADLINE_SECONDS,
+        float(
+            config.GEMINI_KEY_PROBE_TIMEOUT_SECONDS
+            if timeout is None
+            else timeout
+        ),
+    )
+    try:
+        client, _types = build_client(key, deadline)
+    except asyncio.CancelledError:
+        raise
+    except PoolUnavailable as exc:
+        return False, exc.kind, redact(exc.detail, key)
+    except BaseException as exc:  # noqa: BLE001 - any failure is one fact
+        failure = classify_error(exc)
+        return False, failure.kind, redact(failure.detail, key)
+    try:
+        names = await _list_models(client)
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any failure is one fact
+        failure = classify_error(exc)
+        return False, failure.kind, redact(failure.detail, key)
+    if not names:
+        # Authenticated, but unable to serve any workload here. Storing it would
+        # put an account in the pool that fails on every request it is given.
+        return False, "unsupported_model", "the credential listed no usable model"
+    return True, "", f"{len(names)} models"
+
+
 # ── The one entry point ───────────────────────────────────────────────────
 async def generate(
     pool: Pool,
@@ -1706,13 +1790,34 @@ def build_pools() -> dict[str, Pool]:
 
     Called once at startup and once per reload. Safe to call again: it rebuilds
     from configuration, and the persisted state is re-adopted by each account.
+
+    The keys are the environment's list plus whatever the owner has added at
+    runtime, in that order. Environment slots come first so that a credential
+    configured at deployment time stays the primary one — the operator's
+    written-down choice is not silently demoted by something added later from a
+    phone.
+
+    ``key_store`` is consulted only for the workloads it is allowed to manage,
+    so the store cannot widen a workload that was never opened to it. A store
+    that cannot be read contributes nothing and says so in the log; it never
+    raises into the caller, because a credential file must not be able to stop
+    the bot from booting with the keys it does have.
     """
     global _pools
-    _pools = {}
+    # Built into a local dictionary and swapped in at the end, rather than
+    # cleared and refilled in place. The registry is read on every request, and
+    # a request that arrived between the clear and the last workload would find
+    # its pool missing and report the workload as having no account at all — a
+    # spurious outage, caused by the owner adding a key. The assignment is the
+    # commit: a reader sees either the old registry or the new one.
+    built: dict[str, Pool] = {}
     for spec in config.GEMINI_POOLS:
+        workload = spec["workload"]
+        keys = list(spec["keys"])
+        keys.extend(key_store.slots_for(workload))
         pool = Pool(
-            spec["workload"],
-            spec["keys"],
+            workload,
+            keys,
             spec["models"],
             spec["capabilities"],
             allow_experimental=spec["allow_experimental"],
@@ -1735,8 +1840,35 @@ def build_pools() -> dict[str, Pool]:
             # every other workload has always had.
             time_budget=spec.get("time_budget", 0.0),
         )
-        _pools[spec["workload"]] = pool
+        built[spec["workload"]] = pool
+    _pools = built
     return _pools
+
+
+def reload() -> dict[str, Pool]:
+    """Rebuild every pool, so a credential change takes effect now.
+
+    This is what makes the owner's dashboard a control plane rather than a
+    report. Every workload asks for its pool through :func:`pool_for` on each
+    request and reads this module's registry, so replacing the registry is the
+    whole of the update: the next message that needs an answer sees the new
+    account list, and no restart is involved.
+
+    The cached SDK clients are dropped first. They are keyed by fingerprint, so
+    a removed credential's client would otherwise sit in the cache for the
+    process's lifetime — harmless, since nothing would ask for it again, but
+    there is no reason to keep a credential in memory after the owner has said
+    to stop using it.
+
+    A request already in flight holds a reference to the old pool and finishes
+    against it. That is the intended behaviour rather than a gap: it is one
+    answer computed with the credentials that were valid when it started.
+    """
+    reset_clients()
+    pools = build_pools()
+    for line in startup_lines():
+        log.info("%s", line)
+    return pools
 
 
 # ── Retention ─────────────────────────────────────────────────────────────

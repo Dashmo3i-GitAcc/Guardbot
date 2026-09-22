@@ -5900,3 +5900,221 @@ each one is behind the signature check, that a lookup returns no `sub_url` and n
 `vless://`, that an unknown user is a 200 decision rather than an error, that a
 write is audited as `guardbot:<id>` under the right action, and that the write
 surface is closed when its kill switch is off.
+
+## 50. The owner's credential control plane
+
+Until now every Gemini credential came from `.env`. That is a good default — a
+secret in a file the process reads at boot is the easiest thing in the world to
+audit — but it made one operation impossible from where the owner actually is:
+giving a workload a new key meant editing `.env` on the host and restarting the
+container. `/keys` is the smallest thing that fixes that, and it is a control
+plane rather than a prettier `/pool` because it can *write*.
+
+### 50.1 What it is not
+
+It is not a second pool. There is one pool (`app/gemini_pool.py`), one registry,
+one set of counters, one events table. If a number on a dashboard screen
+disagrees with `/pool`, that is a bug in the dashboard and nothing else.
+
+It is not a web dashboard. It is Telegram inline keyboards, because that is where
+the owner is, and because a second HTTP surface with its own authentication is a
+much larger thing to get right than a callback handler behind the authority model
+that already exists.
+
+It is not a menu bolted onto `/pool`. `/pool` is a dump for somebody who already
+knows what they are looking at; these are the questions the owner actually asks,
+one at a time.
+
+### 50.2 Where a credential added from Telegram lives
+
+One file: `GEMINI_KEY_STORE_PATH`, default `/data/gemini_keys.json`, mode `0600`,
+inside the data volume so it survives a container rebuild.
+
+**It is plaintext on disk, and that is stated rather than dressed up.** The brief
+asked for no plaintext secrets, and the honest reading of that is: not in the
+database, not in the audit trail, not in a log line, not in a Telegram message,
+not in a rendered screen. Those are all true and all tested. Encryption at rest
+was the alternative and it was declined, deliberately:
+
+* SQLite cannot hold a value the process cannot read back, so "encrypted in the
+  database" means the decryption key is also in the environment — a lock with the
+  key taped to it;
+* the project has no existing at-rest secret mechanism, and the brief says not to
+  invent an encryption scheme casually;
+* the boundary that actually protects the credential is the file mode plus the
+  container, and that boundary is real and is asserted by a test.
+
+The database deliberately does not hold it because the database is the thing
+operators copy, back up and attach to support tickets. `gemini_accounts` keeps
+the `fingerprint` and the `masked` tail, exactly as it already did.
+
+### 50.3 The pool stays the single source of truth
+
+`build_pools()` reads the environment's key list and then appends whatever
+`key_store` has for that workload:
+
+```python
+workload = spec["workload"]
+keys = list(spec["keys"])
+keys.extend(key_store.slots_for(workload))
+```
+
+Environment slots come first, so a credential written down at deployment time
+stays the primary one and is not demoted by something added later from a phone.
+
+`gemini_pool.reload()` is what makes the dashboard a control plane: it drops the
+cached SDK clients and rebuilds the registry. Every workload asks for its pool
+through `pool_for()` on each request and reads that registry, so the next message
+that needs an answer already sees the new account list. No restart is involved,
+and there is no second copy of the account list to keep in step.
+
+A request already in flight holds a reference to the old pool and finishes
+against it. That is intended: it is one answer computed with the credentials that
+were valid when it started.
+
+### 50.4 Three workloads are writable, and the rest are not
+
+```python
+GEMINI_KEY_MANAGED_WORKLOADS = frozenset({"chat", "awareness", "intent"})
+```
+
+`moderation`, `transcribe` and `tts` appear in the dashboard read-only. They are
+visible so nothing is hidden; they are not writable because the owner is rotating
+three keys, not six, and a write surface that is larger than the job is a
+liability rather than a feature.
+
+This is a closed set rather than an environment variable on purpose: a typo in an
+env var could widen the write surface, and the set *is* the write surface.
+`key_store.is_managed` refuses every write for a workload outside it, and
+`key_store.slots_for` returns nothing for one — so even a hand-edited store file
+containing a `moderation` row cannot widen moderation's pool. Both directions are
+tested.
+
+### 50.5 The entry flow, and the isolation guarantee
+
+Adding a key is the one operation that cannot be a callback, because a callback
+payload cannot carry a secret. The flow is:
+
+1. the owner presses **➕ افزودن کلید** on a workload screen;
+2. in a **private chat** the prompt is armed (`gemini_keys.begin_add`); in a group
+   it is refused, because a key typed into a group has already been published;
+3. the owner sends the key as a plain message;
+4. `on_key_message` deletes that message, answers, and hands the verification to a
+   task;
+5. the task verifies, stores, calls `gemini_pool.reload()`, and edits the notice
+   with the result.
+
+The handler is registered in **group 0**, ahead of the assistant's private-chat
+handler in group 2, and it raises `ApplicationHandlerStop` once it has taken the
+message. That is the isolation requirement and it is structural rather than a
+convention: `app/main.py`'s `on_private_text` would otherwise hand a pasted key to
+the conversational model, and the only way to prevent that reliably is to stop the
+update before that group runs. `tests/test_gemini_keys.py` asserts the stop, not
+just the deletion.
+
+The verification is **not awaited in the handler**. `models.list` is a network
+round trip; a handler that blocked for fifteen seconds would stop every other
+update in the bot. The handler returns immediately and the work runs as its own
+task.
+
+Three guards keep the handler from interfering with ordinary private chat:
+
+* it returns unless the sender is the owner;
+* it returns unless a prompt is armed for that owner, and a prompt expires after
+  `GEMINI_KEY_ADD_TTL_SECONDS`;
+* a message that is plainly conversation — anything with a space in it, or under
+  twenty characters — is left alone *and the prompt stays armed*. A prompt that
+  hijacked the next thing the owner typed would be worse than one that expired.
+
+A single long token that is not a credential is answered with
+`TEXT_ADD_BAD_SHAPE` and is not consumed, because otherwise a mistyped key looks
+exactly like nothing happening.
+
+### 50.6 Authority is re-decided on every press
+
+`cmd_keys` and `on_key_callback` both resolve the actor with `rbac.resolve` and
+refuse unless `is_owner`, before the payload is parsed. `key_store` then refuses
+the workload as well. A crafted payload can therefore choose *which screen opens*
+— a workload name and a slot that must already exist — and nothing else. A
+non-owner's press is audited as `keys.view` with a refusal outcome, exactly like
+every other refused administrative action.
+
+### 50.7 A credential is verified before it is stored
+
+`gemini_pool.probe_credential` calls `models.list` — the same call model discovery
+already makes. It authenticates the credential and consumes no generation quota,
+which matters because the whole point of adding a key is that the existing ones
+are running out.
+
+The result splits two ways, and the caller says which:
+
+| provider said | stored? | what the owner is told |
+|---|---|---|
+| the key is not valid (`invalid_credential`) | no | سرویسدهنده این کلید را نامعتبر میداند |
+| no usable model (`unsupported_model`) | no | این کلید به هیچ مدل قابل استفادهای دسترسی ندارد |
+| rate-limited, quota, 5xx, timeout, network | no | the reason, in words, and "try again" |
+
+Nothing is stored on a failure. That is fail-closed, and it is the direction the
+rest of this project already fails in: an unverifiable credential is not a
+credential. The client is built with `build_client` rather than `client_for`, so a
+rejected key's client is never left in the process-lifetime cache — asserted by a
+test.
+
+### 50.8 What the numbers on the screens mean
+
+The usage screen states this outright rather than leaving it to be inferred:
+
+* every number is a **provider request**, not a user message. One logical request
+  may be tried on several models and several accounts and each attempt is counted,
+  so "requests" can exceed "answers". This is the same distinction that produced
+  the "75% failure" misreading of the intent workload — see §28.13.
+* **token usage is not tracked**, and no number is invented for it. The provider
+  does not publish token counts for these keys, and a number that is not a
+  measurement is worse than a stated absence.
+* **remaining quota and reset times** are shown only when an error response
+  actually carried them, which is the rule the pool has always followed.
+
+### 50.9 What never appears anywhere
+
+* the database — asserted by dumping the audit rows and the account rows after a
+  real add;
+* `admin_audit` — the row carries `workload/slot` and the masked tail;
+* any log line — `Entry.key` is `repr=False` so a future `log.info("%s", entry)`
+  cannot leak it, and the store logs only `slot` and `masked`;
+* any screen — asserted for every screen with a credential in the pool;
+* the probe's error detail — redacted through `gemini_pool.redact`, because a
+  provider body is the one place a credential could plausibly be echoed back.
+
+### 50.10 Settings
+
+| variable | default | what it does |
+|---|---|---|
+| `GEMINI_KEY_STORE_PATH` | `/data/gemini_keys.json` | the credential file. Must be inside the data volume or a container rebuild loses it |
+| `GEMINI_KEY_ADD_TTL_SECONDS` | `300` | how long a "send me the key" prompt stays armed |
+| `GEMINI_KEY_PROBE_TIMEOUT_SECONDS` | `15` | the deadline on the one verification call |
+| `GEMINI_KEY_MAX_PER_WORKLOAD` | `10` | ceiling on runtime credentials per workload |
+| `GEMINI_KEYS_COMMAND` | `keys` | the command name |
+
+`GEMINI_KEY_MANAGED_WORKLOADS` is deliberately **not** a setting — see §50.4.
+
+Rollback needs no code change: deleting the store file returns every workload to
+its environment-only pool, which is exactly the behaviour before this section
+existed.
+
+### 50.11 Tests
+
+`tests/test_gemini_keys.py` (86) covers the store (shape, `0600`, atomicity,
+idempotence, the unmanaged-workload refusal, refusing to overwrite an unreadable
+file, concurrent writers, `repr` not rendering the credential), the pool wiring
+(runtime credentials joining and leaving the live pool, environment keys staying
+first, a store row unable to widen an unmanaged workload, a broken store not
+stopping `build_pools`, counters surviving a reload), the probe (valid, invalid,
+unreachable, no usable model, redaction, no cached client for a rejected key),
+every screen (rendering, length, no credential, the remove button only for
+runtime credentials, the empty-workload warning), the payload parser, the prompt
+lifecycle, and the handlers end to end — including the three isolation
+properties: the stop, the deletion, and that a non-key message is left to the
+dispatcher.
+
+`tests/test_gemini_pool.py` gained the `reload`/`probe` seams; the whole suite is
+2016 passing.

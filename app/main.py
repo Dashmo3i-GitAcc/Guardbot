@@ -44,7 +44,9 @@ from . import (
     config,
     db,
     decision,
+    gemini_keys,
     gemini_pool,
+    key_store,
     media,
     mod_policy,
     moderation,
@@ -3357,6 +3359,406 @@ async def cmd_pool(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ── The owner's Gemini key dashboard ──────────────────────────────────────
+#
+# A real control plane rather than a prettier `/pool`, and the difference is
+# that it can *write*. Three things keep that write surface small enough to
+# reason about:
+#
+#   1. it is owner-only, re-checked from the actor's Telegram id on every single
+#      press — never from the payload, which is fully attacker-controlled;
+#   2. it can only add or remove credentials for the three workloads
+#      `config.GEMINI_KEY_MANAGED_WORKLOADS` names, whatever a crafted callback
+#      asks for, because `key_store` refuses the rest;
+#   3. the only way to supply a credential is a private message to the owner,
+#      which is deleted on arrival and never reaches the assistant.
+#
+# Everything the screens show is a read of the pool that already exists. There
+# is no second source of truth for counters, states or events.
+_KEY_SCREENS = {
+    "home": lambda _first, _second: gemini_keys.overview(),
+    "w": lambda first, _second: gemini_keys.workload_view(first),
+    "a": lambda first, second: gemini_keys.account_view(first, second),
+    "m": lambda first, second: gemini_keys.models_view(first, second),
+    "u": lambda first, _second: gemini_keys.usage_view(first),
+    "e": lambda first, _second: gemini_keys.events_view(first),
+    "h": lambda first, _second: gemini_keys.daily_view(first),
+    "-": lambda first, second: gemini_keys.remove_prompt(first, second),
+    "i": lambda first, second: (
+        gemini_keys.TEXT_ENV_KEY_INFO,
+        [[("⬅️ بازگشت", f"{gemini_keys.PREFIX}a:{first}:{second}")]],
+    ),
+}
+
+
+def _keys_keyboard(rows) -> InlineKeyboardMarkup | None:
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(label, callback_data=data) for label, data in row]
+            for row in rows
+        ]
+    )
+
+
+async def _keys_edit(query, text: str, rows) -> None:
+    """Replace the screen in place, and always clear the loading spinner.
+
+    ``edit_message_text`` raises for a message that has not changed, which is the
+    normal outcome of pressing refresh twice. That must not leave the spinner
+    running, so the answer is sent either way.
+    """
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=_keys_keyboard(rows),
+            disable_web_page_preview=True,
+        )
+    except TelegramError as exc:
+        log.info("key screen edit failed: %s", exc)
+    try:
+        await query.answer()
+    except TelegramError:
+        pass
+
+
+async def cmd_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/keys` — the owner's Gemini credential and usage control plane.
+
+    Owner-only for the same reason `/pool` is: the report describes the
+    operator's own Google projects. This one additionally writes, so the check is
+    repeated on every callback rather than trusted from the command that opened
+    the screen.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    if not actor.is_owner:
+        _audit(actor.user_id, "keys.view", rbac.REASON_NOT_ADMIN, chat_id=room.id)
+        await _reply_in_group(
+            ctx, room.id, gemini_keys.TEXT_DENIED, reply_to=msg.message_id
+        )
+        return
+    _audit(actor.user_id, "keys.view", "ok", chat_id=room.id)
+    text, rows = gemini_keys.overview()
+    await _reply_in_group(
+        ctx, room.id, text, keyboard=_keys_keyboard(rows), reply_to=msg.message_id
+    )
+
+
+async def on_key_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """A press on the key dashboard.
+
+    Authorisation is decided here, from the presser's Telegram id, before the
+    payload is even parsed — and then again by ``key_store`` on the workload the
+    payload named. The payload can therefore choose *which* screen to open, and
+    nothing else.
+    """
+    query = update.callback_query
+    if query is None or not query.data or not query.data.startswith(
+        gemini_keys.PREFIX
+    ):
+        return
+    room = update.effective_chat
+    chat_id = getattr(room, "id", None)
+    actor = _actor(update)
+    if not actor.is_owner:
+        _audit(actor.user_id, "keys.view", rbac.REASON_NOT_ADMIN, chat_id=chat_id)
+        try:
+            await query.answer(gemini_keys.TEXT_DENIED)
+        except TelegramError:
+            pass
+        return
+
+    parsed = gemini_keys.parse(query.data)
+    if parsed is None:
+        try:
+            await query.answer(gemini_keys.TEXT_STALE)
+        except TelegramError:
+            pass
+        return
+    verb, first, second = parsed
+    private = str(getattr(room, "type", "") or "") == "private"
+
+    if verb == "x":
+        try:
+            await query.answer()
+            await query.delete_message()
+        except TelegramError:
+            pass
+        return
+
+    if verb == "+":
+        await _keys_begin_add(query, actor, first, chat_id, private)
+        return
+
+    if verb == "!":
+        await _keys_remove(query, actor, first, second, chat_id)
+        return
+
+    render = _KEY_SCREENS.get(verb)
+    if render is None:
+        try:
+            await query.answer(gemini_keys.TEXT_STALE)
+        except TelegramError:
+            pass
+        return
+    try:
+        text, rows = render(first, second)
+    except Exception:  # noqa: BLE001 - a broken screen must not kill the bot
+        log.exception("key screen failed verb=%s workload=%s", verb, first)
+        try:
+            await query.answer(gemini_keys.TEXT_STALE)
+        except TelegramError:
+            pass
+        return
+    await _keys_edit(query, text, rows)
+
+
+async def _keys_begin_add(query, actor, workload: str, chat_id, private: bool) -> None:
+    """Arm the key prompt, or explain why it cannot be armed here."""
+    if not key_store.is_managed(workload):
+        _audit(actor.user_id, "keys.add", "not_managed", chat_id=chat_id,
+               detail=workload)
+        try:
+            await query.answer(gemini_keys.TEXT_NOT_MANAGED)
+        except TelegramError:
+            pass
+        return
+    text, rows = gemini_keys.add_prompt(workload, private=private)
+    if private:
+        gemini_keys.begin_add(actor.user_id, workload)
+    _audit(actor.user_id, "keys.add", "prompt" if private else "not_private",
+           chat_id=chat_id, detail=workload)
+    await _keys_edit(query, text, rows)
+
+
+async def _keys_remove(query, actor, workload: str, slot: str, chat_id) -> None:
+    """Perform the confirmed removal, then rebuild the pool."""
+    if not key_store.is_managed(workload):
+        try:
+            await query.answer(gemini_keys.TEXT_NOT_MANAGED)
+        except TelegramError:
+            pass
+        return
+    try:
+        gone = key_store.remove(workload, slot, actor_id=actor.user_id)
+    except key_store.StoreError as exc:
+        _audit(actor.user_id, "keys.remove", exc.reason, chat_id=chat_id,
+               detail=f"{workload}/{slot}")
+        text = (
+            gemini_keys.TEXT_STORE_BROKEN
+            if exc.reason == "corrupt"
+            else gemini_keys.TEXT_ADD_FAILED.format(reason=html.escape(exc.reason))
+        )
+        await _keys_edit(
+            query, text, [[("⬅️ بازگشت", f"{gemini_keys.PREFIX}w:{workload}")]]
+        )
+        return
+    if gone is None:
+        # Not a runtime credential — most often an environment slot, which this
+        # screen has no way to remove and should not pretend to.
+        _audit(actor.user_id, "keys.remove", "missing", chat_id=chat_id,
+               detail=f"{workload}/{slot}")
+        await _keys_edit(
+            query,
+            gemini_keys.TEXT_REMOVE_MISSING,
+            [[("⬅️ بازگشت", f"{gemini_keys.PREFIX}w:{workload}")]],
+        )
+        return
+    # The pool is rebuilt before the owner is told it happened, so the screen
+    # they land on cannot describe a pool that no longer exists.
+    gemini_pool.reload()
+    _audit(actor.user_id, "keys.remove", "ok", chat_id=chat_id,
+           detail=f"{workload}/{slot} {gone.masked}")
+    log.info(
+        "owner removed a credential workload=%s slot=%s by=%s",
+        workload,
+        slot,
+        actor.user_id,
+    )
+    await _keys_edit(
+        query,
+        gemini_keys.TEXT_REMOVE_OK.format(
+            slot=html.escape(slot), label=html.escape(gemini_keys.label(workload))
+        ),
+        [[("⬅️ بازگشت", f"{gemini_keys.PREFIX}w:{workload}")]],
+    )
+
+
+async def on_key_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The one place a credential is typed into this bot.
+
+    Registered in group 0, ahead of the assistant's private-chat handler, and it
+    raises ``ApplicationHandlerStop`` once it has taken the message. That is the
+    isolation requirement and it is structural rather than a convention: a key
+    pasted into the owner's private chat must not reach the conversational layer,
+    and the only way to guarantee that is to stop the update before the group
+    that would send it runs.
+
+    It returns silently in every other case, so nothing here changes how the
+    owner's ordinary private messages behave. In particular a message that is
+    plainly conversation — more than one word — is left alone and the prompt
+    stays armed, because a prompt that hijacked the next thing the owner typed
+    would be worse than one that expired.
+
+    The verification is a network call, so it is *not* awaited here. The handler
+    deletes the message, answers, and hands the work to a task; a handler that
+    blocked for fifteen seconds would stop every other update in the bot.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    user = update.effective_user
+    if not msg or not room or not user or user.is_bot:
+        return
+    if str(getattr(room, "type", "") or "") != "private":
+        return
+    text = msg.text or ""
+    if not text:
+        return
+    actor = rbac.resolve(int(user.id))
+    if not actor.is_owner:
+        return
+    workload = gemini_keys.pending_for(actor.user_id)
+    if not workload:
+        return
+
+    stripped = text.strip()
+    if not key_store.looks_like_key(text):
+        if any(char.isspace() for char in stripped) or len(stripped) < 20:
+            return
+        # A single long token that is not a credential. Worth saying, because
+        # otherwise a mistyped key looks exactly like nothing happening.
+        await _reply_in_group(ctx, room.id, gemini_keys.TEXT_ADD_BAD_SHAPE)
+        return
+
+    # From here the message is a credential, and it has been consumed.
+    gemini_keys.clear_pending(actor.user_id)
+    chat_id = int(room.id)
+    deleted = True
+    try:
+        await ctx.bot.delete_message(chat_id, msg.message_id)
+    except TelegramError as exc:
+        deleted = False
+        log.warning("could not delete the key message: %s", exc)
+    _audit(actor.user_id, "keys.add", "received", chat_id=chat_id, detail=workload)
+    try:
+        notice = await ctx.bot.send_message(chat_id, gemini_keys.TEXT_ADD_VERIFYING)
+    except TelegramError as exc:
+        log.warning("could not open the key result notice: %s", exc)
+        notice = None
+    ctx.application.create_task(
+        _keys_store(
+            ctx.bot,
+            actor.user_id,
+            workload,
+            text,
+            chat_id,
+            getattr(notice, "message_id", 0),
+            deleted,
+        )
+    )
+    raise ApplicationHandlerStop
+
+
+async def _keys_store(
+    bot,
+    actor_id: int,
+    workload: str,
+    key: str,
+    chat_id: int,
+    notice_id: int,
+    deleted: bool,
+) -> None:
+    """Verify one credential and store it. Runs off the dispatcher's path.
+
+    The credential is never logged, never echoed and never written to the
+    database: ``key_store`` puts it in a root-only file, and ``admin_audit``
+    gets the slot and the masked tail.
+    """
+    try:
+        ok, kind, detail = await gemini_pool.probe_credential(key)
+    except Exception:  # noqa: BLE001 - a failed probe is a refusal, not a crash
+        log.exception("credential probe failed workload=%s", workload)
+        ok, kind, detail = False, "unknown_error", ""
+    if not ok:
+        _audit(actor_id, "keys.add", kind or "probe_failed", chat_id=chat_id,
+               detail=workload)
+        await _keys_notice(
+            bot, chat_id, notice_id,
+            gemini_keys.probe_reason(kind, detail) + _deleted_note(deleted),
+        )
+        return
+    try:
+        entry, created = key_store.add(workload, key, actor_id=actor_id)
+    except key_store.StoreError as exc:
+        _audit(actor_id, "keys.add", exc.reason, chat_id=chat_id, detail=workload)
+        text = (
+            gemini_keys.TEXT_STORE_BROKEN
+            if exc.reason == "corrupt"
+            else gemini_keys.TEXT_ADD_FAILED.format(reason=html.escape(exc.reason))
+        )
+        await _keys_notice(bot, chat_id, notice_id, text + _deleted_note(deleted))
+        return
+    # Rebuilt before the confirmation is sent, so the next request that needs an
+    # answer already sees the new account.
+    gemini_pool.reload()
+    _audit(actor_id, "keys.add", "ok", chat_id=chat_id,
+           detail=f"{workload}/{entry.slot} {entry.masked}")
+    log.info(
+        "owner added a credential workload=%s slot=%s created=%s by=%s",
+        workload,
+        entry.slot,
+        created,
+        actor_id,
+    )
+    if not created:
+        text = gemini_keys.TEXT_ADD_DUPLICATE.format(
+            label=html.escape(gemini_keys.label(workload))
+        )
+    else:
+        text = gemini_keys.TEXT_ADD_OK.format(
+            label=html.escape(gemini_keys.label(workload)),
+            slot=html.escape(entry.slot),
+            masked=html.escape(entry.masked),
+            detail=html.escape(detail),
+        )
+    await _keys_notice(bot, chat_id, notice_id, text + _deleted_note(deleted))
+
+
+def _deleted_note(deleted: bool) -> str:
+    """The line appended when the key message could not be removed.
+
+    Silence here would be the wrong kind of tidy: the credential is in the chat
+    history, and the owner is the only person who can delete it.
+    """
+    if deleted:
+        return ""
+    return (
+        "\n\n⚠️ پیام کلید حذف نشد. لطفاً خودت آن را از این چت پاک کن."
+    )
+
+
+async def _keys_notice(bot, chat_id: int, message_id: int, text: str) -> None:
+    """Put the result on the notice message, or on a new one if it is gone."""
+    if message_id:
+        try:
+            await bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message_id, parse_mode="HTML"
+            )
+            return
+        except TelegramError as exc:
+            log.info("key notice edit failed: %s", exc)
+    try:
+        await bot.send_message(chat_id, text, parse_mode="HTML")
+    except TelegramError as exc:
+        log.warning("could not report the key result: %s", exc)
+
+
 def _promote_keyboard(actor_id: int, target_id: int, role: str, mask: int):
     """The permission-selection keyboard.
 
@@ -4594,6 +4996,21 @@ def main() -> None:
     ) & filters.ChatType.GROUPS
     app.add_handler(MessageHandler(flood_media_filter, on_media_flood), group=0)
 
+    # The credential-entry path. Group 0 — ahead of acquisition and, crucially,
+    # ahead of the assistant's private-chat handler in group 2 — because it
+    # raises ``ApplicationHandlerStop`` when it consumes a message and that is
+    # the whole of the isolation guarantee: a key typed into the owner's private
+    # chat is never handed to a model. Its filter is the narrowest one that can
+    # work, and the handler itself returns immediately for anyone but the owner
+    # and for any message sent while no prompt is armed.
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.ChatType.PRIVATE & ~filters.UpdateType.EDITED_MESSAGE,
+            on_key_message,
+        ),
+        group=0,
+    )
+
     if config.GROUP_TRIAL_ENABLED:
         # Its own group so it can never be skipped because a media handler in
         # group 0 happened to match first.
@@ -4632,10 +5049,16 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(on_admin_callback, pattern=r"^adm:")
     )
+    # The key dashboard's own namespace, so the two dialogs can never be
+    # confused for one another however a payload is crafted.
+    app.add_handler(
+        CallbackQueryHandler(on_key_callback, pattern=r"^gk:")
+    )
     for command, handler in (
         ("whoami", cmd_whoami),
         ("admins", cmd_admins),
         ("pool", cmd_pool),
+        (config.GEMINI_KEYS_COMMAND, cmd_keys),
         ("nexus", cmd_nexus),
         ("agent", cmd_agent),
         ("promote", cmd_promote),

@@ -8,6 +8,14 @@ os.environ.setdefault("BOT_TOKEN", "test-token")
 os.environ.setdefault("GROUP_IDS", "-1001234567890")
 os.environ.setdefault("DB_PATH", ":memory:")
 os.environ.setdefault("TMP_DIR", "/tmp/guardbot-test")
+# The runtime credential store defaults to the container's data volume, which
+# does not exist on a test host — but a test that exercises the add/remove flow
+# must never be able to reach a real one either. Pointing it at the test temp
+# directory keeps the suite hermetic; the tests that actually add a credential
+# override it again with a per-test path.
+os.environ.setdefault(
+    "GEMINI_KEY_STORE_PATH", "/tmp/guardbot-test/gemini_keys.json"
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,11 +43,15 @@ def fresh_nexus_state():
     later test capturing nothing and passing no rooms, and the failures would
     read as "awareness is broken" rather than "a test forgot to reset".
     """
-    from app import awareness, main, nexus
+    from app import awareness, gemini_keys, main, nexus
 
     nexus.reset_state()
     awareness.reset_timers()
     awareness.reset_switch()
+    # An armed "send me the key now" prompt is process state with a five-minute
+    # life, which is longer than a test run. Left behind, it would make the next
+    # test's private message be consumed as a credential.
+    gemini_keys.reset_pending()
     # The duplicate-reply marker: a room id left behind by one test would make
     # the next test's ambient pass refuse to answer, which is exactly the kind of
     # order-dependent failure that hides a real defect.
@@ -53,6 +65,7 @@ def fresh_nexus_state():
     nexus.reset_state()
     awareness.reset_timers()
     awareness.reset_switch()
+    gemini_keys.reset_pending()
     main._nexus_addressed.clear()
     main._bot_rights_cache.clear()
 
