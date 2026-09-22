@@ -3304,6 +3304,13 @@ on an unmute would make every mute a free reset.
 Members already stuck by the old code are not repaired by the fix; their
 restriction record still exists and each needs one more unmute.
 
+**Verifying a repair needs a pause.** `get_chat_member` immediately after
+`restrict_chat_member` can still return the old status — Telegram's read path
+lags its write path by a second or two. Re-reading one of these members straight
+away reported `restricted` for a call that had in fact succeeded, and the same
+member read `member` seconds later. Read the status again before concluding that
+an unmute failed; a single immediate read-back is not evidence either way.
+
 `tests/test_restriction_permissions.py` (22) pins it. The central test enumerates
 every field of `ChatPermissions` — read from the library, not written out — and
 asserts none of them is left denied, so a field added by a future Bot API fails
