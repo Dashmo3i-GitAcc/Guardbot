@@ -542,7 +542,7 @@ TOOLS: dict[str, ToolSpec] = {
         description=(
             "Correlate what happened in this group: admin actions and refusals, "
             "model/pool failures, coding-agent tasks, the room's understanding, "
-            "moderation counters, pending join challenges. For one person's own "
+            "moderation counters. For one person's own "
             "history use get_identity. Never returns message content or "
             "credentials."
         ),

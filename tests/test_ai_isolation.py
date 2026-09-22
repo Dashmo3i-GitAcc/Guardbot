@@ -299,12 +299,11 @@ def test_opening_one_breaker_leaves_the_others_closed(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_MOD_ENABLED", True)
     monkeypatch.setattr(config, "GEMINI_MOD_API_KEY", "k")
     monkeypatch.setattr(config, "MODERATION_TEXT_ENABLED", True)
-    monkeypatch.setattr(config, "MODERATION_MEDIA_ENABLED", True)
     monkeypatch.setattr(config, "GEMINI_MOD_CIRCUIT_FAILURES", 1)
     monkeypatch.setattr(config, "GEMINI_MOD_CIRCUIT_SECONDS", 300.0)
     monkeypatch.setattr(config, "GEMINI_MOD_MAX_RETRIES", 0)
 
-    async def _boom(parts):
+    async def _boom(prompt):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(ai_moderation, "_request", _boom)

@@ -295,6 +295,37 @@ def test_an_uncounted_hit_never_restricts(monkeypatch):
     assert bot.restricted == []
 
 
+def test_every_hit_at_or_after_the_threshold_restricts(monkeypatch):
+    """Someone who keeps violating past the threshold is restricted again.
+
+    The second restriction extends the first rather than being silently
+    ignored, which is the behaviour the media pipeline's ladder had before it
+    was removed — preserved here because it belongs to the ladder, not to the
+    detector that used to feed it.
+    """
+    monkeypatch.setattr(config, "FILTER_COUNTS_AS_VIOLATION", True)
+    bot = FakeBot()
+
+    for i in range(4):
+        msg, bot = run_filter(bot, "this has badword in it", message_id=55 + i)
+
+    assert db.get_strikes(CHAT_ID, MEMBER) == 4
+    assert len(bot.restricted) == 2  # one at the 3rd, one at the 4th
+
+
+def test_counts_are_per_user(monkeypatch):
+    monkeypatch.setattr(config, "FILTER_COUNTS_AS_VIOLATION", True)
+    bot = FakeBot()
+    other = 9  # a second ordinary member (ADMIN is exempt by config)
+
+    run_filter(bot, "this has badword in it", user_id=MEMBER, message_id=1)
+    run_filter(bot, "this has badword in it", user_id=other, message_id=2)
+
+    assert db.get_strikes(CHAT_ID, MEMBER) == 1
+    assert db.get_strikes(CHAT_ID, other) == 1
+    assert bot.restricted == []  # neither has reached the threshold
+
+
 # ── The safety contract ───────────────────────────────────────────────────
 def test_a_failed_deletion_does_not_strike(monkeypatch):
     """A strike is only ever recorded for content that was actually removed."""

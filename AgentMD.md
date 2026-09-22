@@ -42,8 +42,8 @@ handoff assumptions.**
 
 You are a **senior Python engineer who has run Telegram bots in production**.
 You are comfortable with `python-telegram-bot` v21 asyncio handlers, the Bot
-API's real limits, ffmpeg, ONNX/CPU inference, Docker on a small VPS, and
-SQLite under concurrent access.
+API's real limits, ffmpeg, Docker on a small VPS, and SQLite under concurrent
+access.
 
 You write code that is:
 
@@ -69,13 +69,13 @@ explains" the change.
 2. **The files you are about to touch**, in full — not just the function named
    in the prompt. The change has to fit the file that already exists.
 3. **The neighbours of the change:**
-   - moderation decisions → `app/decision.py` **and** `app/moderation.py`
-     **and** the handler in `app/main.py` that consumes them;
-   - detector output → `app/detector.py` (the `MediaAnalysis` shape is the
-     interface between detector and policy);
+   - moderation decisions → `app/decision.py` **and** `app/mod_policy.py`
+     **and** `app/moderation.py` **and** the handler in `app/main.py` that
+     consumes them;
+   - the moderation AI → `app/ai_moderation.py` (one text in, one verdict out);
    - configuration → `app/config.py` **and** `.env.example` (they must stay in
      sync);
-   - anything media-related → the `finally`/cleanup path in `app/main.py`.
+   - anything media-related → `app/media.py` and its caller in `app/main.py`.
 4. **The tests that already pin the behaviour** (`tests/`). They encode the
    safety contracts. Read them before you change what they assert.
 5. **`README.md`** — it documents the decision table, the admin-report rule and
@@ -93,15 +93,14 @@ Verify all of this against the tree; it is accurate as of the last update of
 this file.
 
 - **Language / runtime:** Python 3.12, `python-telegram-bot[job-queue]==21.6`,
-  `Pillow`, `nudenet==3.4.2` (bundles a small ONNX model; pulls
-  `onnxruntime` + `opencv-python-headless`), and `transformers` + CPU-only
-  `torch` for the second-stage scene classifier. Tests need
-  `pytest` and the same runtime, so run them inside the image (see §11).
+  `Pillow`, `httpx`, `google-genai`. There is **no local ML runtime**: no
+  `torch`, no `transformers`, no ONNX model, no `nudenet`. Tests need `pytest`
+  and the same runtime, so run them inside the image (see §11) or in a venv
+  with those dependencies.
 - **Entry point:** `python -m app.main` (`app/main.py:main`). It creates the
-  DB dir and temp dir, calls `db.init()`, loads the detector if
-  `MEDIA_ENABLED`, builds the `Application`, registers handlers, then
-  `run_polling(allowed_updates=[MESSAGE, CALLBACK_QUERY, CHAT_MEMBER],
-  drop_pending_updates=True)`.
+  DB dir and temp dir, calls `db.init()`, builds the `Application`, registers
+  handlers, then `run_polling(allowed_updates=[MESSAGE, CALLBACK_QUERY,
+  CHAT_MEMBER], drop_pending_updates=True)`.
 - **Modules and their single jobs:**
 
   | File | Responsibility |
@@ -109,27 +108,31 @@ this file.
   | `app/config.py` | every setting, from environment variables |
   | `app/db.py` | SQLite: `users` (strikes/violations) and the operational tables |
   | `app/burst.py` | pure, bounded instant-flood tracker (no Telegram, no I/O) |
-  | `app/detector.py` | raw detections only; NudeNet + ffmpeg frame sampling + the scene classifier |
-  | `app/decision.py` | the policy: `MediaAnalysis` → `SAFE`/`REVIEW`/`EXPLICIT` |
+  | `app/decision.py` | the moderation vocabulary: `Decision` + `DecisionResult` |
+  | `app/ai_moderation.py` | the moderation AI: one text in, one verdict out |
+  | `app/mod_policy.py` | the policy: an AI verdict → `SAFE`/`REVIEW`/`EXPLICIT` |
+  | `app/text_filters.py` | local regex rules; a verdict, never an action |
   | `app/moderation.py` | executing a decision (delete); no Telegram import |
-  | `app/main.py` | Telegram wiring: the media/flood pipeline |
+  | `app/main.py` | Telegram wiring: the text/flood pipeline |
 
-  The detector/policy split is deliberate: `detector.py` produces raw
-  detections, `decision.py` owns *which* classes and *which* confidence count
-  as explicit. Keep them separate — a future stage must be able to extend one
+  The AI/policy split is deliberate: `ai_moderation.py` produces a verdict,
+  `mod_policy.py` owns *which* classes and *which* confidence count as
+  deletable. Keep them separate — a future stage must be able to extend one
   without touching the other. `burst.py` is pure and bounded for the same
   reason: the flood rule is unit-testable without Telegram or a clock.
+  `decision.py` holds only the shared vocabulary and can act on nothing.
 
-- **Three independent signals, never conflated:** explicit sexual content
-  (detector + decision engine), instant media flood (burst tracker), and the
-  repeated-violation ladder. A flood is a violation on its own and does not
-  require sexual content; a photo is never counted toward a flood.
-- **Deployment:** `Dockerfile` (`python:3.12-slim` + `ffmpeg` + CPU-only torch
-  from the pytorch CPU index, `HF_HOME=/data/hf`, `CMD python -m app.main`) and
+- **Signals, never conflated:** text moderation (the AI + policy), the pattern
+  filter, instant media flood (burst tracker), and the repeated-violation
+  ladder. A flood is a violation on its own and does not require any content
+  verdict; a photo is never counted toward a flood. **There is no visual media
+  moderation** — media is never downloaded or inspected for content.
+- **Deployment:** `Dockerfile` (`python:3.12-slim` + `ffmpeg`, plain
+  `pip install -r requirements.txt`, `CMD python -m app.main`) and
   `docker-compose.yml` (service `guardbot`, `restart: always`, `env_file:
   .env`, `./data:/data`, 2 GB memory limit). The VPS runs it from `~/guardbot`
-  with `docker compose up -d --build`. `HF_HOME` is why the ~340 MB scene
-  model survives rebuilds; do not point it somewhere that is not the volume.
+  with `docker compose up -d --build`. There is no model to download, so the
+  image has no model cache and no `HF_HOME`.
 - **Persistence:** SQLite at `DB_PATH` (default `/data/guardbot.db`, inside the
   mounted volume). Runtime data under `data/` and `.env` are gitignored and
   must never be committed.
@@ -145,39 +148,34 @@ side effect of another change.
 
 | Decision | Meaning | Action |
 |---|---|---|
-| `SAFE` | normal / non-explicit | allow, log only |
-| `REVIEW` | an explicit class below the delete threshold, or a scene score in the review band | allow, log only — **never** delete, **never** notify |
-| `EXPLICIT` | an `EXPLICIT_CLASSES` detection at ≥ `EXPLICIT_DELETE_THRESHOLD`, **or** a scene score at ≥ `SCENE_DELETE_THRESHOLD` | delete the Telegram message |
+| `SAFE` | nothing wrong | allow, log only |
+| `REVIEW` | worth a human's attention, below the delete bar | allow, log only — **never** delete, **never** notify silently |
+| `EXPLICIT` | a confident AI verdict on a class in `MODERATION_DELETABLE_CLASSES` | delete the Telegram message |
 
-- Only classes listed in `EXPLICIT_CLASSES` can ever produce `EXPLICIT` from
-  NudeNet.
-- `REVIEW` is a log-only state. It sends no admin message and applies no
-  punishment. This is intentional, not an omission.
-- There are **two** evidence sources and either can produce `EXPLICIT`:
-  1. **NudeNet anatomical evidence** — an `EXPLICIT_CLASSES` detection at or
-     above `EXPLICIT_DELETE_THRESHOLD`.
-  2. **Scene-level sexual content** — the second-stage classifier's NSFW score
-     at or above `SCENE_DELETE_THRESHOLD`, even when NudeNet found nothing.
-     This is deliberate: it is what catches a sexual act whose anatomical class
-     was not detected.
-- The scene score is **graded**: below `SCENE_REVIEW_THRESHOLD` it is `SAFE`,
-  at/above it the media is `REVIEW`, and at/above `SCENE_DELETE_THRESHOLD` it is
-  `EXPLICIT`. `SCENE_DELETE_THRESHOLD` (default 0.95) is deliberately high —
-  do not lower it to "catch more" without real evidence.
-- `DecisionResult.source` is `"nudenet"`, `"scene"` or `"none"` and records
-  which signal decided. Never merge the two signals into one score.
-- An **absent** scene score (`None`: stage disabled, model missing, decode or
-  inference error) is not zero and **never** deletes. Do not replace `None`
-  with a default score.
+- Only classes listed in `MODERATION_DELETABLE_CLASSES` (default
+  `explicit_sexual`) can ever produce `EXPLICIT`.
+- `REVIEW` never deletes and applies no punishment. It is reported to the admin
+  chat when `MODERATION_REVIEW_NOTIFY=1`; otherwise it is a log line. This is
+  intentional, not an omission.
+- A deletion needs an AI confidence of at least `MODERATION_DELETE_CONFIDENCE`
+  (default 0.80). Below that the verdict is treated as uncertain: the band down
+  to `MODERATION_REVIEW_CONFIDENCE` (default 0.45) is `REVIEW`, and below it is
+  `SAFE`.
+- **There is exactly one evidence source.** The moderation AI's verdict is the
+  only thing that can delete; nothing local is weighed against it. The old
+  NudeNet/scene signals and their `DecisionResult.source` were removed with the
+  media pipeline.
+- The AI never executes anything. Its return value is data; `mod_policy.decide`
+  turns it into an outcome and `moderation.enforce` acts. There is no code path
+  from the AI's output to a Telegram call.
 
 ### 4.2 Fail open
 
-- Any detector error, model-load failure or media-decode failure produces
-  `MediaAnalysis(ok=False)`, and `DecisionEngine.decide` returns `SAFE` for it.
-  Uncertainty never deletes anything.
-- The whole media handler body is wrapped in `try/except Exception` that logs
-  `media pipeline failed` and does nothing else. A crash inside the pipeline
-  must not delete, notify or punish.
+- An AI failure, timeout, malformed answer or circuit-open state produces a
+  "not confirmed" verdict, and the policy returns `SAFE` for it. Uncertainty
+  never deletes anything.
+- The text-moderation handler body is defensive: a failure inside it must not
+  delete, notify or punish.
 - **Never** add code that turns an error into a deletion. A false positive
   (deleting allowed content) is treated as worse than a miss. If you are
   unsure whether something is explicit, it must land in `REVIEW`/`SAFE`.
@@ -195,36 +193,30 @@ side effect of another change.
 
 ### 4.4 Admin reporting
 
-- The admin chat (`ADMIN_LOG_CHAT`) receives a message **only** for
-  `EXPLICIT` + `DELETE_SUCCESS`, and for a confirmed flood whose restriction
-  Telegram refused. `SAFE`, `REVIEW`, `DELETE_FAILED`, a *successful*
-  restriction and every operational error are container-log only.
-- The report carries media type, user, user id, username, chat id, message id,
-  the detection that fired, its score, a reason line and a UTC timestamp, plus
-  an evidence frame. The evidence frame is
-  `MediaAnalysis.evidence_frame(result.matched.label)` for a NudeNet deletion,
-  and `MediaAnalysis.scene_frame` (the frame that produced the scene score) for
-  a scene-stage deletion — a scene-only deletion still gets an evidence image.
-  The reason sentence matches the source: it must **not** claim genital
-  evidence when the deletion came from the scene stage. Keep the report
-  readable for a non-technical admin.
-- Evidence upload falls back `send_photo` → `send_document` → text-only
-  `send_message`. **The report itself must never be lost** because an upload
-  failed. Keep that fallback order.
+- The admin chat (`ADMIN_LOG_CHAT`) receives a report for every deletion
+  (`EXPLICIT` + `DELETE_SUCCESS`), every filter hit, every `REVIEW` when
+  `MODERATION_REVIEW_NOTIFY=1`, and for a confirmed flood whose restriction
+  Telegram refused. `SAFE`, `DELETE_FAILED`, a *successful* restriction and
+  every operational error are container-log only.
+- A deletion report carries the user, user id, chat id, message id, the AI's
+  classification and confidence, the policy reason and a UTC timestamp. It
+  carries **no excerpt of the message and no media** — the content itself is
+  what this project spends the most effort not copying into a log or an admin
+  chat. The filter report carries the rule (`kind/label`), not the message.
 - The report text is Persian and HTML-parse-mode. If you touch it, keep the
   same register and the same fields; do not machine-translate or restructure it.
 - Every report carries a single inline button (`REPORT_DELETE_CALLBACK =
   "report_delete"`, label `🗑 حذف گزارش`). It removes **the report message
-  itself** — the moderated message is already gone. It is attached to all three
-  delivery paths (photo, document, text-only) and never sent as a separate
-  message. `app/main.py:on_report_delete` verifies
-  `callback_query.message.chat.id == config.ADMIN_LOG_CHAT` first, then that the
-  presser is a **current member** of that chat (`_is_chat_member`: MEMBER /
-  ADMINISTRATOR / OWNER / RESTRICTED), and only then deletes. Membership is
-  checked fresh on every press and fails closed. This path deliberately does
-  **not** use `is_admin` and does **not** require Telegram administrator
-  status: the report group is a private trusted team group, so any member may
-  clean up a report. A callback from any other chat deletes nothing.
+  itself** — the moderated message is already gone. It is attached to every
+  report path and never sent as a separate message. `app/main.py:on_report_delete`
+  verifies `callback_query.message.chat.id == config.ADMIN_LOG_CHAT` first, then
+  that the presser is a **current member** of that chat (`_is_chat_member`:
+  MEMBER / ADMINISTRATOR / OWNER / RESTRICTED), and only then deletes.
+  Membership is checked fresh on every press and fails closed. This path
+  deliberately does **not** use `is_admin` and does **not** require Telegram
+  administrator status: the report group is a private trusted team group, so
+  any member may clean up a report. A callback from any other chat deletes
+  nothing.
 
 ### 4.5 Punishment is a timed restriction, never a ban
 
@@ -240,11 +232,10 @@ side effect of another change.
   the timed restriction is applied. Every violation at or after the threshold
   re-applies it, which extends the restriction.
 - **The ladder itself lives in exactly one place**: `_apply_strike_ladder` in
-  `main.py`. It used to be duplicated — once on the media path and once on the
-  text path — which is how a fix lands on one path and not the other. It now
-  restricts *then* notices, so the warning reflects what actually happened. Do
-  not re-inline it.
-- **A failed deletion, a detector error or a database error never punishes
+  `main.py`. It used to be duplicated across the content paths — which is how a
+  fix lands on one path and not the other. It now restricts *then* notices, so
+  the warning reflects what actually happened. Do not re-inline it.
+- **A failed deletion, an AI error or a database error never punishes
   anyone.** If recording the violation fails, the deletion still stands and
   `outcome.strike` is `None`, so nothing else happens.
 - `_restrict_user` returns True only when Telegram accepted the call. A refusal
@@ -256,7 +247,7 @@ side effect of another change.
 `TEST_USER_ID` (default `8299811287`) is the owner's test account. It exists so
 the pipeline can be exercised repeatedly without a manual unrestrict.
 
-- It is **not exempt from anything**: detection, deletion, the strike, the
+- It is **not exempt from anything**: moderation, deletion, the strike, the
   warning, the admin report and the real `restrict_chat_member` call all run
   exactly as for anyone else. Do not add an exemption here, and do not let this
   exception suppress the report, the deletion or the strike.
@@ -290,7 +281,8 @@ the pipeline can be exercised repeatedly without a manual unrestrict.
   no ffmpeg, no inference. Keep it that way: the whole point is to stop a flood
   cheaply.
 - **Ordinary photos are never counted.** Sending several photos quickly is not
-  a flood; each photo is still checked by the content pipeline on its own.
+  a flood, and nothing else looks at a photo either: media is never inspected
+  for content.
 - On a flood: restrict the sender, delete **only** the messages recorded as
   belonging to that burst, and warn. Never delete other history from the same
   user.
@@ -303,8 +295,9 @@ the pipeline can be exercised repeatedly without a manual unrestrict.
 ### 4.7 Exemption
 
 - Only `WHITELIST_USER_IDS` (bot owners) are exempt. That is the owner rule.
-- **Telegram admins are not exempt** — not from content moderation and not from
-  the flood rule. Do not reintroduce an administrator check in `on_media`.
+- **Telegram admins are not exempt** — not from text moderation, not from the
+  filter and not from the flood rule. Do not reintroduce an administrator check
+  in `on_media_flood`.
 
 ### 4.8 Out of scope by default
 
@@ -322,23 +315,20 @@ violation only when `FILTER_COUNTS_AS_VIOLATION` is set. See §32.
 
 ### 4.9 Thresholds are calibrated evidence, not guesses
 
-`EXPLICIT_DELETE_THRESHOLD=0.45`, `EXPLICIT_REVIEW_THRESHOLD=0.25`. NudeNet
-320n is **not** a calibrated probability model: its own detection gate is 0.20
-and its NMS threshold is 0.25, and confirmed explicit media from live testing
-scored 0.50–0.67. A previous 0.80 delete threshold never fired and sent
-everything to `REVIEW`.
-
-The scene thresholds are a different kind of number. `SCENE_REVIEW_THRESHOLD`
-(0.60) and `SCENE_DELETE_THRESHOLD` (0.95) are **conservative starting points,
-not measured constants** — the scene classifier's accuracy on this bot's
-traffic has not been measured against a labelled set. `SCENE_DELETE_THRESHOLD`
-deletes media, so it is set high on purpose. Do not present it as calibrated,
-and do not claim a detection-accuracy figure that was not measured.
+`MODERATION_DELETE_CONFIDENCE=0.80` and `MODERATION_REVIEW_CONFIDENCE=0.45` are
+the two numbers that matter. They are confidence bars on the moderation AI's
+verdict, not scores from a local model. They are deliberately conservative: a
+false positive (deleting allowed content) is worse than a miss.
 
 Therefore: **do not change a threshold to make a test or a scenario pass.**
 Thresholds are environment variables and are tuned from real traffic. If a
 change genuinely requires a different threshold, say so explicitly in the
 report and let the owner decide — do not bake a new number into the code.
+
+The removed media pipeline's thresholds (`EXPLICIT_DELETE_THRESHOLD`,
+`EXPLICIT_REVIEW_THRESHOLD`, `SCENE_REVIEW_THRESHOLD`, `SCENE_DELETE_THRESHOLD`,
+`MODERATION_LOCAL_HARD_THRESHOLD`) no longer exist and must not be reintroduced
+without the owner asking for the pipeline back.
 
 ---
 
@@ -346,35 +336,29 @@ report and let the owner decide — do not bake a new number into the code.
 
 The Bot API and Telegram's media model have hard limits. Design within them.
 
-- **Handlers and filters.** The media handler is registered with a combined
-  filter (photo, video, animation, video note, all stickers, image/video
-  documents) **and** `filters.ChatType.GROUPS`. A new media type or a changed
-  filter changes what is inspected.
-- **Only bot owners are immune.** `WHITELIST_USER_IDS` short-circuits the media
-  path. Telegram admins are deliberately **not** exempt. `is_admin` (with a
-  300 s `_admin_cache`) answers a different, older question and must not be used
-  to skip media moderation.
-- **Media types.** Photo, GIF/animation, video, video note, static sticker,
-  video sticker and image/video documents are analysed. Animated `.tgs`
-  (Lottie) stickers cannot be decoded by ffmpeg and are analysed through their
-  **static preview thumbnail** only — explicit content that appears only
-  mid-animation can be missed. That is a known limit, documented in
-  `README.md`; do not claim `.tgs` is fully analysed.
-- **Download behaviour.** `get_file(...).download_to_drive(path)` into the
-  per-job temp dir. Files larger than `MAX_DOWNLOAD_MB` (20 MB, the Bot API
-  limit) fall back to the thumbnail; if there is no thumbnail the media is
-  `SKIPPED` and logged, never guessed.
+- **Handlers and filters.** The flood handler is registered with a filter over
+  the kinds `_burst_kind` can name (animation, video note, all stickers) **and**
+  `filters.ChatType.GROUPS`. Text moderation and the pattern filter are
+  registered on `filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS`. A
+  new media type or a changed filter changes what is counted.
+- **Only bot owners are immune.** `WHITELIST_USER_IDS` short-circuits the
+  moderation paths. Telegram admins are deliberately **not** exempt. `is_admin`
+  (with a 300 s `_admin_cache`) answers a different, older question and must not
+  be used to skip moderation.
+- **No media is inspected.** There is no download of a photo/video/GIF/sticker
+  for content analysis, no frame extraction for moderation, and no model. The
+  only thing a media message can trigger is the flood rule, decided from
+  metadata.
 - **Deletion is the only action**, and it can fail (missing delete permission,
   message already gone, rate limit). Failure is handled in `moderation.enforce`
   and never escalated.
-- **Async.** Handlers are `async`. CPU-bound work (ONNX inference, ffmpeg
-  frames) must run off the event loop — `app/main.py` uses a
-  `ThreadPoolExecutor` via `loop.run_in_executor`. Never call blocking
-  detector/ffmpeg code directly on the event loop.
+- **Async.** Handlers are `async`. The remaining blocking work is ffmpeg in
+  `app/media.py` (the assistant's media builder) and it must run off the event
+  loop. Never call blocking code directly on the event loop.
 - **Rate limits and API failures.** `TelegramError` is the expected failure
   mode for every API call. Catch it narrowly where a call is optional (report,
-  evidence upload) and let the media pipeline's outer
-  fail-open handler cover the rest. Never let an API failure delete or punish.
+  notice) and let the handler's fail-open cover the rest. Never let an API
+  failure delete or punish.
 - **`drop_pending_updates=True`** is deliberate: on restart the bot does not
   process a backlog of old messages.
 
@@ -384,19 +368,12 @@ The Bot API and Telegram's media model have hard limits. Design within them.
 
 This is a small VPS. Disk leaks are production incidents.
 
-- Every media job owns **one** temp directory created with
-  `tempfile.mkdtemp(prefix=f"job_{chat.id}_{message_id}_", dir=config.TMP_DIR)`.
-- That directory is removed in a `finally` block with
-  `shutil.rmtree(work_dir, ignore_errors=True)` — on success, on detector
-  error, on Telegram error, on cancellation, on any exception. **Keep the
-  cleanup in `finally`.** If you add a new early `return`, it must still be
-  inside the `try` that owns the `finally`.
-- `detector.analyze_video` writes frames into the caller's `work_dir` and
-  **never deletes them** — the caller uses one frame as evidence and then
-  removes the whole directory. Keep that ownership rule: the detector does not
-  own cleanup.
-- The evidence frame is uploaded to the admin chat; GuardBot itself keeps **no
-  permanent copy** on the VPS.
+- The remaining media work is the assistant's own media builder
+  (`app/media.py`, used by the conversation path and `/transcribe`). It writes
+  into a temp location and its caller removes it on every path, including
+  failure.
+- There is no per-job moderation temp directory any more: the moderation path
+  no longer downloads media.
 - If you add a new file, frame or cache, decide explicitly who deletes it and
   prove it is deleted on every path. The tests assert `TMP_DIR` is empty after
   each run — keep that property.
@@ -405,9 +382,9 @@ This is a small VPS. Disk leaks are production incidents.
 
 ## 7. Concurrency and shared state
 
-- `MEDIA_WORKERS` (default 2) media jobs may run at once via the
-  `ThreadPoolExecutor`. Detector state (`detector._detector`) is loaded once at
-  startup and read concurrently — treat it as read-only after `load_model()`.
+- The moderation path no longer uses a `ThreadPoolExecutor` or a loaded model.
+  The AI workloads share the pool in `app/ai_pool.py`, which owns their
+  synchronisation.
 - The SQLite connection is shared across threads
   (`check_same_thread=False`) and guarded by a module-level `threading.Lock`.
   Any new DB access goes through `db._exec` / the existing helpers; do not open
@@ -422,32 +399,25 @@ This is a small VPS. Disk leaks are production incidents.
 ## 8. Error handling and logging
 
 - **Every** Telegram API call is wrapped in a narrow `except TelegramError`,
-  and the media pipeline keeps its outer fail-open `except Exception`.
-- Logging is `logging` with the module logger (`guardbot`, `detector`,
-  `decision`, `moderation`). `logging.basicConfig` is configured in
+  and the moderation handlers keep a fail-open path.
+- Logging is `logging` with the module logger (`guardbot`, `moderation`,
+  `ai_moderation`, `mod_policy`). `logging.basicConfig` is configured in
   `app/main.py`.
-- The per-media decision line is the observability contract. Keep its fields
+- The per-message decision line is the observability contract. Keep its fields
   and shape when you change the pipeline:
 
   ```
-  media chat=... user=... kind=... detector=... frames=... decision=...
-  source=... class=... confidence=... detections=... scene=... scene_frames=... reason=...
+  text moderation chat=... user=... policy=...
   ```
 
-  `detections=` comes from `MediaAnalysis.detections_summary()` and must keep
-  distinguishing `n/a` (analysis failed) from `none` (ran, no detections) from
-  `CLASS:score,...`.
-- The outcome lines are `DELETE_SUCCESS`, `DELETE_FAILED`, `media SKIPPED`,
-  and for the new signals `FLOOD`, `FLOOD_RESTRICT`, `FLOOD_CLEARED`,
+- The outcome lines are `TEXT_DELETE_SUCCESS`, `TEXT_DELETE_FAILED`, and for
+  the other signals `FLOOD`, `FLOOD_RESTRICT`, `FLOOD_CLEARED`,
   `FLOOD_DELETE_FAILED`, `VIOLATION`, `VIOLATION_RESTRICT`, plus the test-account
   pair `TEST_UNRESTRICT_SCHEDULED` / `TEST_UNRESTRICT` and their failure lines
   `TEST_UNRESTRICT_FAILED` / `TEST_UNRESTRICT_NOTICE_KEPT`. Do not rename or
   remove them; operators grep them.
-- `source=` is how an operator sees **which detector** caused the decision
-  (`nudenet` / `scene` / `none`). `scene=` is the scene score (`-` when
-  absent), `scene_frames=` how many frames the scene stage actually scored.
-- **Never log media content, file bytes, tokens or the bot token.** Class names
-  and scores are fine; the media is not.
+- **Never log message content, media bytes, tokens or the bot token.**
+  Classifications and confidence are fine; the message and the media are not.
 - The acquisition decision has its own single line, emitted once whenever the
   message was *acted on* or was worth a second look — a message the rules
   silently ignored logs nothing, deliberately, because that is the common case.
@@ -494,8 +464,11 @@ This is a small VPS. Disk leaks are production incidents.
   requested.
 - Do not refactor unrelated code. A bug fix does not need the surrounding file
   tidied. A new option does not need a new abstraction.
-- Do not change moderation behaviour, thresholds, detector classes or the
+- Do not change moderation behaviour, thresholds, deletable classes or the
   decision table unless the stage is explicitly about them.
+- **Do not reintroduce the removed media pipeline** (a local visual detector, a
+  scene classifier, a media-moderation AI stage, media evidence reports) unless
+  the prompt explicitly asks for it.
 - Prefer the smallest diff that works. Three similar lines beat a premature
   helper.
 - If you believe the requested change is wrong or unsafe, say so in the report
@@ -506,8 +479,9 @@ This is a small VPS. Disk leaks are production incidents.
 ## 11. Testing
 
 - Tests are `pytest` and they import the app, which imports
-  `python-telegram-bot`, `Pillow`, `nudenet` and `transformers`. Run them in
-  the image, not on a bare host:
+  `python-telegram-bot`, `Pillow` and `google-genai`. There is no model
+  dependency, so a plain venv can run the suite; running them in the image is
+  still the most faithful check:
 
   ```bash
   docker compose build
@@ -517,31 +491,26 @@ This is a small VPS. Disk leaks are production incidents.
 
 - `tests/conftest.py` sets safe defaults (`BOT_TOKEN`, `GROUP_IDS`, in-memory
   `DB_PATH`, a temp `TMP_DIR`) so tests import the app without a real `.env`.
-- `google-genai` is imported lazily inside `app/ai_intent.py`, so a test
+- `google-genai` is imported lazily inside the AI modules, so a test
   environment without it still runs the whole suite: the AI layer reports
   `sdk_missing` and the rules carry on. Never move that import to module scope —
   it would make an optional dependency mandatory at import time.
 - The existing tests pin the safety contracts and must keep passing:
-  - `tests/test_decision.py` — the policy table, fail-open, the scene bands,
-    and that a borderline NudeNet hit with a safe scene score stays `REVIEW`.
-  - `tests/test_detector.py` — parsing, fail-open on decode error, media rules.
+  - `tests/test_mod_policy.py` — the AI-only policy table: a confident verdict
+    deletes, a `REVIEW` verdict never deletes, a sub-floor verdict is `SAFE`,
+    fail-open, and that nothing but the AI can delete.
   - `tests/test_moderation.py` — delete success/failure, no-punishment-on-failure.
-  - `tests/test_media_pipeline.py` — the real `on_media` handler end to end with
-    a fake Telegram layer and a stubbed detector: delete, no-delete, fail-open,
-    `DELETE_FAILED` applies nothing, evidence fallbacks, temp cleanup.
+  - `tests/test_moderation_ai.py` — the moderation AI contract: malformed and
+    wrong-type answers, clamped confidence, the text prompt's guarantees, and
+    that the key never reaches a log line.
+  - `tests/test_flood_pipeline.py` — the flood rule through `on_media_flood`:
+    restrict, only-the-burst deletion, admin not exempt, owner exempt, fail-open.
   - `tests/test_burst.py` — the pure flood tracker: threshold, window, separate
     bursts, photo exclusion, per-user isolation, bounding.
-  - `tests/test_flood_pipeline.py` — the flood rule through the handler:
-    restrict, only-the-burst deletion, admin not exempt, owner exempt, fail-open.
-  - `tests/test_violations.py` — the violation ladder: warn, count, restrict at
-    the threshold, and everything that must not count.
   - `tests/test_test_user.py` — the test-account exception and the normal
     restriction duration: 15-minute default, the restrict still happening, the
     delayed unrestrict, the warning cleanup, the untouched admin report, and
     that other users get none of it.
-  - `tests/test_scene_stage.py` — the graded scene stage: `EXPLICIT` at high
-    confidence, `REVIEW` in the band, bounded frame sampling, fail-open, and
-    that a scene-stage load failure cannot stop startup.
   - `tests/test_ai_intent.py` — the Gemini layer on its own: config on/off/no
     key, the structured contract (malformed, missing field, wrong type,
     invented category, clamped confidence), the prompt's own guarantees, the
@@ -551,10 +520,10 @@ This is a small VPS. Disk leaks are production incidents.
     match is free, the model cannot overturn a match or a veto, ordinary
     chatter is never escalated, the model can promote and can decline, and
     every failure mode degrades to the rules.
-  - `tests/test_acquisition.py` (extended) — the AI layer end to end through
-    the real group handler: the model's yes becomes the usual invitation, its
-    no leaves the group alone, a Gemini outage does not break the handler, and
-    with no key the handler behaves exactly as it did before.
+  - `tests/test_acquisition.py` — the AI layer end to end through the real
+    group handler: the model's yes becomes the usual invitation, its no leaves
+    the group alone, a Gemini outage does not break the handler, and with no
+    key the handler behaves exactly as it did before.
   - `tests/test_text_filters.py` — the pattern filter on its own: the master
     switch, the minimum length, each family, the allow-list, word boundaries,
     each phishing label, and that the log never leaks the matched word.
@@ -562,22 +531,23 @@ This is a small VPS. Disk leaks are production incidents.
     `main.on_group_filter`: a hit reaches the same executor and ladder as every
     other violation, a failed deletion never strikes, and the filter module
     cannot reach Telegram or the database.
+  - `tests/test_report_button.py` — the admin report's self-delete button:
+    membership is checked fresh and fails closed, another chat's callback
+    deletes nothing, and every report path carries the button.
   - `tests/test_db_migration.py` — the `admin_audit.interface` column added to
     a table built with the old schema, idempotently, with old rows still
     readable.
-- **The AI tests never touch Google.** `app/ai_intent.py` has exactly one
-  network seam, `_request`, and the tests replace it. If you add a code path
-  that talks to the API outside `_request`, the tests will silently stop
-  covering it — keep the seam.
+- **The AI tests never touch Google.** Each AI module has exactly one network
+  seam, `_request`, and the tests replace it. If you add a code path that talks
+  to the API outside `_request`, the tests will silently stop covering it — keep
+  the seam.
 - **Do not weaken or delete a test to make a change pass.** If a contract
   genuinely changes, update the contract text here and in `README.md` and the
   test in the same commit.
 - A new regression test is only worth having if it **fails against the bug**.
   When you fix a defect, add the test that would have caught it and confirm it
   fails before the fix and passes after.
-- When you add media types, thresholds or a new decision path, extend the
-  pipeline tests — especially the temp-cleanup assertion (`TMP_DIR` empty after
-  every run).
+- When you add a decision path or a new signal, extend the pipeline tests.
 
 ---
 
@@ -596,11 +566,12 @@ This is a small VPS. Disk leaks are production incidents.
 
   ```bash
   docker compose up -d
-  docker compose logs -f | grep -E "decision=|DELETE_SUCCESS|DELETE_FAILED|SKIPPED"
+  docker compose logs -f | grep -E "TEXT_DELETE_SUCCESS|TEXT_DELETE_FAILED|FLOOD|VIOLATION"
   ```
 
-- Remember the Dockerfile installs `ffmpeg`; any new binary dependency must be
-  added there or frame extraction breaks only in production.
+- Remember the Dockerfile installs `ffmpeg`; the assistant's media builder uses
+  it, so any new binary dependency must be added there or that path breaks only
+  in production.
 - Report what you actually ran. "Tests pass" and "image builds" are separate
   claims; if you did not run one of them, say so.
 
@@ -742,10 +713,9 @@ must allow the Docker bridge range to reach 8099. Both sides, together.
 rather than a copy of it, so a filter change cannot pass the tests while
 changing production behaviour.
 
-The full suite needs `nudenet` and `torch`; a light venv (`.venv-test/`,
-gitignored) runs everything except the media stages, where one test fails for the
-missing module. That failure is environmental — verify it is the *same* failure
-before calling it unrelated.
+The full suite has no model dependency, so a plain venv (`.venv-test/`,
+gitignored) runs everything. Run it in the image when you want the most faithful
+environment.
 
 ### 13.8 The AI second opinion
 
@@ -1338,16 +1308,15 @@ Guard Bot (app/main.py) ──── deterministic rules (app/intent.py)
       │              ▼                            ▼
       │   a JSON verdict                a JSON verdict
       │              │                            │
-      │              │                   ┌────────┴─────────┐
-      │              │                   ▼                  ▼
-      │              │          local detectors       policy engine
-      │              │          app/detector.py      app/mod_policy.py
-      │              │          app/decision.py            │
-      │              │                            ┌────────┴────────┐
-      │              │                            ▼                 ▼
-      │              │                        ALLOW / REVIEW   DELETE_WARN
-      │              │                                              │
-      └──────────────┴──────────────────────────────────────────────┘
+      │              │                            ▼
+      │              │                    policy engine
+      │              │                    app/mod_policy.py
+      │              │                            │
+      │              │                  ┌─────────┴────────┐
+      │              │                  ▼                  ▼
+      │              │              ALLOW / REVIEW   DELETE_WARN
+      │              │                                     │
+      └──────────────┴─────────────────────────────────────┘
                                     │
                                     ▼
                     Telegram API call (only from app/main.py)
@@ -1387,19 +1356,22 @@ model, rate window, daily cap, circuit breaker, counters table and client.
 
 ### 20.1 What it is asked, and what it answers
 
-One question per piece of content: *what is this?* The answer is a JSON object
+One question per message: *what is this text?* The answer is a JSON object
 constrained by a schema, coerced into closed sets on the way in, and never
 surfaced to a user:
 
 | Field | Values | Used for |
 |---|---|---|
-| `content_type` | text, image, sticker, animation, video, audio, mixed, unknown | the log |
 | `classification` | explicit_sexual, suggestive, harassment, threat, spam, normal, unknown | the policy |
 | `confidence` | 0.0–1.0, clamped | the policy |
 | `category` | a few words, bounded to 80 chars | the operator's log |
 | `recommended_action` | allow, review, delete | **a recommendation only** |
 | `uncertain` | bool | the policy: a veto |
 | `reason` | one sentence, bounded to 240 chars | the operator's log |
+
+It is **text-only**. There is no `content_type` field and no `assess_media`
+entry point: a photo, video, GIF or sticker is never sent here. The media
+moderation pipeline that used to exist was removed.
 
 `recommended_action` is deliberately a *recommendation* and is named that way.
 The policy engine reads it as one more input. Giving the model a place to say
@@ -1422,35 +1394,31 @@ deletion is recoverable, a wrong deletion is not.
 A malformed answer does **not** count toward the circuit breaker. The transport
 worked; an unusable answer is not an availability problem.
 
-### 20.3 Text versus media
+### 20.3 One switch, because there is one path
 
-Two switches, because they are different costs:
+`MODERATION_TEXT_ENABLED` (**default off**) is the only content switch that
+remains. Text is the one thing the AI is asked about, and it can delete a
+person's *words* in a language the model may misjudge, so the capability is
+implemented and tested but turning it on is a decision an operator makes after
+watching the review log, not a default this repository imposes.
 
-* `MODERATION_MEDIA_ENABLED` (default on) — a photo or a video is a large
-  request, but it is the case the whole layer exists for.
-* `MODERATION_TEXT_ENABLED` (**default off**) — the one part that can delete a
-  person's *words* rather than a picture, in a language the model may misjudge.
-  The capability is implemented and tested; turning it on is a decision an
-  operator makes after watching the review log, not a default this repository
-  imposes.
+There is no media switch: the media path it used to gate was removed.
 
 ---
 
-## 21. The moderation policy, and why it is less destructive than it was
+## 21. The moderation policy
 
 `app/mod_policy.py`. Pure functions: no I/O, no clock, no randomness, no
 Telegram. Everything upstream produces *evidence*; this produces the action.
 
-### 21.1 The problem it solves
+### 21.1 What it is now
 
-The local detector alone used to delete media at `EXPLICIT_DELETE_THRESHOLD`
-(0.45). That value was calibrated to fire on confirmed explicit media
-(0.50–0.67 measured) — and 0.45 is low enough that an ordinary photograph could
-cross it. A single uncalibrated score is not a good enough reason to destroy
-somebody's message.
-
-So the local detector's role changed from **verdict** to **evidence**. It can
-raise a candidate and it can no longer delete on its own.
+The policy used to weigh a local visual detector against the AI — a
+demoted-to-evidence NudeNet score, a scene classifier, and a
+`local_only_hard_evidence` mode in which an anatomical detection could delete on
+its own. That whole subsystem was removed. The policy is now exactly: the AI's
+verdict, the exemption flag, and the master switch. **A confident AI verdict is
+the only thing that can delete.**
 
 ### 21.2 The rules, in order
 
@@ -1458,25 +1426,13 @@ raise a candidate and it can no longer delete on its own.
 |---|---|---|---|
 | 1 | `MODERATION_ENABLED=0` | ALLOW | `policy_disabled` |
 | 2 | the author is exempt | ALLOW | `exempt` |
-| 3 | the AI confirms clearly explicit content | **DELETE + WARN** | `ai_confirmed_explicit` |
-| 4 | local says explicit, the AI says it is **not** | REVIEW | `local_explicit_ai_declined` |
-| 5 | local says explicit, the AI is unsure | REVIEW | `ai_uncertain` |
-| 6 | local says explicit, the AI could not be asked | REVIEW | `no_ai_confirmation` |
-| 6b | …and `MODERATION_REQUIRE_AI_CONFIRM=0` **and** the anatomical score clears the hard bar | **DELETE + WARN** | `local_only_hard_evidence` |
-| 7 | the AI flagged something non-deletable | REVIEW | `ai_<classification>` |
-| 8 | the local stage wanted a human | REVIEW | `local_review` |
-| 9 | otherwise | ALLOW | `no_evidence` |
+| 3 | the AI confirms a deletable, confident, non-uncertain classification | **DELETE + WARN** | `ai_confirmed_explicit` |
+| 4 | the AI flagged something non-deletable, or a deletable class below the confidence floor | REVIEW | `ai_<classification>` |
+| 5 | otherwise | ALLOW | `no_evidence` |
 
-**Rule 4 is the false-positive fix.** It is the case the local detector got
-wrong in production: it escalated, the AI declined, and now nothing is deleted.
-The AI wins the disagreement because a second opinion that can say *no* is the
-entire reason it is there.
-
-**Rule 6b is the only path where a local score deletes**, and it requires an
-explicit opt-in plus a threshold (`MODERATION_LOCAL_HARD_THRESHOLD`, 0.85) set
-above every true positive this deployment has measured. It exists so a
-deployment that has chosen to run without the AI layer is still strict rather
-than quietly equivalent.
+There is no rule that lets a local score delete, because there is no local
+score. `SOURCE_AI`, `SOURCE_NONE`, `SOURCE_EXEMPT` and `SOURCE_DISABLED` are the
+only sources.
 
 ### 21.3 What the action set deliberately cannot express
 
@@ -1499,30 +1455,30 @@ confirmed deletions lead to the configured timed restriction
 it is the pre-existing three-strike policy, applied only to content that was
 deleted and only after the AI confirmed it.
 
-### 21.4 The scene classifier's role
+### 21.4 `enforce_result` is lossy in one direction
 
-The scene stage (`SCENE_DELETE_THRESHOLD`, 0.95) can no longer delete on its
-own, in any mode. It is the less interpretable of the two local signals, and the
-case it was added for — a sexual act with no exposed anatomy — is now handled by
-the moderation AI, which attaches a reason. A scene score is evidence for a
-human.
+`enforce_result` adapts a policy outcome to the `DecisionResult` the shared
+executor takes. A non-`DELETE_WARN` action can never produce
+`Decision.EXPLICIT`, so nothing downstream of it can delete by accident. The
+executor's safety contract — a failed delete applies no strike and no
+restriction — is therefore written once, not twice.
 
 ### 21.5 REVIEW is reported, not silent
 
 `MODERATION_REVIEW_NOTIFY` (default on) sends one message to `ADMIN_LOG_CHAT` for
-every REVIEW: the identifiers, the two signals, the policy reason, and the
-sentence *"nothing was deleted"*. Without it, "the bot stopped deleting" and "the
-bot stopped working" would look identical from the outside. It carries no media
-and no message text.
+every REVIEW: the identifiers, the AI's classification and confidence, the
+policy reason, and the sentence *"nothing was deleted"*. Without it, "the bot
+stopped deleting" and "the bot stopped working" would look identical from the
+outside. It carries no message text.
 
 ---
 
-## 22. Media analysis
+## 22. Media understanding
 
-`app/media.py`. One builder, two callers: the moderation path and the assistant.
-What is shared is the *translation*; what is not shared is policy — the
-moderation path's limits, key and decision live in §20/§21, the assistant's in
-§23.
+`app/media.py`. One builder, one caller: the assistant. The moderation path
+that used to share it was removed, so what remains is the assistant's
+translation of a file the user explicitly sent it into something Gemini can
+read. Nothing here feeds any content moderation.
 
 ### 22.1 What was measured, and what it decided
 
@@ -1563,7 +1519,7 @@ ceiling is the same order, so there is nothing the Files API would unlock here.
 ### 22.3 The fallbacks, and why each exists
 
 * **Oversized file** → the thumbnail, if Telegram attached one, with
-  `thumbnail_only` set so a report can say a decision was made on a preview.
+  `thumbnail_only` set so the caller can say the read was on a preview.
 * **Long video** (`GEMINI_MEDIA_MAX_SECONDS`) → `GEMINI_MEDIA_FRAMES` still
   frames, sent as images. This is the documented API approach, and it is why a
   long clip does not silently become "not analysed".
@@ -1573,10 +1529,6 @@ ceiling is the same order, so there is nothing the Files API would unlock here.
   frames; for anything else, refused.
 * **A download that fails** → `ok=False` with a reason. Nothing fabricates a
   description.
-
-`build_from_path` is the moderation path's entry point: it has the file on disk
-already (the local detector downloaded it) and re-fetching the same bytes from
-Telegram would be a second download of somebody's media.
 
 ---
 
@@ -1891,7 +1843,7 @@ finds every ban, whichever interface requested it.
 | model | `GEMINI_MODEL` | `GEMINI_CHAT_MODEL` | `GEMINI_MOD_MODEL` | `TRANSCRIBE_MODEL` |
 | counters | `ai_usage` | `chat_usage` | `moderation_usage` | `transcript_usage` |
 | daily cap | 400 | 200 | 500 | 300 |
-| triggered by | any group message | an explicit address | media with local evidence; text if enabled | an explicit request only |
+| triggered by | any group message | an explicit address | a group text message, if enabled | an explicit request only |
 
 Each has its own `_recent_calls`, `_consecutive_failures`,
 `_circuit_open_until`, `_client` and `_client_key`. `tests/test_ai_isolation.py`
@@ -1916,12 +1868,12 @@ reported at boot as one shared allowance, because that is what it is.
 
 ## 27. Gotchas learned the hard way
 
-1. **A threshold that looks safe can mean the feature never fires.** The first
-   delete threshold was 0.80; confirmed explicit media scored 0.50–0.67, so
-   every true positive landed in `REVIEW` and nothing was ever deleted. Watch
-   the `decision=` lines on real traffic before concluding a stage works.
-2. **Fail-open is a feature, not laziness.** `MediaAnalysis(ok=False)` → `SAFE`
-   is the contract. Never let an exception path produce `EXPLICIT`.
+1. **A bar that looks safe can mean the feature never fires.** A confidence
+   threshold set too high means every true positive lands in `REVIEW` and
+   nothing is ever deleted. Watch the `policy=` lines on real traffic before
+   concluding a stage works.
+2. **Fail-open is a feature, not laziness.** An AI failure is a "not confirmed"
+   verdict → `SAFE`. Never let an exception path produce `EXPLICIT`.
 3. **`REVIEW` never deletes and never punishes — and it is no longer silent.**
    It used to be log-only. It now sends one message to `ADMIN_LOG_CHAT`
    (`MODERATION_REVIEW_NOTIFY`), because REVIEW became the landing place for
@@ -1929,47 +1881,33 @@ reported at boot as one shared allowance, because that is what it is.
    stopped deleting" and "the bot stopped working" look identical from outside.
    What must never change: no deletion, no strike, no restriction, and no
    message content in the notice.
-4. **The detector never owns cleanup.** Frames are written into the caller's
-   `work_dir`; the handler removes the whole directory in `finally`.
-5. **`.tgs` stickers are preview-only.** Do not claim animated stickers are
-   fully analysed.
-6. **The scene stage is a real, graded signal — not auxiliary plumbing.** When
-   `SCENE_ENABLED` is on, `MediaAnalysis.scene_nsfw` fills it and a score at or
-   above `SCENE_DELETE_THRESHOLD` deletes on its own (no NudeNet evidence
-   needed). Below `SCENE_REVIEW_THRESHOLD` it is ignored. `None` means "no
-   score" (disabled / failed) and must never be treated as `0.0` or as
-   evidence. Turning the stage off or breaking it must leave the bot working.
-7. **`db.add_strike` is now used for the violation ladder.** Do not add a second
-   violation store, and remember it is only ever called after a *successful*
-   deletion.
-8. **Only bot owners (`WHITELIST_USER_IDS`) are immune.** Telegram admins are
-   moderated like anyone else — do not add an admin bypass to `on_media`.
-9. **A flood fires the moment the threshold is crossed, not after the window
+4. **The media builder does not own cleanup.** `app/media.py` writes into a
+   caller-supplied location; the caller removes it on every path. Keep that
+   ownership rule.
+5. **`.tgs` stickers are preview-only.** Lottie is not readable by ffmpeg or
+   the model, so an animated sticker is read through its still preview. Do not
+   claim animated stickers are fully analysed.
+6. **A flood fires the moment the threshold is crossed, not after the window
    closes.** The first `BURST_MAX_ITEMS` messages are processed normally; only
    the burst's own messages are deleted, and the window is then cleared so the
    next message starts a fresh burst. Do not "fix" this into waiting for the
    window to expire.
-10. **The scene classifier costs ~1.7 s per scored frame on a 2-core VPS.** The
-    frame budget is `SCENE_MAX_FRAMES` (default 2), which is what bounds the
-    stage's cost on video/GIF — it is deliberately independent of
-    `VIDEO_FRAMES`. Raising it improves recall at ~1.7 s per extra frame; do
-    not score every frame "just in case".
-11. **The live `.env` still contains first-generation leftovers** (`MAX_STRIKES`,
-    `NSFW_DELETE_THRESHOLD`, `NSFW_BAN_THRESHOLD`, `HIGH_CONF_ACTION`,
-    `TRUST_AFTER_MESSAGES`, `TRUSTED_EXTRA_MARGIN`). Nothing reads them. The
-    violation threshold is `VIOLATION_MUTE_AFTER` (default 3) precisely so the
-    stale `MAX_STRIKES=5` cannot change the documented three-strike policy. Do
-    not start reading the old names.
-12. **The bot needs delete-message permission and privacy mode off.** If
-    deletion silently fails, check the Telegram-side setup before the code.
-13. **`drop_pending_updates=True` means restarts skip the backlog** by design —
-    do not "fix" it into processing old messages.
-14. **`data/` and `.env` are gitignored and must stay out of Git.** The model
-    cache, the SQLite DB and the token never belong in a commit.
-15. **A documentation change is not a code change.** Do not let a docs commit
+7. **The live `.env` still contains first-generation leftovers** (`MAX_STRIKES`,
+   `NSFW_DELETE_THRESHOLD`, `NSFW_BAN_THRESHOLD`, `HIGH_CONF_ACTION`,
+   `TRUST_AFTER_MESSAGES`, `TRUSTED_EXTRA_MARGIN`). Nothing reads them. The
+   violation threshold is `VIOLATION_MUTE_AFTER` (default 3) precisely so the
+   stale `MAX_STRIKES=5` cannot change the documented three-strike policy. Do
+   not start reading the old names.
+8. **The bot needs delete-message permission and privacy mode off.** If
+   deletion silently fails, check the Telegram-side setup before the code.
+9. **`drop_pending_updates=True` means restarts skip the backlog** by design —
+   do not "fix" it into processing old messages.
+10. **`data/` and `.env` are gitignored and must stay out of Git.** The SQLite
+    DB and the token never belong in a commit.
+11. **A documentation change is not a code change.** Do not let a docs commit
     carry source edits, and do not let a code commit quietly rewrite the
     decision table.
-16. **A container reaching a host service through the bridge gateway can hang
+12. **A container reaching a host service through the bridge gateway can hang
     instead of failing.** `host.docker.internal:host-gateway` points at the host
     itself, so the packet hits the host's `INPUT` chain, where ufw's default-deny
     drops it. The symptom is a *timeout*, which is indistinguishable from the
@@ -1978,18 +1916,17 @@ reported at boot as one shared allowance, because that is what it is.
     reason (§13.6). Test a new host dependency with a raw
     `socket.create_connection()` from inside the container before wiring it into
     application code.
-17. **`host-gateway` resolves to the *default bridge* gateway, not the compose
+13. **`host-gateway` resolves to the *default bridge* gateway, not the compose
     network's.** With `network_mode: host` this stops mattering; if you ever go
     back to a bridge network, remember that `getent hosts host.docker.internal`
     inside the container is the only way to know which address it picked.
-18. **A fake that returns the shape you wish for hides real bugs.** The
+14. **A fake that returns the shape you wish for hides real bugs.** The
     acquisition tests originally faked the panel with flat `total` / `up` /
     `down` keys; the real panel sends `totalGB` and nests the counters under
     `traffic`, so the sweep's exhaustion check passed while being unable to fire
     in production. When faking an external system, copy its *actual* response —
     see `/opt/vpn-bot/AGENTS.md` §5.6.
-
-19. **A seam that everything replaces is a seam nothing tests.** `chat._request`
+15. **A seam that everything replaces is a seam nothing tests.** `chat._request`
     is replaced by every test in `tests/test_chat.py`, so a mistake *inside* it
     is invisible to the whole suite. One was: a payload whose `parts` mixed a
     string with a `types.Part` fails pydantic validation with nineteen field
@@ -1997,32 +1934,31 @@ reported at boot as one shared allowance, because that is what it is.
     turn. The fix was to split the conversion into `chat._wire` and test it
     directly. When a function is the universal test seam, the code inside it
     needs its own tests or a live call — there is no third option.
-20. **A score is not a decision.** The local detector's threshold was calibrated
-    correctly (0.45, just below the lowest confirmed true positive) and it still
-    produced a false positive on an ordinary photograph, because calibration is
-    not the same as being right. The fix was not a better number: it was demoting
-    the detector from *verdict* to *evidence* and requiring a second opinion that
-    can say no. When a single uncalibrated signal can destroy something, the
-    problem is the signal's authority, not its value.
-21. **`uncertain` has to be a veto, not a footnote.** A model that answers
+16. **A score is not a decision.** The removed local detector's threshold was
+    calibrated correctly and it still produced false positives on ordinary
+    photographs, because calibration is not the same as being right. The fix was
+    not a better number: it was to stop letting a single local signal decide at
+    all. When one uncalibrated signal can destroy something, the problem is the
+    signal's authority, not its value.
+17. **`uncertain` has to be a veto, not a footnote.** A model that answers
     "explicit, 0.95, but I am guessing" has told you it does not know. Treating
     the confidence as the answer and the uncertainty as colour is how a
     deliberate hedge becomes a deletion.
-22. **Callback data is attacker-controlled.** The promote dialog carries a
+18. **Callback data is attacker-controlled.** The promote dialog carries a
     permission bitmask in its buttons, and any client can send any bytes. The
     handler therefore re-runs every authorization check on every press and treats
     its own payload as a suggestion of what to display. A dialog that trusts its
     own buttons is a privilege-escalation bug with a nice UI.
-23. **The owner must not be a row in a writable table.** `OWNER_USER_ID` is
+19. **The owner must not be a row in a writable table.** `OWNER_USER_ID` is
     compared, never looked up, so no command, no button and no hand-edited
     database row can create or remove the highest authority. The moment "owner"
     is a row, "make me owner" becomes a thing an attacker can ask for.
-24. **A refused Telegram operation is not a failed command.** `promoteChatMember`
+20. **A refused Telegram operation is not a failed command.** `promoteChatMember`
     can succeed at the application layer and fail at Telegram's. Reporting those
     as one outcome is how an operator comes to believe somebody has rights they
     do not have, so the three outcomes (stored+applied, stored+refused,
     not-attempted) each have their own sentence.
-25. **Transcription and generation are different jobs with different failure
+21. **Transcription and generation are different jobs with different failure
     meanings.** They share nothing — not a key, not a window, not a breaker —
     because otherwise "the transcript was wrong" and "the reply was wrong" arrive
     as the same counter, and a busy voice chat can silence the assistant.
@@ -2123,7 +2059,7 @@ never offers a model that does not satisfy it *in full*:
 |---|---|
 | intent | `text` |
 | chat | `text` |
-| moderation | `text`, `image`, `video` |
+| moderation | `text` |
 | transcribe | `audio_in` |
 | tts | `audio_out` |
 
@@ -2997,10 +2933,10 @@ recorded here so nobody "tidies" the name back.
 ## 33. One strike ladder
 
 The escalation rule — warn, and restrict at `VIOLATION_MUTE_AFTER` — used to
-exist twice: once in the media pipeline and once in the text pipeline. Two copies
-of a punishment rule is how a group ends up punishing the same behaviour two
-different ways depending on whether the violation arrived as a photo or as a
-sentence, and it is how a fix lands on one path and not the other.
+exist twice: once in the (now removed) media pipeline and once in the text
+pipeline. Two copies of a punishment rule is how a group ends up punishing the
+same behaviour two different ways depending on which path caught it, and it is
+how a fix lands on one path and not the other.
 
 `_apply_strike_ladder(ctx, chat_id, user, *, strike, source)` in `main.py` is now
 the only implementation. Three properties are deliberate:
@@ -3017,10 +2953,9 @@ the only implementation. Three properties are deliberate:
   warning still goes out, and `_schedule_test_unrestrict` is reached only when
   the restriction actually applied.
 
-The `source` argument (`media`, `text`, `filter`) is what makes the ladder's
-decisions attributable in the log without the ladder needing to know what a
-filter is. The three callers are the media path, the text path, and
-`on_group_filter` (§32).
+The `source` argument (`text`, `filter`) is what makes the ladder's decisions
+attributable in the log without the ladder needing to know what a filter is. The
+callers are the text-moderation path and `on_group_filter` (§32).
 
 ## 34. Nexus: who may talk to the assistant, and what it may do about it
 
@@ -4162,58 +4097,57 @@ content; the purge is not run on every capture; the retention policy still
 discards old rows; the room window still respects both bounds; and the assistant
 still answers nobody when it is switched off.
 
-## 37. An ordinary photograph is not a sexual verdict
+## 37. Why the visual media pipeline was removed
 
-### 37.1 Two independent defects, one symptom
+The bot once ran a photo / video / GIF / sticker content pipeline: a local
+NudeNet detector for explicit body regions, a second-stage scene classifier, a
+`DecisionEngine` that combined them, and a media-moderation AI stage on top. It
+was removed deliberately, and this section records why so a future session does
+not "restore" it by accident.
 
-The report was false positives in media moderation. There were two causes, and
-neither was a threshold:
+### 37.1 The false positives were the signal, not the tuning
 
-1. **`mod_policy` rule 8 turned any local REVIEW into a REVIEW.** The local
-   detector returns a graded verdict, and the AI stage is asked for a second
-   opinion on the ambiguous ones. When the AI answered `normal` with high
-   confidence, rule 8 discarded that and returned REVIEW anyway — because it
-   only looked at the local verdict, never at what the AI had said about it.
-2. **The gate that decides whether to ask the AI at all was a dead
-   conjunction.** `_assess_media_with_ai` asked only when
-   `result.scene_nsfw is None`. For a clean image the detector returns `0.0`, not
-   `None`, so the AI was asked about *every* image — on the moderation workload,
-   which has no daily budget. That is why the extra cost was invisible in the
-   pool counters and why the behaviour was inconsistent.
+Live use produced false positives on ordinary photographs. Two independent
+causes were found, and neither was a threshold:
 
-### 37.2 The fix, and the asymmetry it preserves
+1. The policy turned any local REVIEW into a REVIEW even when the AI answered
+   `normal` with high confidence — it only looked at the local verdict.
+2. The gate deciding whether to ask the AI at all was a dead conjunction
+   (`scene_nsfw is None`), which for a clean image is `0.0`, so the AI was asked
+   about every image.
 
-A new rule 8 (`local_review_ai_normal`) precedes the old one and allows when the
-AI says `normal` with no uncertainty and confidence at or above
-`MODERATION_REVIEW_CONFIDENCE`. The old rule is now rule 9 and is unchanged: a
-local REVIEW with no AI answer, or with an uncertain one, is still a REVIEW.
+Tuning did not fix the class of problem: a single local visual score was being
+trusted to destroy somebody's message. The architecture that removed that
+authority — demote the local signal, require the AI to confirm — was the first
+fix. The pipeline was then removed entirely at the owner's request, because the
+remaining value did not justify the cost (a ~330 MB model, CPU inference on a
+2-core VPS, and a second content path to maintain) and because the text path and
+the flood rule cover the cases the owner actually needs.
 
-The thresholds were not touched. The change is that a *strong* verdict now
-requires a strong signal: a weak local cue plus a confident "this is ordinary"
-is ordinary. Uncertainty still produces review rather than deletion, and
-genuinely explicit material is unaffected — the AI's `explicit` classification
-still drives the ladder it always did.
+### 37.2 What was removed, and what was kept
 
-The gate was replaced with an explicit switch, `MODERATION_AI_ASK_ON_SAFE`,
-default `false`. The dead conjunction was not repaired; it was replaced with a
-named decision, because a condition nobody can read is a condition nobody can
-audit.
+Removed: `app/detector.py` (NudeNet + ffmpeg frame sampling + the scene
+classifier), `DecisionEngine`/`default_engine`, `ai_moderation.assess_media` and
+its media context, `mod_policy`'s local-vs-AI rules and `local_only_hard_evidence`
+mode, the `on_media` handler and its helpers, the media evidence reports, the
+media-only config (`MEDIA_ENABLED`, `SCENE_*`, `EXPLICIT_*`, `VIDEO_FRAMES`,
+`MAX_DOWNLOAD_MB`, `MEDIA_WORKERS`, `MODERATION_MEDIA_ENABLED`,
+`MODERATION_REQUIRE_AI_CONFIRM`, `MODERATION_LOCAL_HARD_THRESHOLD`,
+`MODERATION_AI_ASK_ON_SAFE`), the `nudenet`/`transformers`/`torch` dependencies,
+the CPU-torch Dockerfile step and `HF_HOME`, and the tests dedicated to them.
 
-### 37.3 Tests
+Kept, because none of it was dedicated to that pipeline: `app/burst.py` (the
+flood rule), `app/text_filters.py`, `app/moderation.py` (the executor), the
+`Decision`/`DecisionResult` vocabulary, the strike ladder and the admin report
+infrastructure, `app/media.py` (the assistant's media builder and
+`/transcribe`), and ffmpeg.
 
-`tests/test_moderation_false_positives.py` (29 tests) is in three layers, so a
-regression is attributed to the right one:
+### 37.3 The rule that follows
 
-* the policy ladder as a pure function — portrait, gym, swimsuit, hug, kiss,
-  close-up, visible skin, each with a confident `normal` AI verdict;
-* the gate — that a clean image does not reach the AI by default, and does when
-  the switch is on;
-* the whole `on_media` handler end to end — that none of the above produces a
-  deletion or a restriction.
-
-And, in the same file, the cases that must still be caught: genuinely explicit
-material with a local HARD verdict, with an AI `explicit` verdict, and with an
-uncertain AI verdict.
+**Do not reintroduce it.** A video or GIF must not enter any content pipeline;
+no general or conversational AI may be made to do the job by accident. If a
+future stage needs media content understanding, it is a new, explicitly
+requested stage with its own design — not a restoration.
 
 ## 38. "Him" means him
 

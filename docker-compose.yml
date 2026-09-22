@@ -5,7 +5,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ./data:/data          # sqlite db + downloaded model cache
+      - ./data:/data          # sqlite db
 
     # A log ceiling, because the default is none.
     #

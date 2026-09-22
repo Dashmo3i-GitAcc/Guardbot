@@ -53,58 +53,15 @@ ADMIN_LOG_CHAT = int(os.getenv("ADMIN_LOG_CHAT", "0")) or None
 # Extra user IDs that are always immune (besides real chat admins)
 WHITELIST_USER_IDS = set(_int_list(os.getenv("WHITELIST_USER_IDS", "")))
 
-# ---------------- Explicit media moderation ----------------
-MEDIA_ENABLED = _bool("MEDIA_ENABLED", True)
-
-# Detector backend. NudeNet ships a small ONNX model with explicit
-# body-region classes (CPU friendly).
-DETECTOR_BACKEND = os.getenv("DETECTOR_BACKEND", "nudenet")
-
-# Body-region classes that count as *explicit evidence*. These are real
-# NudeNet classes. Anything not listed here can never trigger a deletion.
-EXPLICIT_CLASSES = set(
-    _str_list(
-        os.getenv(
-            "EXPLICIT_CLASSES",
-            "FEMALE_GENITALIA_EXPOSED,MALE_GENITALIA_EXPOSED,ANUS_EXPOSED",
-        )
-    )
-)
-
-# >= this confidence for an explicit class -> EXPLICIT (auto-delete).
-#
-# Calibration note: NudeNet 320n is not a calibrated probability model. Its own
-# operating point is a 0.20 detection gate with NMS at 0.25. Live testing with
-# confirmed explicit media produced 0.50 / 0.51 / 0.56 / 0.67 for the explicit
-# classes, so the previous 0.80 never fired and everything landed in REVIEW.
-# 0.45 sits just below the lowest confirmed true positive (0.50) with a small
-# margin, while staying ~1.8x above the model's 0.25 noise floor. Explicit
-# classes are region-specific, so swimwear/clothing normally produces the
-# *_COVERED classes instead and is not affected.
-EXPLICIT_DELETE_THRESHOLD = _float("EXPLICIT_DELETE_THRESHOLD", 0.45)
-# >= this (but below the delete threshold) -> REVIEW: logged only, never
-# deleted and never notified. Set to NudeNet's NMS floor so REVIEW stays a
-# meaningful state instead of a degenerate sliver just under the delete value.
-EXPLICIT_REVIEW_THRESHOLD = _float("EXPLICIT_REVIEW_THRESHOLD", 0.25)
-
-# Video / GIF / animated sticker: number of frames sampled
-VIDEO_FRAMES = _int("VIDEO_FRAMES", 4)
-
-# Bot API download limit is 20 MB. Larger files: only the thumbnail is checked.
-MAX_DOWNLOAD_MB = _int("MAX_DOWNLOAD_MB", 20)
-
-# How many media items are analyzed in parallel
-MEDIA_WORKERS = _int("MEDIA_WORKERS", 2)
-
 # ---------------- Instant media flood (burst) ----------------
 # A burst is *more than* BURST_MAX_ITEMS qualifying media messages from the
 # same user inside BURST_WINDOW_SECONDS. The window is deliberately very
 # short: this rule stops an instant flood, it is not a "sent a lot of media
 # today" rule, and it must not flag normal sharing over 20-30 seconds.
 #
-# Only BURST_MEDIA_KINDS are counted. Ordinary photos are never in this set,
-# so sending several photos quickly is not a flood; a photo is still checked
-# by the sexual-content detector on its own.
+# Only BURST_MEDIA_KINDS are counted. Ordinary photos and videos are never in
+# this set, so sending several of them quickly is not a flood — this rule is
+# about a burst of one light-weight kind, not about the volume of content.
 #   gif            = Telegram animation
 #   sticker        = static sticker
 #   video_sticker  = .webm video sticker
@@ -122,7 +79,8 @@ BURST_MEDIA_KINDS = set(
 )
 
 # ---------------- Repeated violations ----------------
-# One confirmed explicit-media deletion counts as one violation. A warning is
+# One confirmed deletion counts as one violation — a pattern-filter hit the
+# operator has chosen to count, or an AI-confirmed text deletion. A warning is
 # sent each time, and the configured restriction is applied once the count
 # reaches VIOLATION_MUTE_AFTER.
 #
@@ -163,38 +121,6 @@ FLOOD_WARNING_TEXT = os.getenv(
     "چند تا فایل/استیکر رو خیلی سریع پشت سر هم فرستادی و این باعث شلوغی گروه می‌شه.\n"
     "به همین دلیل ارسال پیام برات {minutes} دقیقه محدود شد. لطفاً آرام‌تر بفرست.",
 )
-
-# ---------------- Second-stage scene classifier ----------------
-# NudeNet only sees explicit *body regions*; it cannot see a sexual act when no
-# genitalia are visible (intimate/sexual interaction, erotic scenes, explicit
-# scenes where the anatomical class is simply missed). This stage adds a local,
-# scene-level NSFW score on top of NudeNet, so the overall sexual nature of the
-# media is recognised and not just individual body parts.
-#
-# Unlike the first version of this stage, a confident scene score CAN now
-# produce EXPLICIT and therefore a deletion - that is the whole point of the
-# stage. It is graded so that only clearly sexual media deletes:
-#
-#     score <  SCENE_REVIEW_THRESHOLD  -> SAFE
-#     score >= SCENE_REVIEW_THRESHOLD  -> REVIEW   (logged, never deletes)
-#     score >= SCENE_DELETE_THRESHOLD  -> EXPLICIT (delete)
-#
-# It still fails open: a missing model, a missing dependency or an inference
-# error leaves the score absent, and an absent score never deletes.
-SCENE_ENABLED = _bool("SCENE_ENABLED", True)
-SCENE_MODEL = os.getenv("SCENE_MODEL", "Falconsai/nsfw_image_detection")
-# Deliberately high: this threshold deletes media, so it is set where only a
-# clearly sexual scene reaches it. Like EXPLICIT_DELETE_THRESHOLD it is a
-# conservative starting point to be tuned against real traffic, not a measured
-# constant. Do not lower it to "catch more" without evidence.
-SCENE_DELETE_THRESHOLD = _float("SCENE_DELETE_THRESHOLD", 0.95)
-# Lower bound of the REVIEW band: mildly suggestive / ambiguous media.
-SCENE_REVIEW_THRESHOLD = _float("SCENE_REVIEW_THRESHOLD", 0.60)
-# How many of the already-sampled frames the scene stage scores. 1 reproduces
-# the old single-frame behaviour. Measured ~1.7 s per frame on the 2-core VPS,
-# so this is the knob that bounds the stage's cost on video/GIF - it is not
-# affected by raising VIDEO_FRAMES.
-SCENE_MAX_FRAMES = _int("SCENE_MAX_FRAMES", 2)
 
 DB_PATH = os.getenv("DB_PATH", "/data/guardbot.db")
 TMP_DIR = os.getenv("TMP_DIR", "/tmp/guardbot")
@@ -1026,23 +952,22 @@ BOT_RIGHTS_TTL_SECONDS = _float("BOT_RIGHTS_TTL_SECONDS", 45.0)
 # own key setting, its own model, its own rate window, its own daily cap, its
 # own circuit breaker, its own counters table and its own client.
 #
-# What it is for: understanding what a piece of group content *is*, well enough
-# for a deterministic policy to act on. The local detectors are good at one
-# narrow question (is there an explicit body region in this frame) and bad at
-# everything else — a sexual act with no exposed anatomy, a suggestive cartoon,
-# harassment, a threat. This layer answers the wider question, and answers it
+# What it is for: understanding what a group message *is*, well enough for a
+# deterministic policy to act on. A pattern rule can see a link or a banned
+# word; it cannot see targeted abuse, a threat, or a scam phrased in words it
+# has never been given. This layer answers that wider question, and answers it
 # with a small structured verdict rather than prose.
 #
 # What it is NOT for, and this is the architectural line the whole design turns
 # on: **it never executes anything.** It cannot delete, restrict, ban or reply.
 # Its output is data. The decision to act is made by app/mod_policy.py, in code,
-# from its verdict plus the local detectors plus the configuration. There is no
+# from its verdict plus the configuration. There is no
 # code path from this module's return value to a Telegram call, which is why a
 # prompt-injected group message cannot make the bot do anything.
 #
-# Why a separate key matters here more than anywhere else: moderation runs on
-# *every* media item and a large share of text, so it is by far the largest
-# consumer. If it shared the classifier's project it would starve acquisition
+# Why a separate key matters here more than anywhere else: text moderation can
+# run on a large share of a busy group's messages, so this is a heavy consumer.
+# If it shared the classifier's project it would starve acquisition
 # and chat — and Google's limits are per project, not per key.
 GEMINI_MOD_ENABLED = _bool("GEMINI_MOD_ENABLED", False)
 
@@ -1060,9 +985,8 @@ GEMINI_MOD_ALLOW_SHARED_KEY = _bool("GEMINI_MOD_ALLOW_SHARED_KEY", False)
 # short and structured, so the stronger (and slower) models buy little here.
 GEMINI_MOD_MODEL = os.getenv("GEMINI_MOD_MODEL", "gemini-flash-lite-latest").strip()
 
-# Longer than the classifier's 10s, because a video or a voice clip is a much
-# bigger input than a line of text. Still bounded, and the media path runs off
-# the event loop.
+# A generous bound, because the request is a single message: it is only the
+# classifier's 10s that this is comfortably above.
 GEMINI_MOD_TIMEOUT_SECONDS = _float("GEMINI_MOD_TIMEOUT_SECONDS", 20.0)
 GEMINI_MOD_MAX_RETRIES = _int("GEMINI_MOD_MAX_RETRIES", 1)
 GEMINI_MOD_BACKOFF_SECONDS = _float("GEMINI_MOD_BACKOFF_SECONDS", 1.5)
@@ -1076,15 +1000,15 @@ GEMINI_MOD_DAILY_LIMIT = _int("GEMINI_MOD_DAILY_LIMIT", 500)
 GEMINI_MOD_CIRCUIT_FAILURES = _int("GEMINI_MOD_CIRCUIT_FAILURES", 5)
 GEMINI_MOD_CIRCUIT_SECONDS = _float("GEMINI_MOD_CIRCUIT_SECONDS", 300.0)
 
-# Text is truncated to this before it leaves the server. Media is bounded
-# separately, by bytes and by duration — see GEMINI_MEDIA_* below.
+# Text is truncated to this before it leaves the server.
 GEMINI_MOD_MAX_CHARS = _int("GEMINI_MOD_MAX_CHARS", 2000)
 
 
-# ---------------- Media understanding (shared by moderation and chat) --------
-# One builder for "Telegram media -> something Gemini can read", used by both
-# the moderation workload and the conversational one. The *builder* is shared;
-# the policies, limits and keys above and below are not.
+# ---------------- Media understanding (the conversational path) --------------
+# One builder for "Telegram media -> something Gemini can read", used by the
+# assistant when someone sends it a photo, a video or a voice note. The
+# moderation workload used to share it; that path was removed, so this is the
+# only caller now.
 #
 # Measured on this deployment's key on 2026-09-21, one real call each, to decide
 # what the builder may actually send:
@@ -1121,30 +1045,16 @@ GEMINI_MEDIA_MAX_SECONDS = _float("GEMINI_MEDIA_MAX_SECONDS", 60.0)
 
 
 # ---------------- The moderation policy --------------------------------------
-# The deterministic engine that turns signals into an action. Everything here is
-# about *how sure we have to be before we destroy something*, and the defaults
-# are deliberately the conservative end.
+# The deterministic engine that turns the moderation AI's verdict into an
+# action. Everything here is about *how sure we have to be before we destroy
+# something*, and the defaults are deliberately the conservative end.
 #
-# The problem this solves, stated plainly: the local detector alone was deleting
-# media at a threshold low enough that an ordinary celebrity photograph could
-# cross it. A single uncalibrated score is not a good enough reason to delete
-# somebody's message. So the local detector's role is now **evidence, not a
-# verdict**: it can raise a candidate, and it can no longer delete on its own.
+# The media path used to feed a local visual detector into this policy, and its
+# settings lived here too: a hard local threshold, a "delete without the AI"
+# mode, a media switch, an ask-the-AI-about-everything lever. That whole
+# pipeline was removed, so the policy is now simply: a confident AI verdict can
+# delete, and nothing else can.
 MODERATION_ENABLED = _bool("MODERATION_ENABLED", True)
-
-# Whether a deletion must be confirmed by the moderation AI.
-#
-# True (the default) means: local detector says explicit, AI disagrees or cannot
-# be asked -> the content is *allowed and logged*, never deleted. That is the
-# fail-safe direction the brief asks for, and it is why turning this on makes the
-# bot strictly less destructive than it was.
-#
-# False means the local detector may delete alone, but only at or above
-# MODERATION_LOCAL_HARD_THRESHOLD — a much higher bar than the old
-# EXPLICIT_DELETE_THRESHOLD, and one that is deliberately hard to reach. Set it
-# False only if you have decided the AI layer is unavailable and you still want
-# deletions; the startup log says which mode is in force.
-MODERATION_REQUIRE_AI_CONFIRM = _bool("MODERATION_REQUIRE_AI_CONFIRM", True)
 
 # The AI's confidence must be at least this before its "clearly explicit"
 # classification is acted on. Below it the verdict is treated as uncertain and
@@ -1155,13 +1065,6 @@ MODERATION_DELETE_CONFIDENCE = _float("MODERATION_DELETE_CONFIDENCE", 0.80)
 # content is allowed, but an operator can see it in the log and in the review
 # queue. A false positive here costs a log line, not a message.
 MODERATION_REVIEW_CONFIDENCE = _float("MODERATION_REVIEW_CONFIDENCE", 0.45)
-
-# The local detector's own hard bar, used only when
-# MODERATION_REQUIRE_AI_CONFIRM is False. Set above every true positive measured
-# on this deployment (0.50/0.51/0.56/0.67) on purpose: this mode exists for a
-# deployment that has chosen to run without the AI layer, and it should be
-# visibly stricter than the AI-confirmed path rather than quietly equivalent.
-MODERATION_LOCAL_HARD_THRESHOLD = _float("MODERATION_LOCAL_HARD_THRESHOLD", 0.85)
 
 # Which content classes the policy may ever act destructively on. This is the
 # closed vocabulary the moderation AI's verdict is coerced into, and the set the
@@ -1196,46 +1099,17 @@ MODERATION_DELETABLE_CLASSES = set(
 # Whether text is sent to the moderation layer at all.
 #
 # **Off by default**, and that is a deliberate judgement rather than an
-# oversight. This is the one part of the moderation layer that can delete a
-# person's *words* rather than a picture, in a language the model may misjudge,
-# and a false positive here removes something somebody wrote and cannot get
-# back. The capability is implemented and tested; turning it on is a decision
-# the operator should make after watching the review log for a while, not a
-# default this file imposes.
-#
-# Media moderation does not depend on this: a photo is still sent to the
-# moderation layer when this is off.
+# oversight. This is the only path left that can delete a person's *words*, in a
+# language the model may misjudge, and a false positive here removes something
+# somebody wrote and cannot get back. The capability is implemented and tested;
+# turning it on is a decision the operator should make after watching the review
+# log for a while, not a default this file imposes.
 MODERATION_TEXT_ENABLED = _bool("MODERATION_TEXT_ENABLED", False)
 
 # Messages shorter than this are not sent to the moderation layer. A three-word
 # line has almost no signal for a content classifier, and the cost is a request
 # against a shared quota.
 MODERATION_TEXT_MIN_CHARS = _int("MODERATION_TEXT_MIN_CHARS", 25)
-
-# Whether media is sent to it. This is the expensive half — a video is a much
-# larger request than a line of text — so it has its own switch.
-MODERATION_MEDIA_ENABLED = _bool("MODERATION_MEDIA_ENABLED", True)
-
-# Whether the moderation AI is asked about media the local stage found *nothing*
-# to say about.
-#
-# **Off by default**, and the default is the documented intent: the AI is the
-# second opinion, so it is asked exactly when the first one had something to
-# say. That is the cheapest rule and it is also the correct one, because the
-# AI's value here is that it can *disagree* — asking it about content nobody
-# doubted spends the quota to confirm the obvious.
-#
-# The guard used to be written as "skip when SAFE **and** the scene score is
-# absent", and the second clause made the first one dead: the scene classifier
-# returns a number for every image it touches, so the AI was asked about every
-# image posted in the group. On a deployment whose moderation workload has no
-# daily budget, that is an unbounded cost, and it was never a decision anybody
-# made — it was a conjunction that read as a condition.
-#
-# Set this to true to put the AI back on every image. It is a lever, not a
-# recommendation: it trades quota for coverage, and it is the setting to reach
-# for if a genuinely explicit image is ever reported as having been missed.
-MODERATION_AI_ASK_ON_SAFE = _bool("MODERATION_AI_ASK_ON_SAFE", False)
 
 
 # ── Update deduplication ──────────────────────────────────────────────────
@@ -2132,10 +2006,11 @@ GEMINI_POOLS = [
             GEMINI_MOD_ALLOW_SHARED_KEY,
         ),
         "models": _models(GEMINI_MOD_MODEL, GEMINI_MOD_FALLBACK_MODELS),
-        # Moderation is the media workload: it sends images and extracted video
-        # frames, so its models must accept both. This is the requirement that
-        # must never be relaxed to keep a request alive.
-        "capabilities": frozenset({"text", "image", "video"}),
+        # Text only. The workload used to send images and extracted video
+        # frames, and required models that accepted both; with the media
+        # pipeline removed, requiring an image capability would only shrink the
+        # set of models a text classification can use.
+        "capabilities": frozenset({"text"}),
         "allow_experimental": False,
         "retries": GEMINI_MOD_MAX_RETRIES,
         "backoff": GEMINI_MOD_BACKOFF_SECONDS,

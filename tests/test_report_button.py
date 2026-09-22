@@ -26,16 +26,10 @@ class FakeBot:
         self,
         status=ChatMemberStatus.MEMBER,
         member_error=None,
-        photo_fails=False,
-        document_fails=False,
     ):
         self.status = status
         self.member_error = member_error
-        self.photo_fails = photo_fails
-        self.document_fails = document_fails
         self.messages = []   # kwargs of every send_message
-        self.photos = []     # kwargs of every send_photo
-        self.documents = []  # kwargs of every send_document
         self.member_checks = []
 
     async def get_chat_member(self, chat_id, user_id):
@@ -46,16 +40,6 @@ class FakeBot:
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append({"chat_id": chat_id, "text": text, **kwargs})
-
-    async def send_photo(self, chat_id, photo=None, caption=None, **kwargs):
-        if self.photo_fails:
-            raise TelegramError("photo rejected")
-        self.photos.append({"chat_id": chat_id, "caption": caption, **kwargs})
-
-    async def send_document(self, chat_id, document=None, caption=None, **kwargs):
-        if self.document_fails:
-            raise TelegramError("document rejected")
-        self.documents.append({"chat_id": chat_id, "caption": caption, **kwargs})
 
 
 class FakeReportMessage:
@@ -194,63 +178,6 @@ def test_the_button_uses_a_dedicated_callback_prefix():
 def test_button_is_attached_to_text_reports():
     bot = FakeBot()
     asyncio.run(main.report(SimpleNamespace(bot=bot), "hello"))
-
-    assert len(bot.messages) == 1
-    assert button_of(bot.messages[0]["reply_markup"]).callback_data == "report_delete"
-
-
-def explicit_result(label="FEMALE_GENITALIA_EXPOSED", score=0.67):
-    return SimpleNamespace(matched=SimpleNamespace(label=label, score=score))
-
-
-class StubAnalysis:
-    def __init__(self, frame):
-        self._frame = frame
-
-    def evidence_frame(self, label):
-        return self._frame
-
-
-def send_evidence_report(bot, analysis):
-    chat = SimpleNamespace(id=ADMIN_CHAT_ID)
-    user = SimpleNamespace(id=7, full_name="Tester", username="tester")
-    msg = SimpleNamespace(message_id=55)
-    asyncio.run(
-        main._send_explicit_report(
-            SimpleNamespace(bot=bot),
-            chat, user, msg, "photo", analysis, explicit_result(), "",
-        )
-    )
-
-
-def test_button_is_attached_to_evidence_photo_reports(tmp_path):
-    frame = tmp_path / "frame.jpg"
-    frame.write_bytes(b"jpg")
-    bot = FakeBot()
-
-    send_evidence_report(bot, StubAnalysis(str(frame)))
-
-    assert len(bot.photos) == 1
-    assert button_of(bot.photos[0]["reply_markup"]).callback_data == "report_delete"
-
-
-def test_button_is_attached_to_evidence_document_reports(tmp_path):
-    frame = tmp_path / "frame.jpg"
-    frame.write_bytes(b"jpg")
-    bot = FakeBot(photo_fails=True)  # force the document fallback
-
-    send_evidence_report(bot, StubAnalysis(str(frame)))
-
-    assert len(bot.documents) == 1
-    assert button_of(bot.documents[0]["reply_markup"]).callback_data == "report_delete"
-
-
-def test_button_is_attached_to_the_text_only_report_fallback(tmp_path):
-    frame = tmp_path / "frame.jpg"
-    frame.write_bytes(b"jpg")
-    bot = FakeBot(photo_fails=True, document_fails=True)
-
-    send_evidence_report(bot, StubAnalysis(str(frame)))
 
     assert len(bot.messages) == 1
     assert button_of(bot.messages[0]["reply_markup"]).callback_data == "report_delete"

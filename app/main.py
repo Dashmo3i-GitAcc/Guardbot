@@ -6,7 +6,6 @@ import re
 import shutil
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from telegram import (
@@ -44,7 +43,6 @@ from . import (
     config,
     db,
     decision,
-    detector,
     gemini_pool,
     media,
     mod_policy,
@@ -58,7 +56,6 @@ from . import (
     transcribe,
     vpnbot,
 )
-from .decision import Decision, DecisionResult, default_engine
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -68,8 +65,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 log = logging.getLogger("guardbot")
 
-_pool = ThreadPoolExecutor(max_workers=config.MEDIA_WORKERS)
-_engine = default_engine()
 _admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 # Instant-flood tracker. Bounded internally; see app/burst.py.
 _bursts = burst.BurstTracker(
@@ -366,238 +361,13 @@ async def on_report_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     await q.answer("🗑 گزارش حذف شد.")
 
 
-# ------------------------------------------------------------ media
-def _thumb_of(obj):
-    return getattr(obj, "thumbnail", None) or getattr(obj, "thumb", None)
-
-
-def _pick_media(msg):
-    """Returns (file_obj, kind, is_video_like) or None."""
-    if msg.photo:
-        return msg.photo[-1], "photo", False
-    if msg.video:
-        return msg.video, "video", True
-    if msg.animation:
-        return msg.animation, "gif", True
-    if msg.video_note:
-        return msg.video_note, "video_note", True
-    if msg.sticker:
-        st = msg.sticker
-        if st.is_animated:
-            # .tgs (Lottie) can't be decoded by ffmpeg. Telegram attaches a
-            # static preview thumbnail, so analyse that instead of dropping
-            # the sticker entirely.
-            th = _thumb_of(st)
-            if th:
-                return th, "animated_sticker", False
-            return None
-        if getattr(st, "is_video", False):
-            # A .webm video sticker, and it must not be called "sticker".
-            #
-            # ``media.build_from_path`` takes the MIME type it declares to the
-            # API from the *kind*, and "sticker" means image/webp. A video
-            # sticker is a WebM, so labelling it "sticker" sent WebM bytes
-            # declared as an image — every model answered 400, and the
-            # moderation AI never saw the content at all while the pool burned
-            # its whole attempt budget on each one.
-            #
-            # ``_burst_kind`` below and ``media.describe`` already call this
-            # kind by its right name, and ``KINDS`` already carries the right
-            # MIME for it; this is the same rule, applied here.
-            return st, "video_sticker", True
-        return st, "sticker", False
-    if msg.document and msg.document.mime_type:
-        mt = msg.document.mime_type
-        if mt.startswith("image/"):
-            return msg.document, "image_file", False
-        if mt.startswith("video/"):
-            return msg.document, "video_file", True
-    return None
-
-
-def _analyze_blocking(path: str, is_video: bool, work_dir: str) -> detector.MediaAnalysis:
-    if is_video:
-        return detector.analyze_video(path, work_dir)
-    return detector.analyze_image(path)
-
-
-def _explicit_report_text(chat, user, msg, kind, result, note, verdict=None, outcome=None) -> str:
-    """Persian admin report for one confirmed deletion.
-
-    The detection line reflects *which* signal fired: the anatomical NudeNet
-    class when there is one, otherwise the scene-level classifier. The reason
-    sentence matches too, so the report never claims genital evidence that the
-    detector did not actually find.
-
-    When the moderation AI confirmed the deletion its own classification and
-    confidence are shown as well, because "who decided this" is the first
-    question an operator asks about a deletion they disagree with — and with two
-    signals in the pipeline the answer is no longer obvious from the score.
-    """
-    matched = result.matched
-    if matched is not None:
-        label = matched.label
-        score = matched.score
-        reason = "محتوای صریح بزرگسالان با نمایش واضح ناحیه تناسلی تشخیص داده شد."
-    else:
-        # scene-stage deletion: no anatomical class was detected
-        label = "SCENE_NSFW"
-        score = result.scene_nsfw if result.scene_nsfw is not None else 0.0
-        reason = (
-            "محتوای جنسی/صریح در صحنه تشخیص داده شد "
-            "(بدون شناسایی ناحیه تناسلی)."
-        )
-    username = f"@{user.username}" if getattr(user, "username", None) else "-"
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    ai_line = ""
-    if verdict is not None and verdict.decided:
-        ai_line = (
-            f"🤖 تأیید هوش مصنوعی: <b>{verdict.classification}</b> "
-            f"({verdict.confidence:.2f})\n"
-            f"   دسته: {verdict.category or '-'}\n"
-        )
-    policy_line = ""
-    if outcome is not None:
-        policy_line = f"⚖️ سیاست: <code>{outcome.reason}</code>\n"
-
-    return (
-        f"🚨 <b>حذف محتوای صریح</b>\n\n"
-        f"👤 کاربر: {mention(user)}\n"
-        f"🆔 User ID: <code>{user.id}</code>\n"
-        f"🔗 Username: {username}\n"
-        f"💬 Chat ID: <code>{chat.id}</code>\n"
-        f"📩 Message ID: <code>{msg.message_id}</code>\n\n"
-        f"📦 نوع محتوا: <b>{kind}</b> {note}\n"
-        f"🔎 تشخیص محلی: <b>{label}</b>\n"
-        f"📊 امتیاز: <b>{score:.2f}</b>\n"
-        f"{ai_line}"
-        f"{policy_line}\n"
-        f"⛔ دلیل:\n"
-        f"{reason}\n\n"
-        f"✅ اقدام:\n"
-        f"پیام از گروه حذف شد.\n\n"
-        f"ℹ️ بررسی دستی:\n"
-        f"در صورت خطای تشخیص، مدیر می‌تواند این مورد را بررسی کند.\n\n"
-        f"🕒 زمان: {now}"
-    )
-
-
-async def _send_explicit_report(
-    ctx, chat, user, msg, kind, analysis, result, note, verdict=None, outcome=None
-) -> None:
-    """Admin report for a confirmed deletion, with a representative frame.
-
-    Only a DELETE_WARN outcome that actually deleted reaches this function.
-    Evidence is uploaded from the per-job temp dir and the file is removed by the
-    caller's finally.
-    """
-    if not config.ADMIN_LOG_CHAT:
-        return
-    text = _explicit_report_text(chat, user, msg, kind, result, note, verdict, outcome)
-
-    # Evidence frame: the frame behind the matched anatomical detection, or -
-    # for a scene-stage deletion, where there is no matched detection - the
-    # frame that produced the scene score.
-    if result.matched is not None:
-        evidence = analysis.evidence_frame(result.matched.label)
-    else:
-        evidence = analysis.scene_frame
-    if evidence and os.path.exists(evidence):
-        for method, field in (("send_photo", "photo"), ("send_document", "document")):
-            try:
-                with open(evidence, "rb") as fh:
-                    await getattr(ctx.bot, method)(
-                        config.ADMIN_LOG_CHAT,
-                        **{field: fh},
-                        caption=text,
-                        parse_mode="HTML",
-                        reply_markup=_report_keyboard(),
-                    )
-                return
-            except TelegramError as e:
-                log.warning("%s evidence failed: %s", method, e)
-
-    # never leave the admin without the report itself
-    await report(ctx, text)
-
-
-# ------------------------------------------------- AI moderation
-async def _assess_media_with_ai(
-    path: str, work_dir: str, kind: str, result, note: str
-) -> ai_moderation.ModerationVerdict | None:
-    """The moderation AI's opinion on this media, or None.
-
-    **When it is asked**, and why that condition is the whole design: only when
-    the local stage has something to say — a REVIEW or an EXPLICIT. That is both
-    the cheapest rule (an ordinary photo costs nothing) and the one that matters,
-    because the AI's value here is that it can *disagree*. Asking it about
-    content nobody doubted would spend the quota to confirm the obvious, and on
-    this deployment the moderation workload has no daily budget to stop it.
-
-    ``MODERATION_AI_ASK_ON_SAFE`` widens that to every image the scene stage
-    scored. It exists because the condition was once written in a way that made
-    it always true — see the note in ``app/config.py`` — and an operator who
-    wants that coverage back should be able to ask for it deliberately rather
-    than get it by accident.
-
-    It is also why a local EXPLICIT that the AI declines now ends in REVIEW
-    rather than a deletion: this function is the second opinion that can say no.
-
-    The file is already on disk — the local detector downloaded it — so the parts
-    are built from the path rather than fetched from Telegram a second time.
-
-    Never raises, and returns None on any failure, which the policy reads as
-    "not confirmed" and therefore does not delete.
-    """
-    if not config.MODERATION_MEDIA_ENABLED:
-        return None
-    if not ai_moderation.is_enabled():
-        return None
-    if result.decision is Decision.SAFE and not config.MODERATION_AI_ASK_ON_SAFE:
-        return None
-
-    try:
-        bundle = media.build_from_path(path, kind, work_dir=work_dir)
-    except Exception as e:  # noqa: BLE001 - never let this break the pipeline
-        log.warning("media preparation for the moderation AI failed: %s", e)
-        return None
-
-    if not bundle.ok:
-        # The media could not be prepared. That is a reason to leave the content
-        # alone, not a reason to delete it, and the log line says which.
-        log.info(
-            "moderation AI skipped kind=%s: %s", kind, bundle.note or "not preparable"
-        )
-        return None
-
-    parts = [{"mime_type": p.mime_type, "data": p.data} for p in bundle.parts]
-    try:
-        verdict = await ai_moderation.assess_media(parts, kind)
-    except Exception as e:  # noqa: BLE001
-        log.warning("moderation AI call failed: %s", e)
-        return None
-    if bundle.reduced_to_frames or bundle.thumbnail_only:
-        # The verdict was formed from a reduction of the media, and the report
-        # has to say so — an operator deciding whether a deletion was right must
-        # know it was made on frames or a preview rather than the file.
-        log.info(
-            "moderation AI verdict is about a reduction of the media: %s",
-            bundle.note,
-        )
-    return verdict
-
-
-async def _notify_review(
-    ctx, chat, user, msg, kind, result, verdict, outcome
-) -> None:
+async def _notify_review(ctx, chat, user, msg, verdict, outcome) -> None:
     """Tell the operator about something the policy declined to act on.
 
-    REVIEW is where every disputed and every uncertain case now lands, so this
-    is the channel that makes the new policy observable: without it, "the bot
-    stopped deleting" and "the bot stopped working" would look the same from the
-    outside. It carries no media and no message text — an identifier, the two
-    signals, and the reason.
+    REVIEW is where every uncertain case lands, so this is the channel that
+    makes the policy observable: without it, "the bot stopped deleting" and "the
+    bot stopped working" would look the same from the outside. It carries no
+    message text — an identifier, the AI's verdict, and the reason.
     """
     if not config.MODERATION_REVIEW_NOTIFY or not config.ADMIN_LOG_CHAT:
         return
@@ -607,20 +377,11 @@ async def _notify_review(
         if verdict is not None and verdict.decided
         else "🤖 هوش مصنوعی: پاسخی نداد\n"
     )
-    local_line = (
-        f"🔎 محلی: <b>{result.matched.label}</b> ({result.matched.score:.2f})\n"
-        if result.matched is not None
-        else f"🔎 محلی: صحنه ({result.scene_nsfw:.2f})\n"
-        if result.scene_nsfw is not None
-        else "🔎 محلی: -\n"
-    )
     text = (
         f"👀 <b>نیازمند بررسی دستی</b>\n\n"
         f"👤 {mention(user)} (<code>{user.id}</code>)\n"
         f"💬 Chat ID: <code>{chat.id}</code>\n"
-        f"📩 Message ID: <code>{getattr(msg, 'message_id', '-')}</code>\n"
-        f"📦 نوع: <b>{kind}</b>\n"
-        f"{local_line}"
+        f"📩 Message ID: <code>{getattr(msg, 'message_id', '-')}</code>\n\n"
         f"{ai_line}"
         f"⚖️ سیاست: <code>{outcome.reason}</code>\n"
         f"✅ اقدام: هیچ‌چیز حذف نشد.\n"
@@ -636,8 +397,8 @@ def _burst_kind(msg) -> str | None:
     """Burst-rule kind of a message, independent of whether it is decodable.
 
     Ordinary photos are never counted, so sending several photos quickly is not
-    a flood; a photo is still checked by the sexual-content detector on its own.
-    The names returned here are the values used in ``BURST_MEDIA_KINDS``.
+    a flood. The names returned here are the values used in
+    ``BURST_MEDIA_KINDS``.
     """
     if msg.animation:
         return "gif"
@@ -896,182 +657,49 @@ async def _enforce_burst(ctx, chat, user, decision: burst.BurstDecision) -> None
         )
 
 
-async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Media pipeline: download -> detect -> decide -> delete -> report -> cleanup."""
+async def on_media_flood(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The instant media-flood rule, and nothing else.
+
+    This handler used to be the whole media pipeline: download the file, run the
+    local sexual-content detector, ask the moderation AI, delete and report. That
+    pipeline was removed (see ``AgentMD.md``), so what is left is the one part of
+    it that was never about content: a burst of the same kind of media in a few
+    seconds is a flood, and the rule that stops it is decided from message
+    metadata alone — no download, no model, no file on disk.
+
+    Registered for the media kinds the burst rule counts, and independently of
+    any content setting: the flood rule is abuse protection, so it keeps working
+    whatever else is switched off. Ordinary photos are not in
+    ``BURST_MEDIA_KINDS``, so several photos in a row are not a flood.
+    """
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
-    if not msg or chat.id not in config.GROUP_IDS or not user:
+    if not msg or not chat or not user:
         return
-    # Owner exemption only (WHITELIST_USER_IDS). Telegram admins are NOT
-    # exempt: both the sexual-content moderation and the anti-flood rule apply
-    # to them. Telegram itself decides whether the bot may act on an admin's
-    # message, and every failure is handled fail-open below.
+    if chat.id not in config.GROUP_IDS:
+        return
+    # Owner exemption only (WHITELIST_USER_IDS). Telegram admins are NOT exempt:
+    # the anti-flood rule applies to them too. Telegram itself decides whether
+    # the bot may act on an admin's message, and every failure is handled
+    # fail-open below.
     if user.id in config.WHITELIST_USER_IDS:
         return
 
-    # ---- instant media flood: decided from message metadata, no download ----
     bkind = _burst_kind(msg)
-    if config.BURST_ENABLED and bkind is not None:
-        decision = _bursts.record(
-            chat.id, user.id, getattr(msg, "message_id", 0), bkind,
-            kinds=config.BURST_MEDIA_KINDS,
-        )
-        if decision.is_burst:
-            try:
-                await _enforce_burst(ctx, chat, user, decision)
-            except Exception:
-                # fail open: a flood-handling error never escalates
-                log.exception("burst enforcement failed")
-            return
-
-    picked = _pick_media(msg)
-    if not picked:
-        log.info(
-            "media SKIPPED chat=%s message=%s reason=unsupported_or_undecodable",
-            chat.id, getattr(msg, "message_id", "-"),
-        )
+    if not config.BURST_ENABLED or bkind is None:
         return
-    obj, kind, is_video = picked
-
-    os.makedirs(config.TMP_DIR, exist_ok=True)
-    # Every job owns one temp dir; the finally below guarantees its removal on
-    # success, detector error, decode error, Telegram error, cancellation or
-    # any other exception.
-    work_dir = tempfile.mkdtemp(
-        prefix=f"job_{chat.id}_{getattr(msg, 'message_id', 0)}_", dir=config.TMP_DIR
+    decision = _bursts.record(
+        chat.id, user.id, getattr(msg, "message_id", 0), bkind,
+        kinds=config.BURST_MEDIA_KINDS,
     )
-    note = ""
-
+    if not decision.is_burst:
+        return
     try:
-        size_mb = (getattr(obj, "file_size", 0) or 0) / 1024 / 1024
-        target = obj
-        target_is_video = is_video
-        if kind == "animated_sticker":
-            note = "(فقط پیش‌نمایش استیکر متحرک بررسی شد)"
-        if size_mb > config.MAX_DOWNLOAD_MB:
-            # too big for Bot API: fall back to the thumbnail
-            th = _thumb_of(obj)
-            if not th:
-                log.warning(
-                    "media SKIPPED chat=%s message=%s reason=oversized_without_thumbnail",
-                    chat.id, getattr(msg, "message_id", "-"),
-                )
-                return
-            target, target_is_video = th, False
-            note = "(فقط تامبنیل بررسی شد)"
-
-        f = await ctx.bot.get_file(target.file_id)
-        path = os.path.join(work_dir, "media")
-        await f.download_to_drive(path)
-
-        loop = asyncio.get_running_loop()
-        analysis = await loop.run_in_executor(
-            _pool, _analyze_blocking, path, target_is_video, work_dir
-        )
-
-        result = _engine.decide(analysis)
-
-        # The moderation AI's second opinion, when there is something for it to
-        # have an opinion about. `_assess_media_with_ai` explains the condition;
-        # the short version is that it is asked exactly when the local stage has
-        # something to say, which is both the cheapest rule and the one that
-        # matters — it is the *disagreement* that stops a false positive.
-        verdict = await _assess_media_with_ai(
-            path, work_dir, kind, result, note
-        )
-
-        outcome = mod_policy.decide(
-            mod_policy.PolicyInput(
-                local=result,
-                ai=verdict,
-                media_kind=kind,
-                is_media=True,
-            )
-        )
-
-        log.info(
-            "media chat=%s user=%s kind=%s detector=%s frames=%d decision=%s "
-            "source=%s class=%s confidence=%.2f detections=%s scene=%s "
-            "scene_frames=%d reason=%s | policy=%s",
-            chat.id, user.id, kind, config.DETECTOR_BACKEND, analysis.frames_checked,
-            result.decision.value,
-            result.source,
-            result.matched.label if result.matched else "-",
-            result.matched.score if result.matched else 0.0,
-            analysis.detections_summary(),
-            f"{result.scene_nsfw:.2f}" if result.scene_nsfw is not None else "-",
-            analysis.scene_frames,
-            result.reason,
-            mod_policy.describe(outcome),
-        )
-
-        if outcome.allows:
-            return
-
-        if outcome.reviews:
-            # Ambiguous, disputed, or unconfirmed: logged and reported, never
-            # acted on. This is where every false positive now lands — the
-            # content stays, a human can look, and nobody is punished for a
-            # score crossing a line.
-            await _notify_review(ctx, chat, user, msg, kind, result, verdict, outcome)
-            return
-
-        # The only branch that destroys anything. `enforce_result` is what keeps
-        # the executor's safety contract — a failed delete applies no strike and
-        # no restriction — and the policy outcome is the only thing that can
-        # reach it.
-        enforced = mod_policy.enforce_result(outcome, result)
-        result = enforced
-
-        outcome_enforced = await moderation.enforce(
-            result,
-            delete_media=lambda: msg.delete(),
-            record_confirmed=lambda: db.add_strike(chat.id, user.id),
-        )
-
-        if not outcome_enforced.deleted:
-            log.error(
-                "DELETE_FAILED chat=%s message=%s class=%s confidence=%.2f error=%s",
-                chat.id, getattr(msg, "message_id", "-"),
-                result.matched.label if result.matched else "-",
-                result.matched.score if result.matched else 0.0,
-                outcome_enforced.reason,
-            )
-            return
-
-        mark_deleted(chat.id, getattr(msg, "message_id", 0))
-        log.info(
-            "DELETE_SUCCESS chat=%s message=%s class=%s confidence=%.2f policy=%s",
-            chat.id, getattr(msg, "message_id", "-"),
-            result.matched.label if result.matched else "-",
-            result.matched.score if result.matched else 0.0,
-            outcome.reason,
-        )
-        await _send_explicit_report(
-            ctx, chat, user, msg, kind, analysis, result, note, verdict, outcome
-        )
-
-        # A failed deletion returns above, so a strike is only ever recorded for
-        # content that was actually removed. A database error leaves
-        # `strike` as None and changes nothing else. Note `outcome_enforced` is
-        # the *executor's* result, not the policy's — the policy decided to
-        # delete, and this is what actually happened when it tried.
-        if outcome_enforced.strike is not None:
-            log.info(
-                "VIOLATION chat=%s user=%s count=%d",
-                chat.id, user.id, outcome_enforced.strike,
-            )
-            await _apply_strike_ladder(
-                ctx, chat.id, user,
-                strike=outcome_enforced.strike,
-                source="media",
-            )
+        await _enforce_burst(ctx, chat, user, decision)
     except Exception:
-        # fail open: never delete or punish because of an internal error
-        log.exception("media pipeline failed")
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        # fail open: a flood-handling error never escalates
+        log.exception("burst enforcement failed")
 
 
 # ------------------------------------------------------------ acquisition
@@ -4171,17 +3799,14 @@ def _chat_active() -> bool:
 
 
 # ------------------------------------------------- text moderation
-# The local detectors see images only, so without this there is no content
-# moderation for text at all. It is off by default (see
+# This is the only content-moderation path left. It is off by default (see
 # MODERATION_TEXT_ENABLED) and it is deliberately the last handler group: it
 # must never run before acquisition or conversation have had their say, because
 # it is the only path that can delete a person's words.
 #
-# There is no local signal for text, so the policy's `local` input is None. The
-# rule that follows from that is worth stating: with no local evidence, the only
-# thing that can produce a deletion is a confident AI verdict, which is exactly
-# the same bar media has to clear when the AI confirms it.
-_NO_LOCAL = DecisionResult(Decision.SAFE, "no local stage for text")
+# The only signal it has is the moderation AI's verdict. The media path used to
+# carry a local detector alongside it; that whole pipeline was removed, so a
+# deletion now requires a confident AI verdict and nothing else.
 
 
 async def on_group_text_moderation(
@@ -4210,9 +3835,7 @@ async def on_group_text_moderation(
         return
 
     verdict = await ai_moderation.assess_text(text)
-    outcome = mod_policy.decide(
-        mod_policy.PolicyInput(local=None, ai=verdict, is_media=False)
-    )
+    outcome = mod_policy.decide(mod_policy.PolicyInput(ai=verdict))
     log.info(
         "text moderation chat=%s user=%s policy=%s",
         chat.id, user.id, mod_policy.describe(outcome),
@@ -4221,10 +3844,10 @@ async def on_group_text_moderation(
     if outcome.allows:
         return
     if outcome.reviews:
-        await _notify_review(ctx, chat, user, msg, "text", _NO_LOCAL, verdict, outcome)
+        await _notify_review(ctx, chat, user, msg, verdict, outcome)
         return
 
-    enforced = mod_policy.enforce_result(outcome, None)
+    enforced = mod_policy.enforce_result(outcome)
     result = await moderation.enforce(
         enforced,
         delete_media=lambda: msg.delete(),
@@ -4659,11 +4282,7 @@ async def post_init(app: Application) -> None:
         "on" if config.NEXUS_OBSERVE_ADMINS else "off",
         len(nexus.names()),
     )
-    log.info(
-        "GuardBot started. Groups: %s | explicit classes: %s",
-        config.GROUP_IDS,
-        sorted(config.EXPLICIT_CLASSES),
-    )
+    log.info("GuardBot started. Groups: %s", config.GROUP_IDS)
     # One line that makes the egress path a fact rather than an assumption. If
     # the AI ever starts timing out, this is what says whether an address family
     # was involved, instead of leaving it to be guessed at from a support report.
@@ -4745,48 +4364,35 @@ async def post_init(app: Application) -> None:
         log.info("Conversational AI disabled (GEMINI_CHAT_ENABLED=0).")
 
     # The moderation layer, reported on its own for the same reason. What an
-    # operator most needs from this line is the *policy mode*, because that is
-    # what decides whether anything is deleted at all.
+    # operator most needs from this line is whether text moderation is switched
+    # on, because that is what decides whether anything is deleted at all.
     mod_state = ai_moderation.status()
     if mod_state["active"]:
         log.info(
             "Moderation AI active: model=%s daily_limit=%d used_today=%d "
-            "delete_confidence=%.2f review_confidence=%.2f text=%s media=%s",
+            "delete_confidence=%.2f review_confidence=%.2f text=%s",
             mod_state["model"],
             mod_state["daily_limit"],
             mod_state["used_today"],
             mod_state["delete_confidence"],
             mod_state["review_confidence"],
             "on" if mod_state["text_enabled"] else "off",
-            "on" if mod_state["media_enabled"] else "off",
         )
         if mod_state["shares_google_project"]:
             log.warning(
                 "Moderation AI is using the classifier's key "
-                "(GEMINI_MOD_ALLOW_SHARED_KEY=1). This is the heaviest of the "
-                "four workloads, so a busy group can push acquisition and chat "
-                "into a 429. Set GEMINI_MOD_API_KEY from a different Google "
-                "Cloud project for an independent quota."
+                "(GEMINI_MOD_ALLOW_SHARED_KEY=1). A busy group can push "
+                "acquisition and chat into a 429. Set GEMINI_MOD_API_KEY from a "
+                "different Google Cloud project for an independent quota."
             )
     else:
         log.info(
             "Moderation AI is not active (GEMINI_MOD_ENABLED=%s, key=%s). "
-            "Media deletions require AI confirmation, so nothing is deleted "
+            "Text moderation requires an AI confirmation, so nothing is deleted "
             "automatically until this is configured — content that would have "
             "been deleted is reported for review instead.",
             "on" if mod_state["enabled"] else "off",
             "set" if mod_state["configured"] else "missing",
-        )
-
-    if not config.MODERATION_REQUIRE_AI_CONFIRM:
-        # A loud line, because this is the one configuration in which an
-        # uncalibrated local score can still destroy somebody's message.
-        log.warning(
-            "MODERATION_REQUIRE_AI_CONFIRM is OFF: the local detector may "
-            "delete on its own at MODERATION_LOCAL_HARD_THRESHOLD=%.2f. This is "
-            "the configuration that produced the false positives; the default "
-            "requires the moderation AI to agree.",
-            float(config.MODERATION_LOCAL_HARD_THRESHOLD),
         )
 
     # The speech pipeline, its own line again.
@@ -4905,8 +4511,6 @@ def main() -> None:
     # effort: on a host without global IPv6 it declines and the bot runs
     # exactly as it did before.
     net.install_preference()
-    if config.MEDIA_ENABLED:
-        detector.load_model()
 
     app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
 
@@ -4921,19 +4525,21 @@ def main() -> None:
         CallbackQueryHandler(on_report_delete, pattern=r"^report_delete$")
     )
 
-    if config.MEDIA_ENABLED:
-        # Named `visual_media_filter`, not `media_filter`: a local called
-        # `media` would shadow the app.media module for the whole of main().
-        visual_media_filter = (
-            filters.PHOTO
-            | filters.VIDEO
-            | filters.ANIMATION
-            | filters.VIDEO_NOTE
-            | filters.Sticker.ALL
-            | filters.Document.IMAGE
-            | filters.Document.VIDEO
-        ) & filters.ChatType.GROUPS
-        app.add_handler(MessageHandler(visual_media_filter, on_media), group=0)
+    # The instant media-flood rule. Registered independently of every content
+    # setting on purpose: it is abuse protection, decided from message metadata
+    # alone, so it must keep working when text moderation, the filter or the
+    # assistant are switched off. Its own group, before the content handlers, so
+    # a burst is stopped before anything else looks at the messages.
+    #
+    # The filter lists exactly the kinds ``_burst_kind`` can name, and no more:
+    # the handler would return immediately for a photo or a video, so waking it
+    # for them would be a handler call that can never do anything. Named
+    # `flood_media_filter`, not `media_filter`: a local called `media` would
+    # shadow the app.media module for the whole of main().
+    flood_media_filter = (
+        filters.ANIMATION | filters.VIDEO_NOTE | filters.Sticker.ALL
+    ) & filters.ChatType.GROUPS
+    app.add_handler(MessageHandler(flood_media_filter, on_media_flood), group=0)
 
     if config.GROUP_TRIAL_ENABLED:
         # Its own group so it can never be skipped because a media handler in

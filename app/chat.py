@@ -662,10 +662,9 @@ def _generation_config(types, *, tools=None, context: str = "", instruction: str
 async def _pooled_request(pool, contents: list) -> str:
     """One conversational call, through the pool.
 
-    The conversation workload needs ``text`` only, which is the weakest
-    requirement of the four — and deliberately so: an image attached to a
-    conversation is analysed by the moderation workload, never answered about
-    here, so a text model is the correct model for this call.
+    ``text`` is the workload's declared capability — the weakest of the four
+    requirements, which keeps the largest set of models eligible to write a
+    reply.
     """
     try:
         raw = await gemini_pool.generate(
@@ -1254,9 +1253,8 @@ async def reply(
     is not a clean answer returns ``answered=False`` with a reason. The caller
     treats that as "say nothing, or say the short apology".
 
-    ``parts`` is media prepared by ``app/media.py`` — the *same* builder the
-    moderation workload uses, so a sticker the moderator can see is a sticker the
-    assistant can see. ``want_voice`` asks for a voice note as well as the text;
+    ``parts`` is media prepared by ``app/media.py``. ``want_voice`` asks for a
+    voice note as well as the text;
     whether one is produced is ``synthesize``'s decision and the text is sent
     either way.
     """

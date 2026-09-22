@@ -1,16 +1,20 @@
 # GuardBot
 
-Conservative explicit-media moderation on every
-photo / video / GIF / sticker, plus an instant media-flood rule. Everything
-runs on your server. No media leaves it.
+Moderation for the moderated groups: a text-moderation AI (off by default), a
+pattern filter, an instant media-flood rule, and a warn / count / restrict
+ladder. Everything runs on your server.
 
-The media layer is deliberately **narrow**: it removes clearly explicit adult
-genital imagery and allows everything else. It is not a general NSFW,
-profanity, text or behaviour moderation system.
+There is **no visual content detection**. The photo / video / GIF / sticker
+analysis pipeline — a local NudeNet detector, a scene classifier and a
+media-moderation AI stage — was deliberately removed. A photo, video or GIF is
+no longer downloaded or inspected for content at all; media is only ever
+counted for the flood rule, from message metadata.
 
-Three independent signals, which are never conflated:
+Four independent signals, which are never conflated:
 
-* **explicit sexual content** - the detector + decision engine below;
+* **text moderation** - the moderation AI's verdict on a group message, acted
+  on by a deterministic policy (off by default);
+* **pattern filter** - local regex rules that need no model;
 * **instant media flood** - more than `BURST_MAX_ITEMS` GIFs/stickers inside
   `BURST_WINDOW_SECONDS`;
 * **repeated violations** - the warn / count / restrict ladder.
@@ -24,10 +28,8 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-The NudeNet model (~12 MB) ships inside the `nudenet` wheel. The second-stage
-scene classifier (~330 MB) is downloaded once on first start into `./data/hf`
-and then reused. Wait for `Detector ready.` and, if enabled,
-`Scene classifier ready.`
+There is no model to download: the image installs only the Python dependencies
+and starts. Wait for `Bot ready.`
 
 ## Before you start (Telegram side)
 
@@ -39,89 +41,62 @@ and then reused. Wait for `Detector ready.` and, if enabled,
    nothing else — the assistant then works, but cannot observe. The startup log
    and `/nexus status` say which situation applies to each group.
 
-## How media moderation works
+## How moderation works
 
 ```
-Telegram media
-  -> instant-flood check (GIF/sticker kinds, from metadata, no download)
+Telegram media (GIF / sticker / video note)
+  -> instant-flood check (kinds from metadata, no download)
        -> burst -> restrict sender + delete the burst's messages + warn
-  -> per-job temp dir (download, ffmpeg frame extraction for video/GIF)
-  -> explicit-content detector (NudeNet, explicit body-region classes)
-  -> second-stage scene classifier (local, scene-level NSFW score)
-  -> decision engine (SAFE / REVIEW / EXPLICIT)
-  -> SAFE     -> allow (log only)
-     REVIEW   -> allow (log only)
-     EXPLICIT -> delete the Telegram message
-                 -> DELETE_SUCCESS: report + evidence frame to admin chat
-                                    + one violation: warn, count, restrict at N
-                 -> DELETE_FAILED : log only, nothing else happens
-  -> temp dir removed (always, in a finally block)
+
+Telegram text (group messages)
+  -> pattern filter (local rules, no model)
+       -> hit -> delete (or log-only, per rule) + report
+  -> text-moderation AI (only when MODERATION_TEXT_ENABLED=1)
+       -> AI verdict -> deterministic policy (SAFE / REVIEW / EXPLICIT)
+       -> SAFE     -> allow
+          REVIEW   -> allow (log + optional admin notice)
+          EXPLICIT -> delete the message
+                      -> DELETE_SUCCESS: report to admin chat
+                                         + one violation: warn, count, restrict at N
+                      -> DELETE_FAILED : log only, nothing else happens
 ```
 
-### Detector
+There is no media-content branch. A photo, video, GIF, sticker or document is
+never downloaded for analysis and never reaches the moderation AI. The only
+thing a media message can trigger is the flood rule, which reads metadata.
 
-[NudeNet](https://github.com/notAI-tech/NudeNet) - a small YOLOv8-based ONNX
-model (320px, CPU-only) that reports explicit **body-region** classes, e.g.
-`FEMALE_GENITALIA_EXPOSED`, `MALE_GENITALIA_EXPOSED`, `ANUS_EXPOSED`.
+### Text moderation
 
-For video/GIF/animated video stickers several frames are sampled and the
-strongest detection per class is kept, so explicit content that only appears in
-one frame is still caught. Per-frame results are retained so the frame the
-decision was based on can be attached to the admin report.
-
-### Second-stage scene classifier
-
-NudeNet sees explicit *body regions* only. It cannot see a sexual act when no
-genitalia are visible - intimate/sexual interaction, an erotic scene, or an
-explicit scene where the anatomical class is simply missed. A local,
-image-level NSFW classifier
-([Falconsai/nsfw_image_detection](https://huggingface.co/Falconsai/nsfw_image_detection),
-a 224px ViT, CPU-only, ~330 MB) scores the scene on top of NudeNet so the
-overall sexual nature of the media is recognised, not just body parts.
-
-Its score is graded, so only clearly sexual media deletes:
-
-| Scene score | Decision |
-|---|---|
-| `< SCENE_REVIEW_THRESHOLD` (0.60) | `SAFE` |
-| `>= SCENE_REVIEW_THRESHOLD` | `REVIEW` - logged only, never deletes |
-| `>= SCENE_DELETE_THRESHOLD` (0.95) | `EXPLICIT` - deletes the message |
-
-* A scene score at or above the delete threshold deletes **even when NudeNet
-  found nothing**. That is the point of the stage.
-* The delete threshold is deliberately high; the stage is not meant to turn
-  mildly suggestive media into deletions.
-* For video/GIF it scores up to `SCENE_MAX_FRAMES` (default 2) of the frames
-  that were **already** sampled for NudeNet - no extra ffmpeg work - and keeps
-  the highest score, because the sexual nature of a clip can be visible in a
-  single frame.
-* It fails open: a missing model, a missing dependency, an undecodable frame or
-  an inference error leaves the score absent, and an absent score never deletes.
-* Measured cost on this 2-core VPS: ~1.7 s per scored frame (the model is
-  loaded once at startup), so ~1.7 s per photo and ~3.4 s per video at the
-  default frame budget.
-* Disable it with `SCENE_ENABLED=false`.
-
-### Decision policy
+Off by default (`MODERATION_TEXT_ENABLED=0`). When on, a group text message is
+sent to the moderation AI, which returns a classification, a confidence and a
+category. The decision is made in code, not by the model:
 
 | Decision | Meaning | Action |
 |---|---|---|
-| `SAFE` | normal / non-explicit | allow |
-| `REVIEW` | explicit class below the delete threshold, or a scene score in the review band | allow + log |
-| `EXPLICIT` | an `EXPLICIT_CLASSES` detection at >= `EXPLICIT_DELETE_THRESHOLD`, **or** a scene score at >= `SCENE_DELETE_THRESHOLD` | delete message |
+| `SAFE` | nothing wrong | allow |
+| `REVIEW` | worth a human's attention, below the delete bar | allow + log |
+| `EXPLICIT` | a confident verdict on a deletable class | delete the message |
 
-* Only classes in `EXPLICIT_CLASSES` can produce `EXPLICIT` from NudeNet.
-* The scene stage can produce `EXPLICIT` on its own, but only at or above
-  `SCENE_DELETE_THRESHOLD`.
-* Any detector or decoding error fails open (`SAFE`), and an absent scene score
-  is not zero - it never deletes.
-* Swimsuit, underwear, cleavage, gym, dancing, memes, cartoons and normal
-  stickers/GIFs are **not** explicit evidence and are allowed.
-* Thresholds are calibrated for NudeNet 320n, whose own detection gate is 0.20
-  and NMS threshold 0.25. Confirmed explicit media from live testing scored
-  0.50-0.67, which is why the default delete threshold is `0.45`. The scene
-  thresholds are conservative starting points to be tuned against real traffic,
-  not measured constants.
+* Only classes in `MODERATION_DELETABLE_CLASSES` (default `explicit_sexual`) can
+  ever be deleted; every other class is carried, logged and reported.
+* A deletion needs an AI confidence of at least `MODERATION_DELETE_CONFIDENCE`
+  (default 0.80). Below it the verdict is treated as uncertain and only logged.
+* The band down to `MODERATION_REVIEW_CONFIDENCE` (default 0.45) is `REVIEW`:
+  allowed, but visible in the log and, with `MODERATION_REVIEW_NOTIFY`, in the
+  admin chat.
+* The AI never acts. It cannot delete, restrict or reply; its output is data and
+  the action is decided by `app/mod_policy.py`. There is no code path from its
+  return value to a Telegram call.
+* The admin report for a deleted text message carries the classification, the
+  confidence and the policy reason — never an excerpt of the message.
+
+### Pattern filter
+
+Local regex rules (`app/text_filters.py`) that need no model, so they keep
+working when the moderation AI is off, out of quota or unreachable. A rule can
+delete or only log, and every hit is reported. The filter and the AI are
+independent: a message that hits a rule is still allowed to be seen by the AI
+unless the rule already deleted it.
 
 ### Instant media flood
 
@@ -145,8 +120,9 @@ seconds.
 
 ### Repeated violations
 
-One confirmed explicit-media deletion is one violation, recorded in the
-existing `users.strikes` column.
+One confirmed deletion — a text message the moderation AI confirmed, or a
+confirmed flood — is one violation, recorded in the existing `users.strikes`
+column.
 
 * Every violation sends the user a warning.
 * At `VIOLATION_MUTE_AFTER` (default 3) the user is restricted for
@@ -175,13 +151,16 @@ A failure in the delayed unrestrict is logged and never crashes the bot. Set
 
 ### Admin chat
 
-The admin chat receives a message **only** for `EXPLICIT` + `DELETE_SUCCESS`,
-plus a notice when a confirmed flood could not be restricted. `SAFE`, `REVIEW`,
-`DELETE_FAILED` and operational errors are logged to the container log only.
-The report contains media type, user, user id, username, chat id, message id,
-detected class, confidence, reason and timestamp, plus a representative frame
-as evidence (photo, with document and text-only fallbacks if Telegram rejects
-the upload).
+The admin chat receives a report for every deletion (`EXPLICIT` +
+`DELETE_SUCCESS` in the text path), every filter hit, every `REVIEW` when
+`MODERATION_REVIEW_NOTIFY=1`, and a notice when a confirmed flood could not be
+restricted. `SAFE`, `DELETE_FAILED` and operational errors are logged to the
+container log only.
+
+A deletion report contains the user, user id, chat id, message id, the AI's
+classification and confidence, the policy reason and a timestamp. It carries
+**no excerpt of the message and no media** — the content itself is what this
+project spends the most effort not copying into a log or an admin chat.
 
 Every report also carries a `🗑 حذف گزارش` inline button that deletes the
 **report message itself** (the moderated message is already gone). Any
@@ -192,24 +171,27 @@ nothing. If the report was already deleted, the press is answered and ignored.
 
 ### What it does NOT do
 
-* No text/profanity/username/link moderation.
-* No raid detection.
+* No visual / media content moderation of any kind. A photo, video, GIF,
+  sticker or document is not inspected for content — only counted for the flood
+  rule.
 * No ban and no permanent punishment: the only member action is a **timed**
   restriction.
 * A failed deletion logs `DELETE_FAILED` and applies nothing.
 
 ### Media types
 
-| Type | Analysed | Counts toward a flood |
-|---|---|---|
-| Photo | yes | no |
-| GIF / animation | yes (ffmpeg frames) | yes |
-| Video | yes (ffmpeg frames) | no |
-| Video note | yes (ffmpeg frames) | yes |
-| Static sticker (.webp) | yes | yes |
-| Video sticker (.webm) | yes (ffmpeg frames) | yes |
-| Animated sticker (.tgs) | static preview thumbnail only | yes |
-| Image / video document | yes | no |
+Media is never analysed. This table is only about the flood rule.
+
+| Type | Counts toward a flood |
+|---|---|
+| Photo | no |
+| GIF / animation | yes |
+| Video | no |
+| Video note | yes |
+| Static sticker (.webp) | yes |
+| Video sticker (.webm) | yes |
+| Animated sticker (.tgs) | yes |
+| Image / video document | no |
 
 ## Group acquisition (the VPN test handover)
 
@@ -351,19 +333,20 @@ Set `GROUP_IDS` to a test group, send normal photos / videos / stickers and
 check that nothing gets deleted. Watch the decisions:
 
 ```bash
-docker compose logs -f | grep "decision="
 docker compose logs -f | grep -E "DELETE_SUCCESS|DELETE_FAILED|SKIPPED"
 docker compose logs -f | grep -E "FLOOD|VIOLATION"
+docker compose logs -f | grep "text moderation"
 ```
 
-Tune `EXPLICIT_DELETE_THRESHOLD` / `EXPLICIT_CLASSES` after watching real
-traffic, and `BURST_MAX_ITEMS` / `BURST_WINDOW_SECONDS` after watching real
-flood behaviour (all are environment variables, so no rebuild is needed).
+Tune `MODERATION_DELETE_CONFIDENCE` / `MODERATION_DELETABLE_CLASSES` after
+watching real traffic, and `BURST_MAX_ITEMS` / `BURST_WINDOW_SECONDS` after
+watching real flood behaviour (all are environment variables, so no rebuild is
+needed).
 
 ## Tests
 
-The tests need the same environment as the bot (Telegram, Pillow, NudeNet,
-transformers), so run them in the image:
+The tests need the same environment as the bot (Telegram, Pillow), so run them
+in the image:
 
 ```bash
 docker compose build
@@ -373,21 +356,11 @@ docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot \
 
 ## Known limits
 
-* Media is visible for 1-3 seconds before it is deleted.
-* Files > 20 MB: only the thumbnail is checked (Bot API limit).
-* Animated `.tgs` (Lottie) stickers are analysed through their static preview
-  thumbnail, so explicit content that only appears mid-animation can be missed.
-* Evidence frames are uploaded to the admin chat, which means Telegram stores
-  them there. GuardBot itself never keeps a permanent copy on the VPS.
-* The detector cannot determine age, so no age-based action is ever taken; the
-  only member action is a timed restriction.
-* The scene classifier is a general NSFW image classifier: it recognises
-  scene-level sexual content, but it is not an activity classifier and its
-  accuracy on this bot's traffic has **not** been measured against a labelled
-  set. `SCENE_DELETE_THRESHOLD` is a conservative starting point, not a
-  calibrated constant.
-* A scene score below the delete threshold is never a deletion, so a sexual
-  scene the classifier scores in the review band is logged but kept.
+* Text moderation is off by default, and when on it is the one path that can
+  delete a person's **words**, in a language the model may misjudge. Turn it on
+  after watching the review log for a while.
+* The AI cannot be asked for a second opinion on a media file, because no media
+  is sent to it: a photo, video or GIF is never inspected for content.
 * A flood is only detected when the threshold is crossed, so the messages sent
   before it are processed normally and only the burst's own messages are
   removed.
@@ -401,8 +374,9 @@ docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot \
   partial room. `/nexus status` reports which one applies per group.
 * The room window is text only. Photos, videos and stickers are recorded as
   their kind (`[photo]`, `[sticker]`), not analysed, so awareness understands
-  *that* something was posted but not *what* it showed. Media understanding is
-  the moderation path's job and has its own workload.
+  *that* something was posted but not *what* it showed. The assistant can read a
+  file that is explicitly sent to it, but nothing analyses group media
+  automatically.
 * Awareness is a bounded recent view, not a transcript: messages older than
   `NEXUS_AWARENESS_RETENTION_SECONDS` (1 hour by default) leave the window, and
   a very busy room keeps only the last `NEXUS_AWARENESS_MAX_ROWS` messages. A

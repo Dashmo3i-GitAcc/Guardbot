@@ -1,9 +1,14 @@
 """Instant-flood (burst) behaviour in the real media handler.
 
-The Telegram layer is faked; the detector is stubbed. These tests pin what a
-confirmed flood actually does: restrict the sender, delete only the burst's own
-messages, and warn - and what it must never do (touch a photo, punish a safe
-sender, claim an action Telegram refused).
+The Telegram layer is faked. These tests pin what a confirmed flood actually
+does: restrict the sender, delete only the burst's own messages, and warn — and
+what it must never do (touch a photo, punish a safe sender, claim an action
+Telegram refused).
+
+The handler is `on_media_flood`, which is all that is left of the old media
+pipeline: the content detector it used to fall through to was removed, so there
+is no download and no model on this path at all. That is why the fake bot has no
+`get_file`: nothing here ever fetches a file.
 """
 import asyncio
 from types import SimpleNamespace
@@ -11,27 +16,18 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import TelegramError
 
-from app import burst, config, detector, main
+from app import burst, config, main
 
 CHAT_ID = -1001234567890
 ADMIN_CHAT_ID = -1009999999999
 
 
 # --------------------------------------------------------------- fakes
-class FakeFile:
-    async def download_to_drive(self, path):
-        with open(path, "wb") as fh:
-            fh.write(b"fake-media")
-
-
 class FakeBot:
     def __init__(self, restrict_fails=False, delete_fails=False):
         self.sent: list[tuple[int, str]] = []      # (chat_id, text)
-        self.photos: list[str] = []
-        self.documents: list[str] = []
         self.deleted: list[int] = []
         self.restricted: list[tuple[int, int, object]] = []
-        self.get_file_calls = 0
         self.restrict_fails = restrict_fails
         self.delete_fails = delete_fails
 
@@ -39,18 +35,8 @@ class FakeBot:
         # these fakes are ordinary members unless a test overrides them
         return SimpleNamespace(status="member")
 
-    async def get_file(self, file_id):
-        self.get_file_calls += 1
-        return FakeFile()
-
     async def send_message(self, chat_id, text, **kwargs):
         self.sent.append((chat_id, text))
-
-    async def send_photo(self, chat_id, photo=None, caption=None, **kwargs):
-        self.photos.append(caption)
-
-    async def send_document(self, chat_id, document=None, caption=None, **kwargs):
-        self.documents.append(caption)
 
     async def delete_message(self, chat_id, message_id):
         if self.delete_fails:
@@ -74,24 +60,10 @@ class FakeMessage:
         self.document = None
         for key, value in media.items():
             setattr(self, key, value)
-        self.delete_calls = 0
-
-    async def delete(self):
-        self.delete_calls += 1
-
-
-class StubDetector:
-    def __init__(self, result=None, error=None):
-        self.result = result or []
-        self.error = error
-
-    def detect(self, path):
-        if self.error is not None:
-            raise self.error
-        return self.result
 
 
 def media_obj():
+    """The metadata the flood rule reads: none of it is the file itself."""
     return SimpleNamespace(file_id="f", file_size=900, thumbnail=None, thumb=None)
 
 
@@ -123,7 +95,7 @@ def send_media(bot, user_id, message_id, **media):
         effective_chat=SimpleNamespace(id=CHAT_ID),
         effective_user=user,
     )
-    asyncio.run(main.on_media(update, SimpleNamespace(bot=bot)))
+    asyncio.run(main.on_media_flood(update, SimpleNamespace(bot=bot)))
     return msg
 
 
@@ -136,13 +108,9 @@ def admin_texts(bot):
 
 
 @pytest.fixture(autouse=True)
-def flood_env(monkeypatch, tmp_path):
-    tmp = tmp_path / "tmp"
-    tmp.mkdir()
+def flood_env(monkeypatch):
     monkeypatch.setattr(config, "GROUP_IDS", [CHAT_ID])
     monkeypatch.setattr(config, "ADMIN_LOG_CHAT", ADMIN_CHAT_ID)
-    monkeypatch.setattr(config, "TMP_DIR", str(tmp))
-    monkeypatch.setattr(config, "MAX_DOWNLOAD_MB", 20)
     monkeypatch.setattr(config, "WHITELIST_USER_IDS", set())
     monkeypatch.setattr(config, "BURST_ENABLED", True)
     monkeypatch.setattr(config, "BURST_WINDOW_SECONDS", 3.0)
@@ -157,15 +125,7 @@ def flood_env(monkeypatch, tmp_path):
         main, "_bursts", burst.BurstTracker(window_seconds=3.0, max_items=5)
     )
     main._admin_cache.clear()
-    # keep the fall-through media path off the real model and ffmpeg
-    monkeypatch.setattr(detector, "_detector", StubDetector([]))
-    monkeypatch.setattr(detector, "_scene_pipe", None)
-
-    def _extract(video_path, out_dir, count):
-        return []
-
-    monkeypatch.setattr(detector, "extract_frames", _extract)
-    yield tmp
+    yield
 
 
 # ------------------------------------------------------- the flood rule
@@ -177,9 +137,6 @@ def test_six_rapid_gifs_trigger_a_flood():
     assert bot.restricted and bot.restricted[0][:2] == (CHAT_ID, 7)
     assert sorted(bot.deleted) == [100, 101, 102, 103, 104, 105]
     assert len(group_texts(bot)) == 1
-    # the first five were processed normally; the sixth crossed the threshold
-    # and was handled by the flood rule without a download or an inference
-    assert bot.get_file_calls == 5
 
 
 def test_exactly_five_rapid_gifs_is_not_a_flood():
@@ -190,7 +147,6 @@ def test_exactly_five_rapid_gifs_is_not_a_flood():
     assert bot.restricted == []
     assert bot.deleted == []
     assert group_texts(bot) == []
-    assert bot.get_file_calls == 5  # each one still went through the media path
 
 
 def test_ten_stickers_in_two_seconds_trigger_a_flood():
@@ -211,12 +167,12 @@ def test_rapid_photos_are_never_a_flood():
 
     assert bot.restricted == []
     assert bot.deleted == []
-    assert bot.get_file_calls == 12
 
 
 def test_a_telegram_admin_is_not_exempt_from_the_flood_rule():
-    # on_media performs no administrator lookup at all: only WHITELIST_USER_IDS
-    # (bot owners) are exempt, so a Telegram admin is treated like any member.
+    # on_media_flood performs no administrator lookup at all: only
+    # WHITELIST_USER_IDS (bot owners) are exempt, so a Telegram admin is treated
+    # like any member.
     bot = FakeBot()
     for i in range(6):
         gif(100 + i, bot=bot)
@@ -233,7 +189,6 @@ def test_bot_owner_is_exempt_from_the_flood_rule(monkeypatch):
 
     assert bot.restricted == []
     assert bot.deleted == []
-    assert bot.get_file_calls == 0
 
 
 # ------------------------------------------------------- only the burst's own messages

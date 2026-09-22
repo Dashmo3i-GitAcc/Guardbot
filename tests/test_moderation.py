@@ -4,23 +4,20 @@ import asyncio
 import pytest
 
 from app.decision import Decision, DecisionResult
-from app.detector import Detection
 from app.moderation import enforce
 
 
-def explicit_result(score=0.95):
+def explicit_result():
     return DecisionResult(
         Decision.EXPLICIT,
-        "FEMALE_GENITALIA_EXPOSED 0.95 >= 0.80",
-        matched=Detection("FEMALE_GENITALIA_EXPOSED", score),
+        "ai_confirmed_explicit: explicit_sexual 0.95",
     )
 
 
 def review_result():
     return DecisionResult(
         Decision.REVIEW,
-        "borderline FEMALE_GENITALIA_EXPOSED 0.55",
-        matched=Detection("FEMALE_GENITALIA_EXPOSED", 0.55),
+        "ai_suggestive: 0.55",
     )
 
 

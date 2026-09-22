@@ -4,21 +4,13 @@ python-telegram-bot[job-queue]==21.6
 # direct declaration - otherwise a future PTB release could drop it and the
 # acquisition flow would break at import time.
 httpx>=0.27,<0.29
+# Used by app/media.py to normalise images before they are sent to Gemini.
 Pillow>=10.0
-# Explicit body-region detector (bundled ONNX model, CPU-only).
-# Pulls onnxruntime + opencv-python-headless.
-nudenet==3.4.2
-# Second-stage scene classifier (local, CPU). Its score is graded by the policy:
-# a confident score can delete on its own, a middling one only logs REVIEW.
-# CPU-only torch is installed separately in the Dockerfile from the pytorch CPU
-# index, so `pip install -r requirements.txt` here finds it already satisfied.
-# Installing this file on a machine without that step pulls the CUDA torch
-# build instead, which is much larger - use Docker for the real environment.
-transformers>=4.40,<5
-torch>=2.2
-# Second opinion on group messages that the deterministic rules could not
-# settle (app/ai_intent.py). The SDK README asks to pin below the next major,
-# so the upper bound is deliberate - the response-schema API is the contract.
-# The import is lazy: with the package missing the bot still runs, it just
-# keeps using the rules alone.
+# The Gemini SDK, used by every AI workload: the acquisition classifier
+# (app/ai_intent.py), the assistant (app/chat.py), the awareness reader
+# (app/awareness.py), text moderation (app/ai_moderation.py) and transcription
+# (app/transcribe.py). The SDK README asks to pin below the next major, so the
+# upper bound is deliberate - the response-schema API is the contract. Every
+# import is lazy: with the package missing the bot still runs, each workload
+# just reports itself as unavailable.
 google-genai>=2,<3

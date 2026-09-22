@@ -1,7 +1,7 @@
 """Instant media-flood (burst) detection.
 
 Pure, bounded, per-user rolling-window tracker. It touches no Telegram API, no
-detector and no filesystem, so the flood rule can be unit tested exactly.
+model and no filesystem, so the flood rule can be unit tested exactly.
 
 A burst is **more than** ``max_items`` qualifying media messages from the same
 user inside ``window_seconds``. The window is deliberately very short: the

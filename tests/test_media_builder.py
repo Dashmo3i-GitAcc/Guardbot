@@ -332,43 +332,6 @@ def test_the_part_count_is_capped(monkeypatch, tmp_path):
     assert len(bundle.parts) <= 2
 
 
-# ── build_from_path(): the moderation path ────────────────────────────────
-def test_a_local_image_is_read_without_downloading_it(tmp_path):
-    path = tmp_path / "media"
-    path.write_bytes(png_bytes())
-
-    bundle = media.build_from_path(str(path), "photo", work_dir=str(tmp_path))
-
-    assert bundle.ok is True
-    assert bundle.parts[0].data == path.read_bytes()
-
-
-def test_a_local_oversized_video_falls_back_to_frames(monkeypatch, tmp_path):
-    monkeypatch.setattr(config, "GEMINI_MEDIA_MAX_MB", 0.0001)
-    _install_frames(monkeypatch, tmp_path, 2)
-    path = tmp_path / "media"
-    path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"x" * 5000)
-
-    bundle = media.build_from_path(str(path), "video", work_dir=str(tmp_path))
-
-    assert bundle.ok is True
-    assert bundle.reduced_to_frames is True
-
-
-def test_a_local_file_that_does_not_exist_is_a_failure(tmp_path):
-    bundle = media.build_from_path(str(tmp_path / "nope"), "photo",
-                                   work_dir=str(tmp_path))
-    assert bundle.ok is False
-    assert bundle.note == "no local file"
-
-
-def test_a_local_empty_file_is_a_failure(tmp_path):
-    path = tmp_path / "media"
-    path.write_bytes(b"")
-    bundle = media.build_from_path(str(path), "photo", work_dir=str(tmp_path))
-    assert bundle.ok is False
-
-
 # ── The capability table itself ───────────────────────────────────────────
 def test_every_kind_the_describe_function_returns_is_in_the_table():
     """A kind that `describe` can produce but the table does not know would be

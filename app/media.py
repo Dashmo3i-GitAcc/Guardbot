@@ -55,8 +55,8 @@ log = logging.getLogger("guardbot.media")
 # Every media kind this bot understands, with the facts the callers need:
 #
 #   mime          the type sent to the API when Telegram does not tell us
-#   video_like    decode with ffmpeg (the local detector's video path)
-#   visual        something a picture-based moderator can look at
+#   video_like    decode with ffmpeg, to send it or to fall back to frames
+#   visual        something a picture-based model can look at
 #   transcribable something the speech pipeline can turn into text
 #
 # `tgs` (a Lottie animated sticker) is not decodable by ffmpeg or readable by
@@ -390,8 +390,8 @@ def _probe_duration(path: str) -> float:
 def _extract_frames(path: str, out_dir: str, n: int, *, scale: int = 512) -> list[str]:
     """Evenly spread still frames from a video, for the oversized-video path.
 
-    Deliberately a smaller scale than the detector's 640: these frames go to a
-    model as images, and the extra pixels cost tokens without adding meaning.
+    Deliberately a small scale: these frames go to a model as images, and the
+    extra pixels cost tokens without adding meaning.
     """
     dur = _probe_duration(path)
     if dur <= 0:
@@ -638,103 +638,3 @@ async def build_for_message(
     )
     return ref, bundle
 
-
-def build_from_path(
-    path: str,
-    kind: str,
-    *,
-    work_dir: str,
-    mime_type: str = "",
-    max_mb: float | None = None,
-    frames: int | None = None,
-    max_parts: int | None = None,
-) -> MediaBundle:
-    """Prepare media that is *already on disk*, without downloading it again.
-
-    The moderation pipeline has the file in its own temp directory by the time
-    it needs to ask the AI — it downloaded it for the local detector. Going back
-    to Telegram for the same bytes would be a second download of somebody's
-    media, which is slower, wastes the API's bandwidth and is one more place the
-    file exists. So this entry point takes the path.
-
-    Synchronous, and deliberately so: it does no I/O beyond reading a local file
-    and (for a video) one ffmpeg pass, and the caller already runs it in its
-    media thread pool.
-    """
-    max_mb = float(config.GEMINI_MEDIA_MAX_MB if max_mb is None else max_mb)
-    frames = int(config.GEMINI_MEDIA_FRAMES if frames is None else frames)
-    max_parts = int(config.GEMINI_MEDIA_MAX_PARTS if max_parts is None else max_parts)
-    ceiling = int(max_mb * 1024 * 1024)
-
-    if not path or not os.path.exists(path):
-        return MediaBundle(ok=False, kind=kind, note="no local file")
-
-    video_like = KINDS.get(kind, ("", False, False, False))[1]
-    mime = mime_type or KINDS.get(kind, ("", False, False, False))[0]
-
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return MediaBundle(ok=False, kind=kind, note="stat failed")
-
-    if size > ceiling:
-        if video_like:
-            return _frames_from_path(path, kind, work_dir, frames, max_parts,
-                                     note=f"too large ({size} bytes)")
-        return MediaBundle(ok=False, kind=kind, note=f"too large ({size} bytes)")
-
-    try:
-        with open(path, "rb") as fh:
-            data = fh.read()
-    except OSError as e:
-        log.warning("local media read failed: %s", e)
-        return MediaBundle(ok=False, kind=kind, note="read failed")
-
-    if not data:
-        return MediaBundle(ok=False, kind=kind, note="empty file")
-
-    if mime.startswith("image/"):
-        data, mime = _normalise_image(data, mime)
-
-    if mime not in INLINE_MIME_TYPES:
-        # A container the API will not take. For a video that is worth one more
-        # attempt as frames; for anything else there is nothing to fall back to.
-        if video_like:
-            return _frames_from_path(path, kind, work_dir, frames, max_parts,
-                                     note=f"unsupported type ({mime})")
-        return MediaBundle(ok=False, kind=kind, note=f"unsupported type ({mime})")
-
-    if video_like and not _has_video_stream(data, mime):
-        bundle = _frames_from_path(path, kind, work_dir, frames, max_parts,
-                                   note="no video stream")
-        if bundle.ok:
-            return bundle
-
-    return MediaBundle(
-        ok=True, kind=kind, parts=[MediaPart(mime_type=mime, data=data)], note=""
-    )
-
-
-def _frames_from_path(
-    path: str, kind: str, work_dir: str, frames: int, max_parts: int, *, note: str
-) -> MediaBundle:
-    """The frame fallback, for a file already on disk."""
-    paths = _extract_frames(path, work_dir, max(1, min(frames, max_parts)))
-    if not paths:
-        return MediaBundle(ok=False, kind=kind, note=note)
-    parts: list[MediaPart] = []
-    for p in paths[:max_parts]:
-        try:
-            with open(p, "rb") as fh:
-                parts.append(MediaPart(mime_type="image/jpeg", data=fh.read()))
-        except OSError:
-            continue
-    if not parts:
-        return MediaBundle(ok=False, kind=kind, note=note)
-    return MediaBundle(
-        ok=True,
-        kind=kind,
-        parts=parts,
-        note=f"{note}; sent as {len(parts)} still frames",
-        reduced_to_frames=True,
-    )

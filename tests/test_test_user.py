@@ -6,33 +6,29 @@ only difference is that a *successful* restriction is lifted again after
 ``TEST_USER_UNRESTRICT_SECONDS`` and the warning from that cycle is removed, so
 the next test violation can be sent straight away.
 
-Everything here goes through the real ``on_media`` handler and the real
-restriction helpers; only the Telegram layer and the job queue are faked.
+Everything here goes through the real ``on_group_filter`` handler and the real
+restriction helpers; only the Telegram layer and the job queue are faked. The
+filter is the deterministic deletion path that replaced the media pipeline, so
+it is what produces the violation these tests need — no model, no media, no
+network.
 """
 import asyncio
-import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from telegram.error import TelegramError
 
-from app import config, db, detector, main
-from conftest import local_only_moderation
+from app import config, db, main
 
 CHAT_ID = -1001234567890
 ADMIN_CHAT_ID = -1009999999999
 TEST_USER_ID = 8299811287
 NORMAL_USER_ID = 7
+BANNED = "badword"
 
 
 # --------------------------------------------------------------- fakes
-class FakeFile:
-    async def download_to_drive(self, path):
-        with open(path, "wb") as fh:
-            fh.write(b"fake-media")
-
-
 class FakeJob:
     def __init__(self, callback, when, data, name):
         self.callback = callback
@@ -60,8 +56,6 @@ class FakeJobQueue:
 class FakeBot:
     def __init__(self, restrict_fails=False, unrestrict_fails=False):
         self.sent: list[tuple[int, int, str]] = []   # chat_id, message_id, text
-        self.photos: list[tuple[int, str]] = []      # chat_id, caption
-        self.documents: list[tuple[int, str]] = []
         self.deleted: list[tuple[int, int]] = []     # chat_id, message_id
         self.restrict_calls: list[tuple[int, int, object, object]] = []
         self.restrict_fails = restrict_fails
@@ -71,19 +65,10 @@ class FakeBot:
     async def get_chat_member(self, chat_id, user_id):
         return SimpleNamespace(status="member")
 
-    async def get_file(self, file_id):
-        return FakeFile()
-
     async def send_message(self, chat_id, text, **kwargs):
         self._next_id += 1
         self.sent.append((chat_id, self._next_id, text))
         return SimpleNamespace(message_id=self._next_id)
-
-    async def send_photo(self, chat_id, photo=None, caption=None, **kwargs):
-        self.photos.append((chat_id, caption))
-
-    async def send_document(self, chat_id, document=None, caption=None, **kwargs):
-        self.documents.append((chat_id, caption))
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
@@ -97,57 +82,21 @@ class FakeBot:
 
 
 class FakeMessage:
-    def __init__(self, message_id=55, **media):
+    """The filter handler deletes through the message itself."""
+
+    def __init__(self, text, message_id=55):
+        self.text = text
+        self.caption = None
         self.message_id = message_id
-        self.photo = None
-        self.video = None
-        self.animation = None
-        self.video_note = None
-        self.sticker = None
-        self.document = None
-        for key, value in media.items():
-            setattr(self, key, value)
         self.delete_calls = 0
 
     async def delete(self):
         self.delete_calls += 1
 
 
-class StubDetector:
-    def __init__(self, result=None, error=None):
-        self.result = result or []
-        self.error = error
-
-    def detect(self, path):
-        if self.error is not None:
-            raise self.error
-        return self.result
-
-
-def media_obj():
-    return SimpleNamespace(file_id="f", file_size=1000, thumbnail=None, thumb=None)
-
-
-def explicit_raw(label="FEMALE_GENITALIA_EXPOSED", score=0.67):
-    return [{"class": label, "score": score, "box": [0, 0, 1, 1]}]
-
-
-def install_frames(monkeypatch, n=4):
-    def frames(path, out_dir, _n):
-        out = []
-        for i in range(n):
-            p = os.path.join(out_dir, f"f{i}.jpg")
-            with open(p, "wb") as fh:
-                fh.write(b"frame")
-            out.append(p)
-        return out
-
-    monkeypatch.setattr(detector, "extract_frames", frames)
-
-
-def send(bot, jq, user_id, message_id=1, **media):
-    """Run one message through the real ``on_media`` handler."""
-    msg = FakeMessage(message_id=message_id, **media)
+def send(bot, jq, user_id, message_id=1, text=f"this has {BANNED} in it"):
+    """Run one message through the real ``on_group_filter`` handler."""
+    msg = FakeMessage(text, message_id=message_id)
     user = SimpleNamespace(
         id=user_id, full_name=f"User {user_id}", username=f"u{user_id}", is_bot=False
     )
@@ -156,13 +105,13 @@ def send(bot, jq, user_id, message_id=1, **media):
         effective_chat=SimpleNamespace(id=CHAT_ID),
         effective_user=user,
     )
-    asyncio.run(main.on_media(update, SimpleNamespace(bot=bot, job_queue=jq)))
+    asyncio.run(main.on_group_filter(update, SimpleNamespace(bot=bot, job_queue=jq)))
     return msg
 
 
 def violation(bot, jq, user_id, message_id=1):
-    """One confirmed explicit-media deletion (a photo)."""
-    return send(bot, jq, user_id, message_id, photo=[media_obj()])
+    """One confirmed, counted filter deletion."""
+    return send(bot, jq, user_id, message_id)
 
 
 def run_job(bot, job):
@@ -174,6 +123,10 @@ def group_messages(bot):
     return [(mid, text) for chat_id, mid, text in bot.sent if chat_id == CHAT_ID]
 
 
+def admin_messages(bot):
+    return [text for chat_id, _mid, text in bot.sent if chat_id == ADMIN_CHAT_ID]
+
+
 def restrictions(bot):
     return [c for c in bot.restrict_calls if c[3] is not None]
 
@@ -183,28 +136,33 @@ def unrestricts(bot):
 
 
 @pytest.fixture(autouse=True)
-def env(monkeypatch, tmp_path):
-    tmp = tmp_path / "tmp"
-    tmp.mkdir()
+def env(monkeypatch):
     monkeypatch.setattr(config, "GROUP_IDS", [CHAT_ID])
     monkeypatch.setattr(config, "ADMIN_LOG_CHAT", ADMIN_CHAT_ID)
-    monkeypatch.setattr(config, "TMP_DIR", str(tmp))
-    monkeypatch.setattr(config, "MAX_DOWNLOAD_MB", 20)
     monkeypatch.setattr(config, "WHITELIST_USER_IDS", set())
     monkeypatch.setattr(config, "MUTE_MINUTES", 15)
     monkeypatch.setattr(config, "VIOLATION_MUTE_AFTER", 3)
     monkeypatch.setattr(config, "TEST_USER_ID", TEST_USER_ID)
     monkeypatch.setattr(config, "TEST_USER_UNRESTRICT_SECONDS", 2.0)
-    monkeypatch.setattr(detector, "_scene_pipe", None)
-    # This suite tests the test account's auto-unrestrict cycle, which only
-    # begins after a confirmed deletion. See the helper.
-    local_only_moderation(monkeypatch)
+    # The filter is the deletion path these tests drive. It is deterministic, so
+    # a violation here never depends on a model or a media decode.
+    monkeypatch.setattr(config, "FILTER_ENABLED", True)
+    monkeypatch.setattr(config, "FILTER_BANNED_WORDS", [BANNED])
+    monkeypatch.setattr(config, "FILTER_WORD_ACTION", "delete")
+    monkeypatch.setattr(config, "FILTER_PHISHING_ACTION", "delete")
+    monkeypatch.setattr(config, "FILTER_LINK_ACTION", "review")
+    monkeypatch.setattr(config, "FILTER_ALLOWED_DOMAINS", ["example.com"])
+    monkeypatch.setattr(config, "FILTER_EXEMPT_ADMINS", True)
+    monkeypatch.setattr(config, "FILTER_MIN_CHARS", 4)
+    monkeypatch.setattr(config, "FILTER_COUNTS_AS_VIOLATION", True)
+    # Nothing here may reach a model.
+    monkeypatch.setattr(config, "GEMINI_MOD_ENABLED", False)
     main._test_unrestrict_jobs.clear()
     main._test_unrestrict_notices.clear()
     main._admin_cache.clear()
     main._recently_deleted.clear()
     db.init()  # a fresh in-memory database for each test
-    yield tmp
+    yield
     main._test_unrestrict_jobs.clear()
     main._test_unrestrict_notices.clear()
     if db._conn is not None:
@@ -213,8 +171,7 @@ def env(monkeypatch, tmp_path):
 
 
 # --------------------------------------------- normal restriction duration
-def test_a_normal_user_is_restricted_for_fifteen_minutes(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_a_normal_user_is_restricted_for_fifteen_minutes():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, NORMAL_USER_ID, message_id=i)
@@ -229,7 +186,6 @@ def test_a_normal_user_is_restricted_for_fifteen_minutes(monkeypatch):
 
 
 def test_the_restriction_duration_comes_from_config(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
     monkeypatch.setattr(config, "MUTE_MINUTES", 1)
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
@@ -241,8 +197,7 @@ def test_the_restriction_duration_comes_from_config(monkeypatch):
 
 
 # --------------------------------------------- the test account
-def test_the_test_user_reaches_the_normal_restrict_path(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_the_test_user_reaches_the_normal_restrict_path():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         msg = violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -254,8 +209,7 @@ def test_the_test_user_reaches_the_normal_restrict_path(monkeypatch):
     assert restrictions(bot)[0][3] is not None           # timed, not permanent
 
 
-def test_the_test_user_is_not_exempt_from_detection_or_deletion(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_the_test_user_is_not_exempt_from_detection_or_deletion():
     bot, jq = FakeBot(), FakeJobQueue()
     msg = violation(bot, jq, TEST_USER_ID, message_id=1)
 
@@ -263,19 +217,17 @@ def test_the_test_user_is_not_exempt_from_detection_or_deletion(monkeypatch):
     assert db.get_strikes(CHAT_ID, TEST_USER_ID) == 1
 
 
-def test_the_test_user_still_gets_the_admin_report(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_the_test_user_still_gets_the_admin_report():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
 
-    assert len(bot.photos) == 3                     # one report per deletion
-    assert all(c == ADMIN_CHAT_ID for c, _ in bot.photos)
-    assert any("حذف محتوای صریح" in (cap or "") for _, cap in bot.photos)
+    reports = admin_messages(bot)
+    assert len(reports) == 3                     # one report per deletion
+    assert any("فیلتر پیام" in text for text in reports)
 
 
-def test_the_unrestrict_is_scheduled_two_seconds_later(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_the_unrestrict_is_scheduled_two_seconds_later():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -288,7 +240,6 @@ def test_the_unrestrict_is_scheduled_two_seconds_later(monkeypatch):
 
 
 def test_the_delay_is_configurable(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
     monkeypatch.setattr(config, "TEST_USER_UNRESTRICT_SECONDS", 5.0)
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
@@ -297,8 +248,7 @@ def test_the_delay_is_configurable(monkeypatch):
     assert jq.jobs[0].when == 5.0
 
 
-def test_the_test_user_is_automatically_unrestricted(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_the_test_user_is_automatically_unrestricted():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -314,8 +264,7 @@ def test_the_test_user_is_automatically_unrestricted(monkeypatch):
     assert until is None                           # not another timed restriction
 
 
-def test_the_restriction_warning_is_cleaned_up_after_the_unrestrict(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_the_restriction_warning_is_cleaned_up_after_the_unrestrict():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -333,8 +282,7 @@ def test_the_restriction_warning_is_cleaned_up_after_the_unrestrict(monkeypatch)
     assert (CHAT_ID, warnings[1][0]) not in bot.deleted
 
 
-def test_the_admin_report_is_never_deleted_by_the_cleanup(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_the_admin_report_is_never_deleted_by_the_cleanup():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -346,8 +294,7 @@ def test_the_admin_report_is_never_deleted_by_the_cleanup(monkeypatch):
 
 
 # --------------------------------------------- no effect on other users
-def test_a_different_user_does_not_get_the_two_second_behaviour(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_a_different_user_does_not_get_the_two_second_behaviour():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, NORMAL_USER_ID, message_id=i)
@@ -360,7 +307,6 @@ def test_a_different_user_does_not_get_the_two_second_behaviour(monkeypatch):
 
 def test_the_exception_can_be_disabled(monkeypatch):
     monkeypatch.setattr(config, "TEST_USER_ID", 0)
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -370,8 +316,7 @@ def test_the_exception_can_be_disabled(monkeypatch):
 
 
 # --------------------------------------------- safety
-def test_a_failed_unrestrict_does_not_crash_and_is_logged(monkeypatch, caplog):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_a_failed_unrestrict_does_not_crash_and_is_logged(caplog):
     bot, jq = FakeBot(unrestrict_fails=True), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -383,8 +328,7 @@ def test_a_failed_unrestrict_does_not_crash_and_is_logged(monkeypatch, caplog):
     assert unrestricts(bot) == []
 
 
-def test_a_second_restriction_replaces_the_pending_job(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_a_second_restriction_replaces_the_pending_job():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(6):        # several restriction cycles
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -395,8 +339,7 @@ def test_a_second_restriction_replaces_the_pending_job(monkeypatch):
     assert len(main._test_unrestrict_jobs) == 1   # bounded: one per user
 
 
-def test_a_replaced_cycle_still_cleans_up_all_of_its_warnings(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_a_replaced_cycle_still_cleans_up_all_of_its_warnings():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(4):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -414,8 +357,7 @@ def test_a_replaced_cycle_still_cleans_up_all_of_its_warnings(monkeypatch):
         assert (CHAT_ID, mid) not in bot.deleted
 
 
-def test_a_stale_replaced_job_does_nothing(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_a_stale_replaced_job_does_nothing():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(6):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -427,8 +369,7 @@ def test_a_stale_replaced_job_does_nothing(monkeypatch):
     assert bot.deleted == []
 
 
-def test_a_failed_restrict_does_not_schedule_anything(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector(explicit_raw()))
+def test_a_failed_restrict_does_not_schedule_anything():
     bot, jq = FakeBot(restrict_fails=True), FakeJobQueue()
     for i in range(3):
         violation(bot, jq, TEST_USER_ID, message_id=i)
@@ -439,12 +380,23 @@ def test_a_failed_restrict_does_not_schedule_anything(monkeypatch):
 
 
 # --------------------------------------------- the flood path restricts too
-def test_the_test_user_exception_applies_to_the_flood_restrict(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector([]))
-    install_frames(monkeypatch)
+def flood(bot, jq, user_id, message_id):
+    """Run one animation through the real ``on_media_flood`` handler."""
+    msg = SimpleNamespace(message_id=message_id, animation=SimpleNamespace(file_id="a"))
+    update = SimpleNamespace(
+        effective_message=msg,
+        effective_chat=SimpleNamespace(id=CHAT_ID),
+        effective_user=SimpleNamespace(
+            id=user_id, full_name=f"User {user_id}", username=f"u{user_id}", is_bot=False
+        ),
+    )
+    asyncio.run(main.on_media_flood(update, SimpleNamespace(bot=bot, job_queue=jq)))
+
+
+def test_the_test_user_exception_applies_to_the_flood_restrict():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(6):        # more than BURST_MAX_ITEMS gifs
-        send(bot, jq, TEST_USER_ID, i, animation=media_obj())
+        flood(bot, jq, TEST_USER_ID, i)
 
     # the burst fired and restricted the test user for real ...
     assert any(c[1] == TEST_USER_ID for c in restrictions(bot))
@@ -452,12 +404,10 @@ def test_the_test_user_exception_applies_to_the_flood_restrict(monkeypatch):
     assert any(j.data["user_id"] == TEST_USER_ID for j in jq.jobs)
 
 
-def test_the_flood_restrict_of_another_user_is_not_special(monkeypatch):
-    monkeypatch.setattr(detector, "_detector", StubDetector([]))
-    install_frames(monkeypatch)
+def test_the_flood_restrict_of_another_user_is_not_special():
     bot, jq = FakeBot(), FakeJobQueue()
     for i in range(6):
-        send(bot, jq, NORMAL_USER_ID, i, animation=media_obj())
+        flood(bot, jq, NORMAL_USER_ID, i)
 
     assert any(c[1] == NORMAL_USER_ID for c in restrictions(bot))
     assert jq.jobs == []
