@@ -1251,12 +1251,9 @@ def recent_admin_context(chat_id: int, *, limit: int = 0) -> list[dict]:
 def prune() -> None:
     """Apply both retention windows. Best effort; never raises.
 
-    Called from the administrative path rather than from a timer, because this
-    process has no scheduler and a retention rule that only runs when somebody
-    remembers is not a retention rule.
+    A thin alias for ``admin_service.prune``, which is where the windows are
+    actually applied: the audit table is written by the service, so the service
+    is what bounds it, and a second implementation here would be a second answer
+    to the same question.
     """
-    try:
-        db.audit_prune(int(config.ADMIN_ACTIVITY_RETENTION))
-        db.admin_request_prune(int(config.ADMIN_IDEMPOTENCY_RETENTION))
-    except Exception:  # noqa: BLE001
-        log.exception("admin retention prune failed")
+    admin_service.prune()

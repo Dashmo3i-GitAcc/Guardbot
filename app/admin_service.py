@@ -892,6 +892,51 @@ def _record(
     except Exception:  # noqa: BLE001
         log.exception("audit write failed action=%s", request.operation)
     _remember(request, result)
+    _maybe_prune()
+
+
+# ── Retention ─────────────────────────────────────────────────────────────
+# The two tables below are written here, so they are bounded here. Both windows
+# already existed as configuration and neither was ever applied: ``prune`` was
+# written, documented as "called from the administrative path", and had no
+# caller — so the only thing bounding the audit trail was an operator
+# remembering to ask, which is the same as no bound at all.
+#
+# Neither table is ever dropped wholesale. The brief is explicit that
+# accountability survives, so what this does is apply a *window* — 90 days of
+# activity, one day of idempotency — and never a truncation.
+PRUNE_EVERY = 200
+_since_prune = 0
+
+
+def _maybe_prune() -> None:
+    global _since_prune
+    _since_prune += 1
+    if _since_prune < PRUNE_EVERY:
+        return
+    _since_prune = 0
+    prune()
+
+
+def prune() -> None:
+    """Apply both administrative retention windows. Best effort; never raises.
+
+    Called from ``_record``, which is the one place an administrative request
+    reaches regardless of outcome — a refusal is written down too, and a trail
+    that only bounded itself on success would grow fastest on the requests that
+    were denied.
+    """
+    try:
+        db.audit_prune(int(config.ADMIN_ACTIVITY_RETENTION))
+        db.admin_request_prune(int(config.ADMIN_IDEMPOTENCY_RETENTION))
+    except Exception:  # noqa: BLE001
+        log.exception("admin retention prune failed")
+
+
+def prune_reset() -> None:
+    """Forget the prune counter. For tests."""
+    global _since_prune
+    _since_prune = 0
 
 
 # ── Sentences ─────────────────────────────────────────────────────────────

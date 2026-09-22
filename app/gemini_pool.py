@@ -1254,6 +1254,12 @@ async def generate(
     if not pool.enabled:
         raise PoolUnavailable("no_account")
 
+    # The retention sweep rides the request path, every
+    # ``GEMINI_POOL_PRUNE_EVERY`` requests. Here rather than inside the attempt
+    # loop, so one logical request costs at most one counter increment and the
+    # sweep can never run twice for the same message.
+    _maybe_prune()
+
     _genai, types = _load_sdk()
     now = time.time()
 
@@ -1531,6 +1537,55 @@ def build_pools() -> dict[str, Pool]:
         )
         _pools[spec["workload"]] = pool
     return _pools
+
+
+# ── Retention ─────────────────────────────────────────────────────────────
+# The pool owns two tables that grow without bound: ``gemini_daily``, one row per
+# account per API day, and ``gemini_events``, one row per pool transition. Both
+# had a rule and neither rule ran — ``daily_prune`` was written, documented as
+# being "called on the pool path", and had no caller at all, so the only thing
+# bounding either table was the operator remembering to ask.
+#
+# The sweep therefore hangs off the request path with a counter, which is the
+# pattern ``people`` already uses: pruning on every request would run two DELETEs
+# per provider call, and never pruning is what the two functions above were
+# already doing by accident.
+PRUNE_EVERY = 200
+_since_prune = 0
+
+
+def _maybe_prune() -> None:
+    global _since_prune
+    _since_prune += 1
+    if _since_prune < PRUNE_EVERY:
+        return
+    _since_prune = 0
+    prune()
+
+
+def prune() -> None:
+    """Apply both retention windows. Best effort; never raises.
+
+    Called from the pool path rather than from a timer, because this process has
+    no scheduler and a retention rule that only runs when somebody remembers is
+    not a retention rule.
+
+    Deliberately does *not* touch ``admin_audit`` or ``admin_requests``: those
+    are the accountability record, they have their own windows, and their own
+    owner in ``admin_tools.prune``. A pool module deleting an audit row would be
+    the wrong module making that decision.
+    """
+    try:
+        db.daily_prune(int(config.GEMINI_DAILY_RETENTION_DAYS))
+        db.events_prune(int(config.GEMINI_EVENTS_RETENTION_SECONDS))
+    except Exception:  # noqa: BLE001
+        log.exception("pool retention prune failed")
+
+
+def prune_reset() -> None:
+    """Forget the prune counter. For tests."""
+    global _since_prune
+    _since_prune = 0
 
 
 def pool_for(workload: str) -> Pool | None:

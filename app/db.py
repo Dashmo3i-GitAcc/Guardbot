@@ -293,6 +293,14 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_gemini_events_dedup "
         "ON gemini_events(workload, kind, slot, model, at)"
     )
+    # A second index, for the retention sweep rather than for the dedup lookup.
+    # The dedup index above ends in ``at``, so it cannot serve a range scan on
+    # ``at`` alone — a delete by age would read the whole table. This table is
+    # the one in the schema that grows with activity rather than with the number
+    # of accounts or days, so it is the one that needs a bounded delete.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gemini_events_at ON gemini_events(at)"
+    )
     # How many provider requests each account has spent *today*.
     #
     # Lifetime totals live on `gemini_accounts` and are that account's health
@@ -1572,6 +1580,30 @@ def daily_prune(keep_days: int) -> int:
     )
     with _lock:
         cur = _conn.execute("DELETE FROM gemini_daily WHERE day < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
+
+
+def events_prune(keep_seconds: int) -> int:
+    """Drop pool events older than ``keep_seconds``. Returns rows removed.
+
+    ``gemini_events`` is the one table here that grows with *activity* rather
+    than with the number of accounts, days or people, so it is the one that
+    needs a bound. It is telemetry rather than audit — the audit trail is
+    ``admin_audit``, which has its own window and its own rule — so pruning it
+    loses no record of who did what.
+
+    What it does lose is diagnostic history, which is why the default window is
+    generous: this table is what answered "why was Gemini rate-limited" during
+    the incident that produced the awareness pacing change, and a window short
+    enough to have discarded that evidence would have made the question
+    unanswerable.
+    """
+    if keep_seconds <= 0:
+        return 0
+    cutoff = int(time.time()) - int(keep_seconds)
+    with _lock:
+        cur = _conn.execute("DELETE FROM gemini_events WHERE at < ?", (cutoff,))
         _conn.commit()
         return cur.rowcount
 

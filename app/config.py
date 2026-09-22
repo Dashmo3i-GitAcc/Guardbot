@@ -1681,6 +1681,30 @@ GEMINI_POOL_TRANSIENT_COOLDOWN = _int("GEMINI_POOL_TRANSIENT_COOLDOWN", 15)
 # the old name is not left believing it configured something.
 GEMINI_POOL_EVENT_COOLDOWN = _int("GEMINI_POOL_EVENT_COOLDOWN", 900)
 
+# How long pool events are kept, and how often the sweep runs.
+#
+# `gemini_events` is the only table in the schema that grows with activity
+# rather than with the number of accounts, days or people, so it is the only one
+# that needs a bound. Ninety days matches the administrative activity window and
+# is chosen to be long enough to still answer "why was this rate-limited last
+# month" — that question was asked for real during the incident that produced
+# the awareness pacing change, and a shorter window would have discarded the
+# evidence.
+#
+# The sweep runs every N provider requests rather than on a timer, following the
+# same rule as every other retention rule here: this process has no scheduler,
+# and a rule that only runs when somebody remembers is not a rule. Zero disables
+# the sweep, which is the operator's choice to make rather than a silent default.
+GEMINI_EVENTS_RETENTION_SECONDS = _int(
+    "GEMINI_EVENTS_RETENTION_SECONDS", 90 * 24 * 3600
+)
+# The per-day spend table, in days rather than seconds because its rows *are*
+# days — a sub-day window would mean deleting the row that is currently being
+# incremented. Kept as long as the event window so the two tell the same story:
+# "we were rate-limited on the 14th" and "the 14th cost 780 requests" are read
+# together or not at all.
+GEMINI_DAILY_RETENTION_DAYS = _int("GEMINI_DAILY_RETENTION_DAYS", 90)
+
 # A hard ceiling on provider calls for one logical request. Without it a large
 # pool with retries could spend a minute of wall clock on a single message.
 GEMINI_POOL_MAX_ATTEMPTS = _int("GEMINI_POOL_MAX_ATTEMPTS", 12)
