@@ -420,7 +420,9 @@ def roles_for(messages: list[dict]) -> dict[int, str]:
     return {uid: role_of(p) for uid, p in principals.items()}
 
 
-def _line(message: dict, roles: dict[int, str] | None = None) -> str:
+def _line(
+    message: dict, roles: dict[int, str] | None = None, now: int = 0
+) -> str:
     """One transcript line: who, how they stand, what they said, and to whom.
 
     The id is included because it is what a later action has to name — the
@@ -449,13 +451,20 @@ def _line(message: dict, roles: dict[int, str] | None = None) -> str:
       like an instruction.
 
     Both marks come from the one matcher; nothing here re-reads the name itself.
+
+    ``now`` adds how long ago the line was written, when the caller knows the
+    clock. It is appended at the **end** rather than put in the header, and that
+    is deliberate: the header is the line's identity — the part the model and
+    the tests both key on — and an age wedged into the middle of it would make
+    the one part that must not move depend on when the pass happened to run.
     """
     role = message.get("role") or ROLE_MEMBER
     if roles:
         role = roles.get(int(message.get("user_id") or 0)) or role
     body = (message.get("text") or "").replace("\n", " ").strip()
+    age = _age_mark(message, now)
     if role == ROLE_NEXUS:
-        return f"[{role}] {body}"
+        return f"[{role}] {body}{age}"
 
     name = (message.get("name") or "").strip() or "?"
     user_id = int(message.get("user_id") or 0)
@@ -465,7 +474,36 @@ def _line(message: dict, roles: dict[int, str] | None = None) -> str:
         reply_name = (message.get("reply_name") or "").strip() or "?"
         head += f" ↩ reply-to {reply_name} ({reply_user_id})"
     head += _address_mark(message)
-    return f"{head}: {body}"
+    return f"{head}: {body}{age}"
+
+
+def _age_mark(message: dict, now: int) -> str:
+    """How long ago a line was written, as a short suffix. ``""`` if unknown.
+
+    Recency is what turns a transcript from a bag of lines into a conversation
+    with a direction: «الان» and «قبلاً» are different words, and a model that
+    cannot see that one message is four minutes old and the next is four hours
+    old will read a settled argument as a live one. The ``at`` column has always
+    been on the row; this is the first thing to render it.
+
+    Coarse on purpose. A pass runs on a debounce of seconds, so a finer number
+    would be precision the caller does not have, and it would make the rendered
+    transcript — and therefore every test that pins a line — depend on the
+    clock. Seconds only in the first minute, then minutes, hours, days.
+    """
+    if not now:
+        return ""
+    at = int(message.get("at") or 0)
+    if not at or at > now:
+        return ""
+    seconds = now - at
+    if seconds < 60:
+        return f" (+{seconds}s)"
+    if seconds < 3600:
+        return f" (+{seconds // 60}m)"
+    if seconds < 86400:
+        return f" (+{seconds // 3600}h)"
+    return f" (+{seconds // 86400}d)"
 
 
 def _address_mark(message: dict) -> str:
@@ -513,10 +551,11 @@ def render(
     if not rows:
         return ""
     roles = roles_for(rows)
+    now = int(time.time())
     kept: list[str] = []
     used = 0
     for message in reversed(rows):
-        line = _line(message, roles)
+        line = _line(message, roles, now)
         cost = len(line) + 1
         if kept and used + cost > budget:
             break

@@ -26,6 +26,7 @@ import pytest
 from app import (
     admin_tools,
     awareness,
+    awareness_context,
     chat,
     config,
     db,
@@ -95,6 +96,7 @@ def awareness_env(monkeypatch, tmp_path):
     db.awareness_reset()
     nexus.reset_state()
     chat.reset_state()
+    awareness_context.reset_rooms()
     main._recently_deleted.clear()
     main._nexus_visibility.clear()
     main._nexus_visibility[CHAT] = "administrator"
@@ -110,6 +112,7 @@ def awareness_env(monkeypatch, tmp_path):
     db.nexus_state_reset()
     db.awareness_reset()
     nexus.reset_state()
+    awareness_context.reset_rooms()
     main._nexus_visibility.clear()
     main._awareness_inflight.clear()
     main._awareness_last_pass.clear()
@@ -532,6 +535,45 @@ def test_the_model_is_given_what_it_understood_before(monkeypatch):
     asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
     context = passes[0]["context"]
     assert "they were discussing something earlier" in context
+
+
+def test_the_model_is_given_the_staged_room_context(monkeypatch):
+    """The room's name and the last pass's people reach the model's context.
+
+    This asserts the *wiring*, not the builder: ``_awareness_pass`` has to hand
+    its own window and anchor to the context builder, or the blocks would be
+    assembled for a different batch than the transcript describes. The room's
+    name is tier 0 and therefore always there; the deeper tiers are gated by
+    ``app/awareness_context.py`` and tested there.
+    """
+    awareness_context.note_room(CHAT, "Guard Group", "supergroup")
+    db.awareness_set(
+        CHAT,
+        seen_message_id=1,
+        relevant=False,
+        topic="t",
+        summary="s",
+        participants="member:Sara:42",
+    )
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    passes = install_awareness(
+        monkeypatch, decision={"relevant": False, "respond": False}
+    )
+    asyncio.run(main._awareness_pass(ctx_for(FakeBot()), CHAT, pending_row()))
+    context = passes[0]["context"]
+    assert "Guard Group" in context
+    assert "Sara (42)" in context
+
+
+def test_the_transcript_the_pass_reads_carries_recency():
+    """A conversation has a direction, and the age of each line is part of it."""
+    db.group_capture(CHAT, MEMBER, "member", "Reza", "hello", keep=10, message_id=1)
+    db._exec(
+        "UPDATE group_messages SET at=? WHERE chat_id=?",
+        (int(time.time()) - 300, CHAT),
+    )
+    rows = db.group_window(CHAT, limit=10)
+    assert "(+5m)" in awareness.render(CHAT, messages=rows)
 
 
 # ══ 4. Awareness is not response ══════════════════════════════════════════

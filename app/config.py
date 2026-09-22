@@ -927,6 +927,29 @@ NEXUS_AWARENESS_DAILY_LIMIT = _int("NEXUS_AWARENESS_DAILY_LIMIT", 200)
 # carries the current turn and the administrative context.
 NEXUS_AWARENESS_CONTEXT_MESSAGES = _int("NEXUS_AWARENESS_CONTEXT_MESSAGES", 20)
 
+# ── The staged context ────────────────────────────────────────────────────
+# The awareness pass is handed a transcript plus whatever else the server
+# already knows about the room. That extra context is assembled from *sources*
+# (see ``app/awareness_context.py``), and these four numbers bound it. The point
+# of the split is that the cheap half is always there and the expensive half is
+# only built when the batch calls for it — the allowance is rationed in
+# requests, so tokens spent on context nobody asked for are paid on every pass.
+#
+# ``NEXUS_AWARENESS_CONTEXT_CHARS`` is the hard ceiling on all of it together;
+# each source has its own cap beneath it. ``NEXUS_AWARENESS_CONTEXT_DEEP`` is the
+# kill switch for the conditional tier, which is the half that reads the
+# database: switching it off leaves the free context and removes every extra
+# query a pass could make.
+NEXUS_AWARENESS_CONTEXT_CHARS = _int("NEXUS_AWARENESS_CONTEXT_CHARS", 1500)
+NEXUS_AWARENESS_CONTEXT_DEEP = _bool("NEXUS_AWARENESS_CONTEXT_DEEP", True)
+
+# How many recent administrative actions the context may show, and how many
+# people it may describe. Both are bounded because this is context rather than a
+# directory: the point is that a pass can see what has just happened here and
+# who the batch is about, not that it can enumerate the room.
+NEXUS_AWARENESS_ADMIN_ACTIONS = _int("NEXUS_AWARENESS_ADMIN_ACTIONS", 5)
+NEXUS_AWARENESS_REFERENCED_PEOPLE = _int("NEXUS_AWARENESS_REFERENCED_PEOPLE", 4)
+
 # Sent when an awareness pass actually performed an action but the model gave no
 # wording for it. Rare, and the alternative is worse: an administrator whose
 # instruction was carried out and never acknowledged believes it was ignored,

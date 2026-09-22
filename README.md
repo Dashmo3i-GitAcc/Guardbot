@@ -260,6 +260,17 @@ allowance a person is waiting on an answer to. It can be switched off entirely
 with `NEXUS_AWARENESS_ENABLED=false`, and `/nexus status` shows whether it is on
 as its `درک گفتگوی گروه` line.
 
+What the pass knows is **staged rather than preloaded**. The room's own name and
+the people who were here last time are always there, because they are free — a
+name Telegram already gave us, and a list the server already wrote down. The
+expensive context is built only when the batch calls for it: recent
+administrative actions when an administrator is involved, and one line about
+each person the batch actually refers to when somebody has replied to somebody
+else. An ordinary member's ordinary message carries neither, so nothing deeper
+is looked up for it — the allowance is rationed in *requests*, and context
+nobody asked for is paid on every pass. `NEXUS_AWARENESS_CONTEXT_DEEP=false`
+removes the whole conditional half.
+
 Nexus reading the room grants nobody anything. Every action is still authorized
 separately against the Telegram id of the person who actually spoke last, so an
 ordinary member's message being understood does not make it an instruction.

@@ -37,6 +37,7 @@ from . import (
     ai_intent,
     ai_moderation,
     awareness,
+    awareness_context,
     burst,
     chat,
     classifier,
@@ -1055,7 +1056,19 @@ async def _awareness_capture(
     an owner who silenced the assistant must not find that it went on reading
     the room. This matches the pre-existing observation path, which is only
     reached through ``nexus.accepts``.
+
+    The room's own name and type are cached here, before any gate, and that is
+    not part of the capture: the handler already holds ``effective_chat``, so
+    the one place in the bot that knows what the room is called is the one place
+    that should write it down. Doing it here rather than on the pass is what
+    keeps a pass free of a ``get_chat`` network call for a fact Telegram has
+    already told us.
     """
+    awareness_context.note_room(
+        room.id,
+        getattr(room, "title", "") or "",
+        getattr(room, "type", "") or "",
+    )
     if not awareness.capture_enabled() or not nexus.is_online():
         return False
     actor = nexus.is_actor(principal)
@@ -1126,14 +1139,37 @@ def _awareness_note_reply(chat_id: int, text: str) -> None:
     awareness.capture(chat_id, 0, awareness.ROLE_NEXUS, "", text.strip())
 
 
-def _awareness_context(chat_id: int) -> str:
-    """The system-instruction context for a pass: roster, then memory.
+def _awareness_context(
+    chat_id: int,
+    *,
+    messages: list[dict] | None = None,
+    anchor: dict | None = None,
+) -> str:
+    """The system-instruction context for a pass: roster, memory, then the room.
 
     The transcript is *not* in here. For the awareness pass the transcript is
     the user turn — the thing to be read — and duplicating it would double the
     prompt for no gain.
+
+    The third part is staged, and that is the point: ``awareness_context``
+    renders the cheap context always (the room's name, and who was here last
+    time) and the deeper context — recent administrative actions, and who the
+    batch is about — only when a predicate over the batch says the conversation
+    calls for it. See ``app/awareness_context.py`` for why: the awareness
+    allowance is rationed in *requests*, so context nobody asked for is paid on
+    every pass.
+
+    ``messages`` and ``anchor`` are the ones the pass already read. Handing them
+    in is what keeps this from becoming a second read of the room per pass.
     """
-    return awareness.roster() + awareness.memory_block(chat_id)
+    context = awareness_context.build_ctx(
+        chat_id, messages=messages, anchor=anchor
+    )
+    return (
+        awareness.roster()
+        + awareness.memory_block(chat_id)
+        + awareness_context.blocks(context)
+    )
 
 
 async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
@@ -1213,7 +1249,7 @@ async def _awareness_read(
     trace.mark("request")
     result = await chat.awareness(
         transcript,
-        _awareness_context(chat_id)
+        _awareness_context(chat_id, messages=messages, anchor=speaker)
         + awareness.instruction_block(chat_id, messages=messages)
         + (context or ""),
         tools=tools,

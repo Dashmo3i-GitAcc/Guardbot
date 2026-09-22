@@ -3506,6 +3506,59 @@ Media is recorded as its **kind** and never as bytes: `[voice]`, `[sticker]`.
 One photograph in the window would otherwise be a row every later prompt had to
 carry.
 
+**What else the model is shown: the staged context.** The window is not the
+whole of what a pass knows. It says *what was said*; it does not say what the
+room is, who was here a moment ago, what has just been done administratively,
+or who the batch is about. Those are facts the server already holds, and
+`app/awareness_context.py` is where they are assembled.
+
+It is assembled from **sources**, and the reason is cost. The awareness
+allowance is rationed in *requests* (§35.8), so tokens spent on context nobody
+asked for are paid on every pass for ever; describing all forty members of a
+group on a pass that mentions two of them is exactly the preload the owner
+asked to avoid. So each source declares its own tier:
+
+* **Tier 0 — always, and free.** `room` (the group's title and type, from a
+  cache the message handler fills out of `update.effective_chat`, so a pass
+  needs no `get_chat` call) and `remembered_people` (the `participants` string
+  `awareness.record` has always written and nothing used to read back).
+* **Tier 1 — only when a deterministic predicate over the batch says so.**
+  `admin_activity` (recent actions from `db.audit_since`, scoped to this room
+  and to the batch's own time span) renders only when the batch involves
+  authority — the anchor is an administrator, or some window message carries
+  the `actor` hint or addressed the assistant. `referenced_people` (one
+  bounded `identity.describe` line per person, from an allowlist of fields)
+  renders only when the window contains a reply edge, which is what makes a
+  person *referred to* rather than merely present. Neither predicate consults a
+  model, and neither fires on an ordinary member's ordinary message.
+
+`Ctx` is a frozen value holding the pass's own window, anchor and roles, so a
+source cannot read something the pass did not already read: "cheap always, deep
+only when asked" is enforced by what is *in* the value rather than by
+discipline. Assembly is bounded twice — `NEXUS_AWARENESS_CONTEXT_CHARS` for the
+whole thing and a per-source cap beneath it — a block with less room than
+`MIN_BLOCK_CHARS` is not rendered at all (a cut-off clause reads as a finished
+thought), and a source that raises is logged and skipped, because a context
+block is never worth failing a pass. `NEXUS_AWARENESS_CONTEXT_DEEP=0` turns the
+whole conditional tier off, leaving the free context and removing every extra
+query a pass could make.
+
+The registry is the seam: adding a source is adding a `Source` to `SOURCES`, and
+neither `blocks` nor its caller changes. `tests/test_awareness_context.py`
+asserts each source renders when its predicate holds and *not* when it does not,
+that the budgets hold, that a raising source is skipped, and — structurally,
+by parsing the module's imports — that this file reaches no model, no action
+and no pipeline.
+
+Recency belongs to the transcript rather than to a block: `awareness._line`
+appends `(+45s)` / `(+3m)` / `(+2h)` from the `at` column every row has always
+carried. A conversation has a direction, and a model that cannot see that one
+message is four minutes old and the next is four hours old will read a settled
+argument as a live one. It is appended at the *end* of the line on purpose: the
+header is the line's identity — what the model and the tests key on — and an age
+wedged into the middle of it would make the one part that must not move depend
+on when the pass happened to run.
+
 ### 35.4 When a room is read: debounce, ceiling, floor, budget
 
 Awareness is not run per message. It is run per **quiet moment**.
@@ -3856,7 +3909,8 @@ started and «همون مشکل قبلی» would have no antecedent.
 
 ### 35.12 Tests
 
-`tests/test_awareness.py` (94 tests) plus the Awareness cases in
+`tests/test_awareness.py` (122 tests), `tests/test_awareness_context.py`
+(34 tests, the staged context of §35.3) plus the Awareness cases in
 `tests/test_nexus.py` (144 tests, up from 140) cover the brief's list:
 
 * **Capture and window** — every message is captured including a member's;
@@ -3902,6 +3956,10 @@ Two structural tests are worth naming, because they are what makes the claims in
 * `test_awareness_does_not_import_the_other_workload_modules` asserts that
   `ai_intent`, `ai_moderation` and `transcribe` do not appear in the module at
   all — the workload isolation of §35.8, checked at the source level.
+* `test_the_context_builder_is_not_wired_to_any_ai_or_action_pipeline` and
+  `test_the_context_builder_never_sends_or_acts` do the same for
+  `app/awareness_context.py`, so the staged context cannot grow a reach into a
+  model or an action without failing a test that says it must not.
 
 `tests/test_db_migration.py` (14 tests) proves the two new tables are created on
 a database that predates them, that running `init()` twice is harmless, that the
@@ -3924,6 +3982,10 @@ database already held are untouched. No migration step is needed.
 | `NEXUS_AWARENESS_MAX_CHATS_PER_TICK` | `2` | rooms read per tick |
 | `NEXUS_AWARENESS_DAILY_LIMIT` | `200` | the workload's per-account ceiling |
 | `NEXUS_AWARENESS_CONTEXT_MESSAGES` | `20` | room messages shown to the *addressed* path |
+| `NEXUS_AWARENESS_CONTEXT_CHARS` | `1500` | the staged context's total character ceiling (§35.3) |
+| `NEXUS_AWARENESS_CONTEXT_DEEP` | `true` | whether the conditional tier of the staged context runs at all |
+| `NEXUS_AWARENESS_ADMIN_ACTIONS` | `5` | recent administrative actions the context may show |
+| `NEXUS_AWARENESS_REFERENCED_PEOPLE` | `4` | people the context may describe |
 | `NEXUS_AWARENESS_ACTION_TEXT` | `انجام شد ✅` | fallback confirmation |
 | `GEMINI_AWARENESS_API_KEY` | *(none — required)* | the workload's credential; no fallback |
 | `GEMINI_AWARENESS_MODEL` | = chat model | the workload's model |
