@@ -1384,14 +1384,24 @@ async def generate(
                     account.note_failure(failure, now)
                     state.note_failure(failure, now)
                     last = PoolUnavailable(failure.kind, failure.detail)
+                    # ``detail`` is logged because ``kind`` alone does not say
+                    # what the provider actually did, and the difference is the
+                    # whole diagnosis: a 503 is the provider being briefly
+                    # unwell, while DEADLINE_EXCEEDED means it accepted the
+                    # request and then ran out of its own time — same ``kind``,
+                    # same ``scope``, opposite fixes. It is a status code, a
+                    # status enum or an exception class name, never the request
+                    # or the answer, so nothing anybody typed can reach the log
+                    # through here.
                     log.warning(
                         "[pool] error workload=%s account=%s model=%s kind=%s "
-                        "scope=%s failures=%d",
+                        "scope=%s detail=%s failures=%d",
                         pool.workload,
                         account.masked,
                         model,
                         failure.kind,
                         failure.scope,
+                        failure.detail or "-",
                         account.failures,
                     )
 

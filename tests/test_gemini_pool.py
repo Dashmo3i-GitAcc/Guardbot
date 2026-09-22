@@ -708,6 +708,26 @@ def test_a_key_never_reaches_a_log_line(provider, caplog):
         assert key not in caplog.text
 
 
+def test_a_transient_failure_logs_what_the_provider_said(provider, caplog):
+    """``kind`` alone cannot tell a 503 from a deadline; the detail can.
+
+    Both arrive as ``provider_error``/``transient`` with the same scope, and the
+    reading is opposite: one is the provider being briefly unwell, the other is
+    it accepting the request and running out of its own time. Without the status
+    in the line an operator can see only that something failed, which is how a
+    provider-wide degradation gets mistaken for a fault in this code.
+    """
+    provider.answers(KEY_A, "ok")
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded())
+    pool = make_pool()
+
+    with caplog.at_level(logging.WARNING):
+        assert call(pool) == "ok"
+
+    assert "kind=provider_error" in caplog.text
+    assert "detail=503" in caplog.text
+
+
 def test_a_key_never_reaches_a_recorded_event(provider):
     """The events table is read by operators, so it is a place a key must not be.
 
