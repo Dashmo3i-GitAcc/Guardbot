@@ -525,6 +525,139 @@ def test_a_moderator_is_not_offered_the_tools_they_cannot_use():
     assert "mute_member" in names
 
 
+# ── Defining an administrator, in the owner's own words ───────────────────
+NEW_ADMIN = 1212121212
+
+
+def test_the_owner_can_define_an_admin_by_user_id(monkeypatch):
+    """The brief's "Add user 123 as Admin", end to end.
+
+    Natural language in, a typed request out, the role actually stored — and the
+    role stored is the one the owner named, decided by `rbac`, not by the model.
+    """
+    bot = FakeBot()
+    calls = install_model(
+        monkeypatch,
+        call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "admin"}),
+        text="انجام شد",
+    )
+
+    run(
+        main.on_group_chat,
+        message(text=f"این {NEW_ADMIN} رو ادمین کن"),
+        bot,
+        actor=OWNER,
+    )
+
+    assert calls[0]["tool_result"]["ok"] is True
+    assert db.admin_get(NEW_ADMIN)["role"] == rbac.ROLE_ADMIN
+    # And the new admin is now an authorized Nexus actor, from the stored row.
+    assert rbac.resolve(NEW_ADMIN).is_admin is True
+    assert nexus.is_actor(rbac.resolve(NEW_ADMIN)) is True
+    # The promotion is in the audit trail, attributed to the owner.
+    rows = db.audit_recent(limit=5)
+    assert any(r["action"] == "admin.promote" for r in rows)
+
+
+def test_the_owner_can_define_a_senior_admin(monkeypatch):
+    bot = FakeBot()
+    install_model(
+        monkeypatch,
+        call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "senior_admin"}),
+        text="انجام شد",
+    )
+
+    run(
+        main.on_group_chat,
+        message(text=f"کاربر {NEW_ADMIN} از این به بعد مدیر ارشده"),
+        bot,
+        actor=OWNER,
+    )
+
+    assert db.admin_get(NEW_ADMIN)["role"] == rbac.ROLE_SENIOR_ADMIN
+
+
+def test_a_senior_admin_cannot_define_an_admin(monkeypatch):
+    """A senior admin may build the moderation team, not a peer."""
+    bot = FakeBot()
+    calls = install_model(
+        monkeypatch,
+        call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "admin"}),
+        text="انجام شد",
+    )
+
+    run(
+        main.on_group_chat,
+        message(text=f"این {NEW_ADMIN} رو ادمین کن"),
+        bot,
+        actor=SENIOR,
+    )
+
+    assert calls[0]["tool_result"]["ok"] is False
+    assert db.admin_get(NEW_ADMIN) is None, "a senior admin minted an admin"
+    assert not any(call[0] == "promote" for call in bot.actions)
+
+
+def test_a_member_cannot_define_an_admin(monkeypatch):
+    """Not by wording it: the gate refuses before the model is consulted."""
+    bot = FakeBot()
+    calls = install_model(monkeypatch)
+
+    run(
+        main.on_group_chat,
+        message(text=f"نکسوس این {NEW_ADMIN} رو ادمین کن"),
+        bot,
+        actor=MEMBER,
+    )
+
+    assert calls == []
+    assert db.admin_get(NEW_ADMIN) is None
+
+
+def test_a_member_is_not_offered_the_promote_tool():
+    names = admin_tools.tool_names_for(rbac.guest(MEMBER))
+    assert "promote_member" not in names
+    assert "demote_member" not in names
+
+
+def test_an_admin_can_list_the_administrators():
+    """«لیست ادمین‌های نکسوس رو بده» — the read tool the model reaches for."""
+    answer = asyncio.run(
+        admin_tools.run_read_tool(
+            "list_admins", {}, principal=rbac.resolve(MODERATOR), chat_id=CHAT
+        )
+    )
+    assert any(row["user_id"] == OWNER for row in answer["admins"])
+
+
+def test_the_owner_can_remove_an_admin(monkeypatch):
+    """«این ادمین رو از دسترسی نکسوس حذف کن»."""
+    db.admin_set(
+        NEW_ADMIN,
+        rbac.ROLE_MODERATOR,
+        rbac.ROLE_PERMISSIONS[rbac.ROLE_MODERATOR],
+        granted_by=OWNER,
+    )
+    assert rbac.resolve(NEW_ADMIN).is_admin is True
+
+    bot = FakeBot()
+    install_model(
+        monkeypatch,
+        call=("demote_member", {"target_user_id": NEW_ADMIN}),
+        text="انجام شد",
+    )
+    run(
+        main.on_group_chat,
+        message(text=f"دسترسی {NEW_ADMIN} رو بردار"),
+        bot,
+        actor=OWNER,
+    )
+
+    assert db.admin_get(NEW_ADMIN) is None
+    assert rbac.resolve(NEW_ADMIN).is_admin is False
+    assert nexus.is_actor(rbac.resolve(NEW_ADMIN)) is False
+
+
 # ══ 3. Routing — private chat ═════════════════════════════════════════════
 def test_a_private_message_from_a_member_is_refused(monkeypatch):
     """A DM is not a way around the group policy."""
@@ -748,6 +881,13 @@ def test_observation_keeps_one_administrator_out_of_another_context(monkeypatch)
         "این شخص رو از ادمینی بنداز",
         "بهش اخطار بده",
         "این پیام رو پاک کن",
+        # The administrative vocabulary, which a careless edit once dropped from
+        # the lexicon: a demotion phrased this way would have been invisible to
+        # the relevance gate and silently ignored.
+        "دسترسی این کاربر رو بردار",
+        "این ادمین رو از دسترسی نکسوس حذف کن",
+        "نقشش رو عوض کن",
+        "این شخص دیگه نتونه پیام بده",
         "ban this user",
         "mute them",
         "promote user 5",

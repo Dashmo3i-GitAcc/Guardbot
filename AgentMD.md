@@ -3285,7 +3285,7 @@ section can render one.
 
 ### 34.12 Tests
 
-`tests/test_nexus.py` (127 tests) covers the brief's list as eight groups:
+`tests/test_nexus.py` (140 tests) covers the brief's list as eight groups:
 
 * **Identity** — owner by id, authorized admin, ordinary member refused,
   username cannot impersonate, model cannot assert an identity through a tool
@@ -3297,8 +3297,11 @@ section can render one.
 * **Context** — reply-target resolution, Persian-name resolution, ambiguity
   requires clarification, the id stays authoritative across a rename, the
   observed context is bounded, contexts do not leak between administrators.
-* **Commands** — every documented operation, Persian and English variants, and a
-  context-dependent command driven end to end from a reply.
+* **Commands** — every documented operation, Persian and English variants, a
+  context-dependent command driven end to end from a reply, and the owner
+  defining and removing an administrator by Telegram user id in their own words
+  (a senior admin cannot mint an admin, and a member cannot reach the model at
+  all).
 * **State** — ONLINE/OFFLINE, owner disable and re-enable by words and by
   `/nexus`, persistence across a restart, a corrupted row does not come up
   offline, no administrator or member can change it, every transition is audited.
