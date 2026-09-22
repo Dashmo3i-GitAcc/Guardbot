@@ -1662,6 +1662,38 @@ def daily_add(workload: str, slot: str, day: str) -> int:
     return int(row[0]) if row else 0
 
 
+def daily_refund(workload: str, slot: str, day: str) -> int:
+    """Give back one request the provider refused. Returns the new total.
+
+    The counterpart of :func:`daily_add`, and it exists because the allowance is
+    meant to bound *provider spend* rather than *attempts*. A request the
+    provider answered with a 429 or an unavailable backend consumed no quota, so
+    charging the day for it makes the deployment run out of allowance while the
+    provider still had some to give — which is exactly what happened on
+    2026-09-22: 415 real calls spent the whole 1000-request allowance across two
+    accounts, and the group was told the quota was gone for fourteen hours while
+    ``quota_events`` stayed at zero.
+
+    ``MAX(calls - 1, 0)`` rather than a plain subtraction, because a refund that
+    arrives without a matching charge — a retry after a restart, a row written
+    by a previous build — must not drive the counter negative and hand the
+    account allowance it never had.
+    """
+    key = str(day)
+    with _lock:
+        _conn.execute(
+            """UPDATE gemini_daily SET calls = MAX(calls - 1, 0)
+               WHERE workload=? AND slot=? AND day=?""",
+            (str(workload), str(slot), key),
+        )
+        row = _conn.execute(
+            "SELECT calls FROM gemini_daily WHERE workload=? AND slot=? AND day=?",
+            (str(workload), str(slot), key),
+        ).fetchone()
+        _conn.commit()
+    return int(row[0]) if row else 0
+
+
 def daily_for(workload: str, day: str) -> dict[str, int]:
     """``slot -> calls`` for one workload on one day. Missing slots are absent.
 

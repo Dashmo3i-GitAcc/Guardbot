@@ -253,6 +253,54 @@ def _text_of(exc: BaseException) -> str:
     return f"{type(exc).__name__} {exc}"
 
 
+# The failure kinds where the request may have reached the model, so the day's
+# allowance is *not* given back when they happen. Everything else is a refusal:
+# the provider answered with an error instead of a completion, and charged no
+# quota for it. See ``_may_have_been_served``.
+_MAY_HAVE_BEEN_SERVED = ("timeout", "network_error", "unknown_error")
+# ``provider_error`` covers both "the backend was unavailable" and "the model
+# accepted the request and ran out of its own time"; only the second may have
+# been served. It arrives as a status name or as the 504 that means the same.
+_DEADLINE_DETAILS = ("DEADLINE_EXCEEDED", "504")
+
+
+def _may_have_been_served(failure: Failure) -> bool:
+    """Whether a failed request might still have been served by the provider.
+
+    This is the whole of the refund rule, and it is about the *provider's* side
+    rather than ours. A request the provider refused — a 429, an unavailable
+    backend, a payload it rejected — consumed no quota, so charging the day's
+    allowance for it means the deployment runs out of allowance while the
+    provider still had quota to give.
+
+    That is not hypothetical. Measured on the live deployment on 2026-09-22: the
+    chat pool made 415 real calls, produced 394 answers, and spent its entire
+    1000-request allowance, because every retry across eight models and every
+    free-tier 429 was charged as though the provider had served it. Both
+    accounts reached 500, the pool reported no usable account, and the group was
+    told its quota was gone for fourteen hours — while ``quota_events`` stayed
+    at zero, meaning the provider had never once said the quota was exhausted.
+
+    Three kinds stay charged, because the request plausibly reached the model:
+
+    * ``timeout`` — *our* deadline expired. The provider had the request; we
+      stopped waiting for it.
+    * ``network_error`` — the response was lost on the way back, so it may have
+      been generated.
+    * ``unknown_error`` — unclassified, and the safe reading of "I do not know"
+      is that it may have cost something.
+
+    ``DEADLINE_EXCEEDED`` is the same story as our own timeout — the model
+    accepted the request and ran out of its own time — so it stays charged
+    whether it arrived as a status name or as a 504.
+    """
+    if failure.kind in _MAY_HAVE_BEEN_SERVED:
+        return True
+    if failure.kind == "provider_error":
+        return failure.detail in _DEADLINE_DETAILS
+    return False
+
+
 def _status_code(exc: BaseException) -> int | None:
     for attr in ("code", "status_code"):
         raw = getattr(exc, attr, None)
@@ -603,12 +651,33 @@ class Account:
         db.pool_account_bump(self.workload, self.slot, "requests")
         db.pool_account_save(self.workload, self.slot, last_request=int(now))
         if self.daily_budget:
-            # Counted here rather than at the call site because this is the one
-            # place that already means "a provider request is about to be spent
+            # Charged here rather than at the call site because this is the one
+            # place that already means "a provider request is about to be made
             # on this account", and a second place would eventually disagree.
+            # Charged *before* the attempt and refunded by ``note_failure`` when
+            # the provider refuses it, which is what keeps a busy retry loop
+            # bounded while still making the allowance mean "served requests".
             # The day comes from the wall clock, never from ``now``.
             self._daily_day = db.ai_day()
             self._daily_calls = db.daily_add(self.workload, self.slot, self._daily_day)
+
+    def refund_daily(self) -> int:
+        """Give back the day's charge for a request the provider refused.
+
+        Called from :meth:`note_failure` for the failures that provably consumed
+        no quota, so the allowance counts requests the provider *served* rather
+        than requests we attempted. See :func:`_may_have_been_served` for which
+        failures those are and why the distinction is the whole point.
+        """
+        if not self.daily_budget:
+            return 0
+        # The day comes from the wall clock, never from a caller's ``now``, so
+        # this lands on the same day the charge did even across a rollover.
+        self._daily_day = db.ai_day()
+        self._daily_calls = db.daily_refund(
+            self.workload, self.slot, self._daily_day
+        )
+        return self._daily_calls
 
     def note_success(self, now: float) -> bool:
         """Record a success. Returns True when this was a recovery.
@@ -653,6 +722,14 @@ class Account:
         elif failure.kind == "quota_exhausted":
             self.quota_events += 1
             db.pool_account_bump(self.workload, self.slot, "quota_events")
+
+        if self.daily_budget and not _may_have_been_served(failure):
+            # The provider refused this one, so it cost no quota. Giving the
+            # charge back is what makes the allowance mean "requests the
+            # provider served" instead of "requests we attempted" — and a
+            # logical call that is retried across eight models therefore ends up
+            # costing one, not eight.
+            self.refund_daily()
 
     def trip(self, failure: Failure, now: float) -> None:
         """Take the whole account out of rotation after an account-level fault."""

@@ -413,3 +413,258 @@ def test_the_pool_report_omits_the_allowance_where_there_is_none(monkeypatch):
 
     assert "Daily allowance" not in report
     assert "Today:" not in report
+
+
+# ══ The allowance is for requests the provider *served* ═══════════════════
+# The second production incident in this area, and the same message to the
+# group. On 2026-09-22 the chat pool made 415 real calls and produced 394
+# answers, and spent its entire 1000-request allowance doing it: every retry
+# across eight models, and every free-tier 429, was charged as though the
+# provider had served it. Both accounts reached 500, ``usable`` went to zero,
+# and the group was told «سهم امروز چت تموم شده» for the next fourteen hours —
+# while ``quota_events`` stayed at zero, which is the provider saying it had
+# never refused the quota at all.
+#
+# So a charge is now given back when the provider *refuses* the request. The
+# rule is not "refund failures": it is "refund the ones that provably consumed
+# no quota", and the three that may have reached the model stay charged.
+def _attempt(account, failure):
+    """One charged attempt that came back as ``failure``."""
+    now = time.time()
+    account.note_request(now)
+    account.note_failure(failure, now)
+
+
+def _served(account):
+    """One charged attempt the provider answered."""
+    now = time.time()
+    account.note_request(now)
+    account.note_success(now)
+
+
+def _failure(kind, *, scope=gemini_pool.SCOPE_TRANSIENT, detail=""):
+    return gemini_pool.Failure(kind, scope, retryable=True, detail=detail)
+
+
+def test_a_request_the_provider_refused_does_not_spend_the_day():
+    """A 429 cost no quota, so charging the day for it is simply wrong."""
+    pool = _pool("1", budget=5)
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("rate_limited", scope=gemini_pool.SCOPE_MODEL))
+
+    assert account.daily_calls() == 0
+    assert pool.daily_remaining() == 5
+
+
+def test_a_request_the_provider_served_spends_the_day():
+    """The other half: what the provider answered is what the allowance bounds."""
+    pool = _pool("1", budget=5)
+    account = pool.accounts[0]
+
+    _served(account)
+
+    assert account.daily_calls() == 1
+    assert pool.daily_remaining() == 4
+
+
+def test_a_call_retried_across_models_costs_one_not_eight():
+    """The shape of the incident, in miniature.
+
+    One logical call walks the model list, is refused seven times and served
+    once. It must cost the day exactly one request — that is the whole fix.
+    """
+    pool = _pool("1", budget=10)
+    account = pool.accounts[0]
+
+    for _ in range(7):
+        _attempt(account, _failure("rate_limited", scope=gemini_pool.SCOPE_MODEL))
+    _served(account)
+
+    assert account.daily_calls() == 1
+    assert pool.daily_remaining() == 9
+
+
+def test_a_call_the_provider_never_served_costs_nothing():
+    """Every attempt refused: nothing was served, so nothing is owed."""
+    pool = _pool("1", budget=10)
+    account = pool.accounts[0]
+
+    for _ in range(8):
+        _attempt(account, _failure("rate_limited", scope=gemini_pool.SCOPE_MODEL))
+
+    assert account.daily_calls() == 0
+    assert account.daily_exhausted() is False
+
+
+def test_a_timeout_still_spends_the_day():
+    """Our deadline expiring is not the provider refusing.
+
+    The provider had the request; we stopped waiting. Reading that as "not
+    served" would let a slow afternoon look free.
+    """
+    pool = _pool("1", budget=5)
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("timeout"))
+
+    assert account.daily_calls() == 1
+
+
+def test_a_lost_response_still_spends_the_day():
+    """The answer may have been generated and lost on the way back."""
+    pool = _pool("1", budget=5)
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("network_error"))
+
+    assert account.daily_calls() == 1
+
+
+def test_an_unclassified_error_still_spends_the_day():
+    """The safe reading of "I do not know" is that it may have cost something."""
+    pool = _pool("1", budget=5)
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("unknown_error"))
+
+    assert account.daily_calls() == 1
+
+
+def test_an_unavailable_backend_is_refunded_but_a_deadline_is_not():
+    """``provider_error`` covers both, and they mean opposite things.
+
+    A 503 or an UNAVAILABLE backend never reached the model. A 504 or a
+    DEADLINE_EXCEEDED did — the model accepted the request and ran out of its own
+    time — so only the first is given back.
+    """
+    pool = _pool("1", budget=10)
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("provider_error", detail="503"))
+    _attempt(account, _failure("provider_error", detail="UNAVAILABLE"))
+    assert account.daily_calls() == 0
+
+    _attempt(account, _failure("provider_error", detail="504"))
+    _attempt(account, _failure("provider_error", detail="DEADLINE_EXCEEDED"))
+    assert account.daily_calls() == 2
+
+
+def test_an_exhausted_quota_is_refunded_like_any_other_refusal():
+    """The provider saying "no quota" is the clearest refusal there is.
+
+    The account is benched for the cooldown either way; what must not happen is
+    that the *day* is also charged for a request nobody served.
+    """
+    pool = _pool("1", budget=5)
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("quota_exhausted", scope=gemini_pool.SCOPE_ACCOUNT))
+
+    assert account.daily_calls() == 0
+
+
+def test_a_refund_cannot_drive_the_counter_below_zero():
+    """A refund without a matching charge must not hand out free allowance.
+
+    This is reachable: a retry after a restart, or a row written by a build that
+    did not refund at all, leaves failures with no charge behind them.
+    """
+    pool = _pool("1", budget=5)
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("rate_limited", scope=gemini_pool.SCOPE_MODEL))
+
+    assert account.daily_calls() == 0
+    assert db.daily_for("chat", db.ai_day()) == {"1": 0}
+
+
+def test_the_refund_lands_on_the_account_that_was_refused():
+    """One account's refusal must not give the other account allowance."""
+    pool = _pool("1", "2", budget=5)
+    one, two = pool.accounts
+
+    _attempt(one, _failure("rate_limited", scope=gemini_pool.SCOPE_MODEL))
+    _served(two)
+
+    assert one.daily_calls() == 0
+    assert two.daily_calls() == 1
+    assert pool.daily_remaining() == 9
+
+
+def test_a_workload_with_no_allowance_is_unaffected_by_a_refund():
+    """0 means unlimited, and refunding must not invent a counter for it."""
+    pool = gemini_pool.Pool(
+        "moderation", [("1", "k")], ["gemini-flash-lite-latest"],
+        frozenset({"text"}), daily_budget=0,
+    )
+    account = pool.accounts[0]
+
+    _attempt(account, _failure("rate_limited", scope=gemini_pool.SCOPE_MODEL))
+
+    assert account.daily_calls() == 0
+    assert account.daily_exhausted() is False
+    assert db.daily_for("moderation", db.ai_day()) == {}
+
+
+class _RateLimited(Exception):
+    """A free-tier 429, in the shape the provider actually sends."""
+
+
+_REFUSAL = (
+    "429 RESOURCE_EXHAUSTED Quota exceeded for metric: "
+    "generativelanguage.googleapis.com/generate_content_free_tier_requests, "
+    "limit: 20, model: gemini-flash-lite-latest"
+)
+
+
+def test_a_provider_refusal_does_not_end_the_day_through_the_chat_path(monkeypatch):
+    """The incident end to end: a refusal must not spend the last request.
+
+    With a one-request allowance, a question the provider rate-limits has to
+    leave the allowance intact — otherwise the *next* question is the one that
+    gets told the quota is gone, which is how a flaky hour became fourteen hours
+    of silence.
+    """
+    from types import SimpleNamespace
+
+    # A 429 also benches the *model* for its own cooldown — a separate mechanism
+    # with its own tests, and one that cannot be switched off from here because
+    # the pool floors it at one second. The clock is moved instead, which is
+    # also the truer reading of the incident: the next question arrives later
+    # than the same millisecond, and every cooldown in the pool is read from the
+    # wall clock. This keeps the test about the daily allowance and nothing
+    # else, without pretending the refusal had no other consequence.
+    clock = {"now": time.time()}
+    monkeypatch.setattr(gemini_pool.time, "time", lambda: clock["now"])
+
+    pool = _pool("1", budget=1)
+    monkeypatch.setattr(gemini_pool, "_pools", {"chat": pool})
+
+    refusals = {"n": 0}
+
+    async def flaky(pool_, account, model, types, build_contents, build_config):
+        if refusals["n"] == 0:
+            refusals["n"] += 1
+            raise _RateLimited(_REFUSAL)
+        return SimpleNamespace(text="باشه.")
+
+    monkeypatch.setattr(gemini_pool, "_call", flaky)
+
+    # The first question meets a refusal. It must not spend the day.
+    first = ask("سلام")
+
+    assert first.answered is False
+    assert pool.accounts[0].daily_calls() == 0
+    assert pool.accounts[0].daily_exhausted() is False
+
+    # ...so the next one is served, rather than told the quota is gone. The
+    # clock moves past the model's cooldown, read from the configuration rather
+    # than guessed — and the allowance never left, so it needs no such wait.
+    clock["now"] += config.GEMINI_POOL_MODEL_COOLDOWN + 1
+    second = ask("دوباره")
+
+    assert second.skipped != "daily_cap"
+    assert second.answered is True
+    assert second.text == "باشه."
+    assert pool.accounts[0].daily_calls() == 1

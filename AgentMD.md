@@ -2764,6 +2764,102 @@ p = gemini_pool.pool_for('chat')
 print(p.daily_remaining(), 'of', p.daily_budget * len(p.accounts))"
 ```
 
+### 29.15 The allowance is spent by requests the provider *served*
+
+The per-account allowance above fixed *whose* day was spent. It did not fix
+*what* spends it, and that was the second half of the same message to the group.
+
+#### The incident this fixes
+
+Measured live on 2026-09-22, with two chat accounts and
+`GEMINI_CHAT_DAILY_LIMIT=200` — 400 requests of allowance:
+
+| counter | value |
+| --- | --- |
+| `chat_usage.calls` | 415 |
+| `chat_usage.replies` | 394 |
+| `gemini_daily` `chat` slot `1` | 503 |
+| `gemini_daily` `chat` slot `2` | 504 |
+| `quota_events` (both accounts) | **0** |
+
+Four hundred and fifteen real calls spent a thousand charges, both accounts hit
+their ceiling, `usable` went to zero, and the group was told «سهم امروز چت تموم
+شده» for the next fourteen hours. `quota_events = 0` is the provider saying, in
+its own record, that it had never once refused the quota.
+
+The arithmetic is the diagnosis: `note_request` charged the day *before* the
+call, and nothing ever gave the charge back. So every free-tier 429, every retry
+across the eight compatible models, and every 503 was charged as though the
+provider had produced a completion. A logical call that walked seven models
+before the eighth answered cost **eight** — which is why 415 calls consumed 1007.
+
+#### The rule
+
+A charge is given back when the provider *refused* the request, because a
+refusal consumed no quota. This is not "refund failures"; it is "refund the ones
+that provably reached nothing", and the three that may have reached the model
+stay charged:
+
+```python
+_MAY_HAVE_BEEN_SERVED = ("timeout", "network_error", "unknown_error")
+_DEADLINE_DETAILS = ("DEADLINE_EXCEEDED", "504")
+
+def _may_have_been_served(failure: Failure) -> bool:
+    if failure.kind in _MAY_HAVE_BEEN_SERVED:
+        return True
+    if failure.kind == "provider_error":
+        return failure.detail in _DEADLINE_DETAILS
+    return False
+```
+
+* `timeout` — *our* deadline expired. The provider had the request; we stopped
+  waiting. Reading that as "not served" would make a slow afternoon look free.
+* `network_error` — the response was lost on the way back, so the answer may
+  have been generated and billed.
+* `unknown_error` — unclassified, and the safe reading of "I do not know" is
+  that it may have cost something.
+* `provider_error` is split by `detail`, because the same `kind` and the same
+  `scope` cover opposite facts: a `503`/`UNAVAILABLE` never reached the model,
+  while a `504`/`DEADLINE_EXCEEDED` means the model accepted the request and ran
+  out of its own time. Only the first is refunded — the same reasoning as our own
+  `timeout`, and the reason `detail` is logged at all (§28).
+
+`Account.note_failure` is the single place that applies it, so every failure path
+in `generate` — the transient retry loop, the account trip, the model failover —
+gets the same treatment without any call site having to remember:
+
+```python
+if self.daily_budget and not _may_have_been_served(failure):
+    self.refund_daily()
+```
+
+The charge stays where it was, in `note_request`, and is *refunded* rather than
+never made. That ordering is deliberate: the charge-before-the-call is what
+bounds a runaway retry loop inside a single logical request, and moving the
+charge to after the call would remove that bound.
+
+`db.daily_refund` uses `MAX(calls - 1, 0)` rather than a plain subtraction. A
+refund without a matching charge is reachable — a retry after a restart, or a row
+written by a build that did not refund — and it must not drive the counter
+negative and hand out allowance that was never configured.
+
+#### What is unchanged
+
+`0` still means unlimited, and a workload without an allowance is not given a
+counter by a refund: `refund_daily` returns early on `not self.daily_budget`, and
+`db.daily_for("moderation", ...)` stays `{}`. The `gemini_daily` table is
+untouched in shape, so this needs no migration — the same reason it was a
+separate table in the first place.
+
+#### Verifying it
+
+```bash
+# The refund rule: refusal vs. served, the retry-across-models shape, the three
+# kinds that stay charged, the deadline split, the zero floor, and the incident
+# end to end through chat.reply.
+.venv-test/bin/python -m pytest tests/test_chat_daily_budget.py -q
+```
+
 ---
 
 ## 30. The audit trail says which interface acted
