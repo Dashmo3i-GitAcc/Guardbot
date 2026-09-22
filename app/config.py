@@ -1081,6 +1081,27 @@ MODERATION_TEXT_MIN_CHARS = _int("MODERATION_TEXT_MIN_CHARS", 25)
 # larger request than a line of text — so it has its own switch.
 MODERATION_MEDIA_ENABLED = _bool("MODERATION_MEDIA_ENABLED", True)
 
+# Whether the moderation AI is asked about media the local stage found *nothing*
+# to say about.
+#
+# **Off by default**, and the default is the documented intent: the AI is the
+# second opinion, so it is asked exactly when the first one had something to
+# say. That is the cheapest rule and it is also the correct one, because the
+# AI's value here is that it can *disagree* — asking it about content nobody
+# doubted spends the quota to confirm the obvious.
+#
+# The guard used to be written as "skip when SAFE **and** the scene score is
+# absent", and the second clause made the first one dead: the scene classifier
+# returns a number for every image it touches, so the AI was asked about every
+# image posted in the group. On a deployment whose moderation workload has no
+# daily budget, that is an unbounded cost, and it was never a decision anybody
+# made — it was a conjunction that read as a condition.
+#
+# Set this to true to put the AI back on every image. It is a lever, not a
+# recommendation: it trades quota for coverage, and it is the setting to reach
+# for if a genuinely explicit image is ever reported as having been missed.
+MODERATION_AI_ASK_ON_SAFE = _bool("MODERATION_AI_ASK_ON_SAFE", False)
+
 # Where a review verdict is reported. Empty means "only the log". This is
 # deliberately the same private chat the moderation reports already use, so an
 # operator has one place to look.

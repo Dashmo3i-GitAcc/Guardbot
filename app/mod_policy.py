@@ -163,6 +163,25 @@ def _ai_declines(ai: ModerationVerdict | None) -> bool:
     )
 
 
+def _ai_says_ordinary(ai: ModerationVerdict | None) -> bool:
+    """The AI looked at the content and said it is ordinary.
+
+    Narrower than ``_ai_declines`` on purpose, and the difference is the whole
+    point. ``unknown`` is also a non-deletable class, but it means "I could not
+    judge" — and a verdict of "I do not know" must leave a weak local cue in
+    review rather than dismiss it. That is the difference between a second
+    opinion and a shrug, and collapsing the two would turn the moderation AI's
+    uncertainty into an allow.
+    """
+    return bool(
+        ai is not None
+        and ai.decided
+        and ai.classification == "normal"
+        and not ai.uncertain
+        and ai.confidence >= float(config.MODERATION_REVIEW_CONFIDENCE)
+    )
+
+
 def _ai_uncertain(ai: ModerationVerdict | None) -> bool:
     """The AI answered with a deletable class but flagged itself unsure, or at
     a confidence below the delete floor.
@@ -203,8 +222,11 @@ def decide(inp: PolicyInput) -> PolicyOutcome:
        review, unless the operator has explicitly opted into the local-only
        path *and* the anatomical evidence clears the hard bar.
     7. The AI thinks it is worth a human's attention -> review.
-    8. The local stage wanted a human's attention -> review.
-    9. Otherwise -> allow.
+    8. The local stage was *unsure* and the AI said the content is ordinary ->
+       allow. A weak cue does not survive the semantic layer's "no". **This is
+       the false-positive fix.**
+    9. The local stage wanted a human's attention -> review.
+    10. Otherwise -> allow.
     """
     if not config.MODERATION_ENABLED:
         return PolicyOutcome(Action.ALLOW, "policy_disabled", source=SOURCE_DISABLED)
@@ -290,8 +312,43 @@ def decide(inp: PolicyInput) -> PolicyOutcome:
             **shared,
         )
 
-    # 8. The local stage wanted a human. Preserved from the original policy so
-    #    the REVIEW signal keeps working exactly as before.
+    # 8. The local stage was unsure, and the AI looked and said the content is
+    #    ordinary. A weak cue does not outlive a confident "this is normal".
+    #
+    #    This is the reported false positive, and it is worth naming the shape
+    #    of it: the scene classifier is the less interpretable of the two
+    #    signals and it is the one that scores portraits, gym photographs,
+    #    swimwear and close-ups of skin as NSFW. Those land in the local review
+    #    band, and before this rule they produced a review *whatever the AI
+    #    said* — so the operator's review channel filled with notices whose own
+    #    text read "هوش مصنوعی: normal" next to a local score. The two signals
+    #    disagreed and the weaker one won, which is the opposite of why the AI
+    #    layer exists.
+    #
+    #    Note what this does *not* do. It does not raise a threshold, so nothing
+    #    that used to be caught is now missed at the detector level. It does not
+    #    touch rule 4, where the local stage made a *strong* claim and the AI
+    #    disagreed — that disagreement is still a review, because a local
+    #    EXPLICIT is not a weak cue and a human should see it. And it is not
+    #    reached by an `unknown` from the AI, which stays in review below.
+    if (
+        local is not None
+        and local.decision is Decision.REVIEW
+        and _ai_says_ordinary(ai)
+    ):
+        return PolicyOutcome(
+            Action.ALLOW,
+            "local_review_ai_normal",
+            source=SOURCE_BOTH,
+            detail=f"local {local.reason} vs {ai.classification} "
+            f"{ai.confidence:.2f}",
+            **shared,
+        )
+
+    # 9. The local stage wanted a human. Preserved from the original policy so
+    #    the REVIEW signal keeps working exactly as before — including when the
+    #    AI was never asked, which is the "weak cue with no second opinion"
+    #    case and is exactly what a review channel is for.
     if local is not None and local.decision is Decision.REVIEW:
         return PolicyOutcome(
             Action.REVIEW,
@@ -301,7 +358,7 @@ def decide(inp: PolicyInput) -> PolicyOutcome:
             **shared,
         )
 
-    # 9.
+    # 10.
     return PolicyOutcome(Action.ALLOW, "no_evidence", source=SOURCE_NONE, **shared)
 
 

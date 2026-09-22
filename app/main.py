@@ -602,7 +602,14 @@ async def _assess_media_with_ai(
     the local stage has something to say — a REVIEW or an EXPLICIT. That is both
     the cheapest rule (an ordinary photo costs nothing) and the one that matters,
     because the AI's value here is that it can *disagree*. Asking it about
-    content nobody doubted would spend the quota to confirm the obvious.
+    content nobody doubted would spend the quota to confirm the obvious, and on
+    this deployment the moderation workload has no daily budget to stop it.
+
+    ``MODERATION_AI_ASK_ON_SAFE`` widens that to every image the scene stage
+    scored. It exists because the condition was once written in a way that made
+    it always true — see the note in ``app/config.py`` — and an operator who
+    wants that coverage back should be able to ask for it deliberately rather
+    than get it by accident.
 
     It is also why a local EXPLICIT that the AI declines now ends in REVIEW
     rather than a deletion: this function is the second opinion that can say no.
@@ -617,7 +624,7 @@ async def _assess_media_with_ai(
         return None
     if not ai_moderation.is_enabled():
         return None
-    if result.decision is Decision.SAFE and result.scene_nsfw is None:
+    if result.decision is Decision.SAFE and not config.MODERATION_AI_ASK_ON_SAFE:
         return None
 
     try:
