@@ -935,14 +935,33 @@ call, not by the suite, because the suite replaces `_request`.
 - Conventional commits, with the area as scope where it helps:
 
   ```
-  fix(media): delete the message after a confirmed explicit detection
-  feat(media): add a conservative explicit-media moderation stage
+  fix(text): stop a filter hit from striking after a failed delete
+  feat(flood): make the burst window configurable
   docs(agents): add the GuardBot agent workflow
   ```
 
   Types in use: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`.
 - Before committing: `git status --short` and `git diff` — confirm **only** the
   intended files changed. Never commit `.env`, `data/` or a database.
+- **Two remotes, two accounts — push to both.** This repository has two
+  remotes, and every committed change must land on both:
+
+  | Remote | GitHub account | Repository |
+  |---|---|---|
+  | `origin` | `mo3iiibest77-hub` | `mo3iiibest77-hub/guardbot` (private) |
+  | `dashmo3i` | `Dashmo3i-GitAcc` | `Dashmo3i-GitAcc/Guardbot` (public) |
+
+  `main` tracks `origin/main`; `dashmo3i` is pushed explicitly. After a change
+  is committed, run `git pushall` (a repo-local alias for
+  `git push origin main && git push dashmo3i main`), or push to each remote in
+  turn. Each remote URL carries its account name so the credential store
+  selects the right token per account — do not remove the username from a
+  remote URL, and do not add a second push URL to `origin` (that would mix the
+  two accounts on one remote).
+- **Never claim a push succeeded from the `git push` output alone.** Confirm the
+  commit is actually visible on the remote — `git ls-remote <remote>
+  refs/heads/main` and, for an independent check, the GitHub API
+  (`/repos/<owner>/<repo>/commits/main`). Do this for **both** remotes.
 - Do not push to a different repository, do not modify `Voxora-Android` (it is
   a read-only reference project), and do not force-push or rewrite history
   unless the owner asks.

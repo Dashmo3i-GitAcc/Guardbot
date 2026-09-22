@@ -45,7 +45,10 @@ over the current code.
 ## 2. Repositories and environment
 
 - **Primary repository:** `https://github.com/mo3iiibest77-hub/guardbot`
-  — branch `main`.
+  — branch `main`, remote `origin`, private.
+- **Second account (mirror):** `https://github.com/Dashmo3i-GitAcc/Guardbot`
+  — remote `dashmo3i`, public. Every committed change is pushed to **both**
+  accounts. See `AgentMD.md` §14 for the exact flow and the verification rule.
 - **Runtime:** Python 3.12, `python-telegram-bot` 21.6, `Pillow`, ffmpeg,
   `google-genai`. No local ML runtime: there is no `torch`, no `transformers`
   and no ONNX model in the image.
@@ -121,7 +124,7 @@ The coding agent implements the requested change
         ↓
 The coding agent verifies the change (pytest, docker build/logs)
         ↓
-The coding agent commits and pushes to main
+The coding agent commits and pushes to both remotes
         ↓
 You read the actual resulting commit (not the agent's summary)
         ↓
@@ -226,19 +229,23 @@ After the coding agent says it is done:
 
 1. Read the **actual commit** on `main` — its message and its full diff. Never
    review the agent's prose summary.
-2. Check that **only** the intended files changed (`git show --stat`).
+2. Confirm the commit is on **both** remotes — `git ls-remote origin
+   refs/heads/main` and `git ls-remote dashmo3i refs/heads/main` must both
+   return the same SHA. A successful `git push` line is not proof; check the
+   remote.
+3. Check that **only** the intended files changed (`git show --stat`).
    `.env`, `data/`, a database or an unrelated refactor in the diff is a
    finding.
-3. Check that the requested behaviour is really implemented — trace the change
+4. Check that the requested behaviour is really implemented — trace the change
    through the real handler/policy path, not just the changed lines.
-4. Check the safety contract held: fail-open intact, only `EXPLICIT` deletes
+5. Check the safety contract held: fail-open intact, only `EXPLICIT` deletes
    and only on a confident AI verdict, `REVIEW` still silent, no punishment
    added, temp cleanup still in place wherever media is written.
-5. Check the tests: were they run, do they actually cover the change, and was a
+6. Check the tests: were they run, do they actually cover the change, and was a
    regression test added that fails against the old behaviour?
-6. Check for overclaiming in the report — anything stated as verified that has
+7. Check for overclaiming in the report — anything stated as verified that has
    no command, output or reference behind it.
-7. Report the review honestly: what is done, what is partial, what is
+8. Report the review honestly: what is done, what is partial, what is
    unverified, and the single next step.
 
 If the commit does not do what was asked, say so plainly and write the
