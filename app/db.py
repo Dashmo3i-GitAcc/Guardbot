@@ -435,6 +435,49 @@ def init() -> None:
             summary TEXT NOT NULL DEFAULT '',
             participants TEXT NOT NULL DEFAULT '')"""
     )
+    # One coding-agent task. The row is the *index*: it is written by the
+    # container, which is the only writer, and read by the host runner, which
+    # executes the agent. Everything the runner needs is here, and everything
+    # here came from the server — the repository path is resolved from
+    # configuration before the row is written, never from anything the model
+    # produced, so a request cannot name a directory the deployment did not
+    # already allow.
+    #
+    # ``status`` is the lifecycle the brief names: queued, running,
+    # waiting_for_owner, succeeded, failed, cancelled, timed_out. It is in the
+    # database rather than in memory because the whole point of persisting a
+    # task is that a restart must not run it twice.
+    #
+    # ``progress_offset`` is how many bytes of the runner's progress file have
+    # already been delivered to Telegram. It is stored here for the same
+    # reason: a restart must resume the stream rather than repeat it.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS agent_tasks (
+            request_id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            actor_id INTEGER NOT NULL DEFAULT 0,
+            chat_id INTEGER NOT NULL DEFAULT 0,
+            repository TEXT NOT NULL DEFAULT '',
+            repo_path TEXT NOT NULL DEFAULT '',
+            task TEXT NOT NULL DEFAULT '',
+            operation TEXT NOT NULL DEFAULT '',
+            reply_mode TEXT NOT NULL DEFAULT 'text',
+            status TEXT NOT NULL DEFAULT 'queued',
+            danger TEXT NOT NULL DEFAULT '',
+            confirmed_by INTEGER NOT NULL DEFAULT 0,
+            confirmed_at INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER NOT NULL DEFAULT 0,
+            finished_at INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL DEFAULT '',
+            progress_offset INTEGER NOT NULL DEFAULT 0)"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status "
+        "ON agent_tasks(status, created_at)"
+    )
     _conn.commit()
 
 
@@ -2029,4 +2072,274 @@ def awareness_reset() -> None:
     with _lock:
         _conn.execute("DELETE FROM awareness_state")
         _conn.execute("DELETE FROM group_messages")
+        _conn.commit()
+
+
+# ── The coding-agent task store ───────────────────────────────────────────
+# The lifecycle the brief names, and the storage vocabulary. A status outside
+# this tuple is refused rather than written: an unrecognised state is a task
+# that no reader can classify, and a task nothing can classify is one that is
+# either retried for ever or never resumed.
+AGENT_STATUSES = (
+    "queued",
+    "running",
+    "waiting_for_owner",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "timed_out",
+)
+
+# The states a task is in while something is still expected of it.
+AGENT_ACTIVE_STATUSES = ("queued", "running", "waiting_for_owner")
+
+# The states nothing will move a task out of.
+AGENT_TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
+
+# Bounds on what a task row may carry. The task text and the result are
+# attacker-adjacent (the task came from a person, the result came from a model)
+# and both are carried into a Telegram message, so neither is unbounded.
+AGENT_TASK_MAX_CHARS = 4000
+AGENT_RESULT_MAX_CHARS = 20000
+AGENT_ERROR_MAX_CHARS = 1000
+
+_AGENT_COLS = (
+    "request_id, created_at, updated_at, actor_id, chat_id, repository, "
+    "repo_path, task, operation, reply_mode, status, danger, confirmed_by, "
+    "confirmed_at, started_at, finished_at, result, error, session_id, "
+    "progress_offset"
+)
+
+
+def _agent_row(r) -> dict:
+    return {
+        "request_id": str(r[0]),
+        "created_at": int(r[1] or 0),
+        "updated_at": int(r[2] or 0),
+        "actor_id": int(r[3] or 0),
+        "chat_id": int(r[4] or 0),
+        "repository": str(r[5] or ""),
+        "repo_path": str(r[6] or ""),
+        "task": str(r[7] or ""),
+        "operation": str(r[8] or ""),
+        "reply_mode": str(r[9] or "text"),
+        "status": str(r[10] or "queued"),
+        "danger": str(r[11] or ""),
+        "confirmed_by": int(r[12] or 0),
+        "confirmed_at": int(r[13] or 0),
+        "started_at": int(r[14] or 0),
+        "finished_at": int(r[15] or 0),
+        "result": str(r[16] or ""),
+        "error": str(r[17] or ""),
+        "session_id": str(r[18] or ""),
+        "progress_offset": int(r[19] or 0),
+    }
+
+
+def agent_task_create(
+    request_id: str,
+    *,
+    actor_id: int,
+    chat_id: int,
+    repository: str,
+    repo_path: str,
+    task: str,
+    operation: str,
+    reply_mode: str = "text",
+    status: str = "queued",
+    danger: str = "",
+) -> dict:
+    """Record one agent task. Returns the stored row.
+
+    Written before anything runs, which is what makes a restart safe: the row
+    exists, so the work is either already claimed or still to be claimed, and
+    never both.
+    """
+    if status not in AGENT_STATUSES:
+        status = "queued"
+    now = int(time.time())
+    with _lock:
+        _conn.execute(
+            "INSERT OR REPLACE INTO agent_tasks ("
+            + _AGENT_COLS
+            + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,0,'','','',0)",
+            (
+                str(request_id)[:64],
+                now,
+                now,
+                int(actor_id),
+                int(chat_id),
+                str(repository)[:80],
+                str(repo_path)[:400],
+                str(task)[:AGENT_TASK_MAX_CHARS],
+                str(operation)[:40],
+                str(reply_mode)[:16],
+                status,
+                str(danger)[:400],
+            ),
+        )
+        _conn.commit()
+        row = _conn.execute(
+            f"SELECT {_AGENT_COLS} FROM agent_tasks WHERE request_id=?",
+            (str(request_id)[:64],),
+        ).fetchone()
+    return _agent_row(row) if row else {}
+
+
+def agent_task_get(request_id: str) -> dict | None:
+    with _lock:
+        row = _conn.execute(
+            f"SELECT {_AGENT_COLS} FROM agent_tasks WHERE request_id=?",
+            (str(request_id)[:64],),
+        ).fetchone()
+    return _agent_row(row) if row else None
+
+
+def agent_task_update(request_id: str, **fields) -> dict | None:
+    """Update the named columns. Unknown names are ignored, never interpolated.
+
+    ``fields`` is a closed set rather than a formatted fragment, because the
+    alternative — building the SET clause from the caller's keys — is how a
+    value ends up in a column name.
+    """
+    allowed = {
+        "status": (str, 20),
+        "result": (str, AGENT_RESULT_MAX_CHARS),
+        "error": (str, AGENT_ERROR_MAX_CHARS),
+        "session_id": (str, 80),
+        "danger": (str, 400),
+        "started_at": (int, 0),
+        "finished_at": (int, 0),
+        "confirmed_by": (int, 0),
+        "confirmed_at": (int, 0),
+        "progress_offset": (int, 0),
+        "repo_path": (str, 400),
+        "repository": (str, 80),
+        "operation": (str, 40),
+        "reply_mode": (str, 16),
+        "task": (str, AGENT_TASK_MAX_CHARS),
+    }
+    assignments: list[str] = []
+    args: list = []
+    for name, value in fields.items():
+        spec = allowed.get(name)
+        if spec is None:
+            continue
+        caster, limit = spec
+        if caster is int:
+            value = int(value or 0)
+        else:
+            value = str(value or "")
+            if limit:
+                value = value[:limit]
+        if name == "status" and value not in AGENT_STATUSES:
+            continue
+        assignments.append(f"{name}=?")
+        args.append(value)
+    if not assignments:
+        return agent_task_get(request_id)
+    assignments.append("updated_at=?")
+    args.append(int(time.time()))
+    args.append(str(request_id)[:64])
+    with _lock:
+        _conn.execute(
+            f"UPDATE agent_tasks SET {', '.join(assignments)} WHERE request_id=?",
+            tuple(args),
+        )
+        _conn.commit()
+        row = _conn.execute(
+            f"SELECT {_AGENT_COLS} FROM agent_tasks WHERE request_id=?",
+            (str(request_id)[:64],),
+        ).fetchone()
+    return _agent_row(row) if row else None
+
+
+def agent_task_active(*, repository: str = "", actor_id: int = 0) -> list[dict]:
+    """Tasks that are still going, oldest first, optionally filtered."""
+    placeholders = ",".join("?" for _ in AGENT_ACTIVE_STATUSES)
+    sql = (
+        f"SELECT {_AGENT_COLS} FROM agent_tasks WHERE status IN ({placeholders})"
+    )
+    args: list = list(AGENT_ACTIVE_STATUSES)
+    if repository:
+        sql += " AND repository=?"
+        args.append(str(repository)[:80])
+    if actor_id:
+        sql += " AND actor_id=?"
+        args.append(int(actor_id))
+    sql += " ORDER BY created_at ASC, rowid ASC"
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_agent_row(r) for r in rows]
+
+
+def agent_task_running(*, repository: str = "") -> list[dict]:
+    """Tasks a runner has claimed and not finished."""
+    sql = f"SELECT {_AGENT_COLS} FROM agent_tasks WHERE status='running'"
+    args: list = []
+    if repository:
+        sql += " AND repository=?"
+        args.append(str(repository)[:80])
+    sql += " ORDER BY started_at ASC, rowid ASC"
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_agent_row(r) for r in rows]
+
+
+def agent_task_recent(limit: int = 5, *, actor_id: int = 0) -> list[dict]:
+    """The newest tasks, for a status report. Bounded."""
+    sql = f"SELECT {_AGENT_COLS} FROM agent_tasks"
+    args: list = []
+    if actor_id:
+        sql += " WHERE actor_id=?"
+        args.append(int(actor_id))
+    sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+    args.append(max(1, min(int(limit), 50)))
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_agent_row(r) for r in rows]
+
+
+def agent_task_waiting(*, actor_id: int = 0) -> list[dict]:
+    """Tasks waiting for the owner's explicit confirmation, oldest first.
+
+    ``started_at=0`` is the whole distinction between the two reasons a task
+    sits in ``waiting_for_owner``. A dangerous task that was never approved has
+    never run, so its ``started_at`` is zero; a task that *did* run and stopped
+    to ask the owner a question has a ``started_at``. Only the first kind is
+    released by an approval — confirming the second would re-run work that had
+    already begun, which is the opposite of what the owner asked for.
+    """
+    sql = (
+        f"SELECT {_AGENT_COLS} FROM agent_tasks "
+        "WHERE status='waiting_for_owner' AND started_at=0"
+    )
+    args: list = []
+    if actor_id:
+        sql += " AND actor_id=?"
+        args.append(int(actor_id))
+    sql += " ORDER BY created_at ASC, rowid ASC"
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_agent_row(r) for r in rows]
+
+
+def agent_task_prune(keep_seconds: int) -> int:
+    """Drop finished tasks older than the window. Best effort."""
+    cutoff = int(time.time()) - max(1, int(keep_seconds))
+    placeholders = ",".join("?" for _ in AGENT_TERMINAL_STATUSES)
+    with _lock:
+        cur = _conn.execute(
+            f"DELETE FROM agent_tasks WHERE status IN ({placeholders}) "
+            "AND finished_at > 0 AND finished_at < ?",
+            tuple(list(AGENT_TERMINAL_STATUSES) + [cutoff]),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def agent_reset() -> None:
+    """Forget every task. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM agent_tasks")
         _conn.commit()

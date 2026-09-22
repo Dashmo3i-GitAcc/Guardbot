@@ -190,6 +190,30 @@ OPERATIONS: dict[str, Operation] = {
         kind=OP_SYSTEM,
         requires_nexus_online=False,
     ),
+    # ── The coding agent ──────────────────────────────────────────────────
+    # Asking the host's coding agent to work on one of this system's own
+    # repositories. It is an operation here, rather than a separate front door,
+    # for the same reason everything else is: this is where an actor id becomes
+    # an authority, and a second entry point would be a second answer to "who
+    # may do this".
+    #
+    # ``kind=OP_SYSTEM`` because the subject is the system itself and not a
+    # member — there is no target to validate and inventing one would put a
+    # meaningless id in an audit row. ``permission="agent.request"`` is held by
+    # the owner alone, so an administrator asking for it is refused by
+    # ``rbac`` rather than by a check anybody has to remember to write.
+    #
+    # Note what is *not* here: nothing in this table, and nothing in
+    # :class:`AdminRequest`, can express "this is approved" or "deploy is
+    # allowed". The operation names what is wanted; whether it may run is
+    # decided in :mod:`app/agent_service` from the actor's real id.
+    "codebuddy_task": _op(
+        "codebuddy_task",
+        "agent.request",
+        None,
+        "agent.task",
+        kind=OP_SYSTEM,
+    ),
 }
 
 # The role names an actor may ask for, mapped to the canonical role. Kept here
@@ -224,6 +248,17 @@ OUTCOME_NEXUS_OFFLINE = "nexus_offline"
 # A demotion of somebody who held no application role. Distinct from a refusal:
 # nothing was forbidden, there was simply nothing to remove.
 OUTCOME_NOT_AN_ADMIN = "not_an_admin"
+# ── The coding agent ──────────────────────────────────────────────────────
+# Four outcomes rather than one, because "the bridge is switched off", "you
+# asked for a repository that does not exist", "there is already a task on that
+# repository" and "the same request is already in flight" are four different
+# things for the owner to do next, and collapsing them into "refused" would
+# leave them guessing which.
+OUTCOME_AGENT_DISABLED = "agent_disabled"
+OUTCOME_AGENT_REJECTED = "agent_rejected"
+OUTCOME_AGENT_BUSY = "agent_busy"
+OUTCOME_AGENT_DUPLICATE = "agent_duplicate"
+OUTCOME_AGENT_WAITING = "agent_waiting"
 
 # Which interfaces can raise a request. Recorded in the audit trail, because
 # "was this a person typing or a model proposing?" is the first question after
@@ -253,6 +288,33 @@ class AdminRequest:
     role: str = ""
     permissions: tuple[str, ...] = ()
     reason: str = ""
+    # ── The coding-agent payload ──────────────────────────────────────────
+    # Three data fields, and the distinction from an authority field is worth
+    # stating because they are the newest thing here.
+    #
+    # ``repository`` is a *logical name*, not a path: it is resolved against the
+    # allowlist in :mod:`app/agent_bridge`, and a name that is not in that table
+    # is refused. A path is accepted only when it is exactly an allowlisted
+    # root, and is then converted back to the name. So there is no string a
+    # model could produce that becomes a directory this bot will hand to a
+    # process with a shell.
+    #
+    # ``task`` is the owner's instruction in their own words. It is data — it is
+    # read by the agent and never by an authorisation check.
+    #
+    # ``agent_operation`` is the model's *claim* about what kind of work this
+    # is. It is validated against a closed table, and it can only ever make a
+    # request *more* dangerous (see ``agent_bridge.danger_for``), never less.
+    # Like ``role``, it is a value a caller may name and the application
+    # interprets.
+    repository: str = ""
+    task: str = ""
+    agent_operation: str = ""
+    # How the owner wants a long answer back: ``text``, ``document`` or
+    # ``both``. A preference and not a permission — an unknown value falls back
+    # to ``text`` in the bridge, and no value here can change what is delivered
+    # versus what is withheld.
+    reply_mode: str = ""
     request_id: str = ""
     interface: str = INTERFACE_PYTHON
     # When the request was created, as a unix timestamp. Checked against the
@@ -284,6 +346,13 @@ class AdminRequest:
             role=ROLE_ALIASES.get(role, role),
             permissions=tuple(str(p) for p in (self.permissions or ()) if p),
             reason=str(self.reason or "")[:400],
+            repository=str(self.repository or "").strip().lower()[:64],
+            # Bounded at the same length the bridge stores. The bound is here as
+            # well as there so that a request which never reaches the bridge
+            # still cannot carry an unbounded string into an audit row.
+            task=str(self.task or "").strip()[: int(db.AGENT_TASK_MAX_CHARS)],
+            agent_operation=str(self.agent_operation or "").strip().lower()[:40],
+            reply_mode=str(self.reply_mode or "").strip().lower()[:16],
             request_id=str(self.request_id or "")[:120],
             interface=self.interface if self.interface in (INTERFACE_AI, INTERFACE_PYTHON)
             else INTERFACE_PYTHON,
@@ -598,6 +667,25 @@ async def execute(
         _record(request, result)
         return result
 
+    # An operation carried out by another service returns its own result rather
+    # than a note. The coding-agent operation is the only one: it makes no
+    # Telegram call, so there is no "the application change went through and
+    # Telegram refused" state for a note to describe, and it has more to report
+    # than a sentence — the task's id, its status, and whether it is waiting for
+    # the owner. Returning it whole keeps the pipeline below unchanged instead of
+    # adding a second dispatch site in the middle of the authorisation steps.
+    if isinstance(note, AdminResult):
+        result = note
+        _record(request, result)
+        log.info(
+            "admin action=%s interface=%s actor=%s outcome=%s",
+            request.operation,
+            request.interface,
+            request.actor_id,
+            result.outcome,
+        )
+        return result
+
     if note == OUTCOME_NOT_AN_ADMIN:
         result = _result(request, OUTCOME_NOT_AN_ADMIN)
         _record(request, result)
@@ -631,12 +719,17 @@ async def execute(
     return result
 
 
-async def _apply(request: AdminRequest, operation: Operation, gateway: Gateway) -> str:
-    """Make the one Telegram call this operation names.
+async def _apply(
+    request: AdminRequest, operation: Operation, gateway: Gateway
+) -> str | AdminResult:
+    """Make the one call this operation names.
 
-    Returns a note to show beside the success, or an empty string. Only the two
-    role-changing operations produce one, and only when the application layer
-    succeeded and Telegram did not.
+    Returns a note to show beside the success, an empty string, or — for the one
+    operation that is carried out by another service rather than by Telegram — a
+    complete :class:`AdminResult`.
+
+    Only the two role-changing operations produce a note, and only when the
+    application layer succeeded and Telegram did not.
     """
     chat_id = request.chat_id
     if request.operation == "ban_member":
@@ -659,6 +752,13 @@ async def _apply(request: AdminRequest, operation: Operation, gateway: Gateway) 
         nexus.set_state(nexus.OFFLINE, actor_id=request.actor_id, reason=request.interface)
     elif request.operation == "nexus_online":
         nexus.set_state(nexus.ONLINE, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "codebuddy_task":
+        # Imported here rather than at module scope: the bridge imports this
+        # module's peers, and a cycle at import time would make ``admin_service``
+        # depend on the agent being importable in order to authorise a ban.
+        from . import agent_service
+
+        return await agent_service.submit(request)
     else:  # pragma: no cover - OPERATIONS and this branch move together
         raise ValueError(f"unhandled operation {request.operation}")
     return ""
@@ -812,6 +912,11 @@ def message_for(outcome: str) -> str:
         OUTCOME_UNKNOWN_ROLE: config.ADMIN_DENIED_TEXT,
         OUTCOME_NOT_AN_ADMIN: config.ADMIN_DEMOTE_NOTHING_TEXT,
         OUTCOME_NEXUS_OFFLINE: config.NEXUS_OFFLINE_DENIED_TEXT,
+        OUTCOME_AGENT_DISABLED: config.AGENT_DISABLED_TEXT,
+        OUTCOME_AGENT_REJECTED: config.AGENT_REJECTED_TEXT,
+        OUTCOME_AGENT_BUSY: config.AGENT_BUSY_TEXT,
+        OUTCOME_AGENT_DUPLICATE: config.AGENT_DUPLICATE_TEXT,
+        OUTCOME_AGENT_WAITING: config.AGENT_WAITING_TEXT,
     }.get(outcome, config.ADMIN_DENIED_TEXT)
 
 
@@ -845,6 +950,20 @@ OUTCOME_GLOSS = {
     OUTCOME_UNKNOWN_ROLE: "that role does not exist",
     OUTCOME_NOT_AN_ADMIN: "that person holds no administrative role here",
     OUTCOME_NEXUS_OFFLINE: "the assistant is switched off and did not act",
+    OUTCOME_AGENT_DISABLED: "the coding-agent bridge is switched off",
+    OUTCOME_AGENT_REJECTED: (
+        "the request was not accepted — an unknown repository, an unknown "
+        "operation, or an empty task"
+    ),
+    OUTCOME_AGENT_BUSY: (
+        "the bridge is already running as many tasks as it is allowed to, or "
+        "one of them is already working on that repository"
+    ),
+    OUTCOME_AGENT_DUPLICATE: "this exact request has already been made and is still active",
+    OUTCOME_AGENT_WAITING: (
+        "the task is recorded but has not started: it is a dangerous operation "
+        "and is waiting for the owner to confirm it explicitly"
+    ),
 }
 
 
@@ -961,6 +1080,9 @@ _REFUSAL_OUTCOMES = frozenset({
     OUTCOME_UNKNOWN_ROLE,
     OUTCOME_UNKNOWN_OPERATION,
     OUTCOME_NEXUS_OFFLINE,
+    OUTCOME_AGENT_DISABLED,
+    OUTCOME_AGENT_REJECTED,
+    OUTCOME_AGENT_BUSY,
 })
 
 

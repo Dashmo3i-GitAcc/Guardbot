@@ -321,6 +321,33 @@ person replied to). A name is understood when it is unambiguous ("میلاد ر�
 Telegram id. If two people share a name, the bot asks rather than guessing — and
 a name never grants anything: authority always comes from the Telegram id.
 
+### The coding agent (the bridge)
+
+The owner can ask Nexus in the group for a change to this system's own code —
+«توی guardbot این باگ رو درست کن» — and Nexus hands the work to a coding agent
+running on the host. The answer comes back into the same conversation: progress
+lines while it works, then the result, chunked in order or as a document.
+
+It is **owner-only**, and structurally so: the permission behind it is held by no
+role, so an administrator cannot be given it however they are promoted. Nexus
+may *ask*; it may not decide. It cannot claim to be the owner, cannot name a
+repository that is not on the allowlist, and cannot approve its own request — the
+repository is a name that the server resolves to a directory, and the approval is
+the owner's.
+
+**Dangerous work waits.** Deploying, migrating, deleting, resetting and changing
+credentials are recorded and **not started**. They appear in `/agent`, and they
+run only when the owner says so explicitly. With more than one waiting, a bare
+«اوکی» gets a question rather than a guess.
+
+`/agent` shows the bridge's state; `/agent confirm <id>` and
+`/agent cancel <id>` are the typed interface for when the assistant is the thing
+that is broken.
+
+The execution half is a separate host process, `tools/agent_runner.py`, because
+the container ships neither Node nor the CodeBuddy CLI. Pointing `AGENT_CLI` at a
+working invocation is a deployment step — see `AgentMD.md` §40.
+
 ## Test in a private test group first
 
 Set `GROUP_IDS` to a test group, send normal photos / videos / stickers and
@@ -383,4 +410,13 @@ docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot \
   `NEXUS_AWARENESS_RETENTION_SECONDS` (1 hour by default) leave the window, and
   a very busy room keeps only the last `NEXUS_AWARENESS_MAX_ROWS` messages. A
   reference to something said an hour ago may therefore be missed.
+* The coding-agent bridge needs a coding agent on the host, and this container
+  has neither Node nor the CodeBuddy CLI. `tools/agent_runner.py` is the other
+  half and runs outside the container; which invocation it uses is a deployment
+  decision, and on this host the CLI's headless mode needs a credential and a
+  free loopback port that the bot cannot supply. Everything on the bot's side of
+  the bridge is implemented and tested regardless — see `AgentMD.md` §40.15.
+* A coding task's output is whatever the agent printed, redacted and bounded. The
+  bot does not verify that a change was made or that a test passed; it relays
+  what the agent said and records it. A claim in an agent's summary is a claim.
 

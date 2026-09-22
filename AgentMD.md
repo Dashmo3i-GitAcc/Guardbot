@@ -3940,3 +3940,620 @@ database already held are untouched. No migration step is needed.
 Each is documented in `.env.example`. The two tables are created with
 `CREATE TABLE IF NOT EXISTS`, so there is no migration step and an existing
 database picks them up on restart; `tests/test_db_migration.py` proves it.
+
+## 36. The assistant reads a room when its own clock expires
+
+### 36.1 What was slow, measured rather than guessed
+
+The report was that Nexus takes too long to react. "Too long" is not a
+measurement, so the first thing built was the measurement: a `PassTrace` on
+`app/awareness.py` that stamps five points in a pass — when the capture landed,
+when the batch was assembled, when the Gemini request went out and came back,
+when the decision was made, and when the reply was sent — using
+`time.monotonic()`, and logs one line of *durations only*:
+
+```
+chat=-100… waited_ms=8500 batch_ms=12 gemini_ms=1180 decide_ms=3 send_ms=41 total_ms=9736
+```
+
+No message text, no ids beyond the chat, nothing that would put a person's words
+in a log. That line is what the rest of this section is based on.
+
+Three candidates were found, and only one of them was a defect:
+
+1. **Tick quantisation — a real defect.** Every room's debounce expired on its
+   own schedule, but the sweeper only looked every `NEXUS_AWARENESS_TICK_SECONDS`
+   (15 s). A room that went quiet 0.2 s after a tick waited 14.8 s for the next
+   one. Measured median wait: **15.5 s**, of which ~7 s was this.
+2. **Capture cost — real, and two orders of magnitude too small to matter.** The
+   insert-and-trim was two statements plus a purge on every message, 10.9 ms.
+   Worth fixing because it is on the message path, not because it was the wait.
+3. **Prompt size — measured, and deliberately kept.** The awareness request is
+   dominated by ~26 KB of tool declarations against ~5.4 KB of everything else.
+   Trimming them would be the single largest reduction available, and it was
+   rejected: the tool *descriptions* are what make the model call
+   `unmute_member` correctly rather than answering that it cannot. The size is
+   now pinned by a test so it cannot grow silently.
+
+### 36.2 A room is read when its own clock expires, not when a timer notices
+
+`app/main.py` keeps `_awareness_ready_at`, a map from chat to the monotonic
+instant at which that room's debounce expires, and runs a one-second tick that
+looks at the map rather than at the database. `_awareness_schedule(chat_id)`
+sets the entry when a message is captured, coalescing by assignment: two messages
+in the same second produce one entry, not two passes.
+
+The tick is cheap by construction. It does no query while every room is still
+talking — it is a scan over a dictionary of configured groups — and a room whose
+deadline has passed is handed to the existing `_awareness_pass`. The old
+sweeper is still registered and still works; it is now the backstop rather than
+the mechanism, which is what makes the change safe to deploy on a live bot.
+
+Measured effect on the same traffic: median wait **15.5 s → 8.5 s**, which is
+the debounce itself plus one tick, and there is now no quantisation term.
+
+### 36.3 Capture is one transaction
+
+`db.group_capture` does the insert and the trim in a single transaction instead
+of two, which took the per-message cost from 10.9 ms to 5.9 ms. The age purge
+(`db.group_purge`) is amortised behind `NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS`
+(60 s) rather than run on every message: it is a `DELETE` over an indexed column
+whose result is the same whether it runs once a second or once a minute.
+
+An index was added for it — `idx_group_messages_at` — because the purge and the
+window query both filter on `at` and neither had one.
+
+### 36.4 What was deliberately not done
+
+* **No keyword detector.** The semantic layer stays the model's. A regex that
+  decides "this is worth reading" is exactly the design §35.1 exists to avoid.
+* **No "reply to everything".** The debounce and the floor are what keep the
+  assistant from becoming a participant in every conversation; the fix was to
+  remove a quantisation, not a limit.
+* **No security trade.** The owner/admin gate, the per-room isolation and the
+  daily allowance are all unchanged.
+* **No concurrent passes for one room.** `_awareness_ready_at` is cleared in the
+  pass's `finally`, and a pass for a room already in flight cannot be scheduled
+  twice because the schedule is a single dictionary slot.
+* **No smaller model.** The smallest appropriate model was already in use
+  (`gemini-flash-lite-latest`); the latency was not the model's.
+
+### 36.5 Tests
+
+`tests/test_awareness_latency.py` (26 tests, no sleeps) covers: a deadline in
+the past triggers exactly one pass; a deadline in the future triggers none; the
+schedule coalesces; the schedule is cleared after a pass; a room already being
+read is not scheduled again; the tick does no work while every room is talking;
+the trace records every stage; the trace log line carries durations and no
+content; the purge is not run on every capture; the retention policy still
+discards old rows; the room window still respects both bounds; and the assistant
+still answers nobody when it is switched off.
+
+## 37. An ordinary photograph is not a sexual verdict
+
+### 37.1 Two independent defects, one symptom
+
+The report was false positives in media moderation. There were two causes, and
+neither was a threshold:
+
+1. **`mod_policy` rule 8 turned any local REVIEW into a REVIEW.** The local
+   detector returns a graded verdict, and the AI stage is asked for a second
+   opinion on the ambiguous ones. When the AI answered `normal` with high
+   confidence, rule 8 discarded that and returned REVIEW anyway — because it
+   only looked at the local verdict, never at what the AI had said about it.
+2. **The gate that decides whether to ask the AI at all was a dead
+   conjunction.** `_assess_media_with_ai` asked only when
+   `result.scene_nsfw is None`. For a clean image the detector returns `0.0`, not
+   `None`, so the AI was asked about *every* image — on the moderation workload,
+   which has no daily budget. That is why the extra cost was invisible in the
+   pool counters and why the behaviour was inconsistent.
+
+### 37.2 The fix, and the asymmetry it preserves
+
+A new rule 8 (`local_review_ai_normal`) precedes the old one and allows when the
+AI says `normal` with no uncertainty and confidence at or above
+`MODERATION_REVIEW_CONFIDENCE`. The old rule is now rule 9 and is unchanged: a
+local REVIEW with no AI answer, or with an uncertain one, is still a REVIEW.
+
+The thresholds were not touched. The change is that a *strong* verdict now
+requires a strong signal: a weak local cue plus a confident "this is ordinary"
+is ordinary. Uncertainty still produces review rather than deletion, and
+genuinely explicit material is unaffected — the AI's `explicit` classification
+still drives the ladder it always did.
+
+The gate was replaced with an explicit switch, `MODERATION_AI_ASK_ON_SAFE`,
+default `false`. The dead conjunction was not repaired; it was replaced with a
+named decision, because a condition nobody can read is a condition nobody can
+audit.
+
+### 37.3 Tests
+
+`tests/test_moderation_false_positives.py` (29 tests) is in three layers, so a
+regression is attributed to the right one:
+
+* the policy ladder as a pure function — portrait, gym, swimsuit, hug, kiss,
+  close-up, visible skin, each with a confident `normal` AI verdict;
+* the gate — that a clean image does not reach the AI by default, and does when
+  the switch is on;
+* the whole `on_media` handler end to end — that none of the above produces a
+  deletion or a restriction.
+
+And, in the same file, the cases that must still be caught: genuinely explicit
+material with a local HARD verdict, with an AI `explicit` verdict, and with an
+uncertain AI verdict.
+
+## 38. The captcha stops banning people who verified
+
+### 38.1 The bug, and why it was a race rather than a threshold
+
+A member joined, saw «من ربات نیستم», pressed it, and was banned about two
+minutes later anyway. The challenge was removed on success and the ban was
+applied by a reaper that re-read the challenge table — so the two should not
+have been able to disagree.
+
+They could, because the reaper's decision was made *before* the network call
+that answers the button. The click handler deleted the challenge, then called
+`restrictChatMember`; the reaper had already read the row and had already
+decided. On a slow Telegram call the ban was applied to somebody who had
+verified.
+
+### 38.2 Claim, then act, then restore on failure
+
+`db.claim_captcha(chat_id, user_id, *, before)` is an atomic
+DELETE-and-report: it removes the row and tells the caller whether it was the
+one that removed it. The click handler claims before the network call, so the
+reaper can never see a row for a click that is in flight; if the Telegram call
+fails, the row is restored with a `CAPTCHA_RETRY_GRACE_SEC` (15 s) extension so
+the member is not punished for a transient error.
+
+`db.claim_expired_captcha(chat_id, user_id, *, now)` does the same for the
+reaper: it re-reads and deletes *per row*, so a challenge that was answered
+between the query and the decision is no longer there to act on. The reaper's
+loop now re-checks authoritative state at the moment it acts rather than at the
+moment it planned.
+
+`on_member_update` early-returns when a challenge already exists, so a duplicate
+join does not restart the clock on somebody who is already being asked.
+
+### 38.3 The rule that was not implemented
+
+"120 s passed → ban" was never implemented, and the brief is explicit about why:
+the enforcement is for a user who is genuinely still unverified at the deadline,
+and only then. A verified user has no challenge, so the reaper has nothing to
+claim, so nothing happens. The whole fix is making "has a challenge" and
+"verified" the same question.
+
+### 38.4 Tests
+
+`tests/test_captcha.py` (29 tests): join → button → verify → timeout → **no
+ban**; join → timeout → still unverified → enforcement; duplicate click;
+duplicate join; restart between join and verification; a stale timeout; two
+users in one group; the same user in two groups; a callback from the wrong user;
+a callback from the wrong chat; and the restore-on-failure path.
+
+## 39. "Him" means him
+
+### 39.1 The bug was not the model
+
+«این کاربر رو ساکت کن» worked. «درش بیار» answered that it could not be done,
+while the assistant held `unmute_member` the whole time. Two defects, neither in
+Gemini's understanding of Persian:
+
+1. **The antecedent did not exist.** A tool call and its result live only inside
+   the turn that made them: `chat._tool_turn` builds the exchange in a local
+   list and returns the final text, and the conversation store can only hold
+   `user` and `model` turns. A function turn has no representation in it. So the
+   follow-up turn began with a history in which the mute had never happened, and
+   "him" had nothing to point at.
+2. **The persona forbade it.** `chat.SYSTEM_INSTRUCTION` is written for a turn
+   with no tools and said so in as many words: "you cannot change an account,
+   place an order, contact anyone, or run any operation". A prompt that says
+   both "you cannot do this" and "here is the tool that does this" is answered
+   by refusing.
+
+### 39.2 State the server's record, and scope the persona
+
+`admin_tools.recent_actions_block` appends this actor's recent *successful*
+actions in this room to the trusted context, read from `audit_recent_actions`.
+Three properties make it safe, and all three are asserted:
+
+* it cannot be planted, because the execution layer writes the audit row *after*
+  an action succeeded;
+* it is scoped to this actor in this room, so one person's actions are not
+  another's antecedent and one group's business is not another's;
+* it only lists what actually happened, so a failed mute leaves no phantom
+  target.
+
+It is context and never authority: the follow-up still becomes a typed request
+that `app/admin_service.py` re-authorises against the actor's real id. The block
+says so itself, in the prompt, in as many words.
+
+`chat.TOOL_AMENDMENT` is appended after the persona for a turn that actually
+holds tools, and the offending persona line is now scoped to the tool-free case.
+`TOOL_AMENDMENT` is also in `chat.__all__`, because a prompt fragment that
+matters should be nameable.
+
+### 39.3 Tests
+
+`tests/test_admin_continuation.py` (25 tests): the block appears for the owner
+and not for a guest; it lists only successes; it is scoped by actor and by room;
+a follow-up that resolves to it still goes through the ordinary check, so a
+demoted actor gets the same refusal they would have got without it; the persona
+no longer claims it cannot run operations when it holds tools; and the
+tool-free path is unchanged.
+
+## 40. The coding-agent bridge: Telegram → Nexus → CodeBuddy → Telegram
+
+### 40.1 What was asked for, and the one thing that shaped the design
+
+The request was that the owner be able to talk to Nexus in the group in natural
+language and have it hand real coding work to a coding agent, with the result
+coming back to the same conversation. That is four separate problems wearing one
+name: recognising the request, authorising it, executing it somewhere with a
+shell, and carrying a long answer back through a chat.
+
+The design was decided by one measurement, taken before anything was written:
+
+```
+$ docker exec guardbot which node codebuddy
+NO_NODE
+NO_CODEBUDDY
+$ docker inspect guardbot --format '{{json .Mounts}}'
+[{"Source":"/root/guardbot/data","Destination":"/data",...}]
+```
+
+The container ships `app/` and `requirements.txt` and nothing else. There is no
+Node, no CodeBuddy CLI, and no package manager to install one with. So the
+execution half cannot be in the container, and the bridge is **two processes
+that meet over a directory**: the container owns the decision and the database,
+the host owns the shell and the repository.
+
+### 40.2 The bridge is an operation, not a front door
+
+The single most important structural decision: `codebuddy_task` is a row in
+`admin_service.OPERATIONS`, with `kind=OP_SYSTEM` and `permission="agent.request"`.
+It is reached exactly the way `ban_member` is reached — the model calls a
+declared tool, `admin_tools.parse_write_call` turns it into a typed
+`AdminRequest`, and `admin_service.execute` authorises it against the actor's
+real Telegram id, checks the replay window, checks the idempotency table, writes
+an audit row, and only then calls `_apply`.
+
+Nothing about that pipeline was forked. A coding request gets the same audit
+trail, the same idempotency, the same authority model and the same refusal
+vocabulary as a ban. The alternative — a second handler that "just" forwards a
+message — would have been a second answer to "who may do this", which is the
+thing §34 exists to prevent.
+
+### 40.3 The model may ask; it may not decide
+
+`agent.request` is held by **no role bundle**, exactly like `nexus.control`. An
+administrator who is promoted to every role still does not hold it, and
+`rbac.authorize_grant` cannot express it, so the promotion dialog cannot hand it
+out either. That is what makes "only the owner may ask for a coding task" a
+property of the tables rather than a check somebody has to remember.
+
+What the model supplies, and what it cannot:
+
+| the model supplies | the server derives |
+|---|---|
+| the repository **name** | the path, from the allowlist |
+| the task, in the owner's words | the actor id, from the Telegram update |
+| a *claim* about the kind of work | whether that kind is dangerous |
+| a reply-mode preference | whether the actor may do any of it |
+| — | whether deploy is allowed |
+| — | whether the request is approved |
+
+`AdminRequest` has no field for `is_owner`, `is_admin`, `approved` or `allowed`,
+and `parse_write_call` refuses any argument the tool schema does not declare, so
+a smuggled `owner=true` is dropped before it can reach anything. Both facts are
+tested.
+
+### 40.4 The repository allowlist is an indirection, not a filter
+
+`agent_bridge.DEFAULT_REPOSITORIES` maps a logical name to one directory. A
+request carries the *name*; `repository_path(name)` produces the path. A path is
+accepted as input only when it is exactly an allowlisted root, and it is then
+converted back to the name — so `repo_path` in a stored row is always the output
+of that lookup and never a string a model produced.
+
+The consequence is worth stating plainly: there is no expression the model can
+write that becomes a directory this bot will hand to a process with a shell.
+`tests/test_agent_bridge.py` asserts that over the function's *output* rather
+than over a list of suspicious inputs.
+
+The host runner checks the same list again, from its own literal copy, and
+refuses a request whose `repo_path` is not what the name means *there*. Two
+independent checks, because they are two: a single shared source would make a
+mistake in it a mistake in both.
+
+### 40.5 The operation vocabulary, and the danger classifier
+
+Ten operations, and the list is closed — an operation outside it is refused,
+because an open vocabulary means the danger table can be bypassed by inventing a
+word. Five are dangerous:
+
+| operation | dangerous | why |
+|---|---|---|
+| `analyse`, `test`, `edit`, `commit`, `push` | no | recoverable; a working tree is a git repository's purpose |
+| `deploy` | yes | it changes what is *serving* |
+| `migrate` | yes | a migration can destroy data |
+| `delete` | yes | deletes files or branches |
+| `reset` | yes | resets a repository or a service |
+| `credentials` | yes | changes keys or secrets |
+
+The split is deliberately not "read vs write". `edit` writes files and is not
+dangerous; `deploy` writes nothing and is.
+
+The classifier takes the structured operation as the primary signal and scans
+the task text as well, and **the text can only add danger, never remove it**.
+The asymmetry is the point: a false positive costs one confirmation, a false
+negative costs an unconfirmed production change.
+
+### 40.6 A dangerous request is recorded and not published
+
+This is the central safety property, and it is enforced by the *absence* of a
+file. A dangerous request is written to `agent_tasks` with
+`status='waiting_for_owner'`, and the request file is **not** written to the
+spool. The runner's only source of work is that directory, so a task the owner
+has not approved is not merely refused by the runner — it is invisible to it.
+
+Belt and braces: `waiting_for_owner` has exactly one legal exit, and it is
+`queued`. `running` is not reachable from it, so even a forged `started` line
+could not move an unapproved task into execution. Both are tested.
+
+### 40.7 Approval is the owner's, server-side, and unambiguous
+
+The brief's rule about vague language is implemented in
+`agent_bridge.resolve_confirmation`, which is pure and takes the waiting list as
+an argument:
+
+* **only the owner**, checked by id and never by anything the model said;
+* **there must be something waiting** — «اوکی» with nothing pending is not an
+  approval of anything;
+* **a named task must actually be waiting**, so a model that names one is making
+  a reference and not a decision;
+* **a bare confirmation resolves only when exactly one task is waiting**; with
+  two, the answer is a question listing both ids, and the model is instructed to
+  ask which.
+
+`confirm` is reachable two ways and both go through the same function: the
+`confirm_agent_task` tool, and `/agent confirm <id>`. The typed command is the
+fallback for the situation the bridge exists in — the owner wants to know
+whether his request went anywhere and asking the assistant is the thing that is
+broken.
+
+Two meanings share `waiting_for_owner`, and they are told apart by `started_at`:
+
+* `started_at = 0` — dangerous and never approved. `db.agent_task_waiting`
+  returns these, and `confirm` releases them.
+* `started_at > 0` — it ran and stopped to ask a question. These are **not** in
+  the waiting list, because confirming one would re-run work that was already
+  under way. They are answered with `answer_agent_task` instead.
+
+### 40.8 Answering a question is not a backdoor approval
+
+`agent_service.resume` appends the owner's answer to the task and requeues it —
+and it **recomputes the danger** over the enriched text. An answer that turns an
+ordinary task into "yes, and then deploy it" is caught: the task goes back to
+`waiting_for_owner` rather than inheriting an approval the original question did
+not carry. A task that never started cannot be resumed at all, because an answer
+to a question it never asked is not an approval of it.
+
+### 40.9 The two halves meet over a directory
+
+`app/agent_spool.py` defines the wire, and it imports nothing but the standard
+library — which is what makes it safe for the host runner to import. That is not
+tidiness: `app/db.py` writes at import time, and a second writer would produce
+`database is locked` under exactly the load a coding task creates.
+
+```
+<spool>/requests/<id>.json     container writes, runner reads
+<spool>/streams/<id>.jsonl     runner appends, container reads
+<spool>/locks/<id>.lock        O_CREAT|O_EXCL, held while a run is in flight
+<spool>/control/<id>.cancel    container asks a run to stop
+```
+
+The stream is JSON Lines and **append-only**, and that is the whole of the
+restart story. The container records how many lines it has delivered in
+`agent_tasks.progress_offset`; on restart it reads from that line onward. A line
+is written with one `write` and flushed, so the only way to see a partial line
+is a crash mid-write, and the reader treats a trailing line with no terminating
+newline as not-yet-written. Nothing is ever rewritten in place, so a reader can
+never observe a torn file.
+
+Why not a socket: a port would need a listener, a firewall decision and a shared
+secret, and the runner would have to be trusted to enforce all three. A
+directory needs none of them, and its permissions are the filesystem's.
+
+### 40.10 The host runner, and what it refuses
+
+`tools/agent_runner.py` claims a request by creating a lock with `O_CREAT|O_EXCL`
+— atomic everywhere, no lock manager — and then re-validates the parts that are
+its own safety boundary: the repository name is on its own copy of the
+allowlist, the path is what that name means, the directory exists, the operation
+is in the vocabulary, and the task is non-empty. A request that fails any of
+those is marked failed and never executed.
+
+It does **not** take the executable or its arguments from the request. Which
+binary runs is the host's decision, set in the runner's own environment where
+the owner can see it; a container that could name an executable could name one
+that is not a coding agent. It also strips this session's `CODEBUDDY_*`
+identity variables from the child's environment and gives each run its own
+`HOME`, because the CLI writes a loopback-port file into `HOME` and refuses to
+start if the port it recorded is already held by another session.
+
+The timeout is enforced by a watchdog thread rather than by the read loop,
+because the read loop is exactly what a hung child stops doing. A CLI that
+starts, prints nothing and never exits is the failure this was written after.
+
+### 40.11 Carrying a long answer back
+
+`agent_bridge.reply_plan` decides between ordered chunks, a document, or both,
+and returns a plan rather than performing it — so the decision is testable
+without Telegram, and so the caller cannot accidentally implement a fourth
+option. There is deliberately no branch that drops the answer, and
+`tests/test_agent_bridge.py` asserts that as a property over every mode and
+every length.
+
+Delivery is ordered and once-only. The offset is written *after* the lines are
+sent, so a crash mid-delivery repeats at most the messages in flight, while the
+opposite ordering would lose them — and repeating a progress line is a smaller
+fault than losing an answer. Progress is throttled by count and by interval,
+because a chatty agent must not become a chatty bot; the result is never
+throttled.
+
+### 40.12 Secrets
+
+The brief is explicit that no API key, bot token, Gemini key, DeepSeek key, SSH
+credential or server password may appear in Telegram, in a log, in a commit, in
+a test or in a document. Three things enforce it:
+
+* the agent is **told**, in its prompt, never to print one, and to write
+  `<redacted>` instead;
+* the runner **redacts** everything it emits — a rule enforced only by having
+  asked politely is not enforced;
+* the container redacts again on the way to Telegram and before storing, so the
+  stored result is clean as well as the delivered message.
+
+`agent_bridge.redact` matches bot tokens, Google keys, OpenAI-style and
+OpenRouter keys, GitHub tokens, `key = value` assignments for the usual names,
+and PEM private-key blocks. The bridge's own tests and this document contain no
+credential, and neither does the audit row.
+
+### 40.13 Isolation from the awareness allowance
+
+A coding task must not consume the assistant's daily allowance. The mechanism is
+that the bridge never reaches the Gemini pool at all: the agent is a host
+process authenticated by the owner's own CodeBuddy credential, and no Gemini key
+of this deployment is used, no pool account is touched and no counter moves.
+
+`agent_bridge.allowance_account()` returns `"agent"` so the property has a name
+a test can assert — and the test checks the import graph as well as the
+behaviour, so a future change that routed the agent through the pool would have
+to do it deliberately.
+
+### 40.14 The lifecycle, and what a restart does
+
+`queued → running → succeeded | failed | cancelled | timed_out`, with
+`waiting_for_owner` reachable from `running` (the agent asked a question) and
+exiting only to `queued` (approved or answered). Terminal states are terminal.
+
+Every task has a `request_id`, an actor id, a repository, `created_at`, a
+status, a result or an error, and an optional CodeBuddy session id. No task body
+is stored beyond what the owner wrote, and the status report shows ids,
+repositories and states — never a task body, which is tested.
+
+A restart is handled in `agent_poller.recover` and `agent_service.recover`:
+
+* a task recorded as `queued` with no request file — the process died between
+  the two writes — is republished, so it is not stranded;
+* a task whose stream already ended while the bot was down is walked to its
+  terminal state through `agent_bridge.path_to`, because a stream that ends with
+  a result while the row still says `queued` is evidence that it ran;
+* a lock left by a killed runner is cleared for a task that is no longer active,
+  which is what lets it be retried;
+* a running task is never republished, so a restart cannot duplicate execution.
+
+### 40.15 The 21-step deployment, and the one step only the owner can do
+
+The bridge is complete on both sides and fully tested, with one honest
+exception: **the CodeBuddy CLI cannot be driven headlessly on this host in this
+environment**, and that was measured rather than assumed.
+
+```
+$ env -u CODEBUDDY_SESSION_ID … codebuddy -p "Reply with exactly: READY"
+Authentication required. Please use /login command to sign in to your account
+
+$ CODEBUDDY_IDE_PORT=61592 codebuddy -p "…" --no-session-persistence
+Unhandled rejection Error: listen EADDRINUSE: address already in use 127.0.0.1:61424
+
+$ ss -ltnp | grep 6142
+LISTEN 127.0.0.1:61424   users:(("MainThread",pid=2673063,...))
+LISTEN 127.0.0.1:61423   users:(("MainThread",pid=119007,...))
+```
+
+Two facts came out of that. `CODEBUDDY_IDE_PORT` is read only for IDE
+*detection*; the headless server's port comes from
+`$HOME/.codebuddy/web-ui-port.json`, whose pool (61423–61425) is already held by
+two other live CodeBuddy sessions on this host. And auth does not live in a file
+under `HOME` — it lives in the editor's session — so an isolated `HOME` hangs
+rather than authenticating.
+
+Neither is a defect in the bridge, and neither is something the bridge can fix:
+killing the owner's other sessions to free a port would be destructive, and
+there is no credential file to copy. So `AGENT_CLI` and `AGENT_CLI_ARGS` are
+configuration, and pointing them at a working invocation is **the one
+deployment step only the owner can complete**. Everything else — the authority
+model, the allowlist, the danger classifier, the confirmation rules, the
+lifecycle, the transport, the redaction and the timeout — is implemented and
+tested against a stand-in CLI, which is enough to prove the bridge's own
+behaviour.
+
+The full sequence:
+
+1. `git pull` in `/root/guardbot`, and confirm the commit SHA.
+2. Confirm the host has Node and the CodeBuddy CLI: `which node codebuddy`.
+3. Confirm the CLI is authenticated **in the environment the runner will use**:
+   `codebuddy -p "Reply with exactly: READY"`.
+4. Choose the invocation and write it into the runner's environment as
+   `AGENT_CLI` and `AGENT_CLI_ARGS`.
+5. Set `AGENT_REPOSITORIES` to the real allowlist — the same string on both
+   sides, container and runner.
+6. Confirm `AGENT_SPOOL_DIR` is inside the bind mount: `/data/agent` in the
+   container is `/root/guardbot/data/agent` on the host.
+7. `mkdir -p /root/guardbot/data/agent` and check it is writable by both.
+8. Add the `AGENT_*` block to `/root/guardbot/.env` (see `.env.example`).
+9. `docker compose up -d --build` and confirm the container is healthy.
+10. Read the startup log for the `Coding agent:` line and the repository list.
+11. Run the runner once by hand: `python tools/agent_runner.py --once`.
+12. In the group, ask the owner's account for something harmless:
+    «توی guardbot یه تست ساده اضافه کن».
+13. Confirm Nexus called `codebuddy_task` and the reply names a task id.
+14. Confirm the task appears in `/agent`.
+15. Confirm progress lines arrive in the same chat.
+16. Confirm the final answer arrives — chunked, or as a document.
+17. Ask for something dangerous: «آخرین تغییرات رو دیپلوی کن».
+18. Confirm it is recorded as waiting and **nothing ran**.
+19. Confirm «اوکی» releases it, and that with two waiting tasks it asks which.
+20. Restart the container mid-task and confirm nothing runs twice.
+21. Run the suites: `pytest` in `/root/guardbot`, and the VPN Bot suite in
+    `/opt/vpn-bot`.
+
+### 40.16 Tests
+
+| file | tests | what it covers |
+|---|---|---|
+| `tests/test_agent_bridge.py` | 66 | the allowlist, the operation vocabulary, the danger classifier, confirmation, the lifecycle, idempotent ids, concurrency bounds, the prompt, redaction, chunking, the reply plan, and the import-graph isolation from the awareness allowance |
+| `tests/test_agent_service.py` | 61 | submit, the member and administrator refusals, the dangerous path, approval and ambiguity, answering a question, cancelling, the status report, recovery, and the same path through `admin_service.execute` and `parse_write_call` |
+| `tests/test_agent_transport.py` | 59 | the spool's atomicity and offsets, partial-line handling, delivery order, once-only delivery across a process, chunking and documents, redaction on the wire, the timeout, recovery, and the runner's own validation, argv and stream parsing |
+
+### 40.17 Configuration
+
+| variable | default | what it does |
+|---|---|---|
+| `AGENT_ENABLED` | `true` | the master switch |
+| `AGENT_REPOSITORIES` | `guardbot=/root/guardbot,vpn-bot=/opt/vpn-bot` | the allowlist, `name=path` |
+| `AGENT_MAX_ACTIVE` | `2` | tasks in flight at once |
+| `AGENT_MAX_PER_REPOSITORY` | `1` | tasks on one repository |
+| `AGENT_SPOOL_DIR` | `/data/agent` | where the two halves meet |
+| `AGENT_POLL_SECONDS` | `3.0` | how often the container looks for news |
+| `AGENT_TIMEOUT_SECONDS` | `1800` | the run's bound, on both sides |
+| `AGENT_MAX_TURNS` | `40` | the agent's turn ceiling |
+| `AGENT_CLI` | `codebuddy` | the executable — **the runner's environment** |
+| `AGENT_CLI_ARGS` | `-p,--output-format,stream-json,--model,deepseek-v4.1-flash,--permission-mode,acceptEdits,--no-session-persistence` | its arguments — **the runner's environment** |
+| `AGENT_ADD_DIR` | `1` | pass `--add-dir <repo>`; `0` for a CLI without the flag |
+| `AGENT_RUNNER_HOME` | `/run/guardbot-agent` | where each run's isolated `HOME` goes |
+| `AGENT_CHUNK_CHARS` | `3500` | how long a chunk may be |
+| `AGENT_DOCUMENT_CHARS` | `3500` | when a file is kinder than chat |
+| `AGENT_PROGRESS_MAX_CHARS` | `600` | how long a progress line may be |
+| `AGENT_PROGRESS_MIN_INTERVAL_SECONDS` | `10` | the throttle |
+| `AGENT_PROGRESS_MAX_MESSAGES` | `20` | the progress ceiling |
+| `AGENT_RETENTION_SECONDS` | `1209600` | how long a finished task is kept |
+
+The `AGENT_*_TEXT` and `AGENT_*_HEADER` variables are the Persian copy for each
+outcome, in the same place as every other outcome's sentence and reached through
+the same `admin_service.message_for` table — so the assistant and the typed
+commands cannot describe the same state two ways.
+
+`agent_tasks` is created with `CREATE TABLE IF NOT EXISTS`, so there is no
+migration step and an existing database picks it up on restart.

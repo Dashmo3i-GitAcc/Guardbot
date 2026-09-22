@@ -10,6 +10,26 @@ def _str_list(value: str) -> list[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
+def _kv_list(value: str) -> dict[str, str]:
+    """``name=value`` pairs, comma separated. Malformed entries are dropped.
+
+    Dropped rather than raising, on the same reasoning as ``CONFIG_ADMINS``: a
+    typo in a deployment variable must not stop the bot booting. And a dropped
+    entry *narrows* the result, which is the safe direction — the allowlist this
+    builds is only ever consulted to permit something.
+    """
+    out: dict[str, str] = {}
+    for chunk in value.split(","):
+        item = chunk.strip()
+        if not item or "=" not in item:
+            continue
+        name, _, target = item.partition("=")
+        name, target = name.strip().lower(), target.strip()
+        if name and target:
+            out[name] = target
+    return out
+
+
 def _float(name: str, default: float) -> float:
     return float(os.getenv(name, default))
 
@@ -1101,6 +1121,170 @@ MODERATION_MEDIA_ENABLED = _bool("MODERATION_MEDIA_ENABLED", True)
 # recommendation: it trades quota for coverage, and it is the setting to reach
 # for if a genuinely explicit image is ever reported as having been missed.
 MODERATION_AI_ASK_ON_SAFE = _bool("MODERATION_AI_ASK_ON_SAFE", False)
+
+
+# ── The coding-agent bridge ───────────────────────────────────────────────
+# See ``app/agent_bridge.py`` for the design and ``AgentMD.md`` §36 for the
+# deployment. The short version: the owner asks Nexus for a coding task in the
+# group, Nexus turns it into a *tool call*, the one authority model in
+# ``app/admin_service.py`` decides, and a host process runs CodeBuddy because
+# this container ships neither Node nor the CLI.
+AGENT_ENABLED = _bool("AGENT_ENABLED", True)
+
+# The repository allowlist, as ``name=path`` pairs. A request names a name and
+# the path is looked up here, so no expression a model can produce becomes a
+# filesystem path. Both the container and the host runner check this list.
+AGENT_REPOSITORIES = _kv_list(
+    os.getenv(
+        "AGENT_REPOSITORIES",
+        "guardbot=/root/guardbot,vpn-bot=/opt/vpn-bot",
+    )
+)
+
+# How many tasks may be in flight at once, and how many on one repository.
+# One per repository is the number that matters: two agents editing one working
+# tree produce a state neither of them can describe. The global ceiling is about
+# the host, which has two cores and about a gigabyte free.
+AGENT_MAX_ACTIVE = _int("AGENT_MAX_ACTIVE", 2)
+AGENT_MAX_PER_REPOSITORY = _int("AGENT_MAX_PER_REPOSITORY", 1)
+
+# Where the two halves meet. The runner writes ``<request_id>.progress`` and
+# ``<request_id>.result`` here and the container reads them; the directory is
+# inside the bind mount the compose file already provides, so neither side needs
+# a new port or a new shared secret.
+AGENT_SPOOL_DIR = os.getenv("AGENT_SPOOL_DIR", "/data/agent")
+
+# How often the container looks for progress and results written by the runner.
+# One directory listing per tick and no query when nothing is running, which is
+# what makes a short interval affordable.
+AGENT_POLL_SECONDS = _float("AGENT_POLL_SECONDS", 3.0)
+
+# The runner's bounds. A coding task that has not finished in this long is
+# stopped and reported rather than left to consume the host; the turn ceiling is
+# the second bound, and it is the one that stops a loop early.
+AGENT_TIMEOUT_SECONDS = _int("AGENT_TIMEOUT_SECONDS", 1800)
+AGENT_MAX_TURNS = _int("AGENT_MAX_TURNS", 40)
+
+# What the runner executes. Configurable because the correct invocation depends
+# on how CodeBuddy is authenticated on the host — see AgentMD.md §36.4, where
+# this is the one deployment step only the owner can complete.
+AGENT_CLI = os.getenv("AGENT_CLI", "codebuddy")
+AGENT_CLI_ARGS = _str_list(
+    os.getenv(
+        "AGENT_CLI_ARGS",
+        "-p,--output-format,stream-json,--model,deepseek-v4.1-flash,"
+        "--permission-mode,acceptEdits,--no-session-persistence",
+    )
+)
+
+# How long a progress line or a result may be before it is split, and how long
+# an answer may be before a file is kinder than a wall of chat.
+AGENT_CHUNK_CHARS = _int("AGENT_CHUNK_CHARS", 3500)
+AGENT_DOCUMENT_CHARS = _int("AGENT_DOCUMENT_CHARS", 3500)
+AGENT_PROGRESS_MAX_CHARS = _int("AGENT_PROGRESS_MAX_CHARS", 600)
+# Progress is throttled: a chatty agent must not become a chatty bot.
+AGENT_PROGRESS_MIN_INTERVAL_SECONDS = _float(
+    "AGENT_PROGRESS_MIN_INTERVAL_SECONDS", 10.0
+)
+AGENT_PROGRESS_MAX_MESSAGES = _int("AGENT_PROGRESS_MAX_MESSAGES", 20)
+
+# How long a finished task is kept before the retention prune drops it.
+AGENT_RETENTION_SECONDS = _int("AGENT_RETENTION_SECONDS", 14 * 24 * 3600)
+
+# Where the host runner may keep its own per-run HOME. A fresh HOME per run is
+# not tidiness: the CLI writes a loopback-port file into it and refuses to start
+# if the port it recorded is already held by another session, so an isolated
+# HOME is what lets two runs coexist at all.
+AGENT_RUNNER_HOME = os.getenv("AGENT_RUNNER_HOME", "/run/guardbot-agent")
+
+# ── The bridge's copy ─────────────────────────────────────────────────────
+# One sentence per outcome, in the same place as every other outcome's sentence
+# and reached through the same ``admin_service.message_for`` table — so the
+# assistant and the typed commands cannot describe the same state two ways.
+#
+# Each one says what is true rather than what failed, because the four outcomes
+# have four different next steps: switch the bridge on, name a repository that
+# exists, wait for the repository to be free, or go and confirm the task.
+AGENT_DISABLED_TEXT = os.getenv(
+    "AGENT_DISABLED_TEXT",
+    "⛔️ پل عامل برنامه‌نویسی خاموشه، پس درخواستی ثبت نشد.",
+)
+AGENT_REJECTED_TEXT = os.getenv(
+    "AGENT_REJECTED_TEXT",
+    "⛔️ این درخواست پذیرفته نشد: مخزن یا نوع کار شناخته نشد، یا متن کار خالی بود.",
+)
+AGENT_BUSY_TEXT = os.getenv(
+    "AGENT_BUSY_TEXT",
+    "⌛️ الان به اندازهٔ کافی کار در جریانه، یا روی این مخزن یکی در حال اجراست. "
+    "بعد از تمام شدنش دوباره بگو.",
+)
+AGENT_DUPLICATE_TEXT = os.getenv(
+    "AGENT_DUPLICATE_TEXT",
+    "♻️ همین درخواست قبلاً ثبت شده و هنوز در جریانه؛ دوباره ساخته نشد.",
+)
+AGENT_WAITING_TEXT = os.getenv(
+    "AGENT_WAITING_TEXT",
+    "🔐 این کار خطرناکه، پس شروع نشد. برای اجرا باید خودت صریح تأییدش کنی.",
+)
+# The question the bridge asks when a bare «اوکی» arrives with more than one
+# dangerous task waiting. It lists the ids, because the answer it wants is one
+# of them.
+AGENT_CONFIRM_AMBIGUOUS_TEXT = os.getenv(
+    "AGENT_CONFIRM_AMBIGUOUS_TEXT",
+    "چند کار منتظر تأیید هستن؛ کدوم رو تأیید می‌کنی؟",
+)
+AGENT_CONFIRM_NOTHING_TEXT = os.getenv(
+    "AGENT_CONFIRM_NOTHING_TEXT",
+    "الان هیچ کار خطرناکی منتظر تأیید نیست.",
+)
+AGENT_CONFIRM_NOT_WAITING_TEXT = os.getenv(
+    "AGENT_CONFIRM_NOT_WAITING_TEXT",
+    "اون کار در انتظار تأیید نیست.",
+)
+AGENT_CONFIRM_OWNER_ONLY_TEXT = os.getenv(
+    "AGENT_CONFIRM_OWNER_ONLY_TEXT",
+    "⛔️ تأیید کارهای خطرناک فقط کار مالکه.",
+)
+AGENT_CONFIRMED_TEXT = os.getenv(
+    "AGENT_CONFIRMED_TEXT",
+    "✅ تأیید شد؛ کار در صف اجرا قرار گرفت.",
+)
+AGENT_RESUMED_TEXT = os.getenv(
+    "AGENT_RESUMED_TEXT",
+    "✅ پاسخ ثبت شد؛ کار از همان‌جا ادامه پیدا می‌کند.",
+)
+AGENT_CANCELLED_TEXT = os.getenv(
+    "AGENT_CANCELLED_TEXT",
+    "🛑 کار لغو شد.",
+)
+AGENT_NOT_YOURS_TEXT = os.getenv(
+    "AGENT_NOT_YOURS_TEXT",
+    "⛔️ این کار مال تو نیست.",
+)
+# The header on a progress message. It carries the id and nothing else, so a
+# progress line is never mistaken for the final answer.
+AGENT_PROGRESS_HEADER = os.getenv(
+    "AGENT_PROGRESS_HEADER",
+    "🤖 {request_id} — {repository} ({status})",
+)
+AGENT_RESULT_HEADER = os.getenv(
+    "AGENT_RESULT_HEADER",
+    "✅ {request_id} — {repository}: انجام شد",
+)
+AGENT_FAILED_HEADER = os.getenv(
+    "AGENT_FAILED_HEADER",
+    "❌ {request_id} — {repository}: ناموفق",
+)
+AGENT_TIMEOUT_HEADER = os.getenv(
+    "AGENT_TIMEOUT_HEADER",
+    "⌛️ {request_id} — {repository}: از زمان خارج شد",
+)
+AGENT_QUESTION_HEADER = os.getenv(
+    "AGENT_QUESTION_HEADER",
+    "❓ {request_id} — {repository} می‌پرسه:",
+)
+# Shown in place of a result that was too long for a document to be sent.
+AGENT_DOCUMENT_NAME = os.getenv("AGENT_DOCUMENT_NAME", "{request_id}.txt")
 
 # Where a review verdict is reported. Empty means "only the log". This is
 # deliberately the same private chat the moderation reports already use, so an

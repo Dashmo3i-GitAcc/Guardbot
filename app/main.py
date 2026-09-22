@@ -30,6 +30,10 @@ from telegram.ext import (
 from . import (
     admin_service,
     admin_tools,
+    agent_bridge,
+    agent_poller,
+    agent_service,
+    agent_spool,
     ai_intent,
     ai_moderation,
     awareness,
@@ -2260,6 +2264,54 @@ def _admin_turn_core(
                 gateway=gateway,
             )
 
+        if spec.kind == admin_tools.KIND_AGENT:
+            # The bridge's two non-request calls. They are routed here rather
+            # than through ``admin_service`` because they carry no target and no
+            # role — there is no ``AdminRequest`` shape for "confirm the thing
+            # waiting" — and ``app/agent_service.py`` re-derives the actor's
+            # authority itself. The permission on the spec is what kept the tool
+            # out of anybody else's hands; this is the second check.
+            if not config.AGENT_ENABLED:
+                return {"ok": False, "error": "the coding-agent bridge is switched off"}
+            if not rbac.is_owner(principal.user_id):
+                return {"ok": False, "error": "only the owner may do that"}
+            if name == "confirm_agent_task":
+                result = agent_service.confirm(
+                    actor_id=principal.user_id,
+                    chat_id=chat_id,
+                    request_id=str((args or {}).get("request_id", "") or ""),
+                    message_id=message_id,
+                )
+            elif name == "answer_agent_task":
+                result = agent_service.resume(
+                    actor_id=principal.user_id,
+                    chat_id=chat_id,
+                    request_id=str((args or {}).get("request_id", "") or ""),
+                    text=str((args or {}).get("answer", "") or ""),
+                )
+            else:
+                result = agent_service.cancel(
+                    actor_id=principal.user_id,
+                    request_id=str((args or {}).get("request_id", "") or ""),
+                )
+            log.info(
+                "ai agent tool=%s actor=%s outcome=%s ok=%s",
+                name, principal.user_id, result.outcome, result.ok,
+            )
+            return {
+                "ok": result.ok,
+                "operation": result.operation,
+                "outcome": result.outcome,
+                "message": result.message,
+                "explanation": admin_service.explain(result),
+                **({"task": result.extra["task"]} if result.extra.get("task") else {}),
+                **(
+                    {"candidates": result.extra["candidates"]}
+                    if result.extra.get("candidates")
+                    else {}
+                ),
+            }
+
         if not config.ADMIN_AI_ENABLED:
             return {"error": "AI administration is switched off"}
 
@@ -3088,6 +3140,85 @@ async def cmd_nexus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ctx,
         room.id,
         f"{config.NEXUS_STATUS_TITLE}\n{_nexus_status_text()}",
+        reply_to=msg.message_id,
+    )
+
+
+async def cmd_agent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/agent [status|confirm <id>|cancel <id>]` — the typed bridge interface.
+
+    Owner-only, and for the same reason the tool is: the thing on the other end
+    is a process with a shell and a git remote. It exists as a command for the
+    same reason ``/nexus`` does — a feature that can only be driven through the
+    assistant is a feature that strands itself when the assistant is the thing
+    that is broken, and "did my request go anywhere" is exactly the question
+    somebody asks when they suspect it is.
+
+    The confirmation path is the important one. The brief's rule is that vague
+    language is approval only with a specific pending dangerous operation, and
+    this command is the deterministic version of that: ``/agent confirm <id>``
+    names the task, and the server still refuses it if the caller is not the
+    owner or nothing is waiting.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    if not actor.is_owner:
+        _audit(actor.user_id, "agent.status", rbac.REASON_NOT_ADMIN, chat_id=room.id)
+        await _reply_in_group(
+            ctx, room.id, config.AGENT_CONFIRM_OWNER_ONLY_TEXT, reply_to=msg.message_id
+        )
+        return
+
+    args = [str(a).strip() for a in (ctx.args or [])]
+    sub = (args[0].lower() if args else "") or "status"
+
+    if sub in ("confirm", "cancel"):
+        request_id = args[1] if len(args) > 1 else ""
+        if not request_id:
+            await _reply_in_group(
+                ctx,
+                room.id,
+                f"شناسهٔ کار را بده: /agent {sub} <request_id>",
+                reply_to=msg.message_id,
+            )
+            return
+        result = (
+            agent_service.confirm(
+                actor_id=actor.user_id, chat_id=room.id, request_id=request_id
+            )
+            if sub == "confirm"
+            else agent_service.cancel(actor_id=actor.user_id, request_id=request_id)
+        )
+        _audit(
+            actor.user_id,
+            f"agent.{sub}",
+            result.outcome,
+            target_id=None,
+            chat_id=room.id,
+            detail=request_id,
+        )
+        await _reply_in_group(
+            ctx, room.id, result.message, reply_to=msg.message_id
+        )
+        return
+
+    if sub != "status":
+        await _reply_in_group(
+            ctx,
+            room.id,
+            "کاربرد: /agent [status | confirm <id> | cancel <id>]",
+            reply_to=msg.message_id,
+        )
+        return
+
+    _audit(actor.user_id, "agent.status", admin_service.OUTCOME_OK, chat_id=room.id)
+    await _reply_in_group(
+        ctx,
+        room.id,
+        agent_service.status_text(actor_id=actor.user_id),
         reply_to=msg.message_id,
     )
 
@@ -4007,6 +4138,36 @@ async def post_init(app: Application) -> None:
             )
     else:
         log.info("Nexus awareness: off")
+    # The coding-agent bridge. Registered here, and not in the awareness block,
+    # because it is deliberately *not* part of the awareness workload: a coding
+    # task spends the owner's CodeBuddy credential and must not touch the
+    # assistant's daily allowance. One tick lists a directory and queries the
+    # tasks that are actually active, which is nothing at all on a normal day.
+    if config.AGENT_ENABLED:
+        agent_spool.ensure()
+        published = agent_poller.recover()
+        app.job_queue.run_repeating(
+            agent_poller.tick,
+            interval=max(1.0, float(config.AGENT_POLL_SECONDS)),
+            first=1.0,
+        )
+        log.info(
+            "Coding agent: poll=%.0fs repositories=%s max_active=%d "
+            "max_per_repository=%d cli=%s (republished %d queued task(s))",
+            float(config.AGENT_POLL_SECONDS),
+            ",".join(agent_bridge.repository_names()),
+            int(config.AGENT_MAX_ACTIVE),
+            int(config.AGENT_MAX_PER_REPOSITORY),
+            config.AGENT_CLI or "-",
+            published,
+        )
+        if not config.AGENT_CLI:
+            log.warning(
+                "AGENT_ENABLED is on but AGENT_CLI is empty, so the runner has "
+                "nothing to execute. See AgentMD.md."
+            )
+    else:
+        log.info("Coding agent: off")
     # Who we are, from Telegram rather than from configuration. Done first,
     # because the alias matching that decides whether the assistant answers
     # depends on it and a failed getMe must be visible in the log rather than
@@ -4344,6 +4505,7 @@ def main() -> None:
         ("admins", cmd_admins),
         ("pool", cmd_pool),
         ("nexus", cmd_nexus),
+        ("agent", cmd_agent),
         ("promote", cmd_promote),
         ("demote", cmd_demote),
         ("ban", cmd_ban),

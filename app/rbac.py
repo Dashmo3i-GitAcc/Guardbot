@@ -86,6 +86,19 @@ PERMISSIONS = (
     # inserting anywhere else would renumber every existing bit in a dialog that
     # may already be open in somebody's Telegram client.
     "nexus.control",
+    # Ask the coding agent to change one of this system's own repositories.
+    #
+    # Owner-only for the same structural reason as ``nexus.control``, and for
+    # one more: the thing on the other end of this permission is a process with
+    # a filesystem, a shell and a git remote. Handing it to an administrator
+    # would make "an administrator" and "somebody who can edit the code that
+    # runs this bot" the same role, and no role bundle here is meant to mean
+    # that. Like ``nexus.control`` it is carried by no role, so
+    # ``authorize_grant`` cannot express it either.
+    #
+    # Appended after ``nexus.control`` and not before it: the same bitmask
+    # argument applies to both — see the note above.
+    "agent.request",
 )
 
 PERMISSION_SET = frozenset(PERMISSIONS)
@@ -95,7 +108,7 @@ PERMISSION_SET = frozenset(PERMISSIONS)
 # the omission silent: this list exists so that "nexus.control is owner-only" is
 # a checked property of the tables below rather than a fact somebody has to
 # notice while editing them.
-OWNER_ONLY_PERMISSIONS = frozenset({"nexus.control"})
+OWNER_ONLY_PERMISSIONS = frozenset({"nexus.control", "agent.request"})
 
 # The permission implied by every other one. Held by every principal, including
 # a guest, so a handler never has to special-case it.
@@ -196,6 +209,7 @@ PERMISSION_LABELS = {
     "config.manage": "تغییر تنظیمات ربات",
     "commands.use": "استفاده از دستورهای ربات",
     "nexus.control": "روشن/خاموش کردن نکسوس",
+    "agent.request": "درخواست از عامل برنامه‌نویسی",
 }
 ROLE_LABELS = {
     ROLE_OWNER: "مالک",
@@ -263,6 +277,11 @@ PERMISSION_TELEGRAM_RIGHT = {
     # the promotion dialog honest: it marks this permission as application-only
     # rather than offering to tick a Telegram box that does not exist.
     "nexus.control": None,
+    # Nor is asking a coding agent to edit a repository. It has no Telegram
+    # counterpart, and offering to tick a box for it would suggest that
+    # promoting somebody in a group could give them the ability to change the
+    # code — which is exactly what the owner-only bundle above prevents.
+    "agent.request": None,
 }
 
 # Rights the bot must itself hold before it can grant them to somebody else.
