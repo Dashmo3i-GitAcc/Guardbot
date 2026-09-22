@@ -254,6 +254,11 @@ async def on_member_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     chat_id = cm.chat.id
+    # Idempotent against a redelivered join update. Without this a duplicate
+    # event stacks a second challenge — and, worse, a second deadline — on
+    # somebody who is already being challenged.
+    if db.get_captcha(chat_id, user.id):
+        return
     try:
         await ctx.bot.restrict_chat_member(chat_id, user.id, permissions=MUTED)
     except TelegramError as e:
@@ -280,7 +285,17 @@ async def on_captcha_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     chat_id = q.message.chat.id
-    if not db.get_captcha(chat_id, q.from_user.id):
+    # Claim the challenge BEFORE the network call, not after it.
+    #
+    # This ordering is the whole fix. Verification used to read the row, await
+    # ``restrict_chat_member``, and only then delete the row — so for the length
+    # of that round-trip the row still said "unverified", and a reaper tick in
+    # that window would kick the member while this handler went on to answer
+    # "✅ تأیید شد". Claiming first makes the two sides a compare-and-swap on one
+    # row: the loser finds nothing and does nothing.
+    if not db.claim_captcha(chat_id, q.from_user.id, before=int(time.time())):
+        # Already verified, already expired, or already reaped. In every case
+        # there is nothing here to act on.
         await q.answer("مهلت تمام شده.", show_alert=True)
         return
 
@@ -288,10 +303,19 @@ async def on_captcha_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         await ctx.bot.restrict_chat_member(chat_id, q.from_user.id, permissions=FULL)
     except TelegramError as e:
         log.warning("unrestrict failed: %s", e)
+        # Put the challenge back, or a transient Telegram failure would strand
+        # the member muted with no row and no way to verify. The deadline is
+        # extended by the grace period so a retry is actually possible.
+        db.add_captcha(
+            chat_id,
+            q.from_user.id,
+            q.message.message_id,
+            int(time.time()) + config.CAPTCHA_RETRY_GRACE_SEC,
+        )
         await q.answer("خطا، دوباره امتحان کن.", show_alert=True)
         return
 
-    db.remove_captcha(chat_id, q.from_user.id)
+    log.info("captcha verified chat=%s user=%s", chat_id, q.from_user.id)
     await q.answer("✅ تأیید شد")
     try:
         await q.message.delete()
@@ -300,13 +324,34 @@ async def on_captcha_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def captcha_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Runs every 10s: kick users who didn't solve the captcha in time."""
-    for chat_id, user_id, msg_id in db.expired_captchas(int(time.time())):
-        db.remove_captcha(chat_id, user_id)
+    """Runs every 10s: kick users who didn't solve the captcha in time.
+
+    Every step here re-reads authoritative state immediately before acting, and
+    the claim is atomic, so a member who verified between this loop's query and
+    this row's turn is never touched. The list from ``expired_captchas`` is a
+    work queue, not a verdict.
+    """
+    now = int(time.time())
+    for chat_id, user_id, msg_id in db.expired_captchas(now):
+        # Compare-and-swap: False means the row is gone, so somebody verified
+        # (or another tick already handled it). Do nothing.
+        if not db.claim_expired_captcha(chat_id, user_id, now=now):
+            continue
+        # Promoted to admin during the challenge: Telegram will not let us
+        # restrict them, and kicking an administrator would be a worse outcome
+        # than letting an unverified admin through. Unmute and move on.
+        if await is_admin(ctx, chat_id, user_id):
+            log.info("captcha: %s is an admin now; releasing instead", user_id)
+            try:
+                await ctx.bot.restrict_chat_member(chat_id, user_id, permissions=FULL)
+            except TelegramError:
+                pass
+            continue
         try:
             # ban + unban = kick (user can rejoin later)
             await ctx.bot.ban_chat_member(chat_id, user_id)
             await ctx.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+            log.info("captcha expired chat=%s user=%s", chat_id, user_id)
         except TelegramError as e:
             log.warning("kick failed %s: %s", user_id, e)
         try:

@@ -42,6 +42,13 @@ CAPTCHA_TEXT = os.getenv(
 )
 CAPTCHA_BUTTON = os.getenv("CAPTCHA_BUTTON", "✅ من ربات نیستم")
 
+# How long a member has to retry after the unmute call fails on a click that was
+# otherwise valid. The challenge row is claimed (deleted) before the network
+# call, so a failure has to put it back or the member is left muted with no row
+# and no way to verify themselves. Short, because it exists to cover a transient
+# Telegram error, not to extend the challenge.
+CAPTCHA_RETRY_GRACE_SEC = _int("CAPTCHA_RETRY_GRACE_SEC", 15)
+
 # ---------------- Explicit media moderation ----------------
 MEDIA_ENABLED = _bool("MEDIA_ENABLED", True)
 

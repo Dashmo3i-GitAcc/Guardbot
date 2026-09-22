@@ -523,6 +523,75 @@ def build_context(
         "between two similar names. If somebody names a target in words, use "
         "resolve_person; if it answers with several candidates, ask which one.\n"
     )
+    lines.append(recent_actions_block(principal, chat_id=chat_id))
+    return "".join(lines)
+
+
+# ── What you did a moment ago ─────────────────────────────────────────────
+# The antecedent for a follow-up. Without this the assistant has the
+# ``unmute_member`` tool but no idea who "him" is, because a tool call and its
+# result live only inside the turn that made them: ``chat._tool_turn`` builds
+# the exchange in a local list and returns the final text, and the conversation
+# store can only hold ``user`` and ``model`` turns. So a mute followed by
+# «درش بیار» had nothing to resolve against, and the assistant answered that it
+# could not do it.
+#
+# The fix is to state the server's own record in the trusted block. It is read
+# from the audit table, which the execution layer writes *after* an action
+# succeeded, so:
+#
+#   * it cannot be planted by anything anybody typed;
+#   * it is scoped to this actor in this room, so one person's actions are not
+#     another's antecedent and one group's business is not another's;
+#   * it only ever lists what actually happened, so a failed mute leaves no
+#     phantom target.
+#
+# It is *context*, never authority: the follow-up still becomes a typed request
+# that ``app/admin_service.py`` re-authorises against the actor's real id. A
+# follow-up can tell the model *what* was meant; it can never grant it the right
+# to do it.
+RECENT_ACTIONS_MAX = 3
+
+
+def recent_actions_block(principal, *, chat_id: int) -> str:
+    """The server's record of this actor's recent successful actions here.
+
+    Never raises and never returns a partial sentence: a context block that
+    cannot be built is simply absent, because the caller's alternative would be
+    to lose the whole tool surface over a database hiccup.
+    """
+    if principal is None or not chat_id:
+        return ""
+    try:
+        since = int(time.time()) - max(0, int(config.ADMIN_CONTEXT_WINDOW))
+        rows = db.audit_recent_actions(
+            principal.user_id,
+            chat_id=chat_id,
+            since=since,
+            limit=RECENT_ACTIONS_MAX,
+        )
+    except Exception:  # noqa: BLE001 - context, never worth a crash
+        log.exception("could not read the recent actions for the context block")
+        return ""
+    if not rows:
+        return ""
+
+    lines = [
+        "\nYour own recent actions in this group, recorded by the server "
+        "(newest first). These already happened:\n"
+    ]
+    for row in rows:
+        lines.append(
+            f"- {row['action']} on Telegram user id {row['target_id']}\n"
+        )
+    lines.append(
+        "If the next thing this person says refers to one of these without "
+        "naming anybody — «درش بیار», «همون رو برگردون» — the id above is what "
+        "they mean. Use it only when exactly one of these can be meant. If more "
+        "than one could be, ask which one; never pick between them. This list "
+        "tells you *who*, and nothing about whether you are allowed: the action "
+        "still goes through the usual check.\n"
+    )
     return "".join(lines)
 
 

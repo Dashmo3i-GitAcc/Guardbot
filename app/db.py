@@ -482,6 +482,45 @@ def remove_captcha(chat_id: int, user_id: int) -> None:
     _exec("DELETE FROM captchas WHERE chat_id=? AND user_id=?", (chat_id, user_id))
 
 
+def claim_captcha(chat_id: int, user_id: int, *, before: int) -> bool:
+    """Atomically take the challenge if it is still pending and unexpired.
+
+    Returns True for exactly one caller. This is the fix for the bug where a
+    member verified successfully and was banned anyway: verification used to be
+    "read the row, await a network call, then delete the row", which left a
+    window in which the reaper could read the same row and act on it. The
+    deletion is now the claim, in one statement, so the two sides cannot both
+    win — whichever DELETE returns a row is the only one that proceeds.
+
+    ``before`` is the current time: a row whose deadline has already passed is
+    not claimable here, because that is the reaper's case to handle.
+    """
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM captchas WHERE chat_id=? AND user_id=? AND deadline>?",
+            (int(chat_id), int(user_id), int(before)),
+        )
+        _conn.commit()
+        return cur.rowcount == 1
+
+
+def claim_expired_captcha(chat_id: int, user_id: int, *, now: int) -> bool:
+    """The reaper's half of the same compare-and-swap.
+
+    Returns True only when the row was still present *and* still expired at the
+    moment of the delete. A member who verified a moment ago has no row left, so
+    this returns False and the reaper does nothing — which is the behaviour the
+    owner asked for: a completed verification can never be undone by a timer.
+    """
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM captchas WHERE chat_id=? AND user_id=? AND deadline<=?",
+            (int(chat_id), int(user_id), int(now)),
+        )
+        _conn.commit()
+        return cur.rowcount == 1
+
+
 def expired_captchas(now: int):
     with _lock:
         return _conn.execute(
@@ -966,6 +1005,12 @@ _AUDIT_COLS = (
     "at, actor_id, action, target_id, chat_id, outcome, detail, interface"
 )
 
+# The outcome string that means "this action actually happened". It is a copy of
+# ``admin_service.OUTCOME_OK`` rather than an import, because ``admin_service``
+# imports this module and a cycle would be worse than a duplicated literal. A
+# test asserts the two agree, so the copy cannot drift silently.
+AUDIT_OK = "ok"
+
 
 def _audit_row(r) -> dict:
     return {
@@ -1008,6 +1053,45 @@ def audit_since(
         args.append(int(chat_id))
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(max(1, int(limit)))
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_audit_row(r) for r in rows]
+
+
+def audit_recent_actions(
+    actor_id: int, *, chat_id: int, since: int = 0, limit: int = 3
+) -> list[dict]:
+    """What this actor has *successfully done* in this room, newest first.
+
+    This is the antecedent for a follow-up. «این کاربر رو ساکت کن» followed by
+    «درش بیار» is only answerable if something remembers who "him" was, and the
+    thing that remembers it has to be the server: the audit row was written by
+    the execution layer after the action actually succeeded, so it cannot be
+    planted by anything anybody typed.
+
+    Three filters, each load-bearing:
+
+    * ``actor_id`` — it is *your own* actions. Somebody else's mute is not a
+      referent you may act on, and showing it would invite exactly that.
+    * ``chat_id`` — one group's administrative business stays out of another's.
+    * ``outcome = 'ok'`` — a refused or failed action never happened, and a
+      follow-up that resolved to it would be resolving to a fiction.
+
+    Bounded by ``since`` and ``limit``: this is a conversational antecedent, not
+    a copy of the audit table in a prompt.
+    """
+    sql = (
+        f"SELECT {_AUDIT_COLS} FROM admin_audit "
+        "WHERE actor_id = ? AND chat_id = ? AND outcome = ? AND target_id IS NOT NULL "
+        "AND at >= ? ORDER BY id DESC LIMIT ?"
+    )
+    args = [
+        int(actor_id),
+        int(chat_id),
+        AUDIT_OK,
+        int(since),
+        max(1, int(limit)),
+    ]
     with _lock:
         rows = _conn.execute(sql, tuple(args)).fetchall()
     return [_audit_row(r) for r in rows]
