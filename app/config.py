@@ -1840,18 +1840,24 @@ def _deadline(seconds: float) -> float:
 # without touching the assistant.
 #
 # The credential defaults to the conversation's, and that follows the precedent
-# ``tts`` already sets rather than weakening the isolation requirement.
-# Awareness is a **mode of the conversation layer**, not a peer of it — the
-# thing that makes two workloads one allowance is the Google project behind
-# them, and an operator running this bot has one project per *feature*, not one
-# per call site. What the brief requires isolated is isolated and it is
-# isolated structurally: histories, rate windows, circuit breakers, failure
-# state and daily allowances are all keyed by **workload**, in ``gemini_pool``
-# and in ``db``, so awareness cannot spend the allowance a person is waiting on
-# an answer to even when the two share a credential. An operator who has a
-# spare key gives awareness one by setting ``GEMINI_AWARENESS_API_KEY``, and
-# ``gemini_pool.shared_credentials`` treats awareness the way it treats tts: a
-# deliberate pairing rather than a surprise worth warning about.
+# ``tts`` sets rather than weakening the isolation requirement. What the brief
+# requires isolated is isolated and it is isolated structurally: histories, rate
+# windows, circuit breakers, failure state and daily allowances are all keyed by
+# **workload**, in ``gemini_pool`` and in ``db``, so awareness keeps its own
+# allowance and its own breaker even when the two share a credential. An
+# operator who has a spare key gives awareness one by setting
+# ``GEMINI_AWARENESS_API_KEY``.
+#
+# The default is *reported*, though. Sharing a credential means sharing a Google
+# project, and therefore a provider-side rate limit that no per-workload counter
+# can partition — and awareness is not a mode of the conversation the way tts is,
+# because it runs on its own timer in its own rooms rather than as part of a turn
+# that already happened. Measured on the deployment that produced this comment,
+# awareness and chat shared this key and the collision cost 26% of conversational
+# turns to rate limits, plus an awareness pool that spent its day's allowance and
+# then failed every pass until the reset. So ``gemini_pool.shared_credentials``
+# now reports this pairing at boot, and the operator decides whether to spend a
+# key on it.
 GEMINI_AWARENESS_API_KEY = (
     os.getenv("GEMINI_AWARENESS_API_KEY", "").strip() or GEMINI_CHAT_API_KEY
 )

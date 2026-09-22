@@ -1577,23 +1577,30 @@ def shared_credentials() -> list[tuple[str, list[str]]]:
     workload has its own credentials, which is the configuration the brief asks
     for.
 
-    ``tts`` and ``awareness`` are excluded, and deliberately. Both are *modes* of
-    the conversation feature rather than peers of it: speech synthesis is the
-    same exchange spoken aloud, and awareness is the same assistant reading the
-    room instead of a message. Both are configured to use the chat credential on
-    purpose (``GEMINI_CHAT_TTS_MODEL`` and ``GEMINI_CHAT_API_KEY`` are one
-    feature's settings, and ``GEMINI_AWARENESS_API_KEY`` defaults to the same
-    key). Reporting those pairings as a surprise would train the operator to
-    ignore the warning that actually matters, which is two independent workloads
-    quietly drawing on one project.
+    ``tts`` is excluded, and deliberately: speech synthesis is a *mode* of the
+    conversation rather than a peer of it. It runs only as part of a turn that
+    already ran, on the same schedule, so it cannot take an allowance from a
+    request that has not happened yet — and reporting a pairing the operator
+    configured on purpose would train them to ignore the warning that matters.
+
+    ``awareness`` used to be excluded on the same reasoning, and that was wrong.
+    It is not a mode of the conversation: it runs on its own timer, in its own
+    rooms, whether or not anybody is talking to the assistant. Measured on the
+    deployment that produced this change, awareness and chat shared
+    ``GEMINI_CHAT_API_KEY`` and the collision was visible: 143 rate-limited
+    conversational turns out of 543 (26%), and an awareness pool that spent its
+    whole daily allowance and then failed every pass for the rest of the day.
+    The pairing is real, it is the operator's to fix, and the boot log is where
+    they can learn about it.
 
     Note what is *not* claimed here: sharing a credential means sharing a Google
     project, and therefore a provider-side rate limit. What stays separate — and
     what the brief requires separate — is everything this application controls:
     each workload keeps its own accounts, daily allowance, model preference,
-    breaker and counters, because all of those are keyed by workload.
+    breaker and counters, because all of those are keyed by workload. This
+    function exists because that separation is not sufficient on its own.
     """
-    shared_modes = {"tts", "awareness"}
+    shared_modes = {"tts"}
     seen: dict[str, list[str]] = {}
     labels: dict[str, str] = {}
     for pool in pools():

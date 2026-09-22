@@ -663,6 +663,18 @@ def ai_day(now: float | None = None) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(stamp - _API_DAY_OFFSET))
 
 
+def ai_day_seconds_left(now: float | None = None) -> float:
+    """Seconds until the API day rolls over, in ``(0, 86400]``.
+
+    The daily allowance is a *day's* budget, so anything that wants to spend it
+    across the day rather than in the first hour needs the day's own clock. It
+    is derived from the same offset as ``ai_day`` rather than from local
+    midnight, because the reset it is counting down to is the provider's.
+    """
+    stamp = time.time() if now is None else float(now)
+    return 86400.0 - ((stamp - _API_DAY_OFFSET) % 86400.0)
+
+
 def ai_calls_today(day: str | None = None) -> int:
     """How many Gemini requests have been spent on ``day`` (default: today)."""
     key = day or ai_day()

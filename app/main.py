@@ -1718,6 +1718,62 @@ async def _awareness_read(
     trace.mark("send")
 
 
+def _awareness_allowance_gap(now: float | None = None) -> float:
+    """The minimum gap between two passes in one room, given the day's allowance.
+
+    ``NEXUS_AWARENESS_MIN_INTERVAL_SECONDS`` (20) and
+    ``NEXUS_AWARENESS_DAILY_LIMIT`` (200) are two numbers about the same thing,
+    and they disagreed by a factor of twenty-one: a room that is at all busy
+    reaches the interval once every twenty seconds, so the allowance was gone in
+    about an hour and every later pass failed with ``pool_empty`` until the API
+    day rolled over. Measured on this deployment before the change — 203
+    requests spent, then 141 consecutive failed passes, each of which had
+    already rendered the transcript and built 26 KB of tool declarations.
+
+    So the gap is not a constant. It is the configured floor, or whatever
+    spacing would make what is left of the allowance last until the end of the
+    API day, whichever is longer. Early in the day with a full allowance that is
+    still the floor, so nothing slows down while there is budget to spend; as
+    the allowance is consumed the gap widens smoothly rather than awareness
+    switching off at a cliff.
+
+    A pool with no daily budget is not paced at all. There is no allowance to
+    spread, and inventing a rate limit for a workload nobody capped would be
+    this function deciding a policy that belongs in configuration.
+    """
+    floor = max(1.0, float(config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS))
+    pool = gemini_pool.pool_for("awareness")
+    if pool is None or not pool.daily_budget:
+        return floor
+    remaining = pool.daily_remaining(now)
+    if remaining <= 0:
+        # Nothing left today. Wait for the rollover rather than retrying against
+        # a pool that cannot answer: those retries cost nothing at the provider
+        # but they are not free here, and they fill the log with a failure that
+        # is already known and cannot be acted on.
+        return max(floor, db.ai_day_seconds_left(now))
+    return max(floor, db.ai_day_seconds_left(now) / remaining)
+
+
+def _awareness_affordable(chat_id: int, now: float | None = None) -> bool:
+    """Whether the day can still afford another pass in this room.
+
+    Deliberately per room rather than global. The allowance is shared, but
+    starving one room because another happened to be read first is a fairness
+    bug rather than a saving, and ``NEXUS_AWARENESS_MAX_CHATS_PER_TICK`` is
+    where the per-tick bound belongs.
+
+    Checked before the transcript is rendered, so a pass the pool cannot serve
+    costs a dictionary lookup and a cached counter read instead of a prompt.
+    """
+    last = _awareness_last_pass.get(int(chat_id), 0.0)
+    if not last:
+        # Never read. The floor is not a debt to be paid before the first pass.
+        return True
+    moment = time.time() if now is None else float(now)
+    return (moment - last) >= _awareness_allowance_gap(moment)
+
+
 async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
     """Read one room if it is due. Returns whether a pass actually ran.
 
@@ -1734,7 +1790,9 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
     * a room Telegram is not delivering ordinary messages for is not read at all
       — there is nothing in the window but commands and mentions;
     * the room must be *due*, which is a timing question (see
-      ``awareness.due``), and ``urgent`` only relaxes the wait-for-quiet clause.
+      ``awareness.due``), and ``urgent`` only relaxes the wait-for-quiet clause;
+    * and the day must still be able to afford it, which is the second timing
+      question and a different one — see ``_awareness_allowance_gap``.
     """
     chat_id = int(row.get("chat_id") or 0)
     if not chat_id or chat_id in _awareness_inflight:
@@ -1754,6 +1812,13 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
         urgent=urgent,
     )
     if not verdict:
+        return False
+    if not _awareness_affordable(chat_id):
+        # The room is ready but the day is not rich enough to read it yet. This
+        # is the allowance brake rather than the quiescence one, and it is
+        # checked before the transcript is rendered and before the tool
+        # declarations are built, so a pass the pool cannot serve costs a
+        # dictionary lookup instead of 26 KB of prompt.
         return False
     _awareness_urgent.discard(chat_id)
     _awareness_inflight.add(chat_id)

@@ -1144,6 +1144,53 @@ def test_shared_credentials_across_independent_workloads_are_reported(monkeypatc
     assert shared == [(gemini_pool.mask(KEY_A), ["intent", "moderation"])]
 
 
+def test_awareness_sharing_the_chat_key_is_reported(monkeypatch):
+    """Awareness is not a mode of the conversation, and must not be treated as one.
+
+    ``tts`` is: it runs inside a turn that already happened, so it cannot take an
+    allowance from a request nobody has made yet. Awareness runs on its own timer
+    in its own rooms, whether or not anybody is talking to the assistant, so the
+    pairing is a genuine collision — and on the deployment that produced this
+    test it cost 26% of conversational turns to rate limits before anybody
+    noticed. The boot log is where the operator can find out.
+    """
+    monkeypatch.setattr(
+        config,
+        "GEMINI_POOLS",
+        [
+            {"workload": "chat", "keys": [("1", KEY_A)], "models": TEXT_MODELS,
+             "capabilities": frozenset({"text"}), "allow_experimental": False,
+             "retries": 0, "backoff": 0.0, "timeout": 10.0},
+            {"workload": "awareness", "keys": [("1", KEY_A)], "models": TEXT_MODELS,
+             "capabilities": frozenset({"text"}), "allow_experimental": False,
+             "retries": 0, "backoff": 0.0, "timeout": 10.0},
+        ],
+    )
+    gemini_pool.build_pools()
+
+    assert gemini_pool.shared_credentials() == [
+        (gemini_pool.mask(KEY_A), ["awareness", "chat"])
+    ]
+
+
+def test_awareness_with_its_own_key_is_not_reported(monkeypatch):
+    """The report is actionable: an operator who separated them stops seeing it."""
+    monkeypatch.setattr(
+        config,
+        "GEMINI_POOLS",
+        [
+            {"workload": "chat", "keys": [("1", KEY_A)], "models": TEXT_MODELS,
+             "capabilities": frozenset({"text"}), "allow_experimental": False,
+             "retries": 0, "backoff": 0.0, "timeout": 10.0},
+            {"workload": "awareness", "keys": [("1", KEY_B)], "models": TEXT_MODELS,
+             "capabilities": frozenset({"text"}), "allow_experimental": False,
+             "retries": 0, "backoff": 0.0, "timeout": 10.0},
+        ],
+    )
+    gemini_pool.build_pools()
+
+    assert gemini_pool.shared_credentials() == []
+
 # ══ PERSISTENCE TESTS ═════════════════════════════════════════════════════
 def test_model_counters_survive_a_restart(provider):
     provider.then(KEY_A, TEXT_MODELS[0], rate_limited(TEXT_MODELS[0]))

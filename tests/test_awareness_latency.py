@@ -34,7 +34,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import admin_tools, awareness, chat, config, db, main, nexus, rbac
+from app import admin_tools, awareness, chat, config, db, gemini_pool, main, nexus, rbac
 
 OWNER = 999
 ADMIN = 556
@@ -699,3 +699,208 @@ def test_the_tool_declarations_are_the_largest_part_of_the_prompt():
     assert size > fixed, "declarations are the largest item"
     # A ceiling, so growth is noticed. Raise it deliberately, with a reason.
     assert size < 40000, f"tool declarations grew to {size} chars"
+
+
+# ══ THE ALLOWANCE ═════════════════════════════════════════════════════════
+# The second timing question, and the one that was actually broken. The floor
+# interval (20 s) and the daily allowance (200) are two numbers about the same
+# thing, and they disagreed by a factor of twenty-one: a busy room reaches the
+# floor every twenty seconds, so the allowance was spent in about an hour and
+# every pass after that failed with ``pool_empty`` until the API day rolled
+# over. On the deployment that produced this work: 203 requests spent, then 141
+# consecutive failed passes.
+#
+# The fix is to pace, so the tests below are about the pacing rule and about the
+# two things it must not do — slow a room down while there is allowance to
+# spend, and let a spent allowance become a silent failure.
+class FakeAllowance:
+    """A pool that reports exactly the allowance a test wants to describe."""
+
+    def __init__(self, *, budget: int, remaining: int):
+        self.daily_budget = budget
+        self._remaining = remaining
+
+    def daily_remaining(self, now=None) -> int:
+        return self._remaining
+
+
+def install_allowance(monkeypatch, *, budget: int, remaining: int):
+    fake = FakeAllowance(budget=budget, remaining=remaining)
+    monkeypatch.setattr(gemini_pool, "pool_for", lambda workload: fake)
+    return fake
+
+
+def pin_day_clock(monkeypatch, *, seconds_left: float):
+    """Hold the allowance's clock still, so a refusal is not a race.
+
+    The tests that ask ``_awareness_affordable`` a question default to the real
+    clock, and the real clock is within a minute of the API rollover once a day
+    — at which point the gap legitimately shrinks to the floor and a test that
+    expected a refusal would see a pass instead. Pinning the clock is what makes
+    the assertion about the rule rather than about when the suite was run.
+    """
+    monkeypatch.setattr(
+        db, "ai_day_seconds_left", lambda now=None: float(seconds_left)
+    )
+
+
+def at_day_start(offset_days: int = 3) -> float:
+    """A stamp exactly on the API day boundary: the whole day is ahead."""
+    return db._API_DAY_OFFSET + offset_days * 86400.0
+
+
+def test_the_day_clock_counts_down_to_the_providers_reset():
+    """The allowance is a *day's*, and the day is the provider's, not local."""
+    assert db.ai_day_seconds_left(at_day_start()) == 86400.0
+    assert db.ai_day_seconds_left(at_day_start() + 1) == 86399.0
+    assert db.ai_day_seconds_left(at_day_start() + 86399) == 1.0
+    # And it never leaves the day it belongs to.
+    for hour in range(0, 24):
+        left = db.ai_day_seconds_left(at_day_start() + hour * 3600)
+        assert 0.0 < left <= 86400.0
+
+
+def test_a_spent_allowance_waits_for_the_rollover(monkeypatch):
+    """Zero left is not "try again in twenty seconds"; it is "try tomorrow"."""
+    install_allowance(monkeypatch, budget=200, remaining=0)
+
+    gap = main._awareness_allowance_gap(at_day_start() + 3600)
+
+    assert gap == pytest.approx(86400.0 - 3600.0), (
+        "a spent allowance must wait for the reset, not spin against the pool"
+    )
+
+
+def test_a_small_allowance_is_spread_across_the_rest_of_the_day(monkeypatch):
+    """Two hundred passes must cover a day, which is one every seven minutes."""
+    install_allowance(monkeypatch, budget=200, remaining=200)
+
+    gap = main._awareness_allowance_gap(at_day_start())
+
+    assert gap == pytest.approx(86400.0 / 200), "the allowance defines the pace"
+
+
+def test_a_generous_allowance_never_slows_a_room_below_the_floor(monkeypatch):
+    """Pacing must not become a second, hidden rate limit.
+
+    With enough allowance for the whole day the gap is the configured floor and
+    nothing else, which is the property that keeps this change from making
+    awareness slower in the case where it was never the problem.
+    """
+    install_allowance(monkeypatch, budget=5000, remaining=5000)
+
+    assert main._awareness_allowance_gap(at_day_start()) == (
+        config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS
+    )
+
+
+def test_the_end_of_the_day_spends_what_is_left(monkeypatch):
+    """Late in the day the remaining allowance is worth spending, not saving.
+
+    Saving it would be saving it for nobody: the counter resets at the rollover
+    whether or not it was used.
+    """
+    install_allowance(monkeypatch, budget=200, remaining=200)
+
+    gap = main._awareness_allowance_gap(at_day_start() + 86399)
+
+    assert gap == config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS
+
+
+def test_a_pool_without_a_budget_is_not_paced(monkeypatch):
+    """A workload nobody capped has no allowance to spread.
+
+    Inventing a spacing for it would be this function deciding a policy that
+    belongs in configuration, and it would silently throttle every workload the
+    moment somebody added one without a budget.
+    """
+    install_allowance(monkeypatch, budget=0, remaining=0)
+
+    assert main._awareness_allowance_gap(at_day_start()) == (
+        config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS
+    )
+
+
+def test_a_room_that_has_never_been_read_is_not_held_back(monkeypatch):
+    """The floor is a gap between passes, not a debt owed before the first one."""
+    install_allowance(monkeypatch, budget=200, remaining=200)
+    main._awareness_last_pass.pop(CHAT, None)
+
+    assert main._awareness_affordable(CHAT) is True
+
+
+def test_the_allowance_brake_is_per_room(monkeypatch):
+    """A shared allowance is not a reason to starve the second room.
+
+    The allowance is one number for the workload, but the pace is per room: a
+    room read a moment ago must not stop a different room from being read, or
+    the first room to speak would own the whole day.
+    """
+    install_allowance(monkeypatch, budget=200, remaining=200)
+    now = time.time()
+    main._awareness_last_pass[CHAT] = now
+    main._awareness_last_pass[OTHER_CHAT] = 0.0
+
+    assert main._awareness_affordable(CHAT, now) is False
+    assert main._awareness_affordable(OTHER_CHAT, now) is True
+
+
+def test_a_room_is_not_read_once_the_allowance_is_spent(monkeypatch):
+    """The failure this fixes, stated as a behaviour: no allowance, no pass.
+
+    Before the change the room was read, the transcript was rendered, the tool
+    declarations were built, and the call came back ``pool_empty`` — every
+    twenty seconds for the rest of the day.
+    """
+    install_allowance(monkeypatch, budget=200, remaining=0)
+    pin_day_clock(monkeypatch, seconds_left=3600)
+    passes = install_awareness(monkeypatch, decision={"relevant": True})
+    row = room_is_due()
+    # Read a minute ago: due by the floor, unaffordable by the allowance.
+    main._awareness_last_pass[CHAT] = time.time() - 60
+
+    ran = asyncio.run(main._awareness_run_room(SimpleNamespace(bot=FakeBot()), row))
+
+    assert ran is False, "a pass the pool cannot serve must not be started"
+    assert passes == [], "and must not reach the model"
+
+
+def test_the_allowance_is_checked_before_the_prompt_is_built(monkeypatch):
+    """The refusal has to be cheap, or the day is spent on refusals.
+
+    141 failed passes on the deployment each rendered a transcript and built
+    26 KB of tool declarations before the pool told them it was empty. The
+    check belongs in front of that work, not behind it.
+    """
+    install_allowance(monkeypatch, budget=200, remaining=0)
+    pin_day_clock(monkeypatch, seconds_left=3600)
+    install_awareness(monkeypatch, decision={"relevant": True})
+    row = room_is_due()
+    main._awareness_last_pass[CHAT] = time.time() - 60
+
+    rendered: list[int] = []
+    monkeypatch.setattr(
+        main.awareness, "render", lambda *a, **k: rendered.append(1) or ""
+    )
+    built: list[int] = []
+    monkeypatch.setattr(
+        main, "_awareness_turn", lambda *a, **k: built.append(1) or (None, "", None)
+    )
+
+    asyncio.run(main._awareness_run_room(SimpleNamespace(bot=FakeBot()), row))
+
+    assert rendered == [], "the transcript must not be rendered for a refused pass"
+    assert built == [], "and the tool declarations must not be built"
+
+
+def test_a_readable_room_is_still_read_when_the_allowance_allows_it(monkeypatch):
+    """The brake must not be a wall. With allowance, the pass runs as before."""
+    install_allowance(monkeypatch, budget=200, remaining=200)
+    passes = install_awareness(monkeypatch, decision={"relevant": True})
+    row = room_is_due()
+    main._awareness_last_pass[CHAT] = time.time() - 100000
+
+    ran = asyncio.run(main._awareness_run_room(SimpleNamespace(bot=FakeBot()), row))
+
+    assert ran is True
+    assert len(passes) == 1
