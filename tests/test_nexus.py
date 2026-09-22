@@ -1428,6 +1428,60 @@ def test_the_nexus_command_reports_the_state(monkeypatch):
     assert config.NEXUS_STATUS_TITLE in bot.messages[0]
 
 
+def test_the_status_reports_the_actor_gate_when_it_is_on(monkeypatch):
+    """`/nexus status` says which actor gate is in force, not just the state.
+
+    "Nexus did not answer me" has more than one cause, and the actor gate is one
+    of them. The owner asked to be able to check it from the group, so the line
+    is part of the status rather than something only a log reader can see.
+    """
+    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", True)
+    bot = FakeBot()
+    update = update_for(message(text="/nexus"), actor=OWNER)
+    asyncio.run(main.cmd_nexus(update, SimpleNamespace(bot=bot, args=[])))
+
+    assert f"پاسخ‌دهی به: {config.NEXUS_ACTORS_ONLY_ON_LABEL}" in bot.messages[0]
+
+
+def test_the_status_reports_the_actor_gate_when_it_is_off(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", False)
+    bot = FakeBot()
+    update = update_for(message(text="/nexus"), actor=OWNER)
+    asyncio.run(main.cmd_nexus(update, SimpleNamespace(bot=bot, args=[])))
+
+    assert f"پاسخ‌دهی به: {config.NEXUS_ACTORS_ONLY_OFF_LABEL}" in bot.messages[0]
+
+
+def test_the_reported_actor_gate_cannot_disagree_with_the_gate_itself(monkeypatch):
+    """What the status says and what ``nexus.accepts`` does are read from one place.
+
+    The failure this guards against is the expensive one: an operator reads
+    "answers only administrators" while an ordinary member is in fact being
+    served, or the reverse. Both the line and the gate consult the same config
+    value, so toggling it has to move both together.
+    """
+    for actors_only in (True, False):
+        monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", actors_only)
+        # The gate only reaches its actor test when the layer is awake, so the
+        # precondition is made explicit rather than inherited from the fixture.
+        nexus.set_state(nexus.ONLINE, actor_id=OWNER, reason="test")
+        member = rbac.resolve(MEMBER)
+        bot = FakeBot()
+        update = update_for(message(text="/nexus"), actor=OWNER)
+        asyncio.run(main.cmd_nexus(update, SimpleNamespace(bot=bot, args=[])))
+
+        # The line agrees with the config...
+        label = (
+            config.NEXUS_ACTORS_ONLY_ON_LABEL
+            if actors_only
+            else config.NEXUS_ACTORS_ONLY_OFF_LABEL
+        )
+        assert f"پاسخ‌دهی به: {label}" in bot.messages[0]
+        # ...and the config is the thing the gate actually consults: with the
+        # switch off a member is accepted, with it on a member is not.
+        assert nexus.accepts(member) is not actors_only
+
+
 def test_the_nexus_command_is_refused_for_a_member(monkeypatch):
     """A typed command answers a refusal; it never reveals the state or changes it.
 

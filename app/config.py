@@ -1239,12 +1239,22 @@ NEXUS_STATUS_TEXT = os.getenv(
     "آخرین تغییر: {changed}\n"
     "توسط: {changed_by}\n"
     "پایش پیام‌های مدیرها: {observe}\n"
+    "پاسخ‌دهی به: {actors_only}\n"
     "{mode}",
 )
 NEXUS_STATE_ONLINE_LABEL = os.getenv("NEXUS_STATE_ONLINE_LABEL", "روشن (ONLINE)")
 NEXUS_STATE_OFFLINE_LABEL = os.getenv("NEXUS_STATE_OFFLINE_LABEL", "خاموش (OFFLINE)")
 NEXUS_OBSERVE_ON_LABEL = os.getenv("NEXUS_OBSERVE_ON_LABEL", "فعال")
 NEXUS_OBSERVE_OFF_LABEL = os.getenv("NEXUS_OBSERVE_OFF_LABEL", "غیرفعال")
+# Reported in `/nexus status` so the owner can see, from inside the group, which
+# of the two "who gets answered" switches is in force. Without this line the
+# actor gate is invisible: a member who addresses Nexus and gets no reply cannot
+# tell whether the gate refused them or something further in failed, and the
+# owner asked to be able to verify exactly that. The two labels read as answers
+# to "پاسخ‌دهی به" ("answers to") and are deliberately distinct from the observe
+# labels above, so a rendered status says which switch is which.
+NEXUS_ACTORS_ONLY_ON_LABEL = os.getenv("NEXUS_ACTORS_ONLY_ON_LABEL", "فقط مدیرها")
+NEXUS_ACTORS_ONLY_OFF_LABEL = os.getenv("NEXUS_ACTORS_ONLY_OFF_LABEL", "همه")
 NEXUS_NEVER_CHANGED_TEXT = os.getenv("NEXUS_NEVER_CHANGED_TEXT", "—")
 NEXUS_STATUS_HINT = os.getenv(
     "NEXUS_STATUS_HINT",

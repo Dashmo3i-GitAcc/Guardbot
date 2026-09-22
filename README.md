@@ -254,7 +254,9 @@ execution layer decides whether it happens.
 stored role. An ordinary member cannot activate it by replying to it, mentioning
 it, or wording a message that looks like an order; their message costs one lookup
 and never reaches Gemini. (Set `NEXUS_ACTORS_ONLY=false` to restore the older
-"answers any member who addresses it" behaviour.)
+"answers any member who addresses it" behaviour.) `/nexus status` prints this
+setting as its `پاسخ‌دهی به` line, so you can confirm from inside the group which
+gate is in force.
 
 **What it does with an administrator's message.**
 

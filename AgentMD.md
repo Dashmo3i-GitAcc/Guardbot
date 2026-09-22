@@ -3334,3 +3334,9 @@ section: the assistant used to answer any member who addressed it directly. It
 now answers authorized administrators only, and a member's message costs one
 dictionary lookup. Setting it to `false` restores the earlier behaviour and
 still changes nothing about what an *action* requires.
+
+Because the gate is silent by design — a refused member simply gets no answer —
+`/nexus status` reports the value in force as its own line, `پاسخ‌دهی به`
+(`فقط مدیرها` / `همه`, configurable through `NEXUS_ACTORS_ONLY_ON_LABEL` and
+`NEXUS_ACTORS_ONLY_OFF_LABEL`). The line and the gate read the same config value,
+so the report cannot disagree with the behaviour; a test pins that.

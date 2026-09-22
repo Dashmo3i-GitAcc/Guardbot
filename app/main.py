@@ -1432,6 +1432,14 @@ def _nexus_status_text() -> str:
                 if described["observe_admins"]
                 else config.NEXUS_OBSERVE_OFF_LABEL
             ),
+            # Read from the live config rather than from ``described`` so the
+            # line and the gate can never disagree: ``accepts`` consults
+            # ``config.NEXUS_ACTORS_ONLY`` directly, and this is the same read.
+            actors_only=(
+                config.NEXUS_ACTORS_ONLY_ON_LABEL
+                if config.NEXUS_ACTORS_ONLY
+                else config.NEXUS_ACTORS_ONLY_OFF_LABEL
+            ),
             mode=admin_service.mode_line(),
         )
     ]
