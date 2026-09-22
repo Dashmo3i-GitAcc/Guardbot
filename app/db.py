@@ -2,6 +2,7 @@
 import sqlite3
 import threading
 import time
+import uuid
 
 from . import config
 
@@ -526,6 +527,33 @@ def init() -> None:
     )
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_seen_updates_at ON seen_updates(at)"
+    )
+    # A stable, opaque handle for one Telegram user.
+    #
+    # Telegram user ids are the *authority* everywhere in this codebase, and
+    # this table does not change that: nothing reads a uuid to decide whether
+    # somebody may do something. What it adds is a second name for the same
+    # person that is not a phone-adjacent number, so operational records, logs
+    # and the assistant's own answers can refer to somebody without repeating
+    # their Telegram id in every line — and so a person's identity can be
+    # correlated across chats without treating the numeric id as the only
+    # possible key.
+    #
+    # It is deliberately global rather than per-chat: a Telegram user id is
+    # global, and a per-chat uuid would make the same person two people the
+    # moment they spoke in a second group.
+    #
+    # The uuid is generated once, on first sight, and never derived from the
+    # Telegram id — a derived value would be reversible and would make the
+    # opaque handle a weak alias for the number it is meant to stand apart
+    # from. The column is unique so a collision (or a hand-edited row) is
+    # refused by the database rather than silently shadowing somebody.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS identities (
+            user_id INTEGER PRIMARY KEY,
+            uuid TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            last_seen INTEGER NOT NULL DEFAULT 0)"""
     )
     _conn.commit()
 
@@ -1223,6 +1251,36 @@ def audit_recent_actions(
     return [_audit_row(r) for r in rows]
 
 
+def audit_for_user(
+    user_id: int,
+    *,
+    chat_id: int | None = None,
+    since: int = 0,
+    limit: int = 20,
+) -> list[dict]:
+    """Audit rows in which this user was either the actor or the target.
+
+    Both directions, because "why was this person never promoted?" and "what did
+    this person do?" are the same lookup from opposite ends and the assistant is
+    asked both. Bounded by a time window, a room and a count for the same reason
+    every other read here is: this is operational history the assistant may
+    summarise, not a copy of the audit table in a prompt.
+    """
+    sql = (
+        f"SELECT {_AUDIT_COLS} FROM admin_audit "
+        "WHERE (actor_id = ? OR target_id = ?) AND at >= ?"
+    )
+    args: list = [int(user_id), int(user_id), int(since)]
+    if chat_id is not None:
+        sql += " AND chat_id = ?"
+        args.append(int(chat_id))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(max(1, int(limit)))
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_audit_row(r) for r in rows]
+
+
 def audit_prune(keep_seconds: int) -> int:
     """Drop audit rows older than the retention window. Returns rows removed.
 
@@ -1877,6 +1935,94 @@ def people_reset() -> None:
         _conn.commit()
 
 
+# ── Identities: the opaque handle for a Telegram user ─────────────────────
+def identity_ensure(user_id: int) -> dict:
+    """Return this user's identity row, creating it on first sight.
+
+    One statement to insert and one to read, rather than a read-then-insert:
+    two processes handling the same person's first two messages concurrently
+    would otherwise both see "no row" and both try to create one. ``INSERT OR
+    IGNORE`` on the primary key makes the loser a no-op, and the read afterwards
+    is what guarantees both callers return the same uuid rather than the one
+    their own insert proposed.
+    """
+    user_id = int(user_id)
+    if user_id <= 0:
+        return {}
+    now = int(time.time())
+    with _lock:
+        _conn.execute(
+            "INSERT OR IGNORE INTO identities (user_id, uuid, created_at, last_seen) "
+            "VALUES (?,?,?,?)",
+            (user_id, uuid.uuid4().hex, now, now),
+        )
+        _conn.execute(
+            "UPDATE identities SET last_seen=? WHERE user_id=?", (now, user_id)
+        )
+        _conn.commit()
+        row = _conn.execute(
+            "SELECT user_id, uuid, created_at, last_seen FROM identities WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return {}
+    return {
+        "user_id": int(row[0]),
+        "uuid": str(row[1]),
+        "created_at": int(row[2] or 0),
+        "last_seen": int(row[3] or 0),
+    }
+
+
+def identity_get(user_id: int) -> dict | None:
+    """The stored identity row for a Telegram user, or ``None`` if never seen."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT user_id, uuid, created_at, last_seen FROM identities WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "user_id": int(row[0]),
+        "uuid": str(row[1]),
+        "created_at": int(row[2] or 0),
+        "last_seen": int(row[3] or 0),
+    }
+
+
+def identity_by_uuid(value: str) -> dict | None:
+    """The identity row for an opaque uuid, or ``None``. Exact match only."""
+    wanted = (value or "").strip().lower()
+    if not wanted:
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT user_id, uuid, created_at, last_seen FROM identities WHERE uuid=?",
+            (wanted,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "user_id": int(row[0]),
+        "uuid": str(row[1]),
+        "created_at": int(row[2] or 0),
+        "last_seen": int(row[3] or 0),
+    }
+
+
+def identity_count() -> int:
+    with _lock:
+        return int(_conn.execute("SELECT COUNT(*) FROM identities").fetchone()[0])
+
+
+def identity_reset() -> None:
+    """Forget every identity. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM identities")
+        _conn.commit()
+
+
 # ── Nexus Awareness: the room window and the understanding of it ──────────
 # The roles a captured message may carry. The server writes one of these from
 # ``app/rbac.py``; nothing else does, and nothing reads them back to decide
@@ -2171,6 +2317,39 @@ def awareness_reset() -> None:
         _conn.execute("DELETE FROM awareness_state")
         _conn.execute("DELETE FROM group_messages")
         _conn.commit()
+
+
+def awareness_summary() -> dict:
+    """Aggregate awareness counters across every room.
+
+    Derived from the per-room rows that already exist rather than from a second
+    counter store: two places recording the same number is two places for them
+    to disagree, and the per-room row is the thing a pass actually writes. One
+    query, no model, cheap enough to call from a status command.
+    """
+    with _lock:
+        row = _conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(passes),0), COALESCE(SUM(relevant),0) "
+            "FROM awareness_state"
+        ).fetchone()
+        replies = _conn.execute(
+            "SELECT COUNT(*) FROM group_messages WHERE role='nexus'"
+        ).fetchone()
+    return {
+        "rooms": int(row[0] or 0),
+        "passes": int(row[1] or 0),
+        "relevant": int(row[2] or 0),
+        "replies": int(replies[0] or 0),
+    }
+
+
+def group_role_counts() -> dict:
+    """How many captured messages each role has, as ``{role: count}``."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT role, COUNT(*) FROM group_messages GROUP BY role"
+        ).fetchall()
+    return {str(r[0] or "member"): int(r[1] or 0) for r in rows}
 
 
 # ── The coding-agent task store ───────────────────────────────────────────

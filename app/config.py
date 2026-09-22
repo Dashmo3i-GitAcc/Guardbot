@@ -69,6 +69,39 @@ CAPTCHA_BUTTON = os.getenv("CAPTCHA_BUTTON", "✅ من ربات نیستم")
 # Telegram error, not to extend the challenge.
 CAPTCHA_RETRY_GRACE_SEC = _int("CAPTCHA_RETRY_GRACE_SEC", 15)
 
+# What happens when a challenge runs out of time without being solved.
+#
+# This is configuration because the right answer is a policy decision and not a
+# fact about the code. The three modes, and what each means for the member:
+#
+#   * ``kick``    — remove them from the group (ban then immediate unban, so
+#                   they may rejoin and try again). This is the long-standing
+#                   behaviour and remains the default, so an existing deployment
+#                   is unchanged by this setting's introduction.
+#   * ``restrict``— keep them unable to post and refresh the challenge, giving
+#                   them a fresh deadline and a fresh button. They stay in the
+#                   group and stay unverified; nothing removes them.
+#   * ``none``    — take no member action at all. The challenge row is dropped
+#                   and the member is left as Telegram has them. Only appropriate
+#                   where an operator has some other verification in place.
+#
+# What none of these is: a permanent ban on a timer. ``kick`` is not a ban —
+# the unban is immediate and the person may rejoin — and the two alternatives
+# are milder still. An unrecognised value falls back to ``kick`` so that a typo
+# cannot silently turn verification off.
+CAPTCHA_ON_EXPIRE = os.getenv("CAPTCHA_ON_EXPIRE", "kick").strip().lower()
+CAPTCHA_EXPIRE_MODES = ("kick", "restrict", "none")
+if CAPTCHA_ON_EXPIRE not in CAPTCHA_EXPIRE_MODES:
+    CAPTCHA_ON_EXPIRE = "kick"
+
+# The copy used in ``restrict`` mode when the challenge is refreshed. ``{name}``
+# and ``{timeout}`` are filled the same way ``CAPTCHA_TEXT`` is.
+CAPTCHA_RETRY_TEXT = os.getenv(
+    "CAPTCHA_RETRY_TEXT",
+    "سلام {name} 👋\nهنوز تأیید نشدی. برای اینکه بتونی پیام بدی، ظرف {timeout} "
+    "ثانیه دکمه‌ی زیر رو بزن.",
+)
+
 # ---------------- Explicit media moderation ----------------
 MEDIA_ENABLED = _bool("MEDIA_ENABLED", True)
 

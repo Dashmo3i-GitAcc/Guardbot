@@ -640,3 +640,68 @@ def skip(chat_id: int, *, seen_message_id: int) -> None:
         db.awareness_advance(chat_id, seen_message_id=seen_message_id)
     except Exception:  # noqa: BLE001 - never fatal
         log.exception("could not advance the awareness watermark")
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────
+def metrics() -> dict:
+    """What the awareness layer has actually done, from the records it writes.
+
+    The brief asks for measurable awareness quality. Every number here is
+    derived from state a pass already writes — the per-room understanding row,
+    the captured window, the pending query — rather than from a second counter
+    store, for the same reason the retention prune is not duplicated: a second
+    place recording the same fact is a second place for it to be wrong.
+
+    What these numbers can and cannot tell an operator:
+
+    * ``passes`` and ``relevant`` — how often a room was read, and how often the
+      reading concluded the conversation concerned Nexus. A ``relevant`` count
+      far below ``passes`` is healthy; the reverse means the assistant is
+      inserting itself.
+    * ``replies`` — how many times Nexus actually spoke in a captured room.
+    * ``pending_rooms`` — rooms with something unread. A number that only grows
+      means the awareness layer is not keeping up, which is the one signal that
+      says the timing policy is wrong rather than the model.
+
+    There is deliberately no "false positive rate": judging whether a reply was
+    unwanted needs a human, and a number invented here would be a guess wearing
+    a metric's clothes.
+    """
+    out = {
+        "enabled": bool(config.NEXUS_AWARENESS_ENABLED),
+        "rooms": 0,
+        "passes": 0,
+        "relevant": 0,
+        "replies": 0,
+        "pending_rooms": 0,
+        "pending_messages": 0,
+        "window_messages": 0,
+    }
+    try:
+        out.update(db.awareness_summary())
+    except Exception:  # noqa: BLE001 - a metric read is never fatal
+        log.exception("could not read the awareness summary")
+    try:
+        pending = db.group_pending()
+        out["pending_rooms"] = len(pending)
+        out["pending_messages"] = sum(int(p.get("pending") or 0) for p in pending)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the pending rooms")
+    try:
+        out["window_messages"] = sum(db.group_role_counts().values())
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the window size")
+    return out
+
+
+def metrics_line() -> str:
+    """One line for ``/nexus status``. Counts only, never content."""
+    m = metrics()
+    state = "on" if m["enabled"] else "off"
+    return (
+        f"awareness[{state}]: rooms={m['rooms']} passes={m['passes']} "
+        f"relevant={m['relevant']} replies={m['replies']} "
+        f"pending={m['pending_rooms']}/{m['pending_messages']} "
+        f"window={m['window_messages']}"
+    )
+

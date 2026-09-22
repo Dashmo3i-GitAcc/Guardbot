@@ -34,12 +34,24 @@ _ATTRS = {
     ai_intent.DEFAULT_RESPONSE_KIND: "GROUP_TRIAL_INVITE_TEXT",
 }
 
-# Which rule patterns imply which reply. Ordered: the first match wins, and
-# `poor_internet` is checked before `problem` because a message can carry both
-# and the more specific one is the better thing to answer.
+# Which rule patterns imply which reply. Ordered: the first match wins.
+#
+# The mapping is the fix for a reported symptom: the assistant seemed to answer
+# everything with the "your internet is weak" sentence. The cause was here, and
+# it was not a phrase to delete — it was that the broad ``problem`` group (وصل
+# نمیشه، باز نمیشه، کار نمیکنه — a blocked service or a thing that will not
+# load) was mapped to the *connectivity* wording, which is written for a
+# complaint about the speaker's own line. So every blocked-app complaint was
+# answered as though the person had said their internet was slow.
+#
+# Now only the specific ``poor_internet`` signal — «اینترنتم ضعیفه», «نتم خراب
+# شده» — produces the connectivity wording, and a generic ``problem`` produces
+# the access wording, which is what the AI layer already distinguishes in its
+# own prompt (a named blocked service is ``access_offer``, a slow line is
+# ``connectivity_offer``). The rule path and the model path now agree.
 _RULE_HINTS = (
     ("poor_internet", "connectivity_offer"),
-    ("problem", "connectivity_offer"),
+    ("problem", "access_offer"),
     ("request", "vpn_offer"),
 )
 

@@ -137,6 +137,14 @@ def remember(user, chat_id: int) -> bool:
     except Exception:  # noqa: BLE001 - never the reason a handler fails
         log.exception("could not record a person")
         return False
+    # Every speaker is also given their stable internal handle, here, on the one
+    # path that already runs for every message. It is deliberately a separate
+    # call rather than a column on ``people``: the handle is global to a person
+    # while a name row is per room, and folding them together would mint a
+    # second handle the first time somebody spoke in a second group.
+    from . import identity  # imported late: identity imports this module
+
+    identity.ensure(user_id)
     _maybe_prune()
     return True
 

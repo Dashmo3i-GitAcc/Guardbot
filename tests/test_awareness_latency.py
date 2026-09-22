@@ -678,12 +678,21 @@ def test_the_trace_never_logs_the_reply(caplog):
 def test_the_tool_declarations_are_the_largest_part_of_the_prompt():
     """A recorded measurement, not a requirement.
 
-    26 KB of declarations against 5.4 KB of everything else. It is the largest
-    single item in an awareness pass, and it is *kept*: the descriptions are
-    what make the model call ``unmute_member`` with the right id rather than
-    refusing, which was a real bug in this codebase. This test exists so the
-    number cannot change silently — if it does, the decision to keep it should
-    be taken again rather than inherited.
+    36 KB of declarations against 5.4 KB of everything else, and it is *kept*:
+    the descriptions are what make the model call ``unmute_member`` with the
+    right id rather than refusing, which was a real bug in this codebase. This
+    test exists so the number cannot change silently — if it does, the decision
+    to keep it should be taken again rather than inherited.
+
+    The ceiling was raised from 40000 to 48000 deliberately, when the
+    operational-history tools were added (``get_identity``, ``search_events``,
+    ``get_nexus_diagnostics``, ``get_service_status``). They cost about 6.3 KB
+    of declarations and buy the assistant the ability to answer "why did this
+    happen" from the server's records instead of from memory. The cost is
+    bounded in practice: the full set is only attached when the last human
+    speaker in a room is an administrator, because ``tool_names_for`` returns
+    nothing for a guest — so a member's message still costs no declarations at
+    all. The measured size at the time of the raise was 42794.
     """
     principal = rbac.resolve(OWNER)
     declarations = admin_tools.declarations_for(principal)
@@ -698,7 +707,7 @@ def test_the_tool_declarations_are_the_largest_part_of_the_prompt():
 
     assert size > fixed, "declarations are the largest item"
     # A ceiling, so growth is noticed. Raise it deliberately, with a reason.
-    assert size < 40000, f"tool declarations grew to {size} chars"
+    assert size < 48000, f"tool declarations grew to {size} chars"
 
 
 # ══ THE ALLOWANCE ═════════════════════════════════════════════════════════

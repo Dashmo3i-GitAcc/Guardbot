@@ -40,7 +40,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import admin_service, config, db, nexus, people, rbac
+from . import admin_service, agent_data, config, db, nexus, rbac
 
 log = logging.getLogger("guardbot.admin.tools")
 
@@ -342,11 +342,15 @@ TOOLS: dict[str, ToolSpec] = {
         description=(
             "Look up the coding-agent tasks: which are queued, which are "
             "running, which are waiting for the owner's confirmation, and how "
-            "the recent ones ended. Use this instead of remembering, and use it "
-            "before telling the owner what happened to a task."
+            "the recent ones ended. Pass a task id to see one task in full — "
+            "what it was asked, and how it ended. Use this instead of "
+            "remembering, and before telling the owner what happened."
         ),
         kind=KIND_READ,
         permission="agent.request",
+        parameters=(
+            ("request_id", "STRING", "One task id, for the full record. Optional."),
+        ),
     ),
     # -- read tools: authoritative state, never the model's memory --
     "get_member": ToolSpec(
@@ -424,17 +428,17 @@ TOOLS: dict[str, ToolSpec] = {
     "resolve_person": ToolSpec(
         name="resolve_person",
         description=(
-            "Turn a name somebody said out loud into the numeric Telegram user "
-            "id of the person it refers to. Use this when the person named a "
-            "target by name rather than by replying to them. It answers with "
-            "one id when exactly one person matches, and with a list of "
-            "candidates when several people share the name — in that case you "
-            "must ask which one, and never choose. It answers with an error "
-            "when nobody matches; then ask for a reply or an id."
+            "Turn a reference to a person into their numeric Telegram user id. "
+            "Accepts a name as it was written, an @username, a numeric id or an "
+            "internal uuid. Use it when the person named a target rather than "
+            "replying to them. It answers with one id when exactly one person "
+            "matches, and with candidates when several do — then you must ask "
+            "which, and never choose. When nobody matches, ask for a reply or "
+            "an id."
         ),
         kind=KIND_READ,
         parameters=(
-            ("name", "STRING", "The name as it was written or said, in Persian or Latin script."),
+            ("name", "STRING", "The name, @username, id or uuid as written."),
         ),
         required=("name",),
     ),
@@ -456,6 +460,72 @@ TOOLS: dict[str, ToolSpec] = {
         ),
         kind=KIND_READ,
         parameters=(("limit", "INTEGER", "How many events to return. Optional."),),
+    ),
+    # -- operational history: the questions the brief asks by name ----------
+    # These are read-only and answer from the server's own records. They are
+    # gated on ``moderation.review`` — the observational floor — so an ordinary
+    # member is never offered them, while a helper or moderator may use them to
+    # explain what happened. None can change anything.
+    #
+    # Two rules shaped the parameter lists, and both are security properties
+    # rather than style:
+    #
+    #   * **No ``chat_id`` parameter anywhere.** The room comes from the server,
+    #     exactly as it does for a write tool. A model that could name a room
+    #     could read another group's history, and the invariant the whole tool
+    #     layer rests on — the model names no identity it did not receive — is
+    #     asserted in the test suite for every tool.
+    #   * **Descriptions are short.** These declarations are the largest item in
+    #     an awareness pass, and that pass runs on the hot path; a ceiling in the
+    #     test suite keeps the cost of a new tool visible rather than silent.
+    "get_identity": ToolSpec(
+        name="get_identity",
+        description=(
+            "Look up one person: internal uuid, known names and aliases, role, "
+            "permissions and recent administrative history. Defaults to the "
+            "person asking."
+        ),
+        kind=KIND_READ,
+        permission="moderation.review",
+        parameters=(
+            ("user_id", "INTEGER", "Numeric Telegram user id. Optional."),
+        ),
+    ),
+    "search_events": ToolSpec(
+        name="search_events",
+        description=(
+            "Correlate what happened in this group: admin actions and refusals, "
+            "model/pool failures, coding-agent tasks, the room's understanding, "
+            "moderation counters, pending join challenges. For one person's own "
+            "history use get_identity. Never returns message content or "
+            "credentials."
+        ),
+        kind=KIND_READ,
+        permission="moderation.review",
+        parameters=(
+            ("source", "STRING", "admin|model|agent|awareness|moderation|captcha|all"),
+            ("since", "INTEGER", "Unix timestamp to search from. Optional."),
+        ),
+    ),
+    "get_nexus_diagnostics": ToolSpec(
+        name="get_nexus_diagnostics",
+        description=(
+            "Why Nexus is or is not answering here: its switch, the awareness "
+            "layer, what it currently understands, what is pending, recent "
+            "refusals and recent model events."
+        ),
+        kind=KIND_READ,
+        permission="moderation.review",
+    ),
+    "get_service_status": ToolSpec(
+        name="get_service_status",
+        description=(
+            "Which external integrations exist — VPN bot, OpenVPN, TQI, coding "
+            "agent — and what each supports. Check this before claiming the bot "
+            "can do something with an outside service."
+        ),
+        kind=KIND_READ,
+        permission="moderation.review",
     ),
 }
 
@@ -623,6 +693,17 @@ def build_context(
 
     who = "owner of this bot" if principal.is_owner else principal.label
     lines.append(f"Actor Telegram user id: {principal.user_id}\n")
+    # The actor's internal handle, when they have one. It is a second name for
+    # the same person — not an authority — and it is here so that a person can
+    # be referred to, and looked up, without repeating their Telegram number.
+    try:
+        from . import identity
+
+        actor_uuid = identity.uuid_for(principal.user_id)
+    except Exception:  # noqa: BLE001 - context, never worth a crash
+        actor_uuid = ""
+    if actor_uuid:
+        lines.append(f"Actor internal uuid: {actor_uuid}\n")
     lines.append(f"Actor role: {principal.role} ({who})\n")
     lines.append(f"Actor is the owner: {'yes' if principal.is_owner else 'no'}\n")
     # The owner is also the system's creator, and the model is told so from here
@@ -709,6 +790,20 @@ def build_context(
         "between two similar names. If somebody names a target in words, use "
         "resolve_person; if it answers with several candidates, ask which one.\n"
     )
+    # The operational-history tools, stated as a rule rather than a list. The
+    # list is in the tool declarations; what the model needs to be told is the
+    # *habit* — answer from the server's records instead of from memory, and say
+    # plainly when an integration does not exist rather than improvising.
+    if principal.can("moderation.review"):
+        lines.append(
+            "\nFor anything about the past, the roles, or why something "
+            "happened, look it up instead of remembering: use get_identity or "
+            "resolve_person for a person, search_events to correlate what "
+            "happened, and get_nexus_diagnostics to explain a silence. Before "
+            "claiming the bot can do something with an outside service, check "
+            "get_service_status and, if an integration is absent or "
+            "unconfigured, say so rather than promising it.\n"
+        )
     lines.append(recent_actions_block(principal, chat_id=chat_id))
     lines.append(agent_block(principal, chat_id=chat_id))
     return "".join(lines)
@@ -977,6 +1072,14 @@ def _coerce_user_id(args: dict) -> int:
         return 0
 
 
+def _coerce_int(args: dict, key: str) -> int:
+    """One integer argument, or 0. Never raises on a model's malformed value."""
+    try:
+        return int((args or {}).get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 async def run_read_tool(
     name: str,
     args: dict,
@@ -994,7 +1097,20 @@ async def run_read_tool(
     inferred, and a lookup that cannot be completed returns an explicit
     ``error`` rather than an empty success — a model that is told "no data"
     says so, while a model that is told ``{}`` will fill the gap in itself.
+
+    The first thing this does is refuse a tool the principal would not have been
+    offered. The declarations are advisory to the model; only the server's own
+    check is binding, so a hallucinated tool name — or a call made by somebody
+    who was offered nothing, as a guest is — must be answered with a refusal
+    rather than with data. ``tool_names_for`` is the same function that builds
+    the declarations, on purpose: exposure and enforcement cannot drift apart
+    when they are one line of code.
     """
+    if name not in TOOLS:
+        return {"error": f"unknown tool {name}"}
+    if name not in tool_names_for(principal):
+        return {"error": f"not permitted: {name} is not available to this actor"}
+
     if name == "get_member":
         target = _coerce_user_id(args)
         if not target:
@@ -1087,7 +1203,11 @@ async def run_read_tool(
         query = str((args or {}).get("name", "") or "").strip()
         if not query:
             return {"error": "no name supplied"}
-        return people.resolve(query, chat_id=chat_id)
+        # The resolver accepts more than a name — a numeric id, an @username, an
+        # internal uuid — because a person may point at somebody by any of them.
+        # It is still an exact, normalised comparison with a question when
+        # several match, never a pick.
+        return agent_data.resolve_identity(query, chat_id=chat_id)
 
     if name == "get_nexus_status":
         return {
@@ -1118,7 +1238,33 @@ async def run_read_tool(
         return {"events": recent_admin_context(chat_id, limit=limit)}
 
     if name == "get_agent_status":
+        request_id = str((args or {}).get("request_id", "") or "").strip()
+        if request_id:
+            return agent_data.agent_task_view(request_id)
         return agent_status(chat_id=chat_id)
+
+    # -- operational history: read-only, redacted, bounded -------------------
+    if name == "get_identity":
+        target = _coerce_user_id(args) or principal.user_id
+        return agent_data.identity_view(target, chat_id=chat_id)
+
+    if name == "search_events":
+        return agent_data.search_events(
+            source=str((args or {}).get("source", "") or ""),
+            # The room is the server's, never the model's. ``search_events``
+            # takes a chat_id for other callers (the operator's own tooling);
+            # the model is never allowed to supply one. The same rule keeps
+            # ``actor_id`` and ``target_id`` off the schema: a person's own
+            # history is what ``get_identity`` returns, scoped to that person.
+            chat_id=chat_id,
+            since=_coerce_int(args, "since"),
+        )
+
+    if name == "get_nexus_diagnostics":
+        return agent_data.nexus_diagnostics(chat_id)
+
+    if name == "get_service_status":
+        return agent_data.service_status()
 
     return {"error": f"unknown tool {name}"}
 

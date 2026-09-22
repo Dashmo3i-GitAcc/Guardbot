@@ -394,16 +394,72 @@ async def captcha_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
             continue
         try:
-            # ban + unban = kick (user can rejoin later)
-            await ctx.bot.ban_chat_member(chat_id, user_id)
-            await ctx.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
-            log.info("captcha expired chat=%s user=%s", chat_id, user_id)
+            await _captcha_expire(ctx, chat_id, user_id)
         except TelegramError as e:
-            log.warning("kick failed %s: %s", user_id, e)
+            log.warning("captcha expiry failed %s: %s", user_id, e)
         try:
             await ctx.bot.delete_message(chat_id, msg_id)
         except TelegramError:
             pass
+
+
+async def _captcha_expire(ctx, chat_id: int, user_id: int) -> None:
+    """Apply the configured expiry policy to one unsolved challenge.
+
+    The policy is configuration because the right answer is a judgement about
+    the community, not a fact about the code, and because the brief is explicit
+    that expiry must not mean "banned". Three modes, none of which is a ban:
+
+    * ``kick`` — ban then immediate unban, so the person may rejoin. The
+      long-standing behaviour and the default.
+    * ``restrict`` — keep them unable to post and hand them a fresh challenge
+      with a fresh deadline. They stay in the group, unverified.
+    * ``none`` — no member action; the row is dropped and Telegram's own state
+      is left as it is.
+
+    Whatever the mode, the member is never permanently banned by a timer: the
+    ``kick`` path unbans in the same breath, and the other two never ban at all.
+    """
+    mode = getattr(config, "CAPTCHA_ON_EXPIRE", "kick")
+    if mode == "none":
+        log.info("captcha expired (no action) chat=%s user=%s", chat_id, user_id)
+        return
+    if mode == "restrict":
+        # Re-mute and re-challenge. The mute is re-applied rather than assumed,
+        # because a member may have been released for some other reason and the
+        # point of this mode is that they are still unverified.
+        try:
+            await ctx.bot.restrict_chat_member(chat_id, user_id, permissions=MUTED)
+        except TelegramError as e:
+            log.warning("captcha re-restrict failed for %s: %s", user_id, e)
+        name = ""
+        try:
+            member = await ctx.bot.get_chat_member(chat_id, user_id)
+            name = getattr(getattr(member, "user", None), "full_name", "") or ""
+        except TelegramError:
+            name = ""
+        text = config.CAPTCHA_RETRY_TEXT.format(
+            name=name or "دوست عزیز", timeout=config.CAPTCHA_TIMEOUT_SEC
+        )
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(config.CAPTCHA_BUTTON, callback_data=f"cap:{user_id}")]]
+        )
+        try:
+            fresh = await ctx.bot.send_message(chat_id, text, reply_markup=kb)
+            db.add_captcha(
+                chat_id,
+                user_id,
+                fresh.message_id,
+                int(time.time()) + config.CAPTCHA_TIMEOUT_SEC,
+            )
+        except TelegramError as e:
+            log.warning("captcha re-challenge failed for %s: %s", user_id, e)
+        log.info("captcha expired, re-challenged chat=%s user=%s", chat_id, user_id)
+        return
+    # ``kick``: ban + unban = a removal the member can undo by rejoining.
+    await ctx.bot.ban_chat_member(chat_id, user_id)
+    await ctx.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+    log.info("captcha expired, kicked chat=%s user=%s", chat_id, user_id)
 
 
 # ------------------------------------------------------ admin report button
@@ -2096,6 +2152,21 @@ def _nexus_status_text() -> str:
         lines.append(
             config.NEXUS_VISIBILITY_WARNING.format(chat_id="، ".join(blind))
         )
+    # What the awareness layer has actually done, and which integrations exist.
+    # Both are derived from live state rather than from a counter that has to be
+    # kept in step with it, so the line cannot drift from the behaviour it
+    # describes. Neither can fail the command: a status report that raises is a
+    # status report an operator cannot use.
+    try:
+        lines.append(awareness.metrics_line())
+    except Exception:  # noqa: BLE001 - a status line is never worth a crash
+        log.exception("could not build the awareness metrics line")
+    try:
+        from . import service_adapters
+
+        lines.append(service_adapters.summary_line())
+    except Exception:  # noqa: BLE001
+        log.exception("could not build the integrations line")
     return "\n".join(lines)
 
 

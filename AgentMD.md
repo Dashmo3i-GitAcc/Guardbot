@@ -4996,3 +4996,218 @@ owns each step:
 promotion dialog can express them and an administrator promoted to every role
 still does not hold them. That is what makes "only the owner" a property of the
 tables rather than a check somebody has to remember.
+
+## 45. Identity: a handle, and turning a reference into one person
+
+The brief asks for two things that are easy to conflate and must not be: an
+**internal UUID** for each person, and **deterministic identity resolution**.
+
+### 45.1 The handle is a name, not a credential
+
+`identities(user_id PRIMARY KEY, uuid UNIQUE, created_at, last_seen)` in
+`app/db.py`, minted once on first sight by `db.identity_ensure`, which is called
+from `people.remember` — the one path that already runs for every message a
+person sends. `app/identity.py` wraps it.
+
+Three properties, and each was chosen against an alternative:
+
+* **Not derived from the Telegram id.** A derived value would be reversible,
+  which defeats the point of an opaque handle. `test_identity.py` asserts the
+  Telegram id does not appear in it.
+* **Global, not per-chat.** A Telegram user id is global; a per-chat handle
+  would make the same person two people the moment they spoke in a second
+  group. The name rows stay per-chat; the handle does not.
+* **Not authority.** Nothing reads a uuid to decide anything. `app/rbac.py`
+  remains keyed on Telegram ids, and the uuid is only ever a *second name* for
+  the same person — for correlation in logs and for the assistant to refer to
+  somebody without repeating their number.
+
+A person who has not spoken since this shipped has no handle yet and
+`identity.describe` reports `uuid: ""`. That is deliberate: minting on a read
+path would make a lookup a write.
+
+### 45.2 Resolution is exact, and ambiguity is a question
+
+`identity.resolve(query, chat_id=...)` accepts a numeric Telegram id, an internal
+uuid, an `@username`, a display name or an alias, and answers with one of four
+statuses: `ok`, `ambiguous`, `unknown`, `invalid`.
+
+The load-bearing rule is the third line of `app/people.py`'s docstring, kept
+here: **it never guesses.** Two people matching one name returns `ambiguous`
+with the candidates and *no* `identity` field, so there is nothing for a model
+to pick from. The consequence of being wrong is an action on the wrong person,
+which is the worst failure this subsystem could have.
+
+The name matching itself is unchanged from `app/people.py` — an exact,
+normalised comparison that folds the Arabic/Persian letter variants, the
+diacritics and the zero-width joiner, so «ميلاد» and «میلاد» are one person.
+`identity.resolve` adds the id, uuid and username keys and delegates the name
+case to it rather than growing a second, weaker matcher.
+
+### 45.3 Where it plugs in
+
+* `people.remember` mints the handle (never fatal; a failure leaves the
+  Telegram id, which is authoritative anyway).
+* `admin_tools.build_context` states the actor's handle in the trusted block.
+* The `get_identity` tool returns `identity.describe`, and `resolve_person`
+  now delegates to `identity.resolve`, so a name, a `@username`, an id and a
+  uuid are all resolvable by the assistant through one path.
+* `agent_data.agent_task_view` reports `actor_uuid` alongside `actor_id`.
+
+## 46. What the assistant may read, and the two boundaries around it
+
+`app/agent_data.py` is the operational data layer. The brief asks for extensive
+read access to logs and structured events *and* for no secret ever reaching the
+model; those are in tension exactly once, and this module is where it is
+resolved.
+
+### 46.1 No generic query, and no row copied through
+
+There is no `execute_sql`, and no parameter anywhere becomes SQL text. Each
+function knows the one question it answers, and each answer is a dict built
+field by field. A column added to a table later cannot appear in an answer by
+default, because nothing here does `SELECT *` into a return value. That is what
+makes "secret-bearing columns are structurally excluded" a property rather than
+a promise.
+
+### 46.2 Redaction at the boundary
+
+Every string that leaves passes through `redact`, which delegates to
+`agent_bridge.redact` — one pattern list, not two that could drift. It is the
+second line of defence: the allowlist above is the first, and this catches a
+token that ended up somewhere it was never meant to be (an error string, a task
+result). `test_agent_data.py` plants real bot tokens in audit details, in an
+awareness summary and in a task error, and asserts they do not survive.
+
+### 46.3 The sources
+
+`search_events` correlates six sources into one shape, filtered by the ids the
+server already uses — actor, target, room, time — and never by message content,
+because this bot does not keep message content for a search to find:
+
+| source | table | what it answers |
+|---|---|---|
+| `admin` | `admin_audit` | who did what, and what was refused |
+| `model` | `gemini_events` | rate limits, failures, pool state |
+| `agent` | `agent_tasks` | coding-agent task lifecycle |
+| `awareness` | `awareness_state` | what Nexus currently understands about a room |
+| `moderation` | `moderation_usage` | today's moderation counters |
+| `captcha` | `captchas` | pending join challenges |
+
+`nexus_diagnostics(chat_id)` answers «چرا نکسوس جواب نداد؟» from the state that
+decided it — the switch, the awareness layer, the pending batch, recent
+refusals, recent model events — and states a reason in words rather than leaving
+the model to infer one.
+
+### 46.4 The tools, and why they carry no `chat_id`
+
+Four read-only tools are exposed (`get_identity`, `search_events`,
+`get_nexus_diagnostics`, `get_service_status`), gated on `moderation.review` —
+the observational floor — so a member is never given a window into operational
+history while a helper or moderator may use them to explain what happened.
+
+None of them has a `chat_id`, `actor_id`, `target_id` or `permissions`
+parameter. The room and the actor come from the server, exactly as they do for a
+write tool, so a forged one is not rejected — it is *inexpressible*. The test
+suite asserts this for every tool in the registry, not only the new ones.
+
+The prompt cost is real and was measured: the four tools add about 6.3 KB of
+declarations, and `tests/test_awareness_latency.py` carries a ceiling that was
+raised deliberately, with the reason recorded in the test itself. The cost is
+bounded in practice because the full set is only attached when the last human
+speaker in a room is an administrator — a member's message still costs no
+declarations at all.
+
+### 46.5 Exposure is a courtesy; the dispatch is the boundary
+
+A declaration tells the model what it may ask for. It does not stop the model
+from asking for something else, and a hallucinated tool name is not a
+hypothetical — it is what a model does when it is unsure. So `run_read_tool`
+refuses any tool that `tool_names_for` would not have offered the same
+principal, before it looks at the arguments. A guest who was offered nothing
+therefore gets `not permitted`, not the integrations list; a moderator is
+refused `get_agent_status`, which is the owner's.
+
+The two rules are one function on purpose. When exposure and enforcement are
+computed separately they eventually disagree, and the disagreement is invisible
+until it is a leak. `test_ops_tools.py` asserts the pair for every
+permission-gated tool in the registry, not only the four new ones.
+
+## 47. Integrations: what exists, what does not, and saying so
+
+`app/service_adapters.py` is a **capability registry**, not an integration. It
+exists because the failure mode of the alternative is worse than not having the
+feature: an assistant that *claims* it can build a configuration, on a
+deployment whose upstream API has no such endpoint, will promise an operation in
+front of a customer and then fail.
+
+The three states, and they are different:
+
+* **available** — configured, and the operation is implemented.
+* **unconfigured** — implemented, but this deployment has not pointed the bot at
+  a backend.
+* **absent** — there is no implementation at all.
+
+What is actually true on this deployment:
+
+| integration | state | operations |
+|---|---|---|
+| VPN bot (`app/vpnbot.py`) | available when `VPNBOT_API_URL` and `VPNBOT_SHARED_SECRET` are set | `health`, `acquisition.invite` |
+| OpenVPN | **absent** | none — no integration exists |
+| TQI panel | **absent** | none — this bot holds no panel credentials |
+| coding agent (`app/agent_bridge.py`) | available when `AGENT_ENABLED` and a repository allowlist are set | `task.submit/status/confirm/cancel` |
+
+The VPN bot's internal API exposes a health probe and a one-way acquisition
+invite. It does **not** expose user records, subscriptions or configuration
+generation to this bot, so those are listed as `unsupported` and the assistant
+is told to explain the gap rather than improvise around it. No endpoint was
+invented: the brief's own rule — inspect the real API, do not invent one — is
+the rule this module follows.
+
+The shared secret is read only to decide *whether* the client is configured — a
+boolean — and `test_service_adapters.py` asserts it cannot appear in the report.
+
+## 48. Captcha expiry is a policy, not a timer that bans
+
+`config.CAPTCHA_ON_EXPIRE` selects what happens when a challenge runs out of
+time, and the requirement it exists to satisfy is narrow: expiry must not mean
+"banned". A timer is not evidence that somebody is a bot.
+
+* `kick` (default, and the long-standing behaviour) — ban then immediate unban,
+  so the person may rejoin. `test_captcha_expiry.py` asserts the unban always
+  accompanies the ban, in every mode: a kick is not a permanent ban.
+* `restrict` — kept in the group, kept unable to post, and handed a fresh
+  challenge with a fresh deadline (`CAPTCHA_RETRY_TEXT`). Nothing removes them.
+* `none` — no member action at all.
+
+An unrecognised value falls back to `kick` rather than silently disabling
+verification, and that fallback is tested. The original race fix — claim the row
+before the network call, so a member who verified is never acted on by a stale
+timer — is unchanged and still asserted in `tests/test_captcha.py`.
+
+## 49. The weak-internet repetition, and its cause
+
+The reported symptom was that the assistant seemed to answer everything with the
+"your internet is weak" sentence. It was investigated rather than patched, and
+the cause was not a phrase.
+
+`app/responses.py` maps a rule verdict to one of five fixed sentences. The
+`problem` rule group — «وصل نمیشه», «باز نمیشه», «کار نمیکنه», a blocked service
+or a thing that will not load — was mapped to `connectivity_offer`, whose
+wording is written for a complaint about the speaker's own *line*
+(`GROUP_TRIAL_REPLY_CONNECTIVITY`: «اینترنت اینطور ضعیف یا ناپایدار…»). So every
+blocked-app complaint was answered as though the person had said their internet
+was slow.
+
+The fix is at that level: only the specific `poor_internet` group — which matches
+«اینترنتم», «نتم خراب شده» — produces the connectivity wording, and a generic
+`problem` produces `access_offer`, which is the wording for a blocked service.
+The AI layer already made exactly this distinction in its own prompt, so the
+rule path and the model path now agree instead of disagreeing.
+
+Two regression tests pin it: one asserts the `problem` hint is `access_offer`,
+and one asserts the resulting sentence does not contain «ضعیف» or «ناپایدار».
+
+The awareness side needed no change: the live window showed Nexus moving between
+topics normally. What was repeating was the deterministic reply, not the
+conversation.

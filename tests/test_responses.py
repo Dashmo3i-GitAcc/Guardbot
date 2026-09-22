@@ -77,13 +77,32 @@ def test_an_unknown_kind_in_the_constant_table_is_the_generic_reply():
 def test_a_rules_only_lead_gets_the_hint_its_patterns_imply():
     cases = (
         (("topic", "poor_internet", "candidate"), "connectivity_offer"),
-        (("topic", "problem", "candidate"), "connectivity_offer"),
+        # A general `problem` — «باز نمیشه», «وصل نمیشه» — is a blocked service
+        # or a thing that will not load, not a complaint about the speaker's own
+        # line, so it gets the access wording. It used to get the connectivity
+        # wording, and that is what made the assistant appear to talk about
+        # "weak internet" no matter what the person had actually said.
+        (("topic", "problem", "candidate"), "access_offer"),
         (("topic", "request", "candidate"), "vpn_offer"),
         (("topic",), ai_intent.DEFAULT_RESPONSE_KIND),
         (("standalone",), ai_intent.DEFAULT_RESPONSE_KIND),
     )
     for reasons, expected in cases:
         assert responses.kind_for(_verdict(reasons=reasons)) == expected, reasons
+
+
+def test_only_an_explicit_connectivity_signal_gets_the_weak_internet_wording():
+    """The regression guard for the reported repetition.
+
+    A blocked-service complaint must not be answered as though the person had
+    said their internet was slow. Only the ``poor_internet`` group — which
+    matches «اینترنتم», «نتم خراب شده» — produces the connectivity wording.
+    """
+    body = responses.text_for(
+        responses.kind_for(_verdict(reasons=("topic", "problem", "candidate"))), "x"
+    )
+    assert body == config.GROUP_TRIAL_REPLY_ACCESS.format(name="x")
+    assert "ضعیف" not in body and "ناپایدار" not in body
 
 
 def test_poor_internet_wins_over_a_general_problem_pattern():
