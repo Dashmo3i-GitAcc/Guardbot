@@ -238,22 +238,28 @@ def is_named(text: str) -> bool:
     return any(_mentions(low, name) for name in names())
 
 
-# ── The cheap relevance gate ──────────────────────────────────────────────
-# The words that make an *unaddressed* message worth a model call.
+# ── The urgency hint ──────────────────────────────────────────────────────
+# The words that make an unaddressed message worth reading *promptly*.
 #
-# This is not how intent is understood, and it must not become that. Intent is
-# the model's job, and the brief is explicit that administration must not be a
-# list of exact keywords. What this is: a deterministic pre-filter whose only
-# power is to decide whether to *ask* the model. It cannot perform anything, it
-# cannot authorise anything, and a word that is wrong here costs one API call
-# and nothing else — because an unaddressed message only ever produces a visible
-# reply when an action actually ran (see ``app/main.py``).
+# This is not how intent is understood, and since Group Awareness it is not even
+# how relevance is decided. Intent is the model's job, and the brief is explicit
+# that administration must not be a list of exact keywords; relevance is now read
+# from the conversation by ``app/awareness.py``. What is left here is *timing*:
+# an unaddressed message that contains one of these words makes the room due for
+# its awareness pass immediately instead of waiting for it to go quiet.
 #
-# Recall is therefore the right bias: it is better to consult the model about a
-# false positive than to swallow a real instruction. The list is still narrow,
-# because every entry is a verb of moderation or a word for an administrator,
-# matched as a whole word — «بن» does not match «بنظر», and «حذف» does not match
-# «حذفش» unless it is listed, which is why the colloquial suffixed forms are.
+# The demotion is the point, so it is worth being exact about what this can and
+# cannot do:
+#
+#   * it cannot make a message relevant — only the model decides that;
+#   * it cannot make anything happen — only ``app/admin_service.py`` authorises;
+#   * it cannot make the assistant speak — the model's decision does that;
+#   * it can only move a room to the front of a queue it was already in.
+#
+# A wrong word therefore costs one slightly-early batched pass and nothing else,
+# and a missing word costs a few seconds. Recall is still the right bias, because
+# an instruction that arrives late is worse than one that arrives promptly, but
+# the bias is now about latency rather than about correctness.
 _ACTION_WORDS = (
     # Persian: the moderation verbs and the colloquial stems a group actually
     # uses. Both the bare imperative and the common attached-pronoun forms.
@@ -289,11 +295,18 @@ def _action_words() -> frozenset[str]:
 
 
 def looks_actionable(text: str) -> bool:
-    """Whether an unaddressed message might contain an administrative request.
+    """Whether an unaddressed message should make its room due *promptly*.
 
-    Deliberately not "is this an instruction" — that question belongs to the
-    model. This answers "is it worth asking", and the answer is allowed to be
-    wrong in the direction of asking.
+    Deliberately not "is this an instruction", and no longer even "is this worth
+    asking" — that second question moved to the awareness layer when the
+    assistant learned to read the room. This answers "should the model look at
+    this room sooner rather than later", and it is allowed to be wrong in either
+    direction: a false positive costs one batched pass a few seconds early, and a
+    false negative costs a few seconds.
+
+    Kept rather than deleted because the latency it removes is real — a group
+    that is busy never goes quiet, and an instruction should not wait for it to —
+    but its power is now confined to *when*, never *whether*.
     """
     low = (text or "").lower()
     if not low:

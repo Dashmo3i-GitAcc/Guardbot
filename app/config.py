@@ -776,6 +776,99 @@ NEXUS_PEOPLE_RETENTION = _int("NEXUS_PEOPLE_RETENTION", 90 * 86400)
 NEXUS_PEOPLE_MAX_CANDIDATES = _int("NEXUS_PEOPLE_MAX_CANDIDATES", 8)
 
 
+# ---------------- Nexus Awareness: the room, understood -----------------------
+# The observation layer. Everything above decides *who may talk to Nexus and what
+# it may do*; this decides *what Nexus understands about the room it is in*.
+#
+# The distinction the brief draws, and the one this section implements:
+#
+#   collecting a bounded recent window of the room's conversation  ← no AI call
+#   deciding whether that conversation concerns Nexus, and whether
+#   speaking would help                                          ← Gemini's job
+#   deciding whether a privileged action may happen              ← the server
+#
+# The window is captured for every message the bot can actually receive
+# (see ``main._nexus_can_observe``), and a *batched, debounced* pass hands the
+# window to Gemini. One pass covers a whole burst of messages, which is what
+# keeps "continuously aware" from meaning "one API call per message".
+#
+# Nothing here widens anybody's authority. Awareness observes; it never
+# authorises. A member's message is understood and still cannot produce an
+# action, because every tool call is authorised again from the actor's id.
+
+# The master switch. Off restores the pre-Awareness behaviour: an unaddressed
+# message is never analysed, and the only path to the model is the addressed
+# one. Note that ``nexus.looks_actionable`` no longer reaches the model by
+# itself — since Awareness it is a timing hint for this layer, so switching
+# Awareness off removes the unaddressed path entirely rather than handing it
+# back to the keyword list.
+NEXUS_AWARENESS_ENABLED = _bool("NEXUS_AWARENESS_ENABLED", True)
+
+# How often the sweeper looks for a chat with something new to understand. It is
+# a *poll*, not a call: a tick that finds nothing pending costs one indexed read
+# per configured group and no API call at all.
+NEXUS_AWARENESS_TICK_SECONDS = _float("NEXUS_AWARENESS_TICK_SECONDS", 15.0)
+
+# Wait for the room to go quiet for this long before analysing. A burst of
+# twenty messages therefore costs one pass rather than twenty.
+NEXUS_AWARENESS_DEBOUNCE_SECONDS = _float("NEXUS_AWARENESS_DEBOUNCE_SECONDS", 8.0)
+
+# But a busy room never goes quiet, so there is also a ceiling on how long a
+# message may sit unread. Whichever comes first — the room falling silent or
+# this much time passing since the oldest unread message — triggers the pass.
+NEXUS_AWARENESS_MAX_WAIT_SECONDS = _float("NEXUS_AWARENESS_MAX_WAIT_SECONDS", 45.0)
+
+# And a floor between two passes in the same chat, so a room that is busy
+# continuously is understood at a steady, bounded rate rather than as fast as
+# messages arrive.
+NEXUS_AWARENESS_MIN_INTERVAL_SECONDS = _float(
+    "NEXUS_AWARENESS_MIN_INTERVAL_SECONDS", 20.0
+)
+
+# The bounded window itself: how many recent messages are shown, and how many
+# characters they may occupy in total. Both bounds are applied — a count bound
+# alone lets forty long messages become a huge prompt, and a character bound
+# alone lets a flood of one-word messages push the real context out.
+NEXUS_AWARENESS_WINDOW_MESSAGES = _int("NEXUS_AWARENESS_WINDOW_MESSAGES", 40)
+NEXUS_AWARENESS_WINDOW_CHARS = _int("NEXUS_AWARENESS_WINDOW_CHARS", 6000)
+
+# How long a captured message is kept. The window is a *recent* view of the
+# room, not a transcript: rows older than this are dropped, which is what stops
+# the table from becoming a permanent record of the group's conversation.
+NEXUS_AWARENESS_RETENTION_SECONDS = _int("NEXUS_AWARENESS_RETENTION_SECONDS", 3600)
+
+# A ceiling on the table as well as on the age, because a busy hour can produce
+# more rows than the age bound alone would remove. Applied per chat, oldest
+# first.
+NEXUS_AWARENESS_MAX_ROWS = _int("NEXUS_AWARENESS_MAX_ROWS", 400)
+
+# How many chats one tick may analyse. A tick that is still working when the
+# next one arrives would otherwise pile passes on top of each other; this keeps
+# the sweeper's cost bounded and its behaviour predictable.
+NEXUS_AWARENESS_MAX_CHATS_PER_TICK = _int("NEXUS_AWARENESS_MAX_CHATS_PER_TICK", 2)
+
+# The awareness workload's own daily ceiling, per account, exactly as
+# ``GEMINI_CHAT_DAILY_LIMIT`` is per account. When it is spent, awareness stops
+# for the day and the assistant keeps working — the two budgets are separate on
+# purpose, so an observant Nexus can never spend the allowance a person is
+# waiting on an answer to.
+NEXUS_AWARENESS_DAILY_LIMIT = _int("NEXUS_AWARENESS_DAILY_LIMIT", 200)
+
+# How many recent messages are replayed to the model when Nexus *answers*
+# somebody directly. This is the same window, sized for a prompt that also
+# carries the current turn and the administrative context.
+NEXUS_AWARENESS_CONTEXT_MESSAGES = _int("NEXUS_AWARENESS_CONTEXT_MESSAGES", 20)
+
+# Sent when an awareness pass actually performed an action but the model gave no
+# wording for it. Rare, and the alternative is worse: an administrator whose
+# instruction was carried out and never acknowledged believes it was ignored,
+# and repeats it. The action's own outcome is in the audit log either way.
+NEXUS_AWARENESS_ACTION_TEXT = os.getenv(
+    "NEXUS_AWARENESS_ACTION_TEXT",
+    "انجام شد ✅",
+)
+
+
 # ---------------- Gemini: moderation / content understanding ------------------
 # A **third** independent Gemini workload. It is not the acquisition classifier
 # and not the conversational assistant, and it shares nothing with either: its
@@ -1240,6 +1333,7 @@ NEXUS_STATUS_TEXT = os.getenv(
     "توسط: {changed_by}\n"
     "پایش پیام‌های مدیرها: {observe}\n"
     "پاسخ‌دهی به: {actors_only}\n"
+    "درک گفتگوی گروه: {awareness}\n"
     "{mode}",
 )
 NEXUS_STATE_ONLINE_LABEL = os.getenv("NEXUS_STATE_ONLINE_LABEL", "روشن (ONLINE)")
@@ -1255,6 +1349,11 @@ NEXUS_OBSERVE_OFF_LABEL = os.getenv("NEXUS_OBSERVE_OFF_LABEL", "غیرفعال")
 # labels above, so a rendered status says which switch is which.
 NEXUS_ACTORS_ONLY_ON_LABEL = os.getenv("NEXUS_ACTORS_ONLY_ON_LABEL", "فقط مدیرها")
 NEXUS_ACTORS_ONLY_OFF_LABEL = os.getenv("NEXUS_ACTORS_ONLY_OFF_LABEL", "همه")
+# The awareness line, reported for the same reason the actor gate is: "Nexus did
+# not react" and "Nexus is not reading the room at all" look identical from
+# inside a group, and only one of them is a bug.
+NEXUS_AWARENESS_ON_LABEL = os.getenv("NEXUS_AWARENESS_ON_LABEL", "فعال")
+NEXUS_AWARENESS_OFF_LABEL = os.getenv("NEXUS_AWARENESS_OFF_LABEL", "غیرفعال")
 NEXUS_NEVER_CHANGED_TEXT = os.getenv("NEXUS_NEVER_CHANGED_TEXT", "—")
 NEXUS_STATUS_HINT = os.getenv(
     "NEXUS_STATUS_HINT",
@@ -1478,6 +1577,58 @@ def _deadline(seconds: float) -> float:
 # workload needs a model to be able to do; the pool refuses to offer a model
 # that does not satisfy it in full, which is what stops a text-only model being
 # handed an image or an audio model being asked for text.
+#
+# ── The awareness workload's own transport settings ──
+#
+# A **sixth** workload, and a separate one on purpose. Awareness reads the whole
+# room rather than one person's conversation: it is the highest-volume workload
+# in a busy group, and the one most likely to be rate-limited. Folding it into
+# ``chat`` would mean a chatty room silently spending the allowance somebody is
+# waiting on an answer to — so it gets its own key slot, its own model
+# preference, its own timeout, and its own breaker inside the pool.
+#
+# Its default model is the same family as the conversation's because the job is
+# the same shape (read text, reason, write text) and the cost profile is the
+# one an operator already knows. It is a *separate setting* so it can be moved
+# without touching the assistant.
+#
+# The credential defaults to the conversation's, and that follows the precedent
+# ``tts`` already sets rather than weakening the isolation requirement.
+# Awareness is a **mode of the conversation layer**, not a peer of it — the
+# thing that makes two workloads one allowance is the Google project behind
+# them, and an operator running this bot has one project per *feature*, not one
+# per call site. What the brief requires isolated is isolated and it is
+# isolated structurally: histories, rate windows, circuit breakers, failure
+# state and daily allowances are all keyed by **workload**, in ``gemini_pool``
+# and in ``db``, so awareness cannot spend the allowance a person is waiting on
+# an answer to even when the two share a credential. An operator who has a
+# spare key gives awareness one by setting ``GEMINI_AWARENESS_API_KEY``, and
+# ``gemini_pool.shared_credentials`` treats awareness the way it treats tts: a
+# deliberate pairing rather than a surprise worth warning about.
+GEMINI_AWARENESS_API_KEY = (
+    os.getenv("GEMINI_AWARENESS_API_KEY", "").strip() or GEMINI_CHAT_API_KEY
+)
+GEMINI_AWARENESS_ALLOW_SHARED_KEY = _bool("GEMINI_AWARENESS_ALLOW_SHARED_KEY", True)
+GEMINI_AWARENESS_MODEL = os.getenv(
+    "GEMINI_AWARENESS_MODEL", GEMINI_CHAT_MODEL
+).strip()
+GEMINI_AWARENESS_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_AWARENESS_FALLBACK_MODELS", "")
+) or GEMINI_CHAT_FALLBACK_MODELS
+# Shorter than the conversation's, because nobody is waiting on an awareness
+# pass and a pass that runs long delays the next one.
+GEMINI_AWARENESS_TIMEOUT_SECONDS = _float("GEMINI_AWARENESS_TIMEOUT_SECONDS", 20.0)
+GEMINI_AWARENESS_MAX_RETRIES = _int("GEMINI_AWARENESS_MAX_RETRIES", 1)
+GEMINI_AWARENESS_BACKOFF_SECONDS = _float(
+    "GEMINI_AWARENESS_BACKOFF_SECONDS", 1.5
+)
+# The breaker is the pool's, per workload, so an awareness outage opens only the
+# awareness circuit. The conversation keeps answering.
+GEMINI_AWARENESS_CIRCUIT_FAILURES = _int("GEMINI_AWARENESS_CIRCUIT_FAILURES", 5)
+GEMINI_AWARENESS_CIRCUIT_SECONDS = _float(
+    "GEMINI_AWARENESS_CIRCUIT_SECONDS", 300.0
+)
+
 GEMINI_POOLS = [
     {
         "workload": "intent",
@@ -1564,5 +1715,32 @@ GEMINI_POOLS = [
         "retries": 0,
         "backoff": GEMINI_CHAT_BACKOFF_SECONDS,
         "timeout": _deadline(GEMINI_CHAT_TIMEOUT_SECONDS),
+    },
+    {
+        "workload": "awareness",
+        "keys": _pool_key_list(
+            GEMINI_AWARENESS_API_KEY,
+            "GEMINI_AWARENESS_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_AWARENESS_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(
+            GEMINI_AWARENESS_MODEL, GEMINI_AWARENESS_FALLBACK_MODELS
+        ),
+        # Text only, and that is the whole requirement: awareness reads a
+        # transcript. A photo in the room is summarised as the fact that a photo
+        # was sent, not by sending the bytes to a second model — the moderation
+        # workload already looks at the content itself, and duplicating that here
+        # would both double the cost and blur which workload is responsible for
+        # what.
+        "capabilities": frozenset({"text"}),
+        "allow_experimental": False,
+        "retries": GEMINI_AWARENESS_MAX_RETRIES,
+        "backoff": GEMINI_AWARENESS_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_AWARENESS_TIMEOUT_SECONDS),
+        # Per account, like chat's, and deliberately its own number: an
+        # observant Nexus must not be able to spend the allowance a person is
+        # waiting on an answer to.
+        "daily_budget": max(1, NEXUS_AWARENESS_DAILY_LIMIT),
     },
 ]

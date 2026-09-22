@@ -176,3 +176,40 @@ def test_the_people_table_round_trips(pre_nexus_db):
     rows = db.people_rows(-100)
     assert len(rows) == 1, "an upsert, not a second row"
     assert rows[0]["message_count"] == 2
+
+
+# ── The two tables Group Awareness added ──────────────────────────────────
+# Same property, one layer later: an upgrade from the Nexus-era database must
+# not need a migration step, and the room window must survive a restart.
+def test_the_awareness_tables_are_created_on_an_existing_database(pre_nexus_db):
+    tables = _tables(pre_nexus_db)
+    assert "group_messages" in tables
+    assert "awareness_state" in tables
+
+
+def test_the_room_window_survives_an_restart(pre_nexus_db):
+    db.group_append(-100, 7, "member", "Milad", "سلام")
+    db.group_append(-100, 8, "admin", "Sara", "بنش کن")
+    db.init()
+    db.init()
+
+    rows = db.group_window(-100, limit=10)
+    assert [r["text"] for r in rows] == ["سلام", "بنش کن"]
+    assert rows[1]["role"] == "admin"
+
+
+def test_the_awareness_state_round_trips(pre_nexus_db):
+    assert db.awareness_get(-100) == {} or db.awareness_get(-100) is None
+    db.awareness_set(
+        -100, seen_message_id=42, relevant=True, topic="t", summary="s", participants="p"
+    )
+    row = db.awareness_get(-100)
+    assert row["seen_message_id"] == 42
+    assert row["relevant"] is True
+    assert row["topic"] == "t"
+
+    # One row per chat, updated rather than appended.
+    db.awareness_set(
+        -100, seen_message_id=43, relevant=False, topic="t2", summary="s2", participants=""
+    )
+    assert db.awareness_get(-100)["seen_message_id"] == 43

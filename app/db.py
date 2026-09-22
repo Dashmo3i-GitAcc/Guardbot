@@ -371,6 +371,61 @@ def init() -> None:
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_people_last_seen ON people(last_seen)"
     )
+    # ── Nexus Awareness: the bounded view of the room ──
+    #
+    # Two tables, and they are a *different thing* from ``chat_messages`` rather
+    # than a second copy of it. ``chat_messages`` is the assistant's conversation
+    # with **one person** — it is keyed by ``(chat_id, user_id)`` and its rows
+    # are ``user``/``model`` turns, which is what lets the assistant answer that
+    # person and notice when it repeats itself. This is the **room**: many
+    # speakers in one chat, in the order they spoke, which is what lets the
+    # assistant understand a conversation it is not part of.
+    #
+    # Keeping them apart is what stops the two from corrupting each other. A
+    # group transcript written into ``chat_messages`` would appear in every
+    # member's private history — one person's words shown to another, which is
+    # exactly the leak the per-user key exists to prevent.
+    #
+    # ``role`` is assigned by the **server** from ``app/rbac.py`` at the moment
+    # the message is captured, and it is the one field the model is told it can
+    # trust. It is a snapshot rather than a live lookup: it records what the
+    # speaker was when they spoke, and the live role of whoever is being
+    # answered is stated separately in the trusted-context block. A stored role
+    # is never an authority — nothing reads this column to decide anything.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS group_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            name TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL,
+            at INTEGER NOT NULL)"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_messages_chat "
+        "ON group_messages(chat_id, id)"
+    )
+    # What Nexus currently understands about one room. One row per chat, and
+    # every column is bounded: this is a *summary*, not a transcript. It exists
+    # so the assistant's understanding survives between passes and across a
+    # restart, and it is a derived cache — the window above is the source of
+    # truth, so a lost or unreadable row costs nothing but a re-read.
+    #
+    # ``seen_message_id`` is the highest ``group_messages.id`` included in the
+    # last completed pass, which is how "is there anything new?" is answered
+    # without a second table.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS awareness_state (
+            chat_id INTEGER PRIMARY KEY,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            seen_message_id INTEGER NOT NULL DEFAULT 0,
+            passes INTEGER NOT NULL DEFAULT 0,
+            relevant INTEGER NOT NULL DEFAULT 0,
+            topic TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            participants TEXT NOT NULL DEFAULT '')"""
+    )
     _conn.commit()
 
 
@@ -1585,4 +1640,252 @@ def people_reset() -> None:
     """Forget every recorded person. For tests."""
     with _lock:
         _conn.execute("DELETE FROM people")
+        _conn.commit()
+
+
+# ── Nexus Awareness: the room window and the understanding of it ──────────
+# The roles a captured message may carry. The server writes one of these from
+# ``app/rbac.py``; nothing else does, and nothing reads them back to decide
+# anything. They exist so the model can be told, in the transcript, that the
+# person who said something was the owner rather than a stranger.
+GROUP_ROLES = ("owner", "admin", "member", "nexus")
+
+# The text stored per message. Attacker-controlled, so it is truncated hard, on
+# the same reasoning as ``chat_append``: a pasted novel must not become a row
+# that every later prompt has to carry.
+GROUP_MESSAGE_MAX_CHARS = 2000
+
+
+def group_append(
+    chat_id: int, user_id: int, role: str, name: str, text: str
+) -> int:
+    """Record one message the bot actually received. Returns its row id.
+
+    No model call and no decision: this is the capture half of awareness, and it
+    is deliberately the cheapest thing in the pipeline. The row id is returned
+    because it is what the awareness pass records as "understood up to here".
+    """
+    role = role if role in GROUP_ROLES else "member"
+    with _lock:
+        cur = _conn.execute(
+            "INSERT INTO group_messages (chat_id, user_id, role, name, text, at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                int(chat_id),
+                int(user_id),
+                role,
+                (name or "")[:120],
+                (text or "")[:GROUP_MESSAGE_MAX_CHARS],
+                int(time.time()),
+            ),
+        )
+        _conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+def group_window(
+    chat_id: int, *, limit: int, ttl: int = 0
+) -> list[dict]:
+    """The bounded recent view of one room, oldest first.
+
+    Two bounds again, for the same reason ``chat_history`` has two: a count
+    bound alone would let a message from last week reappear, and an age bound
+    alone would let a busy hour produce an unbounded prompt.
+
+    Scoped by ``chat_id`` and by nothing else, which is the isolation: a room's
+    conversation is never visible to another room, because no query here can be
+    asked without a chat id.
+    """
+    limit = max(1, int(limit))
+    sql = (
+        "SELECT id, user_id, role, name, text, at FROM group_messages "
+        "WHERE chat_id=?"
+    )
+    args: list = [int(chat_id)]
+    if ttl and ttl > 0:
+        sql += " AND at>=?"
+        args.append(int(time.time()) - int(ttl))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    # Reversed: the query takes the newest N, the prompt wants them in the order
+    # they were said.
+    return [
+        {
+            "id": int(r[0]),
+            "user_id": int(r[1]),
+            "role": str(r[2]),
+            "name": str(r[3]),
+            "text": str(r[4]),
+            "at": int(r[5]),
+        }
+        for r in reversed(rows)
+    ]
+
+
+def group_trim(chat_id: int, *, keep: int) -> int:
+    """Keep only the newest ``keep`` messages for one room.
+
+    Called after every capture, which is what stops a flood from growing the
+    table faster than the age bound removes it.
+    """
+    keep = max(0, int(keep))
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM group_messages WHERE chat_id=? AND id NOT IN "
+            "(SELECT id FROM group_messages WHERE chat_id=? "
+            " ORDER BY id DESC LIMIT ?)",
+            (int(chat_id), int(chat_id), keep),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def group_purge(ttl: int) -> int:
+    """Drop every captured message older than ``ttl``, across all rooms."""
+    cutoff = int(time.time()) - max(1, int(ttl))
+    with _lock:
+        cur = _conn.execute("DELETE FROM group_messages WHERE at < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
+
+
+def group_pending() -> list[dict]:
+    """Every room with a message the awareness pass has not yet read.
+
+    One query, grouped by chat, and the numbers it returns are exactly what the
+    debounce policy needs: when the oldest unread message arrived (how long this
+    has been waiting), when the newest one arrived (whether the room has gone
+    quiet), and the highest id (what to record as understood once the pass
+    finishes).
+
+    A room with no ``awareness_state`` row is pending by definition, because
+    ``COALESCE`` treats "never analysed" as "understood nothing".
+
+    **The assistant's own messages are excluded, and that is load-bearing.** They
+    are in the window, because the model has to see what it already said or it
+    repeats itself — but they must not make the room *pending*. Counting them
+    would mean every reply scheduled the next pass, which would mean a pass
+    every tick for as long as the bot kept talking: a conversation with itself
+    that never ends and never stops spending the awareness allowance. Only a
+    human speaking makes a room worth reading again.
+    """
+    with _lock:
+        rows = _conn.execute(
+            "SELECT g.chat_id, MIN(g.at), MAX(g.at), MAX(g.id), COUNT(*) "
+            "FROM group_messages g "
+            "LEFT JOIN awareness_state a ON a.chat_id = g.chat_id "
+            "WHERE g.role != 'nexus' AND g.id > COALESCE(a.seen_message_id, 0) "
+            "GROUP BY g.chat_id"
+        ).fetchall()
+    return [
+        {
+            "chat_id": int(r[0]),
+            "oldest_at": int(r[1] or 0),
+            "newest_at": int(r[2] or 0),
+            "max_id": int(r[3] or 0),
+            "pending": int(r[4] or 0),
+        }
+        for r in rows
+    ]
+
+
+def awareness_get(chat_id: int) -> dict | None:
+    with _lock:
+        row = _conn.execute(
+            "SELECT chat_id, updated_at, seen_message_id, passes, relevant, "
+            "topic, summary, participants FROM awareness_state WHERE chat_id=?",
+            (int(chat_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "chat_id": int(row[0]),
+        "updated_at": int(row[1] or 0),
+        "seen_message_id": int(row[2] or 0),
+        "passes": int(row[3] or 0),
+        "relevant": bool(row[4]),
+        "topic": str(row[5] or ""),
+        "summary": str(row[6] or ""),
+        "participants": str(row[7] or ""),
+    }
+
+
+def awareness_set(
+    chat_id: int,
+    *,
+    seen_message_id: int = 0,
+    relevant: bool = False,
+    topic: str = "",
+    summary: str = "",
+    participants: str = "",
+) -> dict:
+    """Record what a completed pass understood about one room.
+
+    Every field is truncated here rather than by the caller: the values come
+    from a model, and a model that answers at length must not be able to grow a
+    row without bound.
+    """
+    now = int(time.time())
+    with _lock:
+        _conn.execute(
+            "INSERT INTO awareness_state "
+            "(chat_id, updated_at, seen_message_id, passes, relevant, topic, "
+            " summary, participants) VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "updated_at=excluded.updated_at, "
+            # Monotonic: a pass over an older window must never move the
+            # watermark backwards, or the messages it skipped would be re-read
+            # on every tick.
+            "seen_message_id=MAX(awareness_state.seen_message_id, "
+            "                    excluded.seen_message_id), "
+            "passes=awareness_state.passes + 1, "
+            "relevant=excluded.relevant, "
+            "topic=excluded.topic, "
+            "summary=excluded.summary, "
+            "participants=excluded.participants",
+            (
+                int(chat_id),
+                now,
+                int(seen_message_id),
+                1,
+                1 if relevant else 0,
+                (topic or "")[:400],
+                (summary or "")[:1200],
+                (participants or "")[:400],
+            ),
+        )
+        _conn.commit()
+    return awareness_get(chat_id) or {}
+
+
+def awareness_advance(chat_id: int, *, seen_message_id: int) -> None:
+    """Move the watermark without recording an understanding.
+
+    Used when a pass did not complete — the model was unreachable, or its answer
+    could not be read. The watermark has to move anyway, because otherwise the
+    sweeper would retry the same batch on every tick for as long as the outage
+    lasted. Nothing permanent is lost by doing so: the window still holds the
+    messages, so the next pass that *does* complete re-reads them and the
+    understanding is rebuilt from the source of truth rather than from the
+    cache.
+    """
+    with _lock:
+        _conn.execute(
+            "INSERT INTO awareness_state (chat_id, updated_at, seen_message_id, "
+            "passes) VALUES (?,?,?,0) "
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "seen_message_id=MAX(awareness_state.seen_message_id, "
+            "                    excluded.seen_message_id)",
+            (int(chat_id), int(time.time()), int(seen_message_id)),
+        )
+        _conn.commit()
+
+
+def awareness_reset() -> None:
+    """Forget every room's understanding and window. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM awareness_state")
+        _conn.execute("DELETE FROM group_messages")
         _conn.commit()

@@ -286,14 +286,24 @@ def test_a_deployment_with_no_pool_still_uses_the_single_counter(monkeypatch):
 
 
 def test_the_other_workloads_have_no_daily_allowance():
-    """Only the conversational workload has one, and this is what keeps it so.
+    """Only the conversational workloads have one, and this is what keeps it so.
 
     A per-account allowance on moderation or transcription would silently
     change how much of the provider those workloads may use, which is not what
     the conversational fix was about.
+
+    ``awareness`` is the one addition since, and it is a *deliberate* second
+    entry rather than an accident: the awareness pass runs on its own workload
+    precisely so that an observant assistant cannot spend the allowance a person
+    is waiting on an answer to. Giving it an allowance of its own is what makes
+    that separation real — without one it would draw on the provider until the
+    room went quiet. The three workloads that are neither conversation nor
+    awareness — intent, moderation, transcription — still have none, and that is
+    the property this test exists to hold.
     """
+    allowed = {"chat", "awareness"}
     for spec in config.GEMINI_POOLS:
-        if spec["workload"] == "chat":
+        if spec["workload"] in allowed:
             assert spec["daily_budget"] >= 1
         else:
             assert spec.get("daily_budget", 0) == 0

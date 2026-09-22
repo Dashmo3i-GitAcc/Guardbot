@@ -74,6 +74,15 @@ def nexus_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "NEXUS_NAMES", ["nexus", "نکسوس"])
     monkeypatch.setattr(config, "NEXUS_PEOPLE_ENABLED", True)
     monkeypatch.setattr(config, "NEXUS_EXTRA_ACTION_WORDS", [])
+    # Group Awareness is on, and its transport is replaced by the tests that
+    # need it. Leaving it on is what makes the "an unaddressed message is read
+    # by the awareness pass" tests below exercise the real path rather than a
+    # configuration the deployment does not use.
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ENABLED", True)
+    monkeypatch.setattr(config, "GEMINI_AWARENESS_API_KEY", "test-awareness-key")
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_DEBOUNCE_SECONDS", 8.0)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_MAX_WAIT_SECONDS", 45.0)
     monkeypatch.setattr(config, "ADMIN_AI_ENABLED", True)
     monkeypatch.setattr(config, "ADMIN_PYTHON_ENABLED", True)
     monkeypatch.setattr(config, "ADMIN_TOOL_GUEST_TOOLS", False)
@@ -85,12 +94,17 @@ def nexus_env(monkeypatch, tmp_path):
     db.admin_reset()
     db.people_reset()
     db.nexus_state_reset()
+    db.awareness_reset()
     nexus.reset_state()
     people.reset_state()
     chat.reset_state()
     main._recently_deleted.clear()
     main._nexus_visibility.clear()
     main._nexus_visibility[CHAT] = "administrator"
+    main._awareness_inflight.clear()
+    main._awareness_last_pass.clear()
+    main._awareness_urgent.clear()
+    main._awareness_sweeping = False
     main._bot_identity.update(
         id=BOT_ID, username="guardbot", name="Guard", aliases=(), resolved=True
     )
@@ -98,9 +112,13 @@ def nexus_env(monkeypatch, tmp_path):
     db.admin_reset()
     db.people_reset()
     db.nexus_state_reset()
+    db.awareness_reset()
     nexus.reset_state()
     people.reset_state()
     main._nexus_visibility.clear()
+    main._awareness_inflight.clear()
+    main._awareness_last_pass.clear()
+    main._awareness_urgent.clear()
 
 
 class FakeBot:
@@ -215,6 +233,53 @@ def install_model(monkeypatch, *, call=None, text="باشه"):
 
     monkeypatch.setattr(main.chat, "reply", _reply)
     return calls
+
+
+def install_awareness_model(
+    monkeypatch, *, call=None, text="انجام شد", relevant=True, respond=True
+):
+    """Replace the *awareness* transport, and optionally script one tool call.
+
+    Since Group Awareness an unaddressed message is no longer answered by
+    ``chat.reply``: it joins the room window and the awareness pass reads it,
+    because deciding whether an unaddressed message concerns Nexus is a semantic
+    question and a keyword list is not allowed to be the thing that answers it.
+    These tests are about administration rather than about which transport
+    carries it, so this is the awareness counterpart of ``install_model`` —
+    same shape, same recorded tool result, different seam.
+
+    ``respond`` is what the model decided; ``text`` is what it chose to say. A
+    test that wants "understood but silent" passes ``respond=False``.
+    """
+    import json
+
+    passes: list[dict] = []
+
+    async def _awareness(transcript, context="", *, tools=None, on_tool=None):
+        entry: dict = {
+            "transcript": transcript,
+            "context": context,
+            "tools": tools,
+        }
+        passes.append(entry)
+        if call is not None and on_tool is not None:
+            entry["tool_result"] = await on_tool(call[0], call[1])
+        return chat.AwarenessReply(
+            text=json.dumps(
+                {
+                    "topic": "test",
+                    "summary": "a test pass",
+                    "relevant": relevant,
+                    "respond": respond,
+                    "message": text if respond else None,
+                }
+            ),
+            model="stub",
+            turns=1,
+        )
+
+    monkeypatch.setattr(main.chat, "awareness", _awareness)
+    return passes
 
 
 def run(handler, msg, bot, actor=MEMBER, ctx=None):
@@ -466,31 +531,35 @@ def test_an_unaddressed_admin_message_is_observed_without_a_reply(monkeypatch):
     assert any("شلوغه" in text for _role, text in stored)
 
 
-def test_an_unaddressed_admin_instruction_reaches_the_model_but_not_the_room(monkeypatch):
-    """A message that looks like an order is *asked about*, and stays silent.
+def test_an_unaddressed_admin_instruction_is_read_by_the_awareness_pass(monkeypatch):
+    """A message that looks like an order is read *semantically*, and may stay silent.
 
-    The cheap relevance gate is allowed to be wrong in the direction of asking;
-    what it may not do is produce a visible reply when no action ran. Here the
-    model is asked and answers without calling a tool, so the room hears nothing.
+    This used to assert that the message reached ``chat.reply`` through a keyword
+    gate. It now asserts the thing the brief actually asks for: the message joins
+    the room, the awareness pass reads it with the surrounding conversation, and
+    the model — not a word list — decides whether there is anything to say. Here
+    it decides there is not, and the room hears nothing.
     """
     bot = FakeBot()
-    calls = install_model(monkeypatch, text="متوجه شدم")
+    passes = install_awareness_model(monkeypatch, respond=False)
 
     run(main.on_group_chat, message(text="این کاربر رو بن کن"), bot, actor=MODERATOR)
 
-    assert len(calls) == 1, "the relevance gate did not consult the model"
-    assert bot.messages == [], "an unaddressed turn talked to the room"
+    assert len(passes) == 1, "the room was not read"
+    assert "این کاربر رو بن کن" in passes[0]["transcript"]
+    assert bot.messages == [], "a silent decision still talked to the room"
 
 
 def test_an_unaddressed_admin_instruction_that_runs_gets_its_confirmation(monkeypatch):
     """End to end: natural language in, a typed request out, a reply only then.
 
-    This is the brief's whole flow. The message is not addressed to Nexus, the
-    model asks for a ban, the request is authorised by the service against the
-    *actor's* id, and the confirmation is the only thing the room sees.
+    This is the brief's whole flow, and it now runs through the awareness layer.
+    The message is not addressed to Nexus, the model asks for a ban, the request
+    is authorised by the service against the *actor's* id, and the confirmation
+    is the only thing the room sees.
     """
     bot = FakeBot()
-    calls = install_model(
+    passes = install_awareness_model(
         monkeypatch, call=("ban_member", {"target_user_id": MEMBER}), text="انجام شد"
     )
 
@@ -498,9 +567,9 @@ def test_an_unaddressed_admin_instruction_that_runs_gets_its_confirmation(monkey
     # hold that permission — the denial case has its own test below.
     run(main.on_group_chat, message(text="این کاربر رو بن کن"), bot, actor=SENIOR)
 
-    assert len(calls) == 1
-    assert calls[0]["tool_result"]["ok"] is True
-    assert calls[0]["tool_result"]["outcome"] == admin_service.OUTCOME_OK
+    assert len(passes) == 1
+    assert passes[0]["tool_result"]["ok"] is True
+    assert passes[0]["tool_result"]["outcome"] == admin_service.OUTCOME_OK
     assert bot.messages == ["انجام شد"], "the confirmation was not sent"
     # And the action is in the audit trail, attributed to the actor.
     rows = db.audit_recent(limit=5)
@@ -536,7 +605,7 @@ def test_the_owner_can_define_an_admin_by_user_id(monkeypatch):
     role stored is the one the owner named, decided by `rbac`, not by the model.
     """
     bot = FakeBot()
-    calls = install_model(
+    passes = install_awareness_model(
         monkeypatch,
         call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "admin"}),
         text="انجام شد",
@@ -549,7 +618,7 @@ def test_the_owner_can_define_an_admin_by_user_id(monkeypatch):
         actor=OWNER,
     )
 
-    assert calls[0]["tool_result"]["ok"] is True
+    assert passes[0]["tool_result"]["ok"] is True
     assert db.admin_get(NEW_ADMIN)["role"] == rbac.ROLE_ADMIN
     # And the new admin is now an authorized Nexus actor, from the stored row.
     assert rbac.resolve(NEW_ADMIN).is_admin is True
@@ -561,7 +630,7 @@ def test_the_owner_can_define_an_admin_by_user_id(monkeypatch):
 
 def test_the_owner_can_define_a_senior_admin(monkeypatch):
     bot = FakeBot()
-    install_model(
+    install_awareness_model(
         monkeypatch,
         call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "senior_admin"}),
         text="انجام شد",
@@ -580,7 +649,7 @@ def test_the_owner_can_define_a_senior_admin(monkeypatch):
 def test_a_senior_admin_cannot_define_an_admin(monkeypatch):
     """A senior admin may build the moderation team, not a peer."""
     bot = FakeBot()
-    calls = install_model(
+    passes = install_awareness_model(
         monkeypatch,
         call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "admin"}),
         text="انجام شد",
@@ -593,7 +662,7 @@ def test_a_senior_admin_cannot_define_an_admin(monkeypatch):
         actor=SENIOR,
     )
 
-    assert calls[0]["tool_result"]["ok"] is False
+    assert passes[0]["tool_result"]["ok"] is False
     assert db.admin_get(NEW_ADMIN) is None, "a senior admin minted an admin"
     assert not any(call[0] == "promote" for call in bot.actions)
 
@@ -631,7 +700,7 @@ def test_an_admin_can_list_the_administrators():
 
 
 def test_the_owner_can_remove_an_admin(monkeypatch):
-    """«این ادمین رو از دسترسی نکسوس حذف کن»."""
+    """«این ادمین رو از دسترسی نکسوس حذف کن» — unaddressed, so the room reads it."""
     db.admin_set(
         NEW_ADMIN,
         rbac.ROLE_MODERATOR,
@@ -641,7 +710,7 @@ def test_the_owner_can_remove_an_admin(monkeypatch):
     assert rbac.resolve(NEW_ADMIN).is_admin is True
 
     bot = FakeBot()
-    install_model(
+    passes = install_awareness_model(
         monkeypatch,
         call=("demote_member", {"target_user_id": NEW_ADMIN}),
         text="انجام شد",
@@ -652,6 +721,10 @@ def test_the_owner_can_remove_an_admin(monkeypatch):
         bot,
         actor=OWNER,
     )
+
+    assert len(passes) == 1
+    assert passes[0]["tool_result"]["ok"] is True
+    assert bot.messages == ["انجام شد"]
 
     assert db.admin_get(NEW_ADMIN) is None
     assert rbac.resolve(NEW_ADMIN).is_admin is False
@@ -971,7 +1044,7 @@ def test_a_context_dependent_command_uses_the_reply_target(monkeypatch):
     replied = SimpleNamespace(
         from_user=SimpleNamespace(id=STRANGER, full_name="Nuisance"), message_id=7
     )
-    calls = install_model(
+    passes = install_awareness_model(
         monkeypatch,
         call=("mute_member", {"target_user_id": STRANGER}),
         text="انجام شد",
@@ -984,12 +1057,13 @@ def test_a_context_dependent_command_uses_the_reply_target(monkeypatch):
         actor=MODERATOR,
     )
 
-    assert calls[0]["tool_result"]["ok"] is True
+    assert passes[0]["tool_result"]["ok"] is True
     rows = db.audit_recent(limit=5)
     assert any(r["target_id"] == STRANGER for r in rows)
     # And the marker is what made it resolvable: the replied-to id was in the
-    # context the model was handed.
-    assert str(STRANGER) in calls[0]["context"]
+    # transcript the model was handed. The window carries it because a later
+    # "بنش کن" is only usable if the room remembers who "این" was.
+    assert str(STRANGER) in passes[0]["transcript"]
 
 
 # ══ 6. State ══════════════════════════════════════════════════════════════
@@ -1369,18 +1443,66 @@ def test_the_acquisition_and_assistant_filters_still_overlap():
     assert main.acquisition_message_filter() is not None
 
 
-def test_the_gemini_pool_keeps_all_five_workloads():
-    """Nexus adds no sixth workload and removes none of the existing five."""
+def test_the_gemini_pool_keeps_its_workloads_and_adds_only_awareness():
+    """The original five are intact, and awareness is a deliberate sixth.
+
+    This test used to assert that Nexus added *no* sixth workload, and that was
+    the right invariant while the assistant only ever answered one message at a
+    time. Group Awareness changes it on purpose: reading the room is a different
+    job from answering a person, it runs on its own schedule, and it must not be
+    able to spend the allowance somebody is waiting on an answer to. So it gets
+    its own pool entry — and the five that were there before are still there,
+    unrenamed and unmerged, which is the half of this that must never change.
+    """
     from app import gemini_pool
 
     gemini_pool.build_pools()
-    assert {pool.workload for pool in gemini_pool.pools()} == {
+    workloads = {pool.workload for pool in gemini_pool.pools()}
+    assert {
         "intent",
         "chat",
         "moderation",
         "transcribe",
         "tts",
+    } <= workloads
+    assert workloads == {
+        "intent",
+        "chat",
+        "moderation",
+        "transcribe",
+        "tts",
+        "awareness",
     }
+
+
+def test_awareness_is_a_separate_workload_with_its_own_limits():
+    """Awareness shares no breaker, allowance or model preference with chat.
+
+    The isolation the brief asks for is structural, so it is asserted
+    structurally: the two pool entries are distinct objects with distinct
+    counters, and moving the awareness model does not move the assistant's.
+    """
+    from app import gemini_pool
+
+    gemini_pool.build_pools()
+    chat_pool = gemini_pool.pool_for("chat")
+    awareness_pool = gemini_pool.pool_for("awareness")
+    assert chat_pool is not None and awareness_pool is not None
+    assert chat_pool is not awareness_pool
+    assert chat_pool.workload != awareness_pool.workload
+    # Its own allowance, and its own breaker: an awareness outage must not
+    # silence the assistant, and a busy room must not spend the answer budget.
+    # Each pool takes its number from its own setting, which is what makes them
+    # independently tunable rather than accidentally equal.
+    assert awareness_pool.daily_budget == max(1, config.NEXUS_AWARENESS_DAILY_LIMIT)
+    assert chat_pool.daily_budget == max(1, config.GEMINI_CHAT_DAILY_LIMIT)
+    # Moving the awareness model leaves the conversational one alone.
+    original = config.GEMINI_CHAT_MODEL
+    try:
+        config.GEMINI_AWARENESS_MODEL = "some-other-model"
+        assert config.GEMINI_CHAT_MODEL == original
+    finally:
+        config.GEMINI_AWARENESS_MODEL = config.GEMINI_CHAT_MODEL
 
 
 def test_the_conversational_allowance_is_still_its_own_counter():

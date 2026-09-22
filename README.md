@@ -253,22 +253,48 @@ execution layer decides whether it happens.
 **Who it answers.** Only authorized administrators — the owner and anybody with a
 stored role. An ordinary member cannot activate it by replying to it, mentioning
 it, or wording a message that looks like an order; their message costs one lookup
-and never reaches Gemini. (Set `NEXUS_ACTORS_ONLY=false` to restore the older
-"answers any member who addresses it" behaviour.) `/nexus status` prints this
-setting as its `پاسخ‌دهی به` line, so you can confirm from inside the group which
-gate is in force.
+and never reaches Gemini as a question aimed at the assistant. (Set
+`NEXUS_ACTORS_ONLY=false` to restore the older "answers any member who addresses
+it" behaviour.) `/nexus status` prints this setting as its `پاسخ‌دهی به` line, so
+you can confirm from inside the group which gate is in force.
+
+**It follows the room, not just the messages aimed at it.** Nexus keeps a
+bounded, per-group view of the recent conversation — who said what, and how they
+stand in the group, labelled by the server from Telegram ids and never from what
+anyone wrote — and reads it with Gemini. That is what lets it understand
+«پس همون کاری که گفتی رو بکن» with no moderation word in it, or a complaint that
+is plainly a request without being phrased as one. A keyword list cannot do that,
+so there is no keyword list in the decision: **whether a conversation concerns
+Nexus is the model's judgement, not a pattern match.**
+
+Reading and answering are two separate decisions. Nexus is aware continuously and
+speaks rarely: it stays quiet through ordinary conversation, and it does not
+answer merely because it was mentioned or stay silent merely because it was not.
+It speaks when a reply would genuinely help, or when an action actually ran — an
+instruction that was carried out is always acknowledged.
+
+This costs far less than it sounds like. A room where twenty people are talking
+costs **one** batched call, because the pass waits for the room to fall quiet
+first; a room where nobody is talking to Nexus costs none. The awareness layer
+has its own daily allowance and its own circuit breaker, separate from the
+allowance a person is waiting on an answer to. It can be switched off entirely
+with `NEXUS_AWARENESS_ENABLED=false`, and `/nexus status` shows whether it is on
+as its `درک گفتگوی گروه` line.
+
+Nexus reading the room grants nobody anything. Every action is still authorized
+separately against the Telegram id of the person who actually spoke last, so an
+ordinary member's message being understood does not make it an instruction.
 
 **What it does with an administrator's message.**
 
 * Addressed to it — by reply, `@mention`, a `BOT_ALIASES` word, or one of
   `NEXUS_NAMES` (`نکسوس`) — it answers, and can use the moderation tools the
   person's role holds.
-* Not addressed, but clearly an instruction ("این کاربر رو بن کن") — it asks the
-  model, and replies **only if an action actually ran**. A message that merely
-  looked like an instruction produces no reply.
-* Not addressed and ordinary ("امروز اینجا خیلی شلوغه") — it is stored as context
-  for that administrator's next instruction and answered with **silence**. No
-  model call, no message.
+* Not addressed — the room is read as a batch, and it replies **only if the
+  model judges a reply would help, or if an action actually ran**. A message that
+  merely looked like an instruction produces no reply.
+* Not addressed and ordinary ("امروز اینجا خیلی شلوغه") — it is understood as part
+  of the room and answered with **silence**.
 
 So an administrator never has to reply to the bot for it to know who they are,
 and the bot never talks to the room uninvited.
@@ -283,9 +309,11 @@ use the command:
 ```
 
 While it is off, the assistant is silent for everybody — including ordinary
-members and their mentions — and nothing is spent on Gemini. The typed
-moderation commands (`/ban`, `/mute`, …) keep working: switching the assistant
-off must not switch moderation off with it. Only the owner can change the state.
+members and their mentions — and nothing is spent on Gemini. It also stops
+following the group conversation: off means off, so it does not go on recording
+a room it was told to stop listening to. The typed moderation commands (`/ban`,
+`/mute`, …) keep working: switching the assistant off must not switch moderation
+off with it. Only the owner can change the state.
 
 **Acting on a target.** A reply is understood ("این رو ساکت کن" acts on the
 person replied to). A name is understood when it is unambiguous ("میلاد رو بن
@@ -342,4 +370,17 @@ docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot \
 * Telegram does not let a bot restrict a chat administrator, so a flooding
   admin cannot be stopped; that refusal is logged and reported, never claimed
   as a success.
+* Nexus's awareness of a group is only as good as what Telegram delivers to it.
+  With privacy mode on, a bot that is an *administrator* in the group receives
+  every message and sees the whole conversation; a bot that is only a *member*
+  receives commands, mentions and replies and nothing else, so it reads a
+  partial room. `/nexus status` reports which one applies per group.
+* The room window is text only. Photos, videos and stickers are recorded as
+  their kind (`[photo]`, `[sticker]`), not analysed, so awareness understands
+  *that* something was posted but not *what* it showed. Media understanding is
+  the moderation path's job and has its own workload.
+* Awareness is a bounded recent view, not a transcript: messages older than
+  `NEXUS_AWARENESS_RETENTION_SECONDS` (1 hour by default) leave the window, and
+  a very busy room keeps only the last `NEXUS_AWARENESS_MAX_ROWS` messages. A
+  reference to something said an hour ago may therefore be missed.
 

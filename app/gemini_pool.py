@@ -1577,17 +1577,27 @@ def shared_credentials() -> list[tuple[str, list[str]]]:
     workload has its own credentials, which is the configuration the brief asks
     for.
 
-    ``tts`` is excluded, and deliberately. Speech synthesis is a *mode* of the
-    conversation feature, not a peer of it: it is configured to use the chat
-    credential on purpose (``GEMINI_CHAT_TTS_MODEL`` and ``GEMINI_CHAT_API_KEY``
-    are one feature's settings). Reporting that pairing as a surprise would
-    train the operator to ignore the warning that actually matters, which is two
-    independent workloads quietly drawing on one project.
+    ``tts`` and ``awareness`` are excluded, and deliberately. Both are *modes* of
+    the conversation feature rather than peers of it: speech synthesis is the
+    same exchange spoken aloud, and awareness is the same assistant reading the
+    room instead of a message. Both are configured to use the chat credential on
+    purpose (``GEMINI_CHAT_TTS_MODEL`` and ``GEMINI_CHAT_API_KEY`` are one
+    feature's settings, and ``GEMINI_AWARENESS_API_KEY`` defaults to the same
+    key). Reporting those pairings as a surprise would train the operator to
+    ignore the warning that actually matters, which is two independent workloads
+    quietly drawing on one project.
+
+    Note what is *not* claimed here: sharing a credential means sharing a Google
+    project, and therefore a provider-side rate limit. What stays separate — and
+    what the brief requires separate — is everything this application controls:
+    each workload keeps its own accounts, daily allowance, model preference,
+    breaker and counters, because all of those are keyed by workload.
     """
+    shared_modes = {"tts", "awareness"}
     seen: dict[str, list[str]] = {}
     labels: dict[str, str] = {}
     for pool in pools():
-        if pool.workload == "tts":
+        if pool.workload in shared_modes:
             continue
         for account in pool.accounts:
             seen.setdefault(account.fingerprint, [])

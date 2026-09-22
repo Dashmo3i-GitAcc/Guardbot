@@ -32,6 +32,7 @@ from . import (
     admin_tools,
     ai_intent,
     ai_moderation,
+    awareness,
     burst,
     chat,
     classifier,
@@ -1327,6 +1328,304 @@ def _nexus_observe(room, user, msg, text: str) -> bool:
     )
 
 
+# ── Nexus Awareness: reading the room ─────────────────────────────────────
+# The observation layer. Capture is unconditional and free; the model call is
+# batched, debounced and budgeted. See ``app/awareness.py`` for the policy and
+# ``AgentMD.md`` §35 for the architecture.
+#
+# Four pieces of state, all in this process and all bounded:
+#   * which rooms are being analysed right now, so two ticks cannot overlap on
+#     one room and produce two replies to the same conversation;
+#   * when each room was last analysed, which is the minimum-interval brake;
+#   * which rooms asked to be read promptly, which is the only thing
+#     ``nexus.looks_actionable`` still does — a timing hint, never a verdict;
+#   * whether a sweep is already running, so a slow pass cannot pile up behind
+#     the job queue's next tick.
+_awareness_inflight: set[int] = set()
+_awareness_last_pass: dict[int, float] = {}
+_awareness_urgent: set[int] = set()
+_awareness_sweeping = False
+
+
+def _awareness_capture(room, user, msg, text: str, principal) -> bool:
+    """Record one received group message into the room window. No AI call.
+
+    Called for every message the bot can actually receive — including ordinary
+    members who will never be answered. That is the point of the feature: the
+    assistant understands the room rather than only the messages aimed at it.
+    It grants nothing. A captured message can still not produce an action,
+    because every tool call is authorised separately against the actor's id.
+
+    Media is recorded as its *kind* and never as bytes, on the same rule the
+    moderation path follows: the window is text, and it has to stay text or one
+    photograph becomes a row every later prompt has to carry.
+
+    Nothing is captured while Nexus is switched off. Recording a group's
+    conversation is part of what the assistant does, so "off" has to mean off:
+    an owner who silenced the assistant must not find that it went on reading
+    the room. This matches the pre-existing observation path, which is only
+    reached through ``nexus.accepts``.
+    """
+    if not awareness.capture_enabled() or not nexus.is_online():
+        return False
+    body = (text or "").strip()
+    ref = media.describe(msg)
+    if ref is not None:
+        kind = getattr(ref, "kind", "") or "media"
+        body = f"[{kind}] {body}".strip() if body else f"[{kind}]"
+    if not body:
+        return False
+    # The reply marker matches the one ``nexus.observe`` writes, and for the
+    # same reason: "این کاربر خیلی مزاحم شده" is only usable by a later "بنش کن"
+    # if the window records *who* it was about.
+    reply_user_id, reply_name, _ = _reply_context(msg)
+    if reply_user_id:
+        who = f"{reply_name} ({reply_user_id})" if reply_name else str(reply_user_id)
+        body = f"[در پاسخ به {who}] {body}"
+    name = getattr(user, "full_name", "") or getattr(user, "first_name", "") or ""
+    return awareness.capture(
+        room.id, user.id, awareness.role_of(principal), name, body
+    )
+
+
+def _awareness_note_reply(chat_id: int, text: str) -> None:
+    """Record what Nexus itself said, so the next pass reads a whole exchange.
+
+    Without this the assistant would see questions and never its own answers,
+    and would cheerfully answer the same thing twice. A failed send is not
+    recorded — ``_send_chat`` returns whether it went out — because a reply that
+    nobody saw is not part of the conversation.
+    """
+    if not awareness.capture_enabled() or not (text or "").strip():
+        return
+    awareness.capture(chat_id, 0, awareness.ROLE_NEXUS, "", text.strip())
+
+
+def _awareness_context(chat_id: int) -> str:
+    """The system-instruction context for a pass: roster, then memory.
+
+    The transcript is *not* in here. For the awareness pass the transcript is
+    the user turn — the thing to be read — and duplicating it would double the
+    prompt for no gain.
+    """
+    return awareness.roster() + awareness.memory_block(chat_id)
+
+
+async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
+    """One batched read of one room: understand it, and maybe speak.
+
+    The order is the requirement. The room is read first and recorded whatever
+    the model decides, because understanding is the point and speaking is the
+    exception. Only then is the response decision applied, and the two
+    conditions on it are the existing security boundary rather than anything new:
+
+    * the speaker must be one Nexus answers at all (``nexus.accepts``), which is
+      where ``NEXUS_ACTORS_ONLY`` still means what it always meant; and
+    * if a write tool ran, the confirmation is sent regardless of what the model
+      decided to say — an action that happened and was never acknowledged is the
+      failure the addressed path already goes out of its way to avoid.
+
+    Everything here is wrapped: a pass runs in the job queue, and an exception
+    escaping it would be a traceback in the log and a stalled room, not a
+    failed pass. Failures degrade to "say nothing and try again later".
+    """
+    max_id = int(row.get("max_id") or 0)
+    speaker = awareness.speaker(chat_id)
+    if speaker is None:
+        # Nothing but the assistant's own words; there is no conversation to
+        # read and no one to answer.
+        awareness.skip(chat_id, seen_message_id=max_id)
+        return
+
+    actor_id = int(speaker.get("user_id") or 0)
+    principal = rbac.resolve(actor_id)
+    counters: dict = {"writes": 0}
+    tools, context, on_tool = _awareness_turn(ctx, chat_id, actor_id, counters)
+    transcript = awareness.render(chat_id)
+    if not transcript:
+        awareness.skip(chat_id, seen_message_id=max_id)
+        return
+
+    result = await chat.awareness(
+        transcript,
+        _awareness_context(chat_id) + (context or ""),
+        tools=tools,
+        on_tool=on_tool,
+    )
+    if not result.answered:
+        # A skipped or failed pass leaves the understanding alone and only moves
+        # the watermark. The messages stay in the window, so the next pass that
+        # completes re-reads them and nothing is lost but time.
+        log.info(
+            "awareness pass did not complete chat=%s error=%s skipped=%s",
+            chat_id,
+            result.error or "-",
+            result.skipped or "-",
+        )
+        awareness.skip(chat_id, seen_message_id=max_id)
+        return
+
+    decision = awareness.parse_decision(result.text)
+    if decision is None:
+        # Unreadable answer. Deliberately not "send the raw text": the one
+        # outcome worth losing a pass over is the assistant speaking into a room
+        # on the strength of an answer nobody could read.
+        log.warning(
+            "awareness answer could not be read chat=%s chars=%d",
+            chat_id,
+            len(result.text or ""),
+        )
+        awareness.skip(chat_id, seen_message_id=max_id)
+        return
+
+    awareness.record(chat_id, seen_message_id=max_id, decision=decision)
+    log.info(
+        "awareness chat=%s relevant=%s respond=%s writes=%d topic=%r",
+        chat_id,
+        decision.get("relevant"),
+        decision.get("respond"),
+        counters.get("writes", 0),
+        (decision.get("topic") or "")[:60],
+    )
+
+    # The response decision. ``writes`` forces a reply because the action has
+    # already happened; otherwise the model's own judgement decides, and it is
+    # then filtered by whether this speaker is one Nexus answers at all.
+    wants_to_speak = bool(decision.get("respond")) or bool(counters.get("writes"))
+    if not wants_to_speak:
+        return
+    if not nexus.accepts(principal):
+        # The existing gate, unchanged and unweakened: with ``NEXUS_ACTORS_ONLY``
+        # on, an ordinary member's message is understood and still not answered.
+        # Awareness observes; it does not widen who may talk to Nexus.
+        log.info(
+            "awareness stayed silent: speaker is not an actor chat=%s actor=%s",
+            chat_id,
+            actor_id,
+        )
+        return
+
+    message = decision.get("message")
+    if not message and counters.get("writes"):
+        # The action ran but the model gave no wording for it. Fall back to the
+        # service's own sentence rather than leaving a change unacknowledged.
+        message = config.NEXUS_AWARENESS_ACTION_TEXT
+    if not message:
+        return
+    if await _send_chat(ctx, chat_id, message):
+        _awareness_note_reply(chat_id, message)
+
+
+async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
+    """Read one room if it is due. Returns whether a pass actually ran.
+
+    The single place a pass is started, shared by the sweeper and by the
+    urgency hint, so the two cannot drift apart in their guards. Every refusal
+    here is about cost or safety, never about meaning:
+
+    * a room already in flight is left alone, so two callers cannot produce two
+      replies to one conversation;
+    * a switched-off assistant reads nothing at all, so "off" costs no allowance
+      and sends no message — the execution layer would refuse any action anyway
+      (``OUTCOME_NEXUS_OFFLINE``), and paying for a pass that can only be denied
+      is waste rather than safety;
+    * a room Telegram is not delivering ordinary messages for is not read at all
+      — there is nothing in the window but commands and mentions;
+    * the room must be *due*, which is a timing question (see
+      ``awareness.due``), and ``urgent`` only relaxes the wait-for-quiet clause.
+    """
+    chat_id = int(row.get("chat_id") or 0)
+    if not chat_id or chat_id in _awareness_inflight:
+        return False
+    if not nexus.is_online():
+        return False
+    if not _nexus_can_observe(chat_id):
+        # Telegram is not delivering this room's ordinary messages, so there is
+        # no conversation to read. Advancing the watermark keeps a room we
+        # cannot see from being retried forever.
+        awareness.skip(chat_id, seen_message_id=int(row.get("max_id") or 0))
+        return False
+    verdict = awareness.due(
+        row,
+        now=time.time(),
+        last_pass_at=_awareness_last_pass.get(chat_id, 0.0),
+        urgent=urgent,
+    )
+    if not verdict:
+        return False
+    _awareness_urgent.discard(chat_id)
+    _awareness_inflight.add(chat_id)
+    try:
+        await _awareness_pass(ctx, chat_id, row)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - a pass must never take the caller down
+        log.exception("awareness pass failed chat=%s", chat_id)
+        awareness.skip(chat_id, seen_message_id=int(row.get("max_id") or 0))
+    finally:
+        _awareness_inflight.discard(chat_id)
+        _awareness_last_pass[chat_id] = time.time()
+    return True
+
+
+def _awareness_pending_for(chat_id: int) -> dict:
+    """The pending summary for one room, or an empty one."""
+    for row in awareness.pending():
+        if int(row.get("chat_id") or 0) == int(chat_id):
+            return row
+    return {}
+
+
+async def _awareness_promptly(ctx, chat_id: int) -> None:
+    """Read a room now because something in it looked like an instruction.
+
+    This is the whole of what ``nexus.looks_actionable`` still does. It is
+    deliberately *not* a separate model call: the room goes through exactly the
+    same pass it would have gone through a few seconds later, so there is one
+    semantic decision rather than a keyword verdict racing a model verdict. The
+    hint can only make a room earlier, never more relevant, and the
+    minimum-interval brake still applies — which is what stops a burst of
+    actionable-sounding messages from becoming a burst of passes.
+    """
+    if not awareness.enabled() or not _nexus_can_observe(chat_id):
+        return
+    row = _awareness_pending_for(chat_id)
+    if not row:
+        return
+    await _awareness_run_room(ctx, row, urgent=True)
+
+
+async def awareness_sweep(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The job-queue tick: find rooms with something new, and read a few.
+
+    A tick that finds nothing pending costs one indexed query per configured
+    group and no API call, which is what makes a 15-second interval affordable.
+    Bounded to ``NEXUS_AWARENESS_MAX_CHATS_PER_TICK`` rooms so a slow pass cannot
+    starve the rest of the bot, and guarded against overlapping ticks because
+    the job queue makes no promise that a callback has finished before the next
+    one starts.
+    """
+    global _awareness_sweeping
+    if not awareness.enabled() or _awareness_sweeping:
+        return
+    _awareness_sweeping = True
+    try:
+        budget = max(1, int(config.NEXUS_AWARENESS_MAX_CHATS_PER_TICK))
+        done = 0
+        for row in awareness.pending():
+            if done >= budget:
+                break
+            chat_id = int(row.get("chat_id") or 0)
+            if await _awareness_run_room(ctx, row, urgent=chat_id in _awareness_urgent):
+                done += 1
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - and a sweep must never kill the bot
+        log.exception("awareness sweep failed")
+    finally:
+        _awareness_sweeping = False
+
+
 def _nexus_state_request(operation: str, actor: rbac.Principal, chat_id: int):
     """One typed state-change request, stamped the way every other one is."""
     return admin_service.AdminRequest(
@@ -1440,6 +1739,11 @@ def _nexus_status_text() -> str:
                 if config.NEXUS_ACTORS_ONLY
                 else config.NEXUS_ACTORS_ONLY_OFF_LABEL
             ),
+            awareness=(
+                config.NEXUS_AWARENESS_ON_LABEL
+                if config.NEXUS_AWARENESS_ENABLED
+                else config.NEXUS_AWARENESS_OFF_LABEL
+            ),
             mode=admin_service.mode_line(),
         )
     ]
@@ -1536,13 +1840,17 @@ async def _send_chat(
     chat_id: int,
     text: str,
     reply_to: int | None = None,
-) -> None:
-    """Send one conversational message.
+) -> bool:
+    """Send one conversational message. Returns whether it was actually sent.
 
     Escaped, because the body is model output and Telegram is asked to parse
     HTML: an unescaped angle bracket would be a parse error at best. The typing
     action is best-effort — it is a courtesy, and failing to show it must not
     cost the reply.
+
+    The return value exists for the awareness window: what the assistant said
+    out loud is part of the conversation the next pass has to understand, and a
+    reply that failed to send must not appear there as though it had.
     """
     safe = html.escape(text)
     try:
@@ -1559,6 +1867,8 @@ async def _send_chat(
         )
     except TelegramError as exc:
         log.warning("chat reply failed: %s", exc)
+        return False
+    return True
 
 
 async def _download_file(ctx: ContextTypes.DEFAULT_TYPE, file_id: str) -> bytes:
@@ -1667,8 +1977,30 @@ def _reply_context(msg) -> tuple[int, str, int]:
     )
 
 
-def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
-    """The tools, trusted context and tool-runner for one conversational turn.
+def _admin_turn_core(
+    *,
+    actor_id: int,
+    chat_id: int,
+    chat_title: str = "",
+    chat_type: str = "",
+    message_id: int = 0,
+    reply_user_id: int = 0,
+    reply_name: str = "",
+    reply_message_id: int = 0,
+    bot_username: str = "",
+    bot_id: int = 0,
+    gateway,
+    counters: dict | None = None,
+    ambient: bool = False,
+):
+    """The tools, trusted context and tool-runner for one administrative turn.
+
+    The single implementation behind both ways a turn reaches the model: the
+    addressed conversation (``_ai_admin_turn``) and the awareness layer's read of
+    the room (``_awareness_turn``). They are the same turn as far as authority is
+    concerned — one actor id, one tool surface, one service that decides — and
+    having two builders would mean two places for the trusted context to drift
+    away from what the service authorises against.
 
     Returns ``(None, "", None)`` — the ordinary, tool-free conversation — in
     every case where administration is not on the table: the feature is switched
@@ -1685,38 +2017,37 @@ def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
     do, and it is never the thing that stops it.
 
     ``counters`` is the caller's tally of what this turn actually did, and it
-    has exactly one consumer: an unaddressed message gets a visible reply only
-    if a write tool was called. See ``_answer_conversationally``.
+    has exactly one consumer: an unaddressed or ambient turn gets a visible
+    reply only if a write tool was called. See ``_answer_conversationally`` and
+    ``_awareness_pass``.
     """
     if not config.ADMIN_AI_ENABLED:
         return None, "", None
 
     try:
-        principal = rbac.resolve(user.id)
+        principal = rbac.resolve(actor_id)
         if not principal.is_admin and not config.ADMIN_TOOL_GUEST_TOOLS:
             return None, "", None
         names = admin_tools.tool_names_for(principal)
         if not names:
             return None, "", None
 
-        reply_user_id, reply_name, reply_message_id = _reply_context(msg)
         context = admin_tools.build_context(
             principal=principal,
-            chat_id=room.id,
-            chat_title=getattr(room, "title", "") or "",
-            chat_type=str(getattr(room, "type", "") or ""),
-            message_id=int(getattr(msg, "message_id", 0) or 0),
+            chat_id=chat_id,
+            chat_title=chat_title,
+            chat_type=chat_type,
+            message_id=message_id,
             reply_user_id=reply_user_id,
             reply_name=reply_name,
             reply_message_id=reply_message_id,
-            bot_username=getattr(ctx.bot, "username", "") or "",
+            bot_username=bot_username,
+            ambient=ambient,
         )
         tools = admin_tools.declarations_for(principal)
     except Exception:  # noqa: BLE001 - degrade to an ordinary conversation
         log.exception("could not build the administrative tool set")
         return None, "", None
-
-    gateway = TelegramGateway(ctx)
 
     async def on_tool(name: str, args: dict) -> dict:
         """Run one tool call the model asked for. Authorisation is not here.
@@ -1736,10 +2067,10 @@ def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
                 name,
                 args,
                 principal=principal,
-                chat_id=room.id,
+                chat_id=chat_id,
                 reply_user_id=reply_user_id,
                 reply_name=reply_name,
-                bot_id=getattr(ctx.bot, "id", 0),
+                bot_id=bot_id,
                 gateway=gateway,
             )
 
@@ -1749,9 +2080,9 @@ def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
         request = admin_tools.parse_write_call(
             name,
             args,
-            actor_id=user.id,
-            chat_id=room.id,
-            message_id=int(getattr(msg, "message_id", 0) or 0),
+            actor_id=principal.user_id,
+            chat_id=chat_id,
+            message_id=message_id,
             request_id=admin_service.new_request_id(),
         )
         if request is None:
@@ -1774,11 +2105,11 @@ def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
             request,
             gateway,
             actor=principal,
-            bot_id=getattr(ctx.bot, "id", 0),
+            bot_id=bot_id,
         )
         log.info(
             "ai admin tool=%s actor=%s outcome=%s ok=%s",
-            name, user.id, result.outcome, result.ok,
+            name, principal.user_id, result.outcome, result.ok,
         )
         return {
             "ok": result.ok,
@@ -1799,27 +2130,70 @@ def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
     return tools, context, on_tool
 
 
+def _ai_admin_turn(update, ctx, msg, room, user, counters: dict | None = None):
+    """The administrative half of one addressed conversational turn."""
+    reply_user_id, reply_name, reply_message_id = _reply_context(msg)
+    return _admin_turn_core(
+        actor_id=int(user.id),
+        chat_id=room.id,
+        chat_title=getattr(room, "title", "") or "",
+        chat_type=str(getattr(room, "type", "") or ""),
+        message_id=int(getattr(msg, "message_id", 0) or 0),
+        reply_user_id=reply_user_id,
+        reply_name=reply_name,
+        reply_message_id=reply_message_id,
+        bot_username=getattr(ctx.bot, "username", "") or "",
+        bot_id=getattr(ctx.bot, "id", 0),
+        gateway=TelegramGateway(ctx),
+        counters=counters,
+    )
+
+
+def _awareness_turn(ctx, chat_id: int, actor_id: int, counters: dict | None = None):
+    """The administrative half of one awareness pass.
+
+    Same core, same authority, different framing: there is no single message
+    being answered, so the trusted context says so and the model is told to find
+    its target in the transcript by id. The tool surface is the last human
+    speaker's — see ``awareness.speaker`` for why that is the safe attribution.
+    """
+    return _admin_turn_core(
+        actor_id=int(actor_id),
+        chat_id=int(chat_id),
+        chat_title="",
+        chat_type="",
+        message_id=0,
+        bot_username=getattr(ctx.bot, "username", "") or "",
+        bot_id=getattr(ctx.bot, "id", 0),
+        gateway=TelegramGateway(ctx),
+        counters=counters,
+        ambient=True,
+    )
+
+
 async def _answer_conversationally(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
     reply_to: int | None = None,
-    *,
-    require_action: bool = False,
 ) -> None:
-    """The whole conversational policy, in one place.
+    """The whole conversational policy for a message that was **aimed** at Nexus.
+
+    This path is now reached by exactly one thing: a message that addressed the
+    assistant — by reply, by `@mention`, by a `BOT_ALIASES` word, or by one of
+    `NEXUS_NAMES`. A message that merely *looked* like an instruction no longer
+    comes here. It joins the room window and the awareness layer reads it
+    (`_awareness_pass`), because deciding whether an unaddressed message
+    concerns Nexus is a semantic question and the answer belongs to the model
+    rather than to a keyword list.
+
+    That split is what makes the two paths mean different things: an addressed
+    message is a conversation and always gets an answer, and an unaddressed one
+    is part of the room and gets a reply only when the model judges that one
+    would help — or when an action actually ran.
 
     Text and media take the same road once the message has been prepared: the
     only difference is that an attachment contributes parts and, for voice, a
     transcript instead of a body.
-
-    ``require_action`` is the difference between the two ways a message can
-    reach Nexus. A message *aimed* at Nexus is a conversation and gets an
-    answer. A message that merely looked like an instruction — an administrator
-    who did not address Nexus but said something the relevance gate recognised —
-    gets a visible reply **only if a write tool was actually called**. That rule
-    is what makes the cheap gate safe: a false positive costs one model call and
-    produces no message, so the bot never talks to the room uninvited, and a real
-    instruction still gets its confirmation.
     """
     msg = update.effective_message
     room = update.effective_chat
@@ -1855,16 +2229,12 @@ async def _answer_conversationally(
             # follows.
             shutil.rmtree(work_dir, ignore_errors=True)
         if parts is None and not text and problem:
-            if require_action:
-                # An unaddressed message with nothing readable in it is not
-                # worth a reply to the room.
-                log.info("chat skipped: unreadable media and no instruction")
-                return
             # Nothing readable, and nothing to say about it either. The two
             # reasons get different sentences: a silent clip is not an
             # unreadable file, and telling somebody their voice note could not
             # be opened when it was simply silent is a small lie that costs
-            # them a second attempt.
+            # them a second attempt. This path is only reached for a message
+            # that was *aimed* at Nexus, so the honest sentence is always owed.
             await _send_chat(
                 ctx,
                 room.id,
@@ -1878,8 +2248,21 @@ async def _answer_conversationally(
     # The administrative half of this turn. Built from server-side values only,
     # and empty for a room where the person asking is not an administrator —
     # which is the normal case, and costs one dictionary lookup.
-    counters: dict = {"writes": 0}
-    tools, context, on_tool = _ai_admin_turn(update, ctx, msg, room, user, counters)
+    #
+    # No write-counter is passed: this turn was asked for something, so it is
+    # answered either way. The counter exists for the ambient path, where a
+    # reply has to be earned by an action having actually run.
+    tools, context, on_tool = _ai_admin_turn(update, ctx, msg, room, user)
+
+    # The room, appended to the trusted block. This is what makes an addressed
+    # answer *informed* rather than isolated: "پس همون کاری که گفتی رو بکن" is
+    # only answerable by somebody who has been following what was said. It goes
+    # in the system instruction, never the user turn, because the transcript is
+    # full of text people typed and text people typed must not be presented to
+    # the model as a statement the server is making.
+    context = (context or "") + awareness.room_block(
+        room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
+    )
 
     result = await chat.reply(
         room.id,
@@ -1892,19 +2275,6 @@ async def _answer_conversationally(
         context=context,
         on_tool=on_tool,
     )
-
-    if result and require_action and not counters["writes"]:
-        # The model had something to say but did nothing, and nobody asked it
-        # anything. Staying quiet is the whole point of the observation path —
-        # the turn is still in the administrator's history, so the next real
-        # instruction has the context.
-        log.info(
-            "nexus stayed silent: unaddressed message produced no action "
-            "(actor=%s chat=%s)",
-            user.id,
-            room.id,
-        )
-        return
 
     if result:
         log.info(
@@ -1921,10 +2291,15 @@ async def _answer_conversationally(
         )
         if result.voice:
             if await _send_voice(ctx, room.id, result.voice, reply_to):
+                _awareness_note_reply(room.id, result.text)
                 return
             # The upload failed; the text is still the answer and is sent below.
             log.warning("voice reply failed; falling back to text")
-        await _send_chat(ctx, room.id, result.text, reply_to)
+        if await _send_chat(ctx, room.id, result.text, reply_to):
+            # What the assistant said is part of the conversation the next
+            # awareness pass has to understand — otherwise it reads questions
+            # and never its own answers, and repeats itself.
+            _awareness_note_reply(room.id, result.text)
         return
 
     log.info(
@@ -1990,6 +2365,13 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     principal = rbac.resolve(user.id)
     text = _message_text(msg)
 
+    # 1b. Awareness. Captured for **everybody**, before every gate, and at no
+    #     AI cost: understanding the room is the feature, and a member whose
+    #     message is understood is still a member who cannot act. The role label
+    #     written here comes from `rbac.resolve` above and from nothing the
+    #     sender wrote.
+    _awareness_capture(room, user, msg, text, principal)
+
     # 2. The owner's spoken state command. Checked first because it is the one
     #    thing that must work when Nexus is already off — the model is not
     #    consulted at all in that state, so this is the only way back.
@@ -2002,20 +2384,27 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not nexus.accepts(principal):
         return
 
-    # 4. Aimed at Nexus, or worth asking about. Neither is understood here —
-    #    `looks_actionable` is a deterministic pre-filter whose only power is to
-    #    decide whether to spend a model call.
-    directed = _nexus_directed(msg, ctx)
-    if not directed and not nexus.looks_actionable(text):
+    # 4. Aimed at Nexus, or left to the room. Only the first is understood
+    #    here; everything else is the awareness layer's job.
+    if not _nexus_directed(msg, ctx):
         # Watch without replying: the message joins this administrator's own
         # bounded context, and nothing is sent and nothing is spent.
         if nexus.is_actor(principal):
             _nexus_observe(room, user, msg, text)
+        # `looks_actionable` is a **timing hint and nothing more** since Group
+        # Awareness. It used to be the relevance gate — an unaddressed message
+        # containing a moderation verb was sent to the model on the spot — and
+        # that made a keyword list the thing that decided relevance, which is
+        # exactly what the awareness layer exists to replace. Now it only says
+        # "read this room now instead of waiting for it to go quiet", and the
+        # model still makes the single semantic decision. It cannot make a
+        # message relevant, and it cannot make one be acted on.
+        if nexus.looks_actionable(text):
+            _awareness_urgent.add(room.id)
+            await _awareness_promptly(ctx, room.id)
         return
 
-    await _answer_conversationally(
-        update, ctx, reply_to=msg.message_id, require_action=not directed
-    )
+    await _answer_conversationally(update, ctx, reply_to=msg.message_id)
 
 
 async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3384,6 +3773,36 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ------------------------------------------------------------ wiring
 async def post_init(app: Application) -> None:
     app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
+    # The awareness sweeper. It is a *poll* rather than a subscription: a tick
+    # with nothing pending costs one indexed query per configured group, and a
+    # tick with something pending performs at most
+    # `NEXUS_AWARENESS_MAX_CHATS_PER_TICK` batched reads. Registered here rather
+    # than driven from the message handler so that a burst of messages produces
+    # one pass instead of one call per message — see `app/awareness.py`.
+    if config.NEXUS_AWARENESS_ENABLED:
+        tick = max(5.0, float(config.NEXUS_AWARENESS_TICK_SECONDS))
+        app.job_queue.run_repeating(awareness_sweep, interval=tick, first=tick)
+        log.info(
+            "Nexus awareness: tick=%.0fs debounce=%.0fs max_wait=%.0fs "
+            "min_interval=%.0fs window=%d msgs/%d chars",
+            tick,
+            float(config.NEXUS_AWARENESS_DEBOUNCE_SECONDS),
+            float(config.NEXUS_AWARENESS_MAX_WAIT_SECONDS),
+            float(config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS),
+            int(config.NEXUS_AWARENESS_WINDOW_MESSAGES),
+            int(config.NEXUS_AWARENESS_WINDOW_CHARS),
+        )
+        if not (
+            config.GEMINI_AWARENESS_API_KEY
+            or gemini_pool.has_accounts("awareness")
+        ):
+            log.warning(
+                "NEXUS_AWARENESS_ENABLED is on but the awareness workload has "
+                "no credential; the room will be captured and never read. Set "
+                "GEMINI_AWARENESS_API_KEY."
+            )
+    else:
+        log.info("Nexus awareness: off")
     # Who we are, from Telegram rather than from configuration. Done first,
     # because the alias matching that decides whether the assistant answers
     # depends on it and a failed getMe must be visible in the log rather than

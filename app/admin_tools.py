@@ -435,6 +435,7 @@ def build_context(
     reply_name: str = "",
     reply_message_id: int = 0,
     bot_username: str = "",
+    ambient: bool = False,
 ) -> str:
     """The trusted-context block for one turn.
 
@@ -443,6 +444,13 @@ def build_context(
     will authorise against. If the two could be assembled independently they
     could disagree, and a disagreement between "who the model thinks is asking"
     and "who the service checks" is the bug this whole design exists to prevent.
+
+    ``ambient`` marks a turn that comes from the awareness layer rather than from
+    one addressed message. There is still no replied-to message to point at — the
+    difference is only that the model is reading a conversation instead of
+    answering one, so it is told to find its target in the transcript by id and
+    to ask when it cannot. The rule is unchanged: an id from the server, or a
+    question.
     """
     lines = [_CONTEXT_HEADER]
 
@@ -450,6 +458,16 @@ def build_context(
     lines.append(f"Actor Telegram user id: {principal.user_id}\n")
     lines.append(f"Actor role: {principal.role} ({who})\n")
     lines.append(f"Actor is the owner: {'yes' if principal.is_owner else 'no'}\n")
+    # The owner is also the system's creator, and the model is told so from here
+    # rather than being left to infer it from the word "owner". It changes the
+    # register of a reply and nothing else: it is a fact about the person, stated
+    # by the server, and it grants no permission that the line above did not
+    # already grant.
+    if principal.is_owner:
+        lines.append(
+            "The owner is also the creator and developer of this system, and is "
+            "its highest authority. Address them with respect.\n"
+        )
     lines.append(
         "Actor may ask for: "
         + (", ".join(sorted(principal.permissions)) or "nothing administrative")
@@ -484,6 +502,15 @@ def build_context(
         )
         if reply_message_id:
             lines.append(f"Replying to message id: {reply_message_id}\n")
+    elif ambient:
+        lines.append(
+            "This turn comes from reading the group's conversation rather than "
+            "from one message addressed to you. There is no single replied-to "
+            "message, so 'this user' and 'them' have no referent on their own. "
+            "If you decide to act, the target must be a user id that actually "
+            "appears in the transcript above; if you cannot tell which person is "
+            "meant, ask instead of guessing.\n"
+        )
     else:
         lines.append(
             "There is no replied-to message in this turn, so 'this user' and "
