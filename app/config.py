@@ -387,11 +387,31 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest").strip()
 # The authoritative bound on one call. `asyncio.wait_for` enforces it, so a
 # stalled socket can never hold up a group message handler.
 #
-# 10 is a floor, not a preference: the API rejects a manually-set deadline below
-# 10 seconds outright ("400 INVALID_ARGUMENT ... Minimum allowed deadline is
-# 10s"), so anything smaller makes every call fail. `app/ai_intent.py` clamps to
-# that floor rather than trusting this value, because a silently dead
-# integration is far worse than a slightly longer timeout.
+# The API refuses a manually-set deadline below 10 seconds outright
+# ("400 INVALID_ARGUMENT ... Minimum allowed deadline is 10s"), so the floor is
+# the API's and `app/ai_intent.py` clamps to it. The value is deliberately *at*
+# that floor, and the reasoning is worth keeping because the obvious move —
+# raise it, the 504s must mean the model is slow — was measured and rejected.
+#
+# Measured on 2026-09-22 18:51 against this deployment, on the very account
+# whose row shows the 504s (`****bxvA`), same model, same prompt, only the
+# deadline varying:
+#
+#     gemini-flash-lite-latest @ 10s   12 of 12 answered, at 0.8-1.8s
+#     gemini-flash-lite-latest @ 25s   12 of 12 answered, at 0.8-1.8s
+#
+# — including a burst of six concurrent calls at each deadline, which is the
+# shape that would expose queueing. So this classification answers in about a
+# second, and ten seconds is a ten-fold headroom, not a budget the model needs.
+#
+# The 504s in the log (`provider_error detail=504`) are the provider honouring
+# the deadline it was sent and aborting a call that had *hung* — a provider-side
+# slowness episode at 17:59-18:21, not a systematically short deadline. Raising
+# the deadline would not have made those calls finish; it would only have made
+# the group message handler wait longer for the same answer. Failover to a
+# healthy account is the remedy for a hung provider, and it works best when the
+# deadline is short — so this stays at the floor and the fix is elsewhere
+# (more accounts, and the wall-clock ceiling below).
 GEMINI_TIMEOUT_SECONDS = _float("GEMINI_TIMEOUT_SECONDS", 10.0)
 
 # One retry, with exponential backoff, and only for transient failures. A 429 or
@@ -399,6 +419,32 @@ GEMINI_TIMEOUT_SECONDS = _float("GEMINI_TIMEOUT_SECONDS", 10.0)
 # again, and it is already counted).
 GEMINI_MAX_RETRIES = _int("GEMINI_MAX_RETRIES", 1)
 GEMINI_BACKOFF_SECONDS = _float("GEMINI_BACKOFF_SECONDS", 1.5)
+
+# A ceiling on the **wall clock** of one logical request, on top of the
+# per-attempt deadline and the attempt count.
+#
+# This is the defect the incident actually exposed. The pool tries every
+# account, every compatible model and `retries + 1` attempts on each, capped
+# only by `GEMINI_POOL_MAX_ATTEMPTS` (12). Twelve attempts at ten seconds is two
+# minutes of wall clock for one ambiguous group message, and `on_group_text`
+# *awaits* this — so the handler that offers a trial can be blocked for minutes.
+# The attempt count bounds the spend; nothing bounded the time.
+#
+# The default is one failover — a second attempt at the full deadline, after the
+# backoff between them — because this workload runs inside the group-message
+# handler, and the most useful thing it can do with more time than that is hand
+# the decision back to the rule engine. `0` means no ceiling, which is the
+# behaviour every other workload keeps.
+#
+# It is enforced by the pool (`Pool.time_budget`), checked *before* each attempt,
+# so it bounds the whole failover walk — every account and every model — and not
+# one model's retries. The pool raises `time_budget` and records an event, so a
+# request stopped by the ceiling is distinguishable in the log from one the
+# provider refused.
+GEMINI_INTENT_TIME_BUDGET_SECONDS = _float(
+    "GEMINI_INTENT_TIME_BUDGET_SECONDS",
+    2 * GEMINI_TIMEOUT_SECONDS + GEMINI_BACKOFF_SECONDS,
+)
 
 # Our own ceiling on how often we are willing to ask: at most GEMINI_RATE_LIMIT
 # calls in any GEMINI_RATE_WINDOW seconds. Deliberately below the published free
@@ -2011,6 +2057,12 @@ GEMINI_POOLS = [
         "retries": GEMINI_MAX_RETRIES,
         "backoff": GEMINI_BACKOFF_SECONDS,
         "timeout": _deadline(GEMINI_TIMEOUT_SECONDS),
+        # The only workload with a wall-clock ceiling on one logical request,
+        # because it is the only one whose caller is a group message handler
+        # that must answer in bounded time: the pool's failover walk can
+        # otherwise spend minutes on one ambiguous message. See
+        # ``GEMINI_INTENT_TIME_BUDGET_SECONDS``.
+        "time_budget": GEMINI_INTENT_TIME_BUDGET_SECONDS,
     },
     {
         "workload": "chat",

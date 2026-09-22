@@ -417,6 +417,17 @@ def test_the_shipped_default_is_not_below_the_floor():
     assert config.GEMINI_TIMEOUT_SECONDS >= ai_intent.MIN_DEADLINE_SECONDS
 
 
+def test_the_shipped_intent_deadline_stays_at_the_api_floor():
+    """The obvious reading of the 504s — "the model needs longer" — was
+    measured on the deployment and rejected: this classification answers in
+    ~1s, and twelve calls at both a 10s and a 25s deadline all answered, a burst
+    of six concurrent calls included. So the deadline is the API floor, and a
+    longer bound would only make the handler wait longer for a provider that had
+    hung. Raising this needs a measurement, not a hunch — see
+    ``GEMINI_TIMEOUT_SECONDS`` in ``app/config.py``."""
+    assert config.GEMINI_TIMEOUT_SECONDS == ai_intent.MIN_DEADLINE_SECONDS
+
+
 def test_a_too_small_configured_timeout_is_clamped_up(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_TIMEOUT_SECONDS", 1.0)
     assert ai_intent.timeout_seconds() == ai_intent.MIN_DEADLINE_SECONDS
@@ -782,3 +793,194 @@ def test_the_prompt_tells_the_model_it_does_not_write_the_reply():
     # And the two hints are explained, or the model would be guessing.
     assert "problem_kind" in text
     assert "response_kind" in text
+
+
+# ── The pool path: one logical request, and how it is counted ─────────────
+# The intent workload runs through the pool, which fails over across accounts
+# and models. These tests pin the two accounting properties that must survive
+# that: the pool's provider attempts are *not* what the daily cap counts, and
+# intent has no per-account allowance for a rejected attempt to over-charge —
+# which is the shape of the chat allowance bug, and why it cannot recur here.
+class _StubPool:
+    """The one attribute ``ai_intent`` reads off a pool."""
+
+    def __init__(self):
+        self.enabled = True
+        self.workload = "intent"
+
+
+@pytest.fixture
+def pooled(layer, monkeypatch):
+    """Make ``classify`` take the pool path, with the transport scripted.
+
+    ``gemini_pool.generate`` is the pool's single entry point, so replacing it
+    exercises everything above it — the daily cap, the circuit, the parse — and
+    nothing below it, which is exactly the boundary these tests are about.
+    """
+    from app import gemini_pool
+
+    monkeypatch.setattr(gemini_pool, "pool_for", lambda workload: _StubPool())
+    monkeypatch.setattr(gemini_pool, "has_accounts", lambda workload: True)
+
+    async def run(outcome):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    def install(outcome):
+        async def fake_generate(pool, *, build_contents, build_config):
+            return await run(outcome)
+
+        monkeypatch.setattr(gemini_pool, "generate", fake_generate)
+
+    return install
+
+
+def test_a_pooled_answer_is_a_lead_and_costs_one_daily_call(pooled):
+    pooled(answer())
+
+    verdict = classify("vpn میخوام")
+
+    assert verdict.relevant
+    assert db.ai_calls_today() == 1
+
+
+def test_one_logical_request_is_one_daily_call_however_many_attempts_the_pool_made(pooled):
+    """The pool may spend a dozen provider calls failing over; the cap counts
+    the request, not the attempts. Counting attempts here would exhaust the
+    day's ceiling while the provider still had quota — the shape of the chat
+    allowance bug."""
+    from app import gemini_pool
+
+    pooled(gemini_pool.PoolUnavailable("time_budget", "provider_error:504"))
+
+    verdict = classify("vpn میخوام")
+
+    assert verdict.error
+    assert db.ai_calls_today() == 1
+    assert db.ai_usage()["errors"] == 1
+
+
+def test_a_pooled_transport_failure_is_not_retried_by_the_module(pooled, monkeypatch):
+    """Two retry loops would multiply the two budgets. When the pool is in use
+    it owns the retry policy, so the module's loop runs exactly once."""
+    from app import gemini_pool
+
+    calls = []
+
+    async def counting(pool, *, build_contents, build_config):
+        calls.append(1)
+        raise gemini_pool.PoolUnavailable("provider_error", "503")
+
+    monkeypatch.setattr(gemini_pool, "generate", counting)
+    monkeypatch.setattr(config, "GEMINI_MAX_RETRIES", 5)
+
+    verdict = classify("vpn میخوام")
+
+    assert verdict.error
+    assert len(calls) == 1
+
+
+def test_the_intent_workload_has_no_per_account_allowance():
+    """So a rejected provider attempt has nothing to over-charge. The chat
+    workload is the only one that sets this."""
+    spec = [s for s in config.GEMINI_POOLS if s["workload"] == "intent"][0]
+
+    assert spec.get("daily_budget", 0) == 0
+
+
+def test_a_refund_cannot_invent_allowance_for_intent(layer):
+    """``refund_daily`` on a workload with no allowance is a no-op, so the
+    refund rule can never create credit intent was not configured with."""
+    from app import gemini_pool
+
+    pool = gemini_pool.Pool(
+        "intent",
+        [("1", "test-key-not-a-real-one")],
+        ["gemini-flash-lite-latest"],
+        frozenset({gemini_pool.TEXT}),
+    )
+    account = pool.accounts[0]
+
+    assert account.daily_budget == 0
+    assert account.daily_calls() == 0
+    assert account.refund_daily() == 0
+    assert account.daily_exhausted() is False
+
+
+@pytest.mark.parametrize(
+    "kind,detail",
+    [
+        ("rate_limited", "429"),
+        ("provider_error", "503"),
+        ("provider_error", "504"),
+        ("timeout", ""),
+        ("network_error", "ConnectionResetError"),
+        ("invalid_credential", "API key not valid"),
+        ("unsupported_model", "404"),
+        ("bad_request", "400"),
+        ("pool_empty", "usable=0/1"),
+        ("time_budget", "provider_error:504"),
+    ],
+)
+def test_every_pool_failure_kind_resolves_to_not_a_lead(pooled, kind, detail):
+    """The whole taxonomy, at the boundary the group actually sees: whatever the
+    pool could not do, the answer is "no lead" and never an exception."""
+    from app import gemini_pool
+
+    pooled(gemini_pool.PoolUnavailable(kind, detail))
+
+    verdict = classify("vpn میخوام")
+
+    assert verdict.consulted
+    assert not verdict.relevant
+    assert not verdict.decided
+    assert verdict.error == kind
+
+
+def test_a_pooled_answer_that_is_not_json_is_a_failure_not_a_lead(pooled):
+    pooled("I am afraid I cannot help with that.")
+
+    verdict = classify("vpn میخوام")
+
+    assert verdict.consulted
+    assert not verdict.relevant
+    assert verdict.error == "malformed_json"
+    assert db.ai_usage()["malformed"] == 1
+
+
+def test_a_pooled_answer_missing_a_required_field_is_a_failure(pooled):
+    pooled(json.dumps({"is_relevant": True}))
+
+    verdict = classify("vpn میخوام")
+
+    assert verdict.error == "malformed_missing"
+    assert db.ai_usage()["malformed"] == 1
+
+
+def test_the_intent_pool_counts_a_provider_attempt_as_a_request(layer):
+    """The pool's own counters are per attempt — that is what ``/pool`` reports
+    and what makes the failover visible. They are deliberately *not* the daily
+    cap, which is why the two numbers differ."""
+    from app import gemini_pool
+
+    pool = gemini_pool.Pool(
+        "intent",
+        [("1", "test-key-not-a-real-one")],
+        ["gemini-flash-lite-latest"],
+        frozenset({gemini_pool.TEXT}),
+    )
+    account = pool.accounts[0]
+    state = account.model("gemini-flash-lite-latest")
+    now = 1000.0
+
+    account.note_request(now)
+    state.note_request(now)
+    account.note_failure(gemini_pool.Failure("provider_error", gemini_pool.SCOPE_TRANSIENT), now)
+    state.note_failure(gemini_pool.Failure("provider_error", gemini_pool.SCOPE_TRANSIENT), now)
+
+    assert account.requests == 1
+    assert account.failures == 1
+    assert account.requests == account.successes + account.failures
+    # ...and none of that touched the intent daily cap, which counts requests.
+    assert db.ai_calls_today() == 0

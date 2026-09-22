@@ -2309,6 +2309,123 @@ print('\n'.join(gemini_pool.startup_lines()))"
    container cannot corrupt them; two containers sharing one SQLite file is not a
    configuration this deployment has and is not supported.
 
+### 28.13 The intent workload's failure count, and what it was not
+
+On 2026-09-22 the acquisition/intent pool's account row read `requests=445`,
+`successes=110`, `failures=335` — 75% of provider attempts failed, which reads
+as a broken workload. It is not, and the gap between the two readings is the
+first thing to get right.
+
+#### The number is per attempt, not per request
+
+The `gemini_accounts` and `gemini_models` counters count **provider calls**, and
+the pool's whole job is to make many of them for one logical request. When the
+primary model fails, the walk continues across every compatible model on the
+account and every account, `retries + 1` times each. One logical failure
+therefore becomes several provider failures.
+
+The workload's own table is the other reading, and it counts **logical
+requests**:
+
+| | value |
+| --- | --- |
+| `ai_usage.calls` (2026-09-22) | 90 |
+| decided (`relevant` + `irrelevant`) | 69 |
+| `malformed` | 8 |
+| `errors` | 13 |
+| pool `requests` / `successes` / `failures` | 445 / 110 / 335 |
+
+So the logical failure rate was **23%**, not 75%. Both numbers are correct; they
+answer different questions. `/pool` reports attempts because that is what
+failover costs; `ai_usage` reports requests because that is what the daily cap
+counts.
+
+#### The taxonomy, from the log and the rows
+
+`[pool] error workload=intent …` over the incident window:
+
+| kind | detail | meaning |
+| --- | --- | --- |
+| `provider_error` | `504` | the provider honoured our deadline and aborted a call that had hung |
+| `provider_error` | `503` | the backend was briefly unavailable |
+| `rate_limited` | `generate_content_free_tier` | a free-tier 429, per model |
+
+The intent account carried **0 rate limits** on its primary model and 83
+failures, so its failures were provider-side slowness and unavailability, not
+quota. The fallback models were worse on this credential — `gemini-3.5-flash-lite`
+answered 1 of 73, `gemini-3.5-flash` 0 of 35, `gemini-3.7-flash` 0 of 20,
+`gemini-pro-latest` 0 of 7 — so failover across models rarely recovered.
+
+#### The false lead: the deadline
+
+The natural reading of a `504` is "the model needed longer". It was measured and
+rejected. On the very account whose row shows the 504s, with the same model and
+prompt, varying only the deadline:
+
+```
+gemini-flash-lite-latest @ 10s   12 of 12 answered, 0.8-1.8s
+gemini-flash-lite-latest @ 25s   12 of 12 answered, 0.8-1.8s
+```
+
+a burst of six concurrent calls included at each deadline. This classification
+answers in about a second, so ten seconds is ten-fold headroom, and the 504s were
+episodes of a hung provider rather than a systematically short bound. Raising the
+deadline would not have made those calls finish; it would only have made the
+group handler wait longer for the same non-answer. **`GEMINI_TIMEOUT_SECONDS`
+therefore stays at the API's 10s floor**, and
+`test_the_shipped_intent_deadline_stays_at_the_api_floor` records why, so a
+future session brings a measurement rather than a hunch.
+
+#### The real defects, and the fix
+
+1. **Nothing bounded the wall clock of one logical request.** Twelve attempts at
+   ten seconds is two minutes, and `on_group_text` *awaits* `classifier.classify`,
+   so one ambiguous message could block the trial-offer handler for minutes. The
+   attempt count bounded the spend; nothing bounded the time. This is what
+   `Pool.time_budget` and `GEMINI_INTENT_TIME_BUDGET_SECONDS` fix: an opt-in
+   ceiling, checked *before* each attempt, so it covers the whole failover walk.
+   It raises `PoolUnavailable("time_budget", …)` with the last real failure folded
+   into the detail and records a `time_budget` event. Every other workload keeps
+   `0`, which is "no ceiling" — the behaviour it always had.
+2. **The workload had one account.** Every 429 was terminal and every hung
+   project was hit by every request. Four more credentials were added as
+   `GEMINI_API_KEY_2..5`, giving the intent pool five independent projects; the
+   boot line reads `[pool] intent: accounts=5 usable=5`.
+3. **The fallback list looks dead on this credential, and was still left
+   alone.** The rows are damning at face value — `gemini-3.5-flash-lite` answered
+   1 of 73, `gemini-3.5-flash` 0 of 35, `gemini-3.7-flash` 0 of 20,
+   `gemini-pro-latest` 0 of 7 — but they are *conditional*: a fallback is only
+   tried after the primary has already failed, so its record is measured during
+   exactly the provider-wide bad periods that caused the primary to fail. That is
+   a selection effect, not a verdict on the models, and trimming the list on it
+   would delete models that are fine on an ordinary afternoon. The primary model
+   answers the great majority of calls, and discovery plus the per-model
+   cooldowns already bench what the provider actually rejects. Revisit this only
+   with data from a healthy window.
+
+#### Why intent does not have the chat allowance bug
+
+The chat incident (§29.15) was a per-account daily allowance charged for
+provider attempts that were *refused*. Intent has no per-account allowance at
+all — only `chat` sets `daily_budget` in `GEMINI_POOLS` — so `refund_daily` is a
+no-op for it and there is nothing to over-charge. Intent's own daily cap counts
+**logical requests** (`ai_usage.calls`, incremented once per `classify`), so a
+request that walks twelve provider calls still costs one. Both properties are
+asserted in `tests/test_ai_intent.py`.
+
+#### Verifying it
+
+```bash
+.venv-test/bin/python -m pytest tests/test_gemini_pool.py -q -k time_budget
+.venv-test/bin/python -m pytest tests/test_ai_intent.py -q
+# live: the ceiling, the account count, and a real classification
+docker exec -i guardbot python -c "
+import asyncio; from app import ai_intent, db, gemini_pool; db.init()
+p = gemini_pool.pool_for('intent')
+print('budget', p.time_budget, 'accounts', len(p.accounts))
+print(asyncio.run(ai_intent.classify('vpn میخوام')))"
+```
+
 ## 29. AI-mediated administration: the model asks, the bot decides
 
 The assistant can now *propose* administrative actions. Somebody types "ban

@@ -927,6 +927,7 @@ class Pool:
         timeout: float = 10.0,
         daily_budget: int = 0,
         rotate_models: bool = False,
+        time_budget: float = 0.0,
     ):
         """``keys`` is an ordered list of ``(slot, credential)`` pairs.
 
@@ -941,6 +942,15 @@ class Pool:
         ``rotate_models`` spreads requests across the whole model list instead of
         preferring the first name until it fails. See ``models_for`` for what
         that changes and why it is opt-in per workload.
+
+        ``time_budget`` is a ceiling on the **wall clock** of one logical
+        request, in seconds, and 0 means no ceiling. The attempt count and the
+        per-attempt deadline bound *spend*, not *time*: twelve attempts at ten
+        seconds is two minutes, however small the deadline is. A workload that
+        runs inside a Telegram message handler cannot spend that, so the one
+        workload in that position sets a ceiling and hands the decision back to
+        the rule engine when it is reached. Every other workload keeps 0, which
+        is the behaviour it had before this existed.
         """
         self.workload = workload
         self.capabilities = capabilities
@@ -951,6 +961,7 @@ class Pool:
         self.timeout = max(1.0, float(timeout))
         self.daily_budget = max(0, int(daily_budget))
         self.rotate_models = bool(rotate_models)
+        self.time_budget = max(0.0, float(time_budget))
         self.accounts: list[Account] = []
         self._discovery: dict[str, list[str] | None] = {}
         seen: set[str] = set()
@@ -1240,6 +1251,8 @@ class Pool:
             "daily_budget": health["daily_budget"],
             "daily_remaining": health["daily_remaining"],
             "daily_exhausted": health["daily_exhausted"],
+            # 0 means no ceiling, which is every workload but intent.
+            "time_budget": self.time_budget,
         }
 
 
@@ -1382,6 +1395,18 @@ async def generate(
     if not pool.enabled:
         raise PoolUnavailable("no_account")
 
+    # The wall clock for one logical request. Monotonic, because this measures an
+    # interval and a step in the system clock must not extend or cut it short.
+    # Started before discovery so a slow credential cannot spend the whole
+    # ceiling before the first provider call.
+    started = time.monotonic()
+
+    def _out_of_time() -> bool:
+        return (
+            pool.time_budget > 0
+            and (time.monotonic() - started) >= pool.time_budget
+        )
+
     # The retention sweep rides the request path, every
     # ``GEMINI_POOL_PRUNE_EVERY`` requests. Here rather than inside the attempt
     # loop, so one logical request costs at most one counter increment and the
@@ -1404,6 +1429,7 @@ async def generate(
 
     last: PoolUnavailable = PoolUnavailable("no_attempt")
     tried_any = False
+    out_of_time = False
 
     for account in pool.ordered_accounts(now):
         candidates = pool.models_for(account, now)
@@ -1427,6 +1453,13 @@ async def generate(
                 continue
             state = account.model(model)
             for attempt in range(attempts_per_model):
+                # Checked before the attempt rather than during it, so the pool
+                # never starts a call it already knows it cannot finish waiting
+                # for. A call already in flight is bounded by ``pool.timeout``.
+                if _out_of_time():
+                    out_of_time = True
+                    account_dead = True
+                    break
                 if budget <= 0:
                     last = PoolUnavailable("attempt_budget", last.kind)
                     account_dead = True
@@ -1515,8 +1548,26 @@ async def generate(
                         )
                     _record_pool_health(pool, now)
                     return _extract(response, extract)
-            if account_dead:
+            if account_dead or out_of_time:
                 break
+        if out_of_time:
+            break
+
+    if out_of_time:
+        # The ceiling, not the provider, is what ended this request. Recorded as
+        # a transition and raised with the last real failure folded into the
+        # detail, so a log reader can tell "we ran out of our own time" apart
+        # from "the provider failed" without losing what the provider said.
+        pool.record(
+            "time_budget",
+            reason="time_budget",
+            detail=f"ceiling={pool.time_budget:.0f}s last={last.kind}",
+            now=time.time(),
+        )
+        raise PoolUnavailable(
+            "time_budget",
+            f"{last.kind}:{last.detail}" if last.detail else last.kind,
+        )
 
     if not tried_any:
         health = pool.health()
@@ -1679,6 +1730,10 @@ def build_pools() -> dict[str, Pool]:
             rotate_models=spec.get(
                 "rotate_models", spec["workload"] in config.GEMINI_POOL_ROTATE_MODELS
             ),
+            # A wall-clock ceiling on one logical request. Only the workload that
+            # sets it has one; the default of 0 is "no ceiling", which is what
+            # every other workload has always had.
+            time_budget=spec.get("time_budget", 0.0),
         )
         _pools[spec["workload"]] = pool
     return _pools

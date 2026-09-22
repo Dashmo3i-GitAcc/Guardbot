@@ -155,6 +155,11 @@ class Provider:
         self.listed: dict[str, list | Exception] = {}
         self.calls: list[tuple[str, str]] = []
         self.listed_calls = 0
+        # Called once per provider call, before the outcome is decided. The
+        # wall-clock tests use it to advance a fake clock by a fixed amount per
+        # call, so "how long did one logical request take" is a number the test
+        # controls rather than a real sleep.
+        self.tick = None
 
     # -- scripting --
     def always(self, key: str, model: str, text: str) -> "Provider":
@@ -186,6 +191,8 @@ class Provider:
 
     async def _generate(self, key: str, model: str, contents, config):  # noqa: A002
         self.calls.append((key, model))
+        if self.tick is not None:
+            self.tick()
         queue = self.script.get(key, {}).get(model)
         if not queue:
             raise AssertionError(f"unscripted call key={gemini_pool.mask(key)} model={model}")
@@ -256,6 +263,7 @@ def make_pool(
     allow_experimental=False,
     backoff=0.0,
     rotate_models=False,
+    time_budget=0.0,
 ):
     return gemini_pool.Pool(
         workload,
@@ -267,6 +275,7 @@ def make_pool(
         backoff=backoff,
         timeout=5.0,
         rotate_models=rotate_models,
+        time_budget=time_budget,
     )
 
 
@@ -644,6 +653,155 @@ def test_retries_are_bounded_per_model(provider):
 
     assert call(pool) == "second"
     assert provider.models_used(KEY_A) == [TEXT_MODELS[0], TEXT_MODELS[0], TEXT_MODELS[1]]
+
+
+# ══ THE WALL-CLOCK BUDGET ═════════════════════════════════════════════════
+# The attempt count alone stops bounding latency the moment the per-attempt
+# deadline grows: twelve attempts at ten seconds is two minutes, and at
+# twenty-five it is five. The intent workload runs inside a Telegram message
+# handler, so it sets a ceiling and hands the decision back to the rule engine
+# when it is reached.
+#
+# The clock is faked rather than slept, so "one logical request took too long"
+# is a number the test sets. Only ``gemini_pool``'s view of time is replaced;
+# the wall clock stays real so the database's cooldowns still work, and
+# asyncio's own clock — which imported ``time`` itself — is untouched.
+class Clock:
+    def __init__(self):
+        self.value = 1000.0
+
+    def monotonic(self):
+        return self.value
+
+    def time(self):
+        return time.time()
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+def test_no_time_budget_means_no_ceiling(provider, monkeypatch):
+    """The default, and the behaviour every other workload keeps."""
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    provider.tick = lambda: clock.advance(600.0)
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded())
+    provider.then(KEY_A, TEXT_MODELS[1], overloaded())
+    provider.always(KEY_A, TEXT_MODELS[2], "third")
+
+    assert call(make_pool()) == "third"
+    assert provider.total_calls == 3
+
+
+def test_a_time_budget_that_is_not_reached_changes_nothing(provider, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    provider.tick = lambda: clock.advance(1.0)
+    provider.always(KEY_A, TEXT_MODELS[0], "answer")
+
+    assert call(make_pool(time_budget=30.0)) == "answer"
+    assert provider.total_calls == 1
+
+
+def test_a_time_budget_bounds_the_failover_walk(provider, monkeypatch):
+    """Two models that each burn a second, a two-second ceiling, and a third
+    model that would have answered. The request stops before it starts the call
+    it cannot afford to wait for."""
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    provider.tick = lambda: clock.advance(1.0)
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded())
+    provider.then(KEY_A, TEXT_MODELS[1], overloaded())
+    provider.always(KEY_A, TEXT_MODELS[2], "too late")
+
+    with pytest.raises(gemini_pool.PoolUnavailable) as caught:
+        call(make_pool(time_budget=2.0))
+
+    assert caught.value.kind == "time_budget"
+    assert provider.total_calls == 2
+    assert provider.models_used(KEY_A) == [TEXT_MODELS[0], TEXT_MODELS[1]]
+
+
+def test_a_time_budget_abort_carries_what_the_provider_said(provider, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    provider.tick = lambda: clock.advance(10.0)
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded())
+
+    with pytest.raises(gemini_pool.PoolUnavailable) as caught:
+        call(make_pool(time_budget=5.0))
+
+    # The last real failure is folded into the detail, so a log reader can tell
+    # "we ran out of our own time" apart from "the provider failed" without
+    # losing what the provider actually said.
+    assert caught.value.kind == "time_budget"
+    assert "provider_error" in caught.value.detail
+    assert "503" in caught.value.detail
+
+
+def test_a_time_budget_abort_is_recorded_as_an_event(provider, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    provider.tick = lambda: clock.advance(10.0)
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded())
+
+    with pytest.raises(gemini_pool.PoolUnavailable):
+        call(make_pool(time_budget=5.0))
+
+    assert [e["kind"] for e in events("time_budget")] == ["time_budget"]
+
+
+def test_a_time_budget_bounds_the_walk_across_accounts_too(provider, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    provider.tick = lambda: clock.advance(1.0)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+
+    with pytest.raises(gemini_pool.PoolUnavailable) as caught:
+        call(make_pool(keys=(("1", KEY_A), ("2", KEY_B)), time_budget=2.0))
+
+    assert caught.value.kind == "time_budget"
+    assert provider.models_used(KEY_B) == []
+
+
+def test_the_counters_add_up_when_the_budget_stops_a_request(provider, monkeypatch):
+    """A request cut short is still one request per attempt and one failure per
+    attempt — never a success, and never an attempt that vanished from the
+    count."""
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    provider.tick = lambda: clock.advance(1.0)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    pool = make_pool(time_budget=2.0)
+
+    with pytest.raises(gemini_pool.PoolUnavailable):
+        call(pool)
+
+    account = pool.accounts[0]
+    assert account.requests == 2
+    assert account.requests == account.successes + account.failures
+    assert account.successes == 0
+
+
+def test_only_the_intent_workload_has_a_wall_clock_ceiling():
+    """The ceiling is opt-in per workload, and exactly one workload opts in."""
+    specs = {spec["workload"]: spec for spec in config.GEMINI_POOLS}
+
+    assert specs["intent"]["time_budget"] > 0
+    for name in ("chat", "moderation", "transcribe", "tts", "awareness"):
+        assert specs[name].get("time_budget", 0) == 0
+
+
+def test_the_built_pools_carry_the_ceiling_only_where_it_was_asked_for():
+    built = gemini_pool.build_pools()
+
+    assert built["intent"].time_budget > 0
+    for name, pool in built.items():
+        if name != "intent":
+            assert pool.time_budget == 0
 
 
 def test_backoff_is_exponential_and_jittered():
