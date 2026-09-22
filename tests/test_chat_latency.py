@@ -43,7 +43,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import chat, config, db, main, nexus, people, rbac
+from app import chat, config, db, main, nexus, people
 
 OWNER = 999
 CHAT = OWNER  # a private chat's id is the sender's own id, as Telegram does it

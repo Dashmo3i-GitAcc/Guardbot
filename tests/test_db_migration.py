@@ -101,6 +101,46 @@ def test_ensure_column_leaves_an_existing_column_alone(old_db):
     assert db.audit_recent(1)[0]["interface"] == "python"
 
 
+def test_init_adds_the_authority_columns_to_an_existing_table(old_db):
+    """The same migration, for the fields the brief lists and the table lacked.
+
+    ``role`` and ``request_id`` were added to a table that was already in
+    production, so they need exactly the treatment ``interface`` needed — and a
+    fresh install would have had them from the start, which is why the failure
+    this guards against is invisible in development.
+    """
+    columns = _columns(old_db)
+
+    assert "role" in columns
+    assert "request_id" in columns
+
+
+def test_a_row_written_before_the_authority_columns_reads_as_empty(old_db):
+    """Additive means the rows already there stay readable.
+
+    Empty rather than guessed at: a row from before the columns existed has no
+    recorded authority, and inventing one on read would be the record lying
+    about its own completeness.
+    """
+    row = db.audit_recent(1)[0]
+
+    assert row["action"] == "moderation.ban"
+    assert row["role"] == ""
+    assert row["request_id"] == ""
+
+
+def test_a_row_written_after_the_authority_columns_carries_them(old_db):
+    db.audit_write(
+        7, "moderation.mute", outcome="ok", chat_id=-100,
+        role="moderator", request_id="req-123",
+    )
+
+    row = db.audit_recent(1)[0]
+
+    assert row["role"] == "moderator"
+    assert row["request_id"] == "req-123"
+
+
 # ── The two tables the Nexus layer added ──────────────────────────────────
 # `CREATE TABLE IF NOT EXISTS` is enough for a *new* table in a way it is not for
 # a new column: an existing database simply does not have it and gets it built.

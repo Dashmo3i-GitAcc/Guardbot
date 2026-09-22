@@ -3113,6 +3113,12 @@ def _audit(
     ``python`` by construction. The assistant's requests are audited by
     ``app/admin_service.py`` instead, which stamps ``ai``. Between the two, every
     administrative row says which front door it came through.
+
+    The role is resolved here for the same reason the service resolves it: the
+    record has to say what authority the action was taken with, and it must not
+    be the actor's own claim. There is no request id — a typed command is not a
+    request from the assistant and has none — so the column stays empty rather
+    than being filled with something that only looks like an identifier.
     """
     try:
         db.audit_write(
@@ -3123,6 +3129,7 @@ def _audit(
             chat_id=chat_id,
             detail=detail,
             interface=admin_service.INTERFACE_PYTHON,
+            role=rbac.resolve(actor_id).role,
         )
     except Exception:  # noqa: BLE001
         log.exception("audit write failed action=%s outcome=%s", action, outcome)

@@ -873,6 +873,12 @@ def _record(
 
     The audit row is written for refusals too. "Who tried" is the question asked
     after an incident, and a trail that only records successes cannot answer it.
+
+    The role is resolved from ``rbac`` here rather than taken from the request,
+    and that direction is the point: the request is the thing being audited, so
+    a request that named its own authority would be writing its own alibi. It is
+    resolved at write time, which is the moment the action happened — a later
+    promotion or demotion must not rewrite what a past action was taken with.
     """
     operation = OPERATIONS.get(request.operation)
     try:
@@ -888,6 +894,8 @@ def _record(
                 else result.detail
             ),
             interface=request.interface,
+            role=rbac.resolve(request.actor_id).role,
+            request_id=request.request_id,
         )
     except Exception:  # noqa: BLE001
         log.exception("audit write failed action=%s", request.operation)

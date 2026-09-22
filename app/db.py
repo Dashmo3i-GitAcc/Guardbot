@@ -175,6 +175,21 @@ def init() -> None:
     # additive — the column is what makes "was this the assistant or a person?"
     # answerable from the record itself rather than only from the log line.
     _ensure_column("admin_audit", "interface", "TEXT NOT NULL DEFAULT ''")
+    # The actor's *role at the time of the action*, and the request id that ties
+    # this row to the idempotency record.
+    #
+    # Role: "who did this" stops being answerable the moment a role changes. An
+    # administrator who is later promoted or demoted leaves a trail that says
+    # only that they acted, and whether they acted with the authority they held
+    # is exactly the question an audit trail exists to answer. Resolved from
+    # ``rbac`` at write time and never taken from the request, because the
+    # request is what is being audited.
+    #
+    # Request id: the join key. The outcome a person saw and the row that
+    # records it were previously linked only by matching actor, chat, operation
+    # and target by hand.
+    _ensure_column("admin_audit", "role", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column("admin_audit", "request_id", "TEXT NOT NULL DEFAULT ''")
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_admin_audit_at ON admin_audit(at)"
     )
@@ -1070,6 +1085,8 @@ def audit_write(
     chat_id: int | None = None,
     detail: str = "",
     interface: str = "",
+    role: str = "",
+    request_id: str = "",
 ) -> None:
     """Record one administrative decision, allowed or refused.
 
@@ -1082,10 +1099,16 @@ def audit_write(
     line because "was this the assistant or a person?" is the first question
     asked about an action somebody disagrees with, and a log file is not a place
     to answer it from.
+
+    ``role`` and ``request_id`` are the actor's authority and the request's
+    identity, both supplied by the caller that resolved them — ``admin_service``
+    resolves the role from ``rbac`` and never from the request. An empty value
+    is written as empty rather than guessed at: a row that invents an authority
+    is worse than a row that admits it does not have one.
     """
     _exec(
         "INSERT INTO admin_audit (at, actor_id, action, target_id, chat_id, "
-        "outcome, detail, interface) VALUES (?,?,?,?,?,?,?,?)",
+        "outcome, detail, interface, role, request_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             int(time.time()),
             int(actor_id),
@@ -1095,12 +1118,15 @@ def audit_write(
             str(outcome)[:40],
             str(detail)[:300],
             str(interface)[:16],
+            str(role)[:32],
+            str(request_id)[:120],
         ),
     )
 
 
 _AUDIT_COLS = (
-    "at, actor_id, action, target_id, chat_id, outcome, detail, interface"
+    "at, actor_id, action, target_id, chat_id, outcome, detail, interface, "
+    "role, request_id"
 )
 
 # The outcome string that means "this action actually happened". It is a copy of
@@ -1120,6 +1146,8 @@ def _audit_row(r) -> dict:
         "outcome": r[5],
         "detail": r[6] or "",
         "interface": r[7] or "",
+        "role": r[8] or "",
+        "request_id": r[9] or "",
     }
 
 
