@@ -527,7 +527,21 @@ def _wire(contents: list) -> list:
                 # turn. It must be replayed verbatim: the protocol requires the
                 # model's call and its result to appear in that order, and a
                 # turn that omits the call leaves the result unexplained.
-                converted.append(types.Part(function_call=part["function_call"]))
+                #
+                # "Verbatim" includes the thought signature. The current models
+                # attach one to every function call and reject the call if it
+                # comes back without it — a 400 whose text is "Function call is
+                # missing a thought_signature in functionCall parts". The
+                # signature lives on the ``Part``, not on the ``FunctionCall``,
+                # which is why it travels as a sibling key and is re-attached
+                # here rather than being part of the call object.
+                signature = part.get("thought_signature")
+                converted.append(
+                    types.Part(
+                        function_call=part["function_call"],
+                        **({"thought_signature": signature} if signature else {}),
+                    )
+                )
             elif "function_response" in part:
                 converted.append(types.Part(function_response=part["function_response"]))
             else:
@@ -661,6 +675,52 @@ async def _request_full(contents: list, *, tools=None, context: str = ""):
     return await asyncio.wait_for(_call(), timeout=timeout_seconds())
 
 
+def _calls_with_signatures(response, types) -> list[dict]:
+    """The model's function calls, each paired with the part that carries them.
+
+    The SDK's ``response.function_calls`` is the convenient way to get the calls,
+    and it is the wrong one here: it hands back bare ``FunctionCall`` objects and
+    drops the ``thought_signature`` that arrived beside each of them. The
+    signature is not decoration — the current models refuse a replayed call that
+    has lost it — so the calls are read off the response's parts instead, where
+    the call and its signature still sit together.
+
+    Returns a list of ``{"call": FunctionCall, "part": {...}}``. The ``part``
+    dict is in the same shape ``_wire`` already understands for a function call,
+    so replaying it is the ordinary path rather than a special case.
+
+    Falls back to ``response.function_calls`` when the parts yield nothing, so a
+    response shaped differently by a future SDK degrades to "no signature"
+    rather than to "no tool call at all".
+    """
+    found: list[dict] = []
+    for candidate in getattr(response, "candidates", None) or ():
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or ():
+            call = getattr(part, "function_call", None)
+            if call is None:
+                continue
+            entry: dict = {"function_call": call}
+            signature = getattr(part, "thought_signature", None)
+            if signature:
+                entry["thought_signature"] = signature
+            found.append({"call": call, "part": entry})
+    if found:
+        return found
+
+    return [
+        {
+            "call": call,
+            "part": {
+                "function_call": types.FunctionCall(
+                    name=call.name, args=dict(call.args or {})
+                )
+            },
+        }
+        for call in (getattr(response, "function_calls", None) or ())
+    ]
+
+
 async def _tool_turn(contents: list, *, tools, context: str, on_tool) -> str:
     """Run the bounded tool loop for one turn and return the final text.
 
@@ -685,25 +745,14 @@ async def _tool_turn(contents: list, *, tools, context: str, on_tool) -> str:
 
     while used < budget:
         response = await _request_full(convo, tools=tools, context=context)
-        calls = list(getattr(response, "function_calls", None) or ())
+        calls = _calls_with_signatures(response, types)
         if not calls:
             return getattr(response, "text", "") or ""
 
-        convo.append(
-            {
-                "role": "model",
-                "parts": [
-                    {
-                        "function_call": types.FunctionCall(
-                            name=call.name, args=dict(call.args or {})
-                        )
-                    }
-                    for call in calls
-                ],
-            }
-        )
-        for call in calls:
+        convo.append({"role": "model", "parts": [entry["part"] for entry in calls]})
+        for entry in calls:
             used += 1
+            call = entry["call"]
             try:
                 answer = await on_tool(call.name, dict(call.args or {}))
             except Exception as exc:  # noqa: BLE001 - a tool failure is an answer
@@ -711,11 +760,21 @@ async def _tool_turn(contents: list, *, tools, context: str, on_tool) -> str:
                 answer = {"error": "the tool failed"}
             convo.append(
                 {
-                    "role": "tool",
+                    # A function response goes back in a **user** turn. The
+                    # role is not a stylistic choice: "tool" is not a role the
+                    # API accepts, and a turn carrying one is refused with
+                    # "Role 'tool' is not supported" before the model ever sees
+                    # it. That single word is what made every tool-calling turn
+                    # fail after the tool had already run — the action happened,
+                    # the model was never told, and the user was told the
+                    # assistant was unavailable.
+                    "role": "user",
                     "parts": [
                         {
                             "function_response": types.FunctionResponse(
-                                name=call.name, response={"result": answer}
+                                name=call.name,
+                                response={"result": answer},
+                                **({"id": call.id} if getattr(call, "id", None) else {}),
                             )
                         }
                     ],
