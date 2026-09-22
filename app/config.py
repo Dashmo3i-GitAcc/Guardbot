@@ -1901,6 +1901,29 @@ GEMINI_CHAT_TTS_FALLBACK_MODELS = _str_list(
     os.getenv("GEMINI_CHAT_TTS_FALLBACK_MODELS", DEFAULT_TTS_FALLBACKS)
 )
 
+# Which workloads spread their requests across the **whole** model list instead
+# of preferring the first name until it fails.
+#
+# The pool has always spread *accounts* this way — ``Pool.ordered_accounts``
+# sorts them least-recently-succeeded-first, precisely so that a pool of five
+# does not leave four unused — and that is the behaviour an operator sees as "it
+# does not use just one". The model list was left in strict preference order, so
+# the leading model took every request until the provider rate-limited it and
+# only then did the pool move on. Under a per-model daily allowance that means
+# the leading model is spent first while the rest of the list sits idle, and the
+# workload's real capacity is one model's, not the list's.
+#
+# Awareness and the conversation are the defaults because both are high-volume
+# and both were measured hitting a ceiling. ``gemini_daily`` shows chat spending
+# 500/500 and 481/500 of its two accounts on 2026-09-21 — its full allowance —
+# and the per-model provider limit is reached *before* the account's when every
+# request goes to one model. Awareness is the third case: nobody is waiting on a
+# pass, so it can afford to land on a heavier model, which the conversation
+# cannot. Remove a workload's name to put it back on strict preference order.
+GEMINI_POOL_ROTATE_MODELS = frozenset(
+    _str_list(os.getenv("GEMINI_POOL_ROTATE_MODELS", "awareness,chat"))
+)
+
 
 def _pool_key_list(primary: str, prefix: str, shared: list, allow_shared: bool):
     """The ordered ``(slot, credential)`` pairs for one workload.

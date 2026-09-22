@@ -849,6 +849,7 @@ class Pool:
         backoff: float = 1.5,
         timeout: float = 10.0,
         daily_budget: int = 0,
+        rotate_models: bool = False,
     ):
         """``keys`` is an ordered list of ``(slot, credential)`` pairs.
 
@@ -859,6 +860,10 @@ class Pool:
         makes the second account worth nothing. Per account, the pool spends one
         account's day and then fails over to the next exactly as it does for a
         429 — so the allowance scales with the pool instead of capping it.
+
+        ``rotate_models`` spreads requests across the whole model list instead of
+        preferring the first name until it fails. See ``models_for`` for what
+        that changes and why it is opt-in per workload.
         """
         self.workload = workload
         self.capabilities = capabilities
@@ -868,6 +873,7 @@ class Pool:
         self.backoff = max(0.0, float(backoff))
         self.timeout = max(1.0, float(timeout))
         self.daily_budget = max(0, int(daily_budget))
+        self.rotate_models = bool(rotate_models)
         self.accounts: list[Account] = []
         self._discovery: dict[str, list[str] | None] = {}
         seen: set[str] = set()
@@ -931,12 +937,28 @@ class Pool:
         )
 
     def models_for(self, account: Account, now: float) -> list[str]:
-        """The models to try, in preference order, for one account.
+        """The models to try for one account. Preference order, or rotation.
 
         Filtered three ways: the model must be capable of this workload, it must
         not be an experimental release unless that was opted into, and — when
         discovery has answered for this credential — the provider must actually
         list it.
+
+        With ``rotate_models`` the surviving names are re-ordered by
+        ``_rotation_key``: the models that have actually answered, rotated
+        least-recently-used, and the ones that have never answered last. That is
+        the same idea as ``ordered_accounts`` and for the same reason — a list
+        whose second member is never tried is a list of one — with one addition
+        the deployment forced: spreading the load must not mean volunteering for
+        a model this credential cannot use. Without rotation the first name
+        absorbs every request until the provider rate-limits it, so under a
+        per-model daily allowance the leading model is spent while the rest sit
+        idle, and the workload's capacity is one model's rather than the list's.
+
+        Ties keep the configured order. ``sort`` is stable and every model that
+        has never served a request has ``last_use == 0``, so the preference list
+        still decides the first pass through the rotation, and the names still
+        read as "cheapest and fastest first".
         """
         discovered = self._discovery.get(account.fingerprint, "unknown")
         out: list[str] = []
@@ -951,7 +973,36 @@ class Pool:
             if isinstance(discovered, list) and name not in discovered:
                 continue
             out.append(name)
+        if self.rotate_models and len(out) > 1:
+            out.sort(key=lambda name: self._rotation_key(account, name))
         return out
+
+    @staticmethod
+    def _rotation_key(account: Account, name: str) -> tuple[int, int]:
+        """Order one model for rotation: proven first, then least-recently-used.
+
+        Least-recently-used alone is not enough, and the deployment proved it
+        the expensive way: a fresh rotation over the whole list puts every model
+        in turn at the front, including the ones this credential cannot actually
+        use. A pass that lands on one of those spends its whole attempt budget
+        and returns a minute later — measured at 104 s for one awareness pass,
+        against 21 s before rotation existed. Spreading the load must not mean
+        volunteering for a model that is known not to answer.
+
+        So a model that has been asked and has never once answered is tried
+        *last*, not first. It is not disabled and not forgotten — when every
+        proven model is cooling down it is still reached, which is how a model
+        that was merely rate-limited earlier gets back in. Everything that has
+        answered is then rotated least-recently-used, which is what spreads the
+        load across the models that work.
+
+        A model nobody has asked yet counts as proven, so the first pass through
+        a new list still learns in the configured order rather than skipping
+        straight past everything.
+        """
+        state = account.model(name)
+        unproven = 1 if (state.requests and not state.successes) else 0
+        return (unproven, state.last_use)
 
     # -- discovery --
     async def discover(self, account: Account) -> list[str] | None:
@@ -1534,6 +1585,13 @@ def build_pools() -> dict[str, Pool]:
             # Only the conversational workload sets it today: it is the one with
             # a user-facing daily budget that has to scale with the pool.
             daily_budget=spec.get("daily_budget", 0),
+            # Derived from the workload's name unless a spec states it outright,
+            # so enabling rotation for a workload is one entry in
+            # ``GEMINI_POOL_ROTATE_MODELS`` rather than a flag to remember to add
+            # to that workload's dict as well.
+            rotate_models=spec.get(
+                "rotate_models", spec["workload"] in config.GEMINI_POOL_ROTATE_MODELS
+            ),
         )
         _pools[spec["workload"]] = pool
     return _pools

@@ -255,6 +255,7 @@ def make_pool(
     retries=0,
     allow_experimental=False,
     backoff=0.0,
+    rotate_models=False,
 ):
     return gemini_pool.Pool(
         workload,
@@ -265,6 +266,7 @@ def make_pool(
         retries=retries,
         backoff=backoff,
         timeout=5.0,
+        rotate_models=rotate_models,
     )
 
 
@@ -1596,3 +1598,126 @@ def test_a_capability_mismatch_is_a_model_problem_not_a_bad_request():
 
     assert failure.kind == "unsupported_input"
     assert failure.scope == gemini_pool.SCOPE_MODEL
+
+
+# ══ Model rotation ════════════════════════════════════════════════════════
+# The pool has always spread *accounts* least-recently-succeeded-first, so a
+# pool of five does not leave four unused. The model list was left in strict
+# preference order, so the leading model absorbed every request until the
+# provider rate-limited it. Under a per-model daily allowance that means the
+# leading model is spent first while the rest sit idle, and the workload's
+# capacity is one model's rather than the list's.
+def test_models_are_tried_in_preference_order_when_rotation_is_off():
+    """The default, unchanged: a workload that has not opted in is unaffected."""
+    pool = make_pool(models=TEXT_MODELS)
+    account = pool.accounts[0]
+    assert pool.models_for(account, time.time()) == list(TEXT_MODELS)
+
+
+def test_rotation_never_reuses_the_model_that_just_served():
+    """The point of the feature: load moves on instead of staying on one name."""
+    pool = make_pool(models=TEXT_MODELS, rotate_models=True)
+    account = pool.accounts[0]
+    now = time.time()
+
+    # Nothing has been used, so the preference list still decides.
+    assert pool.models_for(account, now)[0] == TEXT_MODELS[0]
+
+    account.model(TEXT_MODELS[0]).note_request(now)
+    assert pool.models_for(account, now)[0] == TEXT_MODELS[1]
+
+    account.model(TEXT_MODELS[1]).note_request(now + 1)
+    assert pool.models_for(account, now)[0] == TEXT_MODELS[2]
+
+
+def test_rotation_cycles_back_to_the_least_recently_used():
+    """After a full pass the order is the original preference order again."""
+    pool = make_pool(models=TEXT_MODELS, rotate_models=True)
+    account = pool.accounts[0]
+    now = time.time()
+    for index, name in enumerate(TEXT_MODELS):
+        account.model(name).note_request(now + index)
+
+    assert pool.models_for(account, now) == list(TEXT_MODELS)
+
+
+def test_rotation_still_respects_a_benched_model():
+    """Rotating must not resurrect a model the pool has just taken out."""
+    pool = make_pool(models=TEXT_MODELS, rotate_models=True)
+    account = pool.accounts[0]
+    now = time.time()
+    account.model(TEXT_MODELS[0]).note_failure(
+        gemini_pool.Failure("rate_limited", gemini_pool.SCOPE_MODEL, cooldown=600),
+        now,
+    )
+
+    order = pool.models_for(account, now)
+    assert TEXT_MODELS[0] not in order
+    assert order[0] == TEXT_MODELS[1]
+
+
+def test_only_the_configured_workloads_rotate(monkeypatch):
+    """Rotation is opt-in per workload, not a change to every pool at once."""
+    monkeypatch.setattr(
+        config,
+        "GEMINI_POOLS",
+        [
+            {"workload": "awareness", "keys": [("1", KEY_A)], "models": TEXT_MODELS,
+             "capabilities": frozenset({"text"}), "allow_experimental": False,
+             "retries": 0, "backoff": 0.0, "timeout": 10.0},
+            {"workload": "chat", "keys": [("1", KEY_B)], "models": TEXT_MODELS,
+             "capabilities": frozenset({"text"}), "allow_experimental": False,
+             "retries": 0, "backoff": 0.0, "timeout": 10.0},
+        ],
+    )
+    monkeypatch.setattr(config, "GEMINI_POOL_ROTATE_MODELS", frozenset({"awareness"}))
+    gemini_pool.build_pools()
+
+    assert gemini_pool.pool_for("awareness").rotate_models is True
+    assert gemini_pool.pool_for("chat").rotate_models is False
+
+
+def test_the_shipped_default_rotates_the_two_high_volume_workloads():
+    """The default the deployment actually gets, asserted so it cannot drift.
+
+    Both were measured hitting a ceiling: awareness is the highest-volume
+    workload and the one whose leading model was rate-limited most, and chat
+    spent 500/500 and 481/500 of its two accounts on 2026-09-21. The workloads
+    that are not listed — intent, moderation, transcribe, tts — keep the strict
+    preference order, which is the behaviour an operator already knows.
+    """
+    assert config.GEMINI_POOL_ROTATE_MODELS == frozenset({"awareness", "chat"})
+
+
+def test_a_model_that_has_never_answered_is_tried_last():
+    """Spreading the load must not mean volunteering for a broken model.
+
+    Measured on the deployment, and the reason this rule exists: a fresh
+    least-recently-used rotation over the whole list put every model at the
+    front in turn — including the ones this credential cannot actually use — and
+    one awareness pass took 104 s, against 21 s before rotation existed. The
+    model is not disabled and not forgotten; it is simply reached after the
+    models that have demonstrated they answer.
+    """
+    pool = make_pool(models=TEXT_MODELS, rotate_models=True)
+    account = pool.accounts[0]
+    now = time.time()
+
+    account.model(TEXT_MODELS[0]).note_request(now)        # asked, never answered
+    account.model(TEXT_MODELS[1]).note_request(now)
+    account.model(TEXT_MODELS[1]).note_success(now)        # asked, answered
+
+    order = pool.models_for(account, now)
+    assert order[-1] == TEXT_MODELS[0]
+    assert order.index(TEXT_MODELS[1]) < order.index(TEXT_MODELS[0])
+
+
+def test_a_never_asked_model_still_counts_as_proven():
+    """The first pass through a new list learns in the configured order.
+
+    Otherwise a fresh deployment would skip past every name it had not used yet
+    and rotate only among whichever one it happened to try first.
+    """
+    pool = make_pool(models=TEXT_MODELS, rotate_models=True)
+    account = pool.accounts[0]
+    assert pool.models_for(account, time.time()) == list(TEXT_MODELS)
