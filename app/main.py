@@ -2538,11 +2538,44 @@ async def _answer_conversationally(
         log.info("chat skipped: the message was just deleted by moderation")
         return False
 
+    # The clock for this turn, in the same shape as ``awareness timing`` and for
+    # the same reason: "it feels slow" is not a measurement, and every stage
+    # here is a place the time could be going. Durations only — never the
+    # message, never the answer.
+    started = time.monotonic()
+    prepare_done = started
+    gemini_done = started
+
     parts: list | None = None
     kind = ""
     text = _message_text(msg)
     want_voice = False
     problem = PREPARE_OK
+
+    def _timing(sent: bool) -> bool:
+        """Log this turn's three stages once, then hand back the caller's answer.
+
+        The boundaries are the three things that can actually be slow: getting
+        the message ready (download, transcribe), asking the model, and the
+        send. A turn that never reaches the model reports a zero model stage
+        rather than borrowing somebody else's duration, and the total makes
+        whatever is left — this function's own bookkeeping — visible if it ever
+        grows into a problem.
+        """
+        now = time.monotonic()
+        log.info(
+            "chat timing user=%s chat=%s prepare_ms=%.0f gemini_ms=%.0f "
+            "send_ms=%.0f total_ms=%.0f sent=%s kind=%s",
+            user.id,
+            room.id,
+            (prepare_done - started) * 1000.0,
+            (gemini_done - prepare_done) * 1000.0,
+            (now - gemini_done) * 1000.0,
+            (now - started) * 1000.0,
+            sent,
+            kind or "text",
+        )
+        return sent
 
     if media.describe(msg) is not None:
         work_dir = tempfile.mkdtemp(
@@ -2575,7 +2608,8 @@ async def _answer_conversationally(
             )
             # Something was said, so this turn is answered even though no model
             # was consulted. The person asked and got an honest sentence back.
-            return True
+            return _timing(True)
+    prepare_done = time.monotonic()
 
     # The administrative half of this turn. Built from server-side values only,
     # and empty for a room where the person asking is not an administrator —
@@ -2607,6 +2641,7 @@ async def _answer_conversationally(
         context=context,
         on_tool=on_tool,
     )
+    gemini_done = time.monotonic()
 
     if result:
         log.info(
@@ -2624,7 +2659,7 @@ async def _answer_conversationally(
         if result.voice:
             if await _send_voice(ctx, room.id, result.voice, reply_to):
                 _awareness_note_reply(room.id, result.text)
-                return True
+                return _timing(True)
             # The upload failed; the text is still the answer and is sent below.
             log.warning("voice reply failed; falling back to text")
         if await _send_chat(ctx, room.id, result.text, reply_to):
@@ -2632,10 +2667,10 @@ async def _answer_conversationally(
             # awareness pass has to understand — otherwise it reads questions
             # and never its own answers, and repeats itself.
             _awareness_note_reply(room.id, result.text)
-            return True
+            return _timing(True)
         # Telegram refused the send. Nothing was said, so the room is still
         # unanswered and the ambient path is free to try.
-        return False
+        return _timing(False)
 
     log.info(
         "chat declined for %s in %s reason=%s",
@@ -2646,8 +2681,8 @@ async def _answer_conversationally(
     # Silent for the reasons that are nobody's business — a switched-off feature
     # should not announce itself every time somebody says hello.
     if result.message:
-        return bool(await _send_chat(ctx, room.id, result.message, reply_to))
-    return False
+        return _timing(bool(await _send_chat(ctx, room.id, result.message, reply_to)))
+    return _timing(False)
 
 
 async def _send_voice(
