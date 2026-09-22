@@ -293,6 +293,98 @@ def test_a_press_in_another_chat_cannot_verify_the_challenged_one():
     assert bot.unmuted == []
 
 
+# ── Malformed callback data ───────────────────────────────────────────────
+# The handler is registered behind ``^cap:\d+$``, so these shapes do not reach
+# it in production. They are asserted anyway, because the guard that keeps them
+# out is a pattern string in a registration call, and a handler that trusts it
+# is one edit away from a traceback on crafted data — which is a crash, not a
+# refusal.
+BAD_CALLBACK_DATA = (
+    "",
+    ":",
+    "cap:",
+    "cap",
+    "cap:abc",
+    "cap:12x",
+    "cap:-5",
+    "cap:1:2",
+    "cap: 12",
+    "xap:12",
+    "CAP:12",
+    "cap:1.5",
+    "cap:9" * 40,
+)
+
+
+def test_the_callback_parser_and_the_filter_accept_the_same_strings():
+    """The parser must not be wider than the filter, and the filter not wider
+    than the parser. If they disagree, one of the two is a hole."""
+    import re
+
+    pattern = re.compile(main.CAPTCHA_CALLBACK_PATTERN)
+    for data in BAD_CALLBACK_DATA:
+        assert main._captcha_callback_target(data) is None, data
+        assert pattern.match(data) is None, data
+    for data, expected in (("cap:4242", 4242), ("cap:1", 1), ("cap:0", 0)):
+        assert main._captcha_callback_target(data) == expected, data
+        assert pattern.match(data) is not None, data
+    # Non-ASCII digits are accepted by both, because ``\\d`` in a ``str`` pattern
+    # is Unicode-aware and ``int`` parses them. That is recorded rather than
+    # "fixed": the two agree, which is the property that matters, and a target
+    # still has to equal the presser's own id to do anything.
+    assert main._captcha_callback_target("cap:١٢") == 12
+    assert pattern.match("cap:١٢") is not None
+
+
+def test_a_malformed_callback_is_refused_rather_than_raising():
+    """A crafted callback data must not produce an exception or an unmute."""
+    bot = FakeBot()
+    join(bot)
+    for data in BAD_CALLBACK_DATA:
+        update, q = click_update()
+        q.data = data
+        asyncio.run(main.on_captcha_click(update, ctx_for(bot)))
+        assert bot.unmuted == [], data
+        assert db.get_captcha(CHAT, JOINER) is not None, data
+        # An acknowledgement, and no alert: the presser learns nothing.
+        assert q.answers == [("", False)], data
+
+
+def test_a_callback_with_no_data_at_all_is_refused():
+    bot = FakeBot()
+    join(bot)
+    update, q = click_update()
+    q.data = None
+    asyncio.run(main.on_captcha_click(update, ctx_for(bot)))
+
+    assert bot.unmuted == []
+    assert db.get_captcha(CHAT, JOINER) is not None
+
+
+def test_a_callback_from_an_inaccessible_message_is_a_no_op():
+    """Telegram omits ``message`` on a callback from an inaccessible one, and
+    the chat id only exists on the message. There is nothing to act on."""
+    bot = FakeBot()
+    join(bot)
+    update, q = click_update()
+    q.message = None
+    asyncio.run(main.on_captcha_click(update, ctx_for(bot)))
+
+    assert bot.unmuted == []
+    assert db.get_captcha(CHAT, JOINER) is not None
+
+
+def test_a_callback_with_no_sender_is_refused():
+    bot = FakeBot()
+    join(bot)
+    update, q = click_update()
+    q.from_user = None
+    asyncio.run(main.on_captcha_click(update, ctx_for(bot)))
+
+    assert bot.unmuted == []
+    assert db.get_captcha(CHAT, JOINER) is not None
+
+
 def test_a_failed_unmute_puts_the_challenge_back():
     """A transient Telegram error must not strand the member muted with no row."""
     bot = FakeBot(unmute_fails=True)

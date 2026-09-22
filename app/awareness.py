@@ -223,10 +223,22 @@ class PassTrace:
         return max(0.0, (self.started_at - self.trigger_at) * 1000.0)
 
     def summary(self) -> str:
-        """One line of millisecond durations. No message, no decision, no reply."""
+        """One line of millisecond durations. No message, no decision, no reply.
+
+        ``batch_ms`` is the whole pre-request stage, kept as it was; the two
+        fields beside it split that stage at the seam the brief asks to be able
+        to see. ``ctx_ms`` is building what the model is handed — the tool
+        declarations and the trusted block, which are assembled in Python and
+        cost real time at this size. ``window_ms`` is reading the room's own
+        recent messages out of the database and rendering them. Without the
+        split, a slow pass and a large room look identical, and the two have
+        different fixes.
+        """
         return (
             f"chat={self.chat_id} waited_ms={self.waited_ms():.0f} "
             f"batch_ms={self._gap('batch', 'request'):.0f} "
+            f"ctx_ms={self._gap('batch', 'context'):.0f} "
+            f"window_ms={self._gap('context', 'window'):.0f} "
             f"gemini_ms={self._gap('request', 'response'):.0f} "
             f"decide_ms={self._gap('response', 'decision'):.0f} "
             f"send_ms={self._gap('decision', 'send'):.0f} "

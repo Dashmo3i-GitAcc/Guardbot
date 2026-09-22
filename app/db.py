@@ -555,6 +555,24 @@ def init() -> None:
             created_at INTEGER NOT NULL DEFAULT 0,
             last_seen INTEGER NOT NULL DEFAULT 0)"""
     )
+    # How identity lookups have been ending, as counts rather than as rows.
+    #
+    # This is the one awareness-side signal that cannot be derived from
+    # anything else: a name that matches two people leaves no other trace, and
+    # "resolution keeps coming back ambiguous" is the difference between a
+    # group whose members share a first name and a resolver that is broken. It
+    # is a counter table rather than a log because the question is a rate, and
+    # a rate does not need the individual calls.
+    #
+    # Written only from ``app/identity.py``, and only on the admin tool path —
+    # ``resolve`` is reached when a person asks about a person, not on the
+    # message path — so this is not a write added to the hot path.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS identity_resolutions (
+            outcome TEXT PRIMARY KEY,
+            count INTEGER NOT NULL DEFAULT 0,
+            last_at INTEGER NOT NULL DEFAULT 0)"""
+    )
     _conn.commit()
 
 
@@ -2020,7 +2038,37 @@ def identity_reset() -> None:
     """Forget every identity. For tests."""
     with _lock:
         _conn.execute("DELETE FROM identities")
+        _conn.execute("DELETE FROM identity_resolutions")
         _conn.commit()
+
+
+def identity_resolution_bump(outcome: str) -> None:
+    """Count one identity lookup by how it ended. Never raises.
+
+    A metrics write must not be able to break a lookup: if the counter cannot
+    be written, the caller's answer is still correct and still worth returning.
+    """
+    try:
+        with _lock:
+            _conn.execute(
+                "INSERT INTO identity_resolutions (outcome, count, last_at) "
+                "VALUES (?, 1, ?) "
+                "ON CONFLICT(outcome) DO UPDATE SET "
+                "count = count + 1, last_at = excluded.last_at",
+                (str(outcome)[:32], int(time.time())),
+            )
+            _conn.commit()
+    except Exception:  # noqa: BLE001 - a counter is never worth an exception
+        pass
+
+
+def identity_resolution_counts() -> dict[str, int]:
+    """``{outcome: count}`` for every outcome seen since the last reset."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT outcome, count FROM identity_resolutions"
+        ).fetchall()
+    return {str(r[0]): int(r[1] or 0) for r in rows}
 
 
 # ── Nexus Awareness: the room window and the understanding of it ──────────

@@ -601,6 +601,43 @@ def test_the_trace_reports_every_stage_as_a_duration():
     assert 8500 <= trace.waited_ms() <= 9500
 
 
+def test_the_pre_request_stage_is_split_at_the_seam():
+    """``ctx_ms`` and ``window_ms`` divide ``batch_ms``, they do not replace it.
+
+    A large room and a slow context build produce the same ``batch_ms`` and have
+    different fixes, so the brief asks for both to be visible. The arithmetic is
+    asserted rather than the values, because the values are whatever the machine
+    did: the two halves must add up to the whole they were cut from.
+    """
+    trace = awareness.PassTrace(chat_id=CHAT, trigger_at=time.monotonic())
+    trace.mark("batch")
+    trace.mark("context")
+    trace.mark("window")
+    trace.mark("request")
+
+    line = trace.summary()
+    for field in ("batch_ms=", "ctx_ms=", "window_ms="):
+        assert field in line
+
+    batch = float(line.split("batch_ms=")[1].split()[0])
+    ctx = float(line.split("ctx_ms=")[1].split()[0])
+    window = float(line.split("window_ms=")[1].split()[0])
+    assert batch >= ctx + window - 1.0, (batch, ctx, window)
+    assert ctx >= 0.0 and window >= 0.0
+
+
+def test_the_split_fields_are_absent_rather_than_wrong_when_a_pass_skips():
+    """A pass that stops early must not report a half-measured seam as a value."""
+    trace = awareness.PassTrace(chat_id=CHAT, trigger_at=time.monotonic())
+    trace.mark("batch")
+    trace.mark("end")
+
+    line = trace.summary()
+
+    assert "ctx_ms=0" in line
+    assert "window_ms=0" in line
+
+
 def test_the_trace_carries_no_content():
     """A trace is a log line, and other people's words must not be in it."""
     secret = "این پیام نباید در لاگ باشد"

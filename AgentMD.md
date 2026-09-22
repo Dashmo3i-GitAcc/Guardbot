@@ -3966,6 +3966,15 @@ chat=-100… waited_ms=8500 batch_ms=12 gemini_ms=1180 decide_ms=3 send_ms=41 to
 No message text, no ids beyond the chat, nothing that would put a person's words
 in a log. That line is what the rest of this section is based on.
 
+`batch_ms` was later split at the seam the brief asks to be able to see:
+`ctx_ms` is assembling what the model is handed — the tool declarations and the
+trusted block — and `window_ms` is reading the room's own recent messages out of
+the database and rendering them. `batch_ms` is kept unchanged beside them, so
+the split is an addition rather than a change of meaning. Without it a large
+room and a slow context build produce the same number and have different fixes.
+A pass that stops early reports both as `0` rather than as a half-measured
+value, which `test_awareness_latency.py` asserts.
+
 Three candidates were found, and only one of them was a defect:
 
 1. **Tick quantisation — a real defect.** Every room's debounce expired on its
@@ -5054,6 +5063,25 @@ case to it rather than growing a second, weaker matcher.
   uuid are all resolvable by the assistant through one path.
 * `agent_data.agent_task_view` reports `actor_uuid` alongside `actor_id`.
 
+### 45.4 How resolution has been ending, as a rate
+
+The brief asks for identity resolution success and ambiguity to be visible, and
+that is the one awareness-side signal nothing else stores: a name matching two
+people leaves no other trace. `identity_resolutions` is a counter table —
+`outcome` and a count — written from `identity.resolve`, and rendered by
+`identity.resolution_line()` on the Nexus status report.
+
+Two deliberate choices. The bump lives in the public `resolve` wrapper around
+`_resolve`, not at each of the eight returns inside it, so the tally is complete
+by construction: a new branch cannot be added without being counted. And it is
+guarded at both the call site and inside `db.identity_resolution_bump`, because
+a metric is never worth a wrong answer — `test_identity.py` proves a counter
+that raises still leaves the lookup correct.
+
+This is not a write on the message path. `resolve` is reached when a person asks
+*about* a person, through `resolve_person`; the hot path calls `identity.ensure`,
+which is a different function.
+
 ## 46. What the assistant may read, and the two boundaries around it
 
 `app/agent_data.py` is the operational data layer. The brief asks for extensive
@@ -5184,6 +5212,24 @@ An unrecognised value falls back to `kick` rather than silently disabling
 verification, and that fallback is tested. The original race fix — claim the row
 before the network call, so a member who verified is never acted on by a stale
 timer — is unchanged and still asserted in `tests/test_captcha.py`.
+
+### 48.1 The callback data is parsed by shape, not by splitting
+
+`on_captcha_click` used to do `_, target = q.data.split(":")`. The handler is
+registered behind `^cap:\d+$`, so on the real path that was safe — but a handler
+that *assumes* its filter ran is one registration edit away from a traceback on
+crafted callback data, and a traceback is not a refusal. A crafted
+`callback_data` is attacker-controlled, which makes this the one input in the
+captcha flow that is.
+
+`_captcha_callback_target` now returns the id or `None`, and `None` is answered
+with an empty acknowledgement: no exception, no unmute, no information about
+what this bot recognises. `CAPTCHA_CALLBACK_PATTERN` is a named constant so the
+filter and the parser can be asserted to accept exactly the same strings — if
+one is wider than the other, one of them is a hole. Non-ASCII digits
+(`cap:١٢`) are accepted by both, because `\d` in a `str` pattern is
+Unicode-aware and `int` parses them; that agreement is recorded in the test
+rather than "fixed", since the target still has to equal the presser's own id.
 
 ## 49. The weak-internet repetition, and its cause
 

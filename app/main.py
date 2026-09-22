@@ -283,11 +283,52 @@ async def on_member_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+# The callback data of a challenge button. Named rather than inline so the
+# filter that decides what reaches the handler and the parser that reads it can
+# be asserted to accept the same strings — see ``tests/test_captcha.py``.
+CAPTCHA_CALLBACK_PATTERN = r"^cap:\d+$"
+
+
+def _captcha_callback_target(data) -> int | None:
+    """The user id in a ``cap:<digits>`` callback, or ``None`` for anything else.
+
+    The handler is registered with the pattern ``^cap:\\d+$``, so on the real
+    path this has already been filtered — but a handler that *assumes* its
+    filter ran is one registration change away from a traceback on crafted
+    callback data, and a traceback is not a refusal. Every malformed shape is
+    therefore answered with ``None`` rather than by raising: no data at all, the
+    wrong prefix, a non-numeric id, extra segments, an empty id, a negative id.
+    ``str.isdigit`` is what rejects the last three, and it is also why the parse
+    is done by shape instead of by splitting and unpacking.
+    """
+    if not isinstance(data, str):
+        return None
+    parts = data.split(":")
+    if len(parts) != 2 or parts[0] != "cap" or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
 async def on_captcha_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    _, target = q.data.split(":")
-    if q.from_user.id != int(target):
+    target = _captcha_callback_target(q.data if q is not None else None)
+    if target is None:
+        # Not a challenge we issued, or not shaped like one. Answering with an
+        # empty acknowledgement stops Telegram's client-side spinner without
+        # telling the presser anything about what this bot recognises.
+        if q is not None:
+            try:
+                await q.answer()
+            except TelegramError:
+                pass
+        return
+    if q.from_user is None or q.from_user.id != target:
         await q.answer("این دکمه برای شما نیست.", show_alert=True)
+        return
+    if q.message is None:
+        # Telegram omits the message on a callback from an inaccessible one.
+        # There is no challenge row we could act on without its chat, so this
+        # is a no-op rather than a guess.
         return
 
     chat_id = q.message.chat.id
@@ -1665,7 +1706,12 @@ async def _awareness_read(
     principal = rbac.resolve(actor_id)
     counters: dict = {"writes": 0}
     tools, context, on_tool = _awareness_turn(ctx, chat_id, actor_id, counters)
+    # The seam between building what the model is handed and reading the room.
+    # See ``PassTrace.summary``: without it a large room and a slow pass are the
+    # same number, and only one of them is worth optimising.
+    trace.mark("context")
     transcript = awareness.render(chat_id)
+    trace.mark("window")
     if not transcript:
         awareness.skip(chat_id, seen_message_id=max_id)
         return
@@ -2167,6 +2213,12 @@ def _nexus_status_text() -> str:
         lines.append(service_adapters.summary_line())
     except Exception:  # noqa: BLE001
         log.exception("could not build the integrations line")
+    try:
+        from . import identity
+
+        lines.append(identity.resolution_line())
+    except Exception:  # noqa: BLE001
+        log.exception("could not build the identity resolution line")
     return "\n".join(lines)
 
 
@@ -4801,7 +4853,9 @@ def main() -> None:
     app.add_handler(
         ChatMemberHandler(on_member_update, ChatMemberHandler.CHAT_MEMBER)
     )
-    app.add_handler(CallbackQueryHandler(on_captcha_click, pattern=r"^cap:\d+$"))
+    app.add_handler(
+        CallbackQueryHandler(on_captcha_click, pattern=CAPTCHA_CALLBACK_PATTERN)
+    )
     app.add_handler(
         CallbackQueryHandler(on_report_delete, pattern=r"^report_delete$")
     )

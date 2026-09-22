@@ -217,7 +217,47 @@ def resolve(query: str, *, chat_id: int = 0) -> dict:
       assistant must ask. There is no field anywhere that lets it pick one.
     * ``unknown`` — nobody matches. Ask for a reply or an id.
     * ``invalid`` — the query is empty or too short to be anything.
+
+    This is the only public entry point, and it is a thin counter around
+    :func:`_resolve`. Counting here rather than at each of the eight returns
+    below is what makes the tally complete by construction: a new branch cannot
+    be added without being counted. The bump cannot fail the lookup — see
+    ``db.identity_resolution_bump``.
     """
+    answer = _resolve(query, chat_id=chat_id)
+    # Guarded here as well as inside the bump: the lookup is the answer the
+    # caller needs and the count is bookkeeping, so a counter that cannot be
+    # written must not be able to turn a correct answer into an exception.
+    try:
+        db.identity_resolution_bump(str(answer.get("status") or "unknown"))
+    except Exception:  # noqa: BLE001 - bookkeeping is never worth a failure
+        log.exception("could not count an identity resolution")
+    return answer
+
+
+def resolution_line() -> str:
+    """One line of how identity lookups have been ending. Counts, never content.
+
+    The signal is the shape of the distribution. A run of ``ambiguous`` means
+    names in the group collide and the assistant is being made to ask, which is
+    correct but worth seeing; ``unknown`` climbing means people are naming
+    somebody the bot has never observed. Neither is derivable from anything
+    else stored, which is why the counter exists at all.
+    """
+    try:
+        counts = db.identity_resolution_counts()
+    except Exception:  # noqa: BLE001 - a status line is never worth a crash
+        log.exception("could not read the identity resolution counts")
+        return "identity lookups: unavailable"
+    if not counts:
+        return "identity lookups: none yet"
+    total = sum(counts.values())
+    parts = " ".join(f"{k}={counts[k]}" for k in sorted(counts))
+    return f"identity lookups: total={total} {parts}"
+
+
+def _resolve(query: str, *, chat_id: int = 0) -> dict:
+    """The resolution itself. See :func:`resolve` for the contract."""
     raw = (query or "").strip()
     if not raw:
         return {"status": "invalid", "query": raw, "reason": "empty"}

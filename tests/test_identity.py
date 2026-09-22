@@ -233,3 +233,61 @@ def test_resolution_grants_nothing():
     # The permission list describes the *target*; it is not a grant to the
     # caller, and the caller's own authority is resolved separately.
     assert found["identity"]["role"] == rbac.ROLE_GUEST
+
+
+# ── The counter ───────────────────────────────────────────────────────────
+def test_every_resolution_is_counted_by_its_outcome():
+    """The tally must be complete by construction, not by remembering to add
+    a bump to each return."""
+    # Realistic ten-digit ids: ``_ID_RE`` deliberately needs four digits or more
+    # so that a short Persian word is never mistaken for one.
+    remember(5001234567, "میلاد")
+    remember(5001234568, "میلاد")  # a colliding name, so one query is ambiguous
+
+    identity.resolve("میلاد", chat_id=CHAT)                    # ambiguous
+    identity.resolve("5001234567", chat_id=CHAT)               # ok
+    identity.resolve("", chat_id=CHAT)                         # invalid
+    identity.resolve("0" * 32, chat_id=CHAT)                   # unknown uuid
+
+    counts = db.identity_resolution_counts()
+    assert counts.get("ambiguous") == 1
+    assert counts.get("ok") == 1
+    assert counts.get("invalid") == 1
+    assert counts.get("unknown") == 1
+
+
+def test_a_failing_counter_does_not_fail_the_lookup(monkeypatch):
+    """A metric is never worth a wrong answer."""
+    remember(500, "میلاد")
+
+    def boom(outcome):
+        raise RuntimeError("the counter is unavailable")
+
+    monkeypatch.setattr(db, "identity_resolution_bump", boom)
+    # The public wrapper must swallow it; the lookup still answers.
+    found = identity.resolve("میلاد", chat_id=CHAT)
+    assert found["status"] == "ok"
+
+
+def test_the_counter_line_reports_counts_and_no_names():
+    remember(500, "میلاد")
+    identity.resolve("میلاد", chat_id=CHAT)
+
+    line = identity.resolution_line()
+
+    assert "identity lookups:" in line
+    assert "ok=1" in line
+    assert "میلاد" not in line, "a count line must not carry a name"
+
+
+def test_the_counter_line_says_so_when_nothing_has_been_looked_up():
+    assert "none yet" in identity.resolution_line()
+
+
+def test_reset_clears_the_counter():
+    remember(500, "میلاد")
+    identity.resolve("میلاد", chat_id=CHAT)
+    assert db.identity_resolution_counts()
+
+    db.identity_reset()
+    assert db.identity_resolution_counts() == {}
