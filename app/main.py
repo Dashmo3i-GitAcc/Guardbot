@@ -19,11 +19,13 @@ from telegram.constants import ChatAction, ChatMemberStatus
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -325,6 +327,46 @@ async def on_captcha_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         await q.message.delete()
     except TelegramError:
         pass
+
+
+async def on_any_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Claim every update, and stop the ones that have already been handled.
+
+    This runs in the lowest handler group, so it sees an update before any
+    handler does, and it is the only place in the bot that decides whether an
+    update is new. ``ApplicationHandlerStop`` is what makes "stop" mean stop: the
+    dispatcher runs groups in order, so raising it here means no handler in any
+    later group sees the update at all.
+
+    The claim is written *before* the handlers run rather than after. That is the
+    deliberate half of the trade: an update that is being handled when the
+    process dies is lost, and Telegram will not send it again either way — the
+    offset moves when the update is fetched, not when it is answered — so writing
+    the claim first costs nothing that was not already lost, while writing it
+    last would leave a window in which a crash after handling produces a second
+    reply on the next start.
+
+    Nothing here is fatal. A database failure must not stop the bot from
+    answering: if the claim cannot be written, the update is handled, which is
+    the behaviour that existed before this guard.
+    """
+    if not config.UPDATE_DEDUP_ENABLED:
+        return
+    update_id = int(getattr(update, "update_id", 0) or 0)
+    if update_id <= 0:
+        # Not something Telegram does. Refusing to guess is the safe direction:
+        # treating a missing id as claimable would collide every such update on
+        # one row and start dropping real ones.
+        return
+    try:
+        first_time = db.update_claim(update_id)
+    except Exception:  # noqa: BLE001 - a dedup failure must not silence the bot
+        log.exception("could not claim update_id=%s; handling it anyway", update_id)
+        return
+    if first_time:
+        return
+    log.info("duplicate update dropped update_id=%s", update_id)
+    raise ApplicationHandlerStop
 
 
 async def captcha_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4191,8 +4233,42 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ------------------------------------------------------------ wiring
+async def update_dedup_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Forget the update ids Telegram will never send again.
+
+    One indexed DELETE, and it is on its own timer rather than on the captcha
+    reaper's: the two have nothing to do with each other, and a failure in one
+    must not stop the other. Nothing is lost by pruning — an id older than the
+    window will not be re-delivered, and if it somehow were, the update would
+    simply be handled, which is the behaviour before this table existed.
+    """
+    if not config.UPDATE_DEDUP_ENABLED:
+        return
+    try:
+        dropped = db.seen_updates_prune(int(config.UPDATE_DEDUP_TTL_SECONDS))
+    except Exception:  # noqa: BLE001 - housekeeping is never worth a crash
+        log.exception("could not prune the claimed update ids")
+        return
+    if dropped:
+        log.info("update dedup: forgot %d expired update id(s)", dropped)
+
+
 async def post_init(app: Application) -> None:
     app.job_queue.run_repeating(captcha_reaper, interval=10, first=10)
+    if config.UPDATE_DEDUP_ENABLED:
+        interval = max(60.0, float(config.UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS))
+        app.job_queue.run_repeating(update_dedup_reaper, interval=interval, first=interval)
+        log.info(
+            "Update dedup: on, ttl=%ds prune_every=%.0fs",
+            int(config.UPDATE_DEDUP_TTL_SECONDS),
+            interval,
+        )
+    else:
+        log.warning(
+            "UPDATE_DEDUP_ENABLED is off: a re-delivered update will be handled "
+            "again, which means a duplicate reply after a network failure or a "
+            "restart."
+        )
     # The awareness sweeper. It is a *poll* rather than a subscription: a tick
     # with nothing pending costs one indexed query per configured group, and a
     # tick with something pending performs at most
@@ -4536,6 +4612,13 @@ def main() -> None:
         detector.load_model()
 
     app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
+
+    # The update guard, and the reason it is a handler rather than a decorator
+    # around the dispatcher: it has to run before *every* other handler, and the
+    # only thing that is guaranteed to run before every handler is a handler in a
+    # lower group. Group -1 is that group, and no other handler uses it.
+    if config.UPDATE_DEDUP_ENABLED:
+        app.add_handler(TypeHandler(Update, on_any_update), group=-1)
 
     app.add_handler(
         ChatMemberHandler(on_member_update, ChatMemberHandler.CHAT_MEMBER)

@@ -478,6 +478,32 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status "
         "ON agent_tasks(status, created_at)"
     )
+    # One row per Telegram update this bot has already handled.
+    #
+    # Telegram re-delivers an update whenever it is not certain the bot received
+    # it — after a network failure, and after a restart, because the update
+    # offset is not persisted and the bot asks for the backlog again. Without
+    # this table the same message is answered twice, which is a real duplicate
+    # rather than a cosmetic one: a second reply, a second moderation action, a
+    # second model call.
+    #
+    # The primary key *is* the mechanism. ``INSERT OR IGNORE`` on a unique key
+    # is atomic in SQLite, so two concurrent deliveries of the same id cannot
+    # both win, and the check needs no lock of its own.
+    #
+    # The ids are Telegram's and are never reused, so a row here can only ever
+    # mean "this exact update was handled" — which is why dropping a duplicate is
+    # safe and cannot lose a real event. The table is bounded by age
+    # (``seen_updates_prune``); a few hundred bytes per day is a cheaper price
+    # than a duplicate reply.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS seen_updates (
+            update_id INTEGER PRIMARY KEY,
+            at INTEGER NOT NULL)"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_seen_updates_at ON seen_updates(at)"
+    )
     _conn.commit()
 
 
@@ -2342,4 +2368,62 @@ def agent_reset() -> None:
     """Forget every task. For tests."""
     with _lock:
         _conn.execute("DELETE FROM agent_tasks")
+        _conn.commit()
+
+
+# ── Update deduplication ──────────────────────────────────────────────────
+def update_claim(update_id: int) -> bool:
+    """Claim one Telegram update. ``True`` the first time, ``False`` afterwards.
+
+    The whole duplicate-delivery defence is this one statement, and the reason it
+    is a statement rather than a read-then-write is the race: two deliveries of
+    the same update can arrive close enough together that a ``SELECT`` followed
+    by an ``INSERT`` would let both see "not seen yet" and both proceed.
+    ``INSERT OR IGNORE`` against the primary key cannot: exactly one of them
+    inserts a row, and the other's ``rowcount`` is zero.
+
+    An unknown or zero id is refused rather than stored. Telegram does not issue
+    ``update_id`` 0, and treating a missing id as claimable would make every
+    update without one collide on a single row.
+    """
+    update_id = int(update_id or 0)
+    if update_id <= 0:
+        return False
+    with _lock:
+        cur = _conn.execute(
+            "INSERT OR IGNORE INTO seen_updates (update_id, at) VALUES (?,?)",
+            (update_id, int(time.time())),
+        )
+        _conn.commit()
+        return cur.rowcount > 0
+
+
+def update_seen(update_id: int) -> bool:
+    """Whether this update has already been claimed. For reporting and tests."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT 1 FROM seen_updates WHERE update_id=?", (int(update_id or 0),)
+        ).fetchone()
+    return row is not None
+
+
+def seen_updates_prune(keep_seconds: int) -> int:
+    """Forget update ids older than the window. Best effort.
+
+    The window only has to outlast Telegram's willingness to re-deliver, and
+    beyond that a row is dead weight. Nothing is lost by dropping one: an id that
+    old will not be sent again, and if it somehow were, the update would simply
+    be handled — which is the behaviour before this table existed.
+    """
+    cutoff = int(time.time()) - max(1, int(keep_seconds))
+    with _lock:
+        cur = _conn.execute("DELETE FROM seen_updates WHERE at < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
+
+
+def seen_updates_reset() -> None:
+    """Forget every claimed update. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM seen_updates")
         _conn.commit()

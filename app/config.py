@@ -1123,6 +1123,33 @@ MODERATION_MEDIA_ENABLED = _bool("MODERATION_MEDIA_ENABLED", True)
 MODERATION_AI_ASK_ON_SAFE = _bool("MODERATION_AI_ASK_ON_SAFE", False)
 
 
+# ── Update deduplication ──────────────────────────────────────────────────
+# Whether one Telegram update may be handled more than once.
+#
+# It may not, and the reason is not tidiness. Telegram re-delivers an update it
+# is not certain was received — after a network failure, and after a restart,
+# because the update offset is not persisted and the bot asks for the backlog
+# again. Handled twice, a message is answered twice, a moderation action runs
+# twice, and a model call is paid for twice.
+#
+# See ``db.update_claim`` for the mechanism. The switch exists so that a
+# deployment which somehow sees updates dropped can turn the guard off and get
+# the previous behaviour back without a code change — but the default is on,
+# because "handle every update exactly once" is the correct behaviour and the
+# failure it prevents is invisible until it happens.
+UPDATE_DEDUP_ENABLED = _bool("UPDATE_DEDUP_ENABLED", True)
+# How long a claimed id is remembered. It only has to outlast Telegram's
+# willingness to re-deliver, which is bounded by how long the bot was away —
+# Telegram keeps undelivered updates for 24 hours. A day is therefore the honest
+# bound, and the table costs a few hundred bytes a day at this bot's traffic.
+UPDATE_DEDUP_TTL_SECONDS = _int("UPDATE_DEDUP_TTL_SECONDS", 24 * 3600)
+# How often the claimed ids are swept. The sweep is one indexed DELETE, so it
+# runs on the captcha reaper's existing timer rather than on one of its own.
+UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS = _float(
+    "UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS", 3600.0
+)
+
+
 # ── The coding-agent bridge ───────────────────────────────────────────────
 # See ``app/agent_bridge.py`` for the design and ``AgentMD.md`` §36 for the
 # deployment. The short version: the owner asks Nexus for a coding task in the
