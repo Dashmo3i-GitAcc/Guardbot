@@ -19,6 +19,15 @@ Running it
 or, as a service, see ``AgentMD.md``. It runs until killed; ``--once`` performs
 one pass and exits, which is what the tests use.
 
+How it runs the agent
+---------------------
+Through the CodeBuddy job broker, with ``--bg``, because that is the only
+invocation measured to work on this host — the foreground ``-p`` never returns.
+The launcher hands over a job in about a second and the work continues in the
+broker's process, so the outcome is read from the job's own
+``$HOME/.codebuddy/jobs/<shortId>/state.json`` rather than from stdout. See the
+constants below for what was measured and why each part is the way it is.
+
 What it checks for itself
 -------------------------
 The container already validated the request — repository against the allowlist,
@@ -109,6 +118,52 @@ _QUESTION_RE = re.compile(
     r"^\s*" + re.escape(QUESTION_MARKER) + r"\s*(.+)$", re.MULTILINE | re.IGNORECASE
 )
 
+# ── The CodeBuddy job mechanism ───────────────────────────────────────────
+# How this host can run the agent without a terminal, measured 2026-09-22.
+#
+# ``codebuddy -p`` in the foreground does not work here. It starts, prints
+# nothing and never exits — in six different shapes (fresh and real ``HOME``,
+# ``-y``, ``--permission-mode dontAsk``, ``--permission-mode acceptEdits``, and
+# stdin closed), so it is not a prompt, not stdin and not a permission question.
+#
+# ``--bg`` works. It hands the session to the CodeBuddy job broker, which is
+# where the authentication lives, and returns immediately:
+#
+#     backgrounded · gb-runne · gb-runner-realhome-5020
+#
+# The run's outcome is not on stdout. It lands in
+# ``$HOME/.codebuddy/jobs/<shortId>/state.json`` and moves through
+# ``state=working, tempo=active`` to ``state=done, tempo=idle``, with the answer
+# in ``output["result"]``. That file is what this runner reads.
+#
+# Two facts about it are load-bearing and were both measured:
+#
+# * ``shortId`` is the *first eight characters* of the name, so it is neither
+#   unique nor predictable. The launcher prints it and this runner matches
+#   ``state.json`` on the ``sessionId`` it set itself, never on the directory
+#   name.
+# * The authentication is in ``$HOME/.codebuddy``. A child given a fresh ``HOME``
+#   reports ``Authentication required`` as its *result* — a successful job whose
+#   text is a login prompt. So the child inherits the real ``HOME``, and that
+#   sentence is treated as the failure it is rather than relayed as an answer.
+JOB_DIR_NAME = ".codebuddy/jobs"
+JOB_STATE_FILE = "state.json"
+JOB_LAUNCH_TIMEOUT_SECONDS = 90.0
+JOB_POLL_SECONDS = 2.0
+# ``working``/``active`` while it runs; anything else is an ending. Written as
+# the running set rather than the terminal set because a state this code has
+# never seen is far more likely to be an ending than a new kind of waiting, and
+# waiting forever is the failure this whole file exists to avoid.
+JOB_RUNNING_STATES = frozenset(
+    {"working", "starting", "queued", "pending", "running", "active"}
+)
+_AUTH_REQUIRED_RE = re.compile(
+    r"authentication required|please (?:use /)?login|not (?:logged|signed) in",
+    re.IGNORECASE,
+)
+_SHORT_ID_RE = re.compile(r"backgrounded[^\n]*?([A-Za-z0-9_-]{2,})\s*[·•|]")
+_DETAIL_PREFIXES = ("result:", "error:", "failed:")
+
 
 def redact(text: str) -> str:
     """Strip credential-shaped substrings. Applied to everything that leaves."""
@@ -191,11 +246,17 @@ class Run:
         self.payload = payload
         self.spool = spool
         self.request_id = str(payload.get("request_id") or "")
-        self.stdout_tail: list[str] = []
         self.result_text = ""
         self.error = ""
         self.cancelled = False
-        self.session_id = ""
+        # The id this run's job is found by. Made here, unique per launch, and
+        # deliberately *not* the request id: reusing a session id would resume
+        # the earlier conversation rather than start the work again, and "run
+        # this task" is not "carry on with that one". It is also what the
+        # emitted ``session_id`` carries, which is how the container records
+        # which CodeBuddy session a task became.
+        self.session_id = f"{self.request_id}-{int(time.time())}"
+        self.short_id = ""
         self.progress_count = 0
 
     # -- emitting ---------------------------------------------------------
@@ -210,20 +271,52 @@ class Run:
         self._emit("progress", body[: int(self.payload.get("progress_max_chars") or 600)])
 
     # -- the environment --------------------------------------------------
+    def home(self) -> str:
+        """The HOME the child gets: the real one, unless told otherwise.
+
+        A fresh HOME per request was the original design and it is wrong here.
+        The CodeBuddy authentication lives in ``$HOME/.codebuddy``, and a child
+        that cannot see it does not fail — it *succeeds*, with the text
+        ``Authentication required. Please use /login command to sign in``, which
+        would then be relayed to the owner as though the agent had answered.
+
+        Isolation is bought with ``--no-session-persistence`` and an explicit
+        ``--session-id`` instead, which is what those flags are for.
+        ``AGENT_RUNNER_HOME`` still overrides this for a deployment that keeps a
+        prepared profile elsewhere, and that profile has to carry the
+        authentication or the same sentence comes back.
+        """
+        override = os.getenv("AGENT_RUNNER_HOME", "").strip()
+        return override or os.path.expanduser("~")
+
     def environment(self) -> dict:
         env = dict(os.environ)
         for name in _SESSION_VARS:
             env.pop(name, None)
-        home = os.path.join(
-            os.getenv("AGENT_RUNNER_HOME", "/run/guardbot-agent"), self.request_id
-        )
-        os.makedirs(home, mode=0o700, exist_ok=True)
-        env["HOME"] = home
+        env["HOME"] = self.home()
         # The agent's own working directory, so a tool that resolves a relative
         # path does so inside the repository rather than wherever this was
         # started from.
         env["PWD"] = str(self.payload.get("repo_path") or "")
         return env
+
+    def jobs_dir(self) -> str:
+        """Where the broker writes this job's state. One directory per job."""
+        return os.path.join(self.home(), JOB_DIR_NAME)
+
+    def preflight(self) -> str:
+        """Why no job can run at all, or ``""``.
+
+        Checked before launching so that a missing profile is a sentence in the
+        log rather than a login prompt arriving as the agent's answer.
+        """
+        if not os.path.isdir(os.path.join(self.home(), ".codebuddy")):
+            return (
+                f"no CodeBuddy profile under {self.home()!r}: the agent would run "
+                "unauthenticated. Unset AGENT_RUNNER_HOME, or point it at a "
+                "profile that is logged in."
+            )
+        return ""
 
     # -- the command ------------------------------------------------------
     def argv(self) -> list[str]:
@@ -236,15 +329,22 @@ class Run:
         container that could name an executable could name one that is not a
         coding agent. ``AGENT_CLI`` and ``AGENT_CLI_ARGS`` are the deployment's,
         set in the runner's own environment where the owner can see them.
+
+        ``--bg`` is not decoration. It is the only invocation measured to work
+        here: the foreground ``-p`` never returns, and ``--bg`` is what puts the
+        session under the job broker that holds the authentication. ``--name``
+        and ``--session-id`` are both set so that the job this launch created can
+        be found again, whatever the broker decides to call its directory.
         """
         cli = os.getenv("AGENT_CLI", "codebuddy")
-        args = [
+        extra = [
             item.strip()
             for item in os.getenv("AGENT_CLI_ARGS", "").split(",")
             if item.strip()
         ]
-        if not args:
-            args = ["-p", "--output-format", "stream-json"]
+
+        args = ["--bg", "--name", self.request_id, "--session-id", self.session_id]
+        args += extra
 
         # The two bounds this runner owns. The turn ceiling is its own cost
         # control and the directory is its own safety boundary; both can be
@@ -259,29 +359,193 @@ class Run:
         repo = str(self.payload.get("repo_path") or "")
         # ``--add-dir`` is what makes a headless run non-interactive. Without it
         # the CLI may stop and ask permission to touch a path, and a run that
-        # stops to ask a question nobody can answer looks exactly like a hang —
-        # which is one of the failures this bridge was written after. It is
-        # suppressible for a CLI that does not accept the flag.
+        # stops to ask a question nobody can answer looks exactly like a hang.
+        # It is suppressible for a CLI that does not accept the flag.
         if repo and "--add-dir" not in args and os.getenv("AGENT_ADD_DIR", "1") != "0":
             args = args + ["--add-dir", repo]
 
-        prompt = str(self.payload.get("prompt") or "")
-        if "-p" in args or "--print" in args:
-            return [cli, *args, prompt]
-        return [cli, *args, "-p", prompt]
+        return [cli, *args, "-p", str(self.payload.get("prompt") or "")]
+
+    # -- the job ----------------------------------------------------------
+    def _state_path(self, short_id: str) -> str:
+        return os.path.join(self.jobs_dir(), short_id, JOB_STATE_FILE)
+
+    def _read_state(self, short_id: str) -> dict | None:
+        """This job's state file, or ``None``. Never raises.
+
+        A half-written file is a normal thing to find — the broker rewrites it
+        while the job runs — so a parse failure is "not yet", not "broken".
+        """
+        if not short_id:
+            return None
+        try:
+            with open(self._state_path(short_id), encoding="utf-8", errors="replace") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _find_state(self) -> dict | None:
+        """Find this run's job by the id this run chose, not by its directory.
+
+        The fallback for a launcher whose line could not be parsed. Matched on
+        ``sessionId`` because the broker's directory name is the first eight
+        characters of ours, and is therefore neither unique nor predictable —
+        two launches can share one.
+        """
+        try:
+            names = sorted(os.listdir(self.jobs_dir()))
+        except OSError:
+            return None
+        for name in names:
+            state = self._read_state(name)
+            if state and str(state.get("sessionId") or "") == self.session_id:
+                self.short_id = self.short_id or name
+                return state
+        return None
+
+    def _state(self) -> dict | None:
+        return self._read_state(self.short_id) or self._find_state()
+
+    def _launch(self, argv: list[str]) -> str:
+        """Hand the task to the broker. Returns ``""`` or why it did not.
+
+        The launcher is expected to return almost immediately with the job's
+        short id; it is not the job. Waiting on it is therefore a bound on the
+        *handover*, not on the work, and a launcher that sits there is the
+        failure mode this whole file was written around.
+        """
+        repo = str(self.payload.get("repo_path") or "")
+        try:
+            child = subprocess.Popen(
+                argv,
+                cwd=repo,
+                env=self.environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                bufsize=1,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return f"could not start the agent: {exc}"
+
+        text = self._read_handover(child)
+        self.short_id = _short_id_from(text)
+        if not self.short_id:
+            # The launcher's own words, because they are the only diagnosis
+            # there is — the same reason the old read loop fell back to stdout
+            # when stderr was empty.
+            tail = text.strip()[-600:]
+            return "the agent did not report a background job: " + (tail or "no output")
+        return ""
+
+    def _read_handover(self, child) -> str:
+        """The launcher's own words, up to the moment it says it has handed over.
+
+        Read on a thread and stopped at the marker rather than with
+        ``communicate``, because ``communicate`` waits for end-of-file on the
+        pipes — and a detached worker that inherited them holds them open. That
+        would make this wait for the *work* instead of the handover, and a bound
+        that lasts as long as the thing it is bounding is not a bound.
+        """
+        import threading  # noqa: PLC0415 - only needed here
+
+        chunks: list[str] = []
+
+        def pump() -> None:
+            try:
+                assert child.stdout is not None
+                for line in child.stdout:
+                    chunks.append(line)
+                    if "backgrounded" in line.lower():
+                        return
+            except Exception:  # noqa: BLE001 - the caller reports what arrived
+                pass
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        reader.join(timeout=JOB_LAUNCH_TIMEOUT_SECONDS)
+
+        # Reaping the launcher is a courtesy to the process table and nothing
+        # more; it does not wait on the pipes, so it returns as soon as the
+        # launcher itself is gone.
+        try:
+            child.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+        for stream in (child.stdout, child.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return "".join(chunks)
+
+    def _answer_from_state(self, state: dict) -> str:
+        """The job's answer, out of whichever field it landed in.
+
+        ``output`` is the documented place and is what the measured runs use;
+        ``detail`` is the same text with a ``result:`` prefix. Read as a walk
+        rather than a schema, for the same reason ``_text_of`` is.
+        """
+        output = state.get("output")
+        if isinstance(output, dict):
+            text = _text_of(output)
+            if text:
+                return text.strip()
+        elif isinstance(output, str) and output.strip():
+            return output.strip()
+        detail = str(state.get("detail") or "").strip()
+        lowered = detail.lower()
+        for prefix in _DETAIL_PREFIXES:
+            if lowered.startswith(prefix):
+                return detail[len(prefix):].strip()
+        return detail
+
+    def _stop_job(self) -> None:
+        """Stop the job, using the pid the broker recorded for it.
+
+        Not the launcher's pid: that process has already exited, which is the
+        whole point of a background job.
+        """
+        state = self._state()
+        try:
+            pid = int((state or {}).get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 1:
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(os.getpgid(pid), sig)
+            except Exception:  # noqa: BLE001
+                try:
+                    os.kill(pid, sig)
+                except Exception:  # noqa: BLE001
+                    return
+            for _ in range(20):
+                time.sleep(0.25)
+                if not _alive(pid):
+                    return
 
     # -- the loop ---------------------------------------------------------
     def execute(self) -> int:
-        """Run the child, bounded by a clock this side controls.
+        """Launch the job, then watch it to an ending this side bounds.
 
-        The timeout is enforced by a watchdog rather than by the read loop,
-        because the read loop is exactly what a hung child stops doing. A CLI
-        that starts, prints nothing and never exits — which is what the loopback
-        port collision produces — would otherwise hold a task in ``running``
-        until the container's own timeout, and the point of a bound is that it
-        is applied by the side that can still act.
+        The bound is a deadline in this loop rather than a watchdog on a child,
+        because there is no child to watch: the launcher exits in a second and
+        the work continues in the broker's process. The clock is still ours —
+        the container's timeout is the backstop, and a bound applied by the side
+        that can still act is the point.
         """
-        import threading  # noqa: PLC0415 - only needed here
+        reason = self.preflight()
+        if reason:
+            log("refusing %s: %s", self.request_id, reason)
+            self._emit("error", reason)
+            return 1
 
         argv = self.argv()
         repo = str(self.payload.get("repo_path") or "")
@@ -293,87 +557,91 @@ class Run:
                 or 1800
             ),
         )
-        log("running %s in %s (timeout %ds)", argv[0], repo, timeout)
+        log(
+            "launching %s in %s (session %s, timeout %ds)",
+            argv[0],
+            repo,
+            self.session_id,
+            timeout,
+        )
 
-        try:
-            child = subprocess.Popen(
-                argv,
-                cwd=repo,
-                env=self.environment(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                bufsize=1,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            self._emit("error", f"could not start the agent: {exc}")
-            return 127
+        failure = self._launch(argv)
+        if failure:
+            self._emit("error", failure, session_id=self.session_id)
+            return 1
 
         deadline = time.time() + timeout
-        stopped = threading.Event()
+        seen_detail = ""
+        while True:
+            if self.spool.cancel_requested(self.request_id):
+                self.cancelled = True
+                break
+            if time.time() > deadline:
+                self.error = "timed out"
+                break
 
-        def watchdog() -> None:
-            while not stopped.wait(2.0):
-                if self.spool.cancel_requested(self.request_id):
-                    self.cancelled = True
-                    self._stop(child)
-                    return
-                if time.time() > deadline:
-                    self.error = "timed out"
-                    self._stop(child)
-                    return
+            state = self._state()
+            if state is None:
+                time.sleep(JOB_POLL_SECONDS)
+                continue
 
-        watcher = threading.Thread(target=watchdog, daemon=True)
-        watcher.start()
+            detail = str(state.get("detail") or "").strip()
+            if detail and detail != seen_detail:
+                seen_detail = detail
+                # ``detail`` holds the running commentary *and* the final
+                # ``result:`` line. Only the commentary is progress; the ending
+                # is read once, below, so the answer is not also sent as a
+                # progress message.
+                if not detail.lower().startswith(_DETAIL_PREFIXES):
+                    readable = _readable_detail(detail)
+                    if readable:
+                        self.progress(readable)
 
-        stderr_tail = ""
-        try:
-            assert child.stdout is not None
-            for line in child.stdout:
-                self.consume(line)
-            child.wait(timeout=30)
-            if child.stderr is not None:
-                stderr_tail = child.stderr.read() or ""
-        except Exception as exc:  # noqa: BLE001 - reported, never raised
-            if not self.error and not self.cancelled:
-                self.error = str(exc)[:400]
-            self._stop(child)
-        finally:
-            stopped.set()
-            watcher.join(timeout=5)
-
-        if child.returncode not in (0, None) and not self.error and not self.cancelled:
-            if not self.result_text.strip():
-                self.error = f"the agent exited with status {child.returncode}"
+            name = str(state.get("state") or "").strip().lower()
+            if name and name not in JOB_RUNNING_STATES:
+                self.result_text = self._answer_from_state(state)
+                break
+            time.sleep(JOB_POLL_SECONDS)
 
         if self.cancelled:
+            self._stop_job()
             self._emit("cancelled", "stopped at the owner's request")
             return 0
         if self.error:
-            detail = self.error
-            if stderr_tail.strip():
-                detail += "\n" + stderr_tail.strip()[-1500:]
-            elif self.stdout_tail:
-                # Nothing on stderr, which is the shape a CLI that fails inside
-                # its own event loop produces — it reports the fault on stdout
-                # and then hangs rather than exiting. Without this the owner
-                # would be told "timed out" and nothing else, and the line that
-                # says *why* would be sitting in a transcript nobody can read.
-                detail += "\n" + "\n".join(self.stdout_tail[-8:])[-1500:]
-            self._emit("error", detail, session_id=self.session_id)
+            self._stop_job()
+            self._emit("error", self.error, session_id=self.session_id)
             return 1
 
-        answer = self.answer(stderr_tail)
-        question = _QUESTION_RE.search(answer or "")
+        answer = self.result_text.strip()
+        if not answer:
+            self._emit(
+                "error",
+                "the job ended without a result",
+                session_id=self.session_id,
+            )
+            return 1
+        if _AUTH_REQUIRED_RE.search(answer):
+            # A job that succeeds with a login prompt as its text is the worst
+            # shape this can fail in: the container would store it as a
+            # successful answer and the owner would read it as one. It is the
+            # signature of a HOME without the CodeBuddy profile, so it is named.
+            self._emit(
+                "error",
+                "the agent is not authenticated on this host: " + answer[:300],
+                session_id=self.session_id,
+            )
+            return 1
+
+        question = _QUESTION_RE.search(answer)
         if question:
             # The agent stopped to ask. The question goes out as a question and
             # *not* as a result, because the container turns the two into
             # different states — one waits for the owner, the other finishes.
-            self._emit("question", question.group(1).strip()[:400],
-                       session_id=self.session_id)
+            self._emit(
+                "question",
+                question.group(1).strip()[:400],
+                session_id=self.session_id,
+            )
             return 0
         self._emit("result", answer, session_id=self.session_id)
         return 0
@@ -395,65 +663,53 @@ class Run:
             except Exception:  # noqa: BLE001
                 pass
 
-    # -- reading a line ---------------------------------------------------
-    def consume(self, line: str) -> None:
-        """Read one line of the agent's output.
 
-        Two output shapes are supported on purpose. ``stream-json`` gives one
-        JSON object per line and is what the default arguments ask for; plain
-        text is what a CLI that ignored the flag produces, and the runner has to
-        cope with both because the invocation is a deployment detail this code
-        cannot verify. A line that is JSON is mined for text and classified; a
-        line that is not is progress, and also accumulates as the answer so that
-        a plain-text run still ends with something to report.
-        """
-        raw = line.rstrip("\n")
-        if not raw.strip():
-            return
-        self.stdout_tail.append(raw)
-        if len(self.stdout_tail) > 4000:
-            del self.stdout_tail[:1000]
+def _alive(pid: int) -> bool:
+    """Whether a pid still exists. Signal 0 asks the kernel, and asks nothing else."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
-        record = None
-        if raw.lstrip().startswith("{"):
-            try:
-                record = json.loads(raw)
-            except ValueError:
-                record = None
 
-        if not isinstance(record, dict):
-            self.progress(raw)
-            return
+def _short_id_from(text: str) -> str:
+    """The job's short id, out of the launcher's ``backgrounded · <id> · <name>``.
 
-        kind = str(record.get("type") or record.get("kind") or "")
-        session = record.get("session_id") or record.get("sessionId")
-        if session and not self.session_id:
-            # Kept on the run rather than emitted as its own line: the id is
-            # recorded on whichever line ends the run, and a line whose only
-            # content is an id would be a message with nothing in it.
-            self.session_id = str(session)[:80]
+    Parsed rather than computed: the broker names the directory from the first
+    eight characters of the name, which is a rule about *its* naming and not a
+    contract. The launcher states the id it used, so that is what is read, and a
+    parse failure falls back to matching the state files on ``sessionId``.
+    """
+    for line in (text or "").splitlines():
+        if "backgrounded" not in line.lower():
+            continue
+        match = _SHORT_ID_RE.search(line)
+        if match:
+            return match.group(1)
+    return ""
 
-        text = _text_of(record)
-        if kind in ("result", "done", "complete"):
-            if text:
-                self.result_text = text
-            return
-        if kind in ("error",):
-            self.error = text or "the agent reported an error"
-            return
-        if text:
-            self.progress(text)
 
-    def answer(self, stderr_tail: str) -> str:
-        """The final answer: the agent's own result, or the tail of its output."""
-        if self.result_text.strip():
-            return self.result_text.strip()
-        body = "\n".join(self.stdout_tail).strip()
-        if body:
-            return body
-        if stderr_tail.strip():
-            return stderr_tail.strip()
-        return ""
+def _readable_detail(detail: str) -> str:
+    """A job's ``detail`` line as something worth putting in front of a person.
+
+    Usually it is already a sentence — ``starting…``, ``requesting the model``.
+    Sometimes it is a raw JSON blob, and relaying that verbatim would put
+    ``{"summary": "..."}`` in the owner's chat, so it is mined for its text and
+    dropped when it has none.
+    """
+    body = (detail or "").strip()
+    if not body.startswith("{"):
+        return body
+    try:
+        record = json.loads(body)
+    except ValueError:
+        return body
+    if isinstance(record, dict):
+        return _text_of(record).strip()
+    return body
 
 
 def _text_of(record: dict) -> str:
@@ -463,7 +719,7 @@ def _text_of(record: dict) -> str:
     not this repository's to fix and a strict reader would silently deliver
     nothing the day it changes.
     """
-    for key in ("result", "text", "content", "message", "output"):
+    for key in ("result", "text", "content", "message", "output", "summary"):
         value = record.get(key)
         if isinstance(value, str) and value.strip():
             return value

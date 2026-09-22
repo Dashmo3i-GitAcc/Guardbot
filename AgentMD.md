@@ -4454,49 +4454,63 @@ A restart is handled in `agent_poller.recover` and `agent_service.recover`:
   which is what lets it be retried;
 * a running task is never republished, so a restart cannot duplicate execution.
 
-### 40.15 The 21-step deployment, and the one step only the owner can do
+### 40.15 How it runs the agent, and the deployment
 
-The bridge is complete on both sides and fully tested, with one honest
-exception: **the CodeBuddy CLI cannot be driven headlessly on this host in this
-environment**, and that was measured rather than assumed.
+The bridge is complete on both sides, and the runner drives the CLI through the
+mechanism that actually works on this host — measured, not assumed.
+
+The foreground invocation does **not** work here:
 
 ```
-$ env -u CODEBUDDY_SESSION_ID … codebuddy -p "Reply with exactly: READY"
-Authentication required. Please use /login command to sign in to your account
-
-$ CODEBUDDY_IDE_PORT=61592 codebuddy -p "…" --no-session-persistence
-Unhandled rejection Error: listen EADDRINUSE: address already in use 127.0.0.1:61424
-
-$ ss -ltnp | grep 6142
-LISTEN 127.0.0.1:61424   users:(("MainThread",pid=2673063,...))
-LISTEN 127.0.0.1:61423   users:(("MainThread",pid=119007,...))
+$ codebuddy -p "Reply with exactly: READY"
+(zero output, never exits)
 ```
 
-Two facts came out of that. `CODEBUDDY_IDE_PORT` is read only for IDE
-*detection*; the headless server's port comes from
-`$HOME/.codebuddy/web-ui-port.json`, whose pool (61423–61425) is already held by
-two other live CodeBuddy sessions on this host. And auth does not live in a file
-under `HOME` — it lives in the editor's session — so an isolated `HOME` hangs
-rather than authenticating.
+Six shapes were tried — fresh `HOME`, the real `HOME`, `-y`,
+`--permission-mode dontAsk`, `--permission-mode acceptEdits`, and stdin closed —
+and every one of them started, printed nothing and never returned. So it is not
+a permission prompt, not stdin, and not the environment.
 
-Neither is a defect in the bridge, and neither is something the bridge can fix:
-killing the owner's other sessions to free a port would be destructive, and
-there is no credential file to copy. So `AGENT_CLI` and `AGENT_CLI_ARGS` are
-configuration, and pointing them at a working invocation is **the one
-deployment step only the owner can complete**. Everything else — the authority
-model, the allowlist, the danger classifier, the confirmation rules, the
-lifecycle, the transport, the redaction and the timeout — is implemented and
-tested against a stand-in CLI, which is enough to prove the bridge's own
-behaviour.
+`--bg` works. It hands the session to the CodeBuddy job broker, which is where
+the authentication lives, and returns in about a second:
+
+```
+$ codebuddy --bg --name gb-probe -p "Reply with exactly: READY"
+backgrounded · gb-runne · gb-probe
+```
+
+The outcome is not on stdout. It lands in
+`$HOME/.codebuddy/jobs/<shortId>/state.json`, moving from
+`state=working, tempo=active` to `state=done, tempo=idle`, with the answer in
+`output["result"]`. Two properties of that file are load-bearing:
+
+* `shortId` is the **first eight characters of the name**, so it is neither
+  unique nor predictable — two launches can share one directory. The runner
+  therefore finds its job by the `sessionId` it chose itself, never by the name.
+* The authentication is in `$HOME/.codebuddy`. A child given a fresh `HOME` does
+  not fail: it **succeeds**, with `Authentication required. Please use /login
+  command to sign in` as its text, which the container would otherwise store as
+  the agent's answer. That is why the runner no longer gives each request its own
+  `HOME`, and why that sentence is classified as a failure rather than relayed.
+
+Two further surfaces exist and are deliberately unused: `--serve --port N` serves
+a REST API (it needs a printed password and an `x-codebuddy-request` header), and
+`--acp` answers an `initialize` handshake over stdio but never returns from
+`session/new`.
+
+**There is no credential to hand over.** The authentication is the host's own
+CodeBuddy profile, so the deployment step is only to start the runner.
 
 The full sequence:
 
 1. `git pull` in `/root/guardbot`, and confirm the commit SHA.
 2. Confirm the host has Node and the CodeBuddy CLI: `which node codebuddy`.
 3. Confirm the CLI is authenticated **in the environment the runner will use**:
-   `codebuddy -p "Reply with exactly: READY"`.
-4. Choose the invocation and write it into the runner's environment as
-   `AGENT_CLI` and `AGENT_CLI_ARGS`.
+   `codebuddy --bg --name probe -p "Reply with exactly: READY"`, then read
+   `~/.codebuddy/jobs/*/state.json` and check `output["result"]` says `READY`.
+4. Leave `AGENT_CLI` as `codebuddy` unless the binary is elsewhere. `AGENT_CLI_ARGS`
+   is *extra* flags only — the runner supplies `--bg`, `--name`, `--session-id`
+   and `-p` itself, and an argument list that repeats them is a misconfiguration.
 5. Set `AGENT_REPOSITORIES` to the real allowlist — the same string on both
    sides, container and runner.
 6. Confirm `AGENT_SPOOL_DIR` is inside the bind mount: `/data/agent` in the

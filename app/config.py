@@ -1165,17 +1165,15 @@ AGENT_POLL_SECONDS = _float("AGENT_POLL_SECONDS", 3.0)
 AGENT_TIMEOUT_SECONDS = _int("AGENT_TIMEOUT_SECONDS", 1800)
 AGENT_MAX_TURNS = _int("AGENT_MAX_TURNS", 40)
 
-# What the runner executes. Configurable because the correct invocation depends
-# on how CodeBuddy is authenticated on the host — see AgentMD.md §36.4, where
-# this is the one deployment step only the owner can complete.
+# What the runner executes. The *mechanism* is the runner's, not configuration:
+# it launches ``codebuddy --bg --name <task> --session-id <id> -p <prompt>``,
+# because ``--bg`` is the only invocation measured to work on this host (the
+# foreground ``-p`` never returns). What is left to configure is the executable
+# and any *extra* flags, and both live in the runner's own environment rather
+# than here — the container never names the program that runs. See AgentMD.md
+# §40.15.
 AGENT_CLI = os.getenv("AGENT_CLI", "codebuddy")
-AGENT_CLI_ARGS = _str_list(
-    os.getenv(
-        "AGENT_CLI_ARGS",
-        "-p,--output-format,stream-json,--model,deepseek-v4.1-flash,"
-        "--permission-mode,acceptEdits,--no-session-persistence",
-    )
-)
+AGENT_CLI_ARGS = _str_list(os.getenv("AGENT_CLI_ARGS", ""))
 
 # How long a progress line or a result may be before it is split, and how long
 # an answer may be before a file is kinder than a wall of chat.
@@ -1191,11 +1189,12 @@ AGENT_PROGRESS_MAX_MESSAGES = _int("AGENT_PROGRESS_MAX_MESSAGES", 20)
 # How long a finished task is kept before the retention prune drops it.
 AGENT_RETENTION_SECONDS = _int("AGENT_RETENTION_SECONDS", 14 * 24 * 3600)
 
-# Where the host runner may keep its own per-run HOME. A fresh HOME per run is
-# not tidiness: the CLI writes a loopback-port file into it and refuses to start
-# if the port it recorded is already held by another session, so an isolated
-# HOME is what lets two runs coexist at all.
-AGENT_RUNNER_HOME = os.getenv("AGENT_RUNNER_HOME", "/run/guardbot-agent")
+# Where the host runner may keep its own per-run HOME. Empty — the default —
+# means the child inherits the real one, and that is deliberate: the CodeBuddy
+# authentication lives in ``$HOME/.codebuddy``, and a child that cannot see it
+# does not fail, it *succeeds* with "Authentication required" as its answer.
+# Set this only to point the runner at a profile that is logged in.
+AGENT_RUNNER_HOME = os.getenv("AGENT_RUNNER_HOME", "")
 
 # ── The bridge's copy ─────────────────────────────────────────────────────
 # One sentence per outcome, in the same place as every other outcome's sentence

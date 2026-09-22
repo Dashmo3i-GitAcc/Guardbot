@@ -80,6 +80,10 @@ def agent_env(monkeypatch, tmp_path, repo):
     monkeypatch.setattr(config, "AGENT_TIMEOUT_SECONDS", 1800)
     monkeypatch.setenv("AGENT_SPOOL_DIR", str(tmp_path / "spool"))
     monkeypatch.setenv("AGENT_REPOSITORIES", f"demo={repo}")
+    # The runner's HOME has to look like a logged-in CodeBuddy profile, because
+    # that is exactly what it has to be: a HOME without ``.codebuddy`` runs the
+    # agent unauthenticated and returns a login prompt as the agent's answer.
+    (tmp_path / "home" / ".codebuddy").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("AGENT_RUNNER_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AGENT_CLI", "true")
     db.init()
@@ -686,7 +690,7 @@ def test_the_runner_refuses_an_empty_task(repo):
 def test_the_runner_takes_the_executable_from_its_own_environment(repo, monkeypatch):
     runner = _load_runner()
     monkeypatch.setenv("AGENT_CLI", "/usr/bin/true")
-    monkeypatch.setenv("AGENT_CLI_ARGS", "-p,--output-format,stream-json")
+    monkeypatch.delenv("AGENT_CLI_ARGS", raising=False)
     run = runner.Run(
         {"request_id": "agent-x", "repo_path": str(repo), "prompt": "do it"}, None
     )
@@ -695,10 +699,50 @@ def test_the_runner_takes_the_executable_from_its_own_environment(repo, monkeypa
     assert "do it" in argv
 
 
+def test_the_runner_asks_for_a_background_job(repo, monkeypatch):
+    """``--bg`` is the mechanism, not a preference.
+
+    The foreground ``-p`` was measured never returning on this host; ``--bg`` is
+    what hands the session to the broker that holds the authentication. A
+    regression to a foreground run would hang rather than fail, so it is
+    asserted here rather than left to the smoke test.
+    """
+    runner = _load_runner()
+    monkeypatch.setenv("AGENT_CLI", "/usr/bin/true")
+    monkeypatch.delenv("AGENT_CLI_ARGS", raising=False)
+    run = runner.Run(
+        {"request_id": "agent-x", "repo_path": str(repo), "prompt": "do it"}, None
+    )
+    argv = run.argv()
+    assert "--bg" in argv
+    assert argv[argv.index("--name") + 1] == "agent-x"
+    assert argv[argv.index("--session-id") + 1] == run.session_id
+    # The prompt is the last thing on the line and ``-p`` introduces it.
+    assert argv[-1] == "do it"
+    assert argv[-2] == "-p"
+
+
+def test_the_job_is_named_by_an_id_this_runner_chose(repo, monkeypatch):
+    """The id is how the job is found again, so it cannot be the broker's name.
+
+    The broker's directory is the first eight characters of the name — neither
+    unique nor predictable — so the runner matches on the ``sessionId`` it set
+    itself.
+    """
+    runner = _load_runner()
+    payload = {"request_id": "agent-x", "repo_path": str(repo), "prompt": "x"}
+    monkeypatch.setattr(runner.time, "time", lambda: 1000.0)
+    first = runner.Run(payload, None).session_id
+    monkeypatch.setattr(runner.time, "time", lambda: 1001.0)
+    second = runner.Run(payload, None).session_id
+    assert first != second
+    assert first.startswith("agent-x")
+
+
 def test_the_runner_appends_the_turn_ceiling_and_the_directory(repo, monkeypatch):
     runner = _load_runner()
     monkeypatch.setenv("AGENT_CLI", "/usr/bin/true")
-    monkeypatch.setenv("AGENT_CLI_ARGS", "-p")
+    monkeypatch.delenv("AGENT_CLI_ARGS", raising=False)
     monkeypatch.delenv("AGENT_ADD_DIR", raising=False)
     run = runner.Run(
         {
@@ -723,39 +767,108 @@ def test_the_runner_removes_this_sessions_identity_from_the_child(repo, monkeypa
     )
     env = run.environment()
     assert "CODEBUDDY_SESSION_ID" not in env
-    assert env["HOME"].endswith("agent-x")
-    assert os.path.isdir(env["HOME"])
+    assert env["HOME"] == str(repo / "home")
 
 
-def test_the_runner_reads_a_stream_json_progress_line():
+def test_the_child_keeps_the_real_home_so_it_can_authenticate(repo, monkeypatch):
+    """A fresh HOME per request was the old design and it broke authentication.
+
+    The failure is quiet and the worst kind: the job *succeeds*, with
+    "Authentication required" as its text, and the container would store that as
+    the agent's answer.
+    """
+    runner = _load_runner()
+    monkeypatch.delenv("AGENT_RUNNER_HOME", raising=False)
+    run = runner.Run(
+        {"request_id": "agent-x", "repo_path": str(repo), "prompt": "x"}, None
+    )
+    assert run.home() == os.path.expanduser("~")
+    assert run.jobs_dir() == os.path.join(os.path.expanduser("~"), ".codebuddy", "jobs")
+
+
+def test_a_home_without_a_codebuddy_profile_is_refused_before_launching(
+    repo, monkeypatch
+):
+    runner = _load_runner()
+    monkeypatch.setenv("AGENT_RUNNER_HOME", str(repo / "bare-home"))
+    run = runner.Run(
+        {"request_id": "agent-x", "repo_path": str(repo), "prompt": "x"}, None
+    )
+    assert "CodeBuddy profile" in run.preflight()
+
+
+def test_a_home_with_a_codebuddy_profile_passes_the_preflight(repo, monkeypatch):
+    runner = _load_runner()
+    home = repo / "good-home"
+    (home / ".codebuddy").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGENT_RUNNER_HOME", str(home))
+    run = runner.Run(
+        {"request_id": "agent-x", "repo_path": str(repo), "prompt": "x"}, None
+    )
+    assert run.preflight() == ""
+
+
+def test_the_short_id_is_read_from_the_launchers_own_line():
+    runner = _load_runner()
+    line = "backgrounded · gb-runne · gb-runner-realhome-5020\n"
+    assert runner._short_id_from(line) == "gb-runne"
+
+
+def test_a_launcher_that_reports_nothing_yields_no_short_id():
+    runner = _load_runner()
+    assert runner._short_id_from("something else entirely\n") == ""
+    assert runner._short_id_from("") == ""
+
+
+def test_the_answer_is_read_from_the_job_state():
     runner = _load_runner()
     run = runner.Run({"request_id": "agent-x"}, _Recorder())
-    run.consume('{"type":"progress","text":"reading the repository"}\n')
-    assert run.progress_count == 1
-    assert run.spool.records[-1][1] == "reading the repository"
+    assert run._answer_from_state({"output": {"result": "all done"}}) == "all done"
 
 
-def test_the_runner_reads_a_stream_json_result_line():
+def test_the_answer_falls_back_to_the_result_detail_line():
     runner = _load_runner()
     run = runner.Run({"request_id": "agent-x"}, _Recorder())
-    run.consume('{"type":"result","result":"all done"}\n')
-    assert run.answer("") == "all done"
+    assert run._answer_from_state({"detail": "result: all done"}) == "all done"
 
 
-def test_the_runner_reads_plain_text_as_progress_and_still_answers():
-    """A CLI that ignores ``--output-format`` must still produce a report."""
+def test_a_working_job_is_not_terminal_and_a_done_one_is():
     runner = _load_runner()
-    run = runner.Run({"request_id": "agent-x"}, _Recorder())
-    run.consume("I changed the parser\n")
-    run.consume("and the tests pass\n")
-    assert run.answer("") == "I changed the parser\nand the tests pass"
+    assert "working" in runner.JOB_RUNNING_STATES
+    assert "done" not in runner.JOB_RUNNING_STATES
+    assert "failed" not in runner.JOB_RUNNING_STATES
+
+
+def test_an_unauthenticated_job_is_recognised_as_a_failure():
+    """The sentence that has to be caught, because it arrives looking like success."""
+    runner = _load_runner()
+    prompt = "Authentication required. Please use /login command to sign in to your account"
+    assert runner._AUTH_REQUIRED_RE.search(prompt)
+    assert not runner._AUTH_REQUIRED_RE.search("The tests pass and I committed it.")
+
+
+def test_a_plain_detail_line_is_passed_through():
+    runner = _load_runner()
+    assert runner._readable_detail("requesting the model") == "requesting the model"
+
+
+def test_a_json_detail_line_is_mined_rather_than_relayed():
+    """The broker sometimes puts a JSON blob in ``detail``.
+
+    Relaying it verbatim would put ``{"summary": "..."}`` in the owner's chat,
+    so the text is taken out of it — and a blob with no readable text at all
+    yields nothing rather than braces.
+    """
+    runner = _load_runner()
+    blob = '{"summary": "Summarizing a coding session\'s activity"}'
+    assert runner._readable_detail(blob) == "Summarizing a coding session's activity"
+    assert runner._readable_detail('{"n": 1}') == ""
+    assert runner._readable_detail("{not json") == "{not json"
 
 
 def test_the_runner_finds_a_marked_question():
     runner = _load_runner()
-    run = runner.Run({"request_id": "agent-x"}, _Recorder())
-    run.consume('{"type":"result","result":"QUESTION: should I push?"}\n')
-    assert runner._QUESTION_RE.search(run.answer(""))
+    assert runner._QUESTION_RE.search("QUESTION: should I push?")
 
 
 def test_the_runner_redacts_a_credential_before_it_leaves():
@@ -797,22 +910,52 @@ def test_the_runner_refuses_a_request_that_fails_validation(repo, monkeypatch):
     assert "refused" in spool.read_lines("agent-y")[0]["text"]
 
 
-def test_the_runner_runs_a_real_child_and_streams_its_output(repo, monkeypatch):
-    """End to end through a real subprocess, with a stand-in for the agent."""
+def test_the_runner_runs_a_real_job_and_streams_its_output(repo, monkeypatch):
+    """End to end through a real subprocess, with a stand-in for the launcher.
+
+    The stand-in does what the real launcher does: it prints the job's short id
+    and leaves the work to a process that outlives it, writing the outcome into
+    the job's ``state.json``. That handover is the whole contract between the
+    two halves, and it is the part a regression would break — the old version of
+    this test read the answer off stdout, which is the thing that never happens.
+    """
     runner = _load_runner()
     spool = _load_spool()
     spool.ensure()
-    script = repo / "fake-agent.sh"
+    monkeypatch.setattr(runner, "JOB_POLL_SECONDS", 0.2)
+
+    home = repo / "home"
+    (home / ".codebuddy").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGENT_RUNNER_HOME", str(home))
+    monkeypatch.delenv("AGENT_ADD_DIR", raising=False)
+
+    script = repo / "fake-launcher.py"
     script.write_text(
-        "#!/bin/bash\n"
-        'echo \'{"type":"progress","text":"working"}\'\n'
-        'echo \'{"type":"result","result":"finished"}\'\n'
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys, time\n"
+        "args = sys.argv[1:]\n"
+        "sid = args[args.index('--session-id') + 1]\n"
+        "short = 'job12345'\n"
+        "d = os.path.join(os.environ['HOME'], '.codebuddy', 'jobs', short)\n"
+        "os.makedirs(d, exist_ok=True)\n"
+        "p = os.path.join(d, 'state.json')\n"
+        "def write(state, detail, output=None):\n"
+        "    rec = {'sessionId': sid, 'state': state, 'detail': detail}\n"
+        "    if output is not None:\n"
+        "        rec['output'] = output\n"
+        "    tmp = p + '.tmp'\n"
+        "    json.dump(rec, open(tmp, 'w'))\n"
+        "    os.replace(tmp, p)\n"
+        "write('working', 'working')\n"
+        "print('backgrounded \\u00b7 %s \\u00b7 %s' % (short, sid), flush=True)\n"
+        "if os.fork() == 0:\n"
+        "    time.sleep(1.5)\n"
+        "    write('done', 'result: finished', {'result': 'finished'})\n"
+        "    os._exit(0)\n"
     )
     script.chmod(0o755)
     monkeypatch.setenv("AGENT_CLI", str(script))
-    monkeypatch.setenv("AGENT_CLI_ARGS", "-p")
-    monkeypatch.delenv("AGENT_ADD_DIR", raising=False)
-    monkeypatch.setenv("AGENT_RUNNER_HOME", str(repo / "home"))
+    monkeypatch.delenv("AGENT_CLI_ARGS", raising=False)
 
     spool.write_request(
         "agent-z",
@@ -824,6 +967,72 @@ def test_the_runner_runs_a_real_child_and_streams_its_output(repo, monkeypatch):
     assert kinds == ["started", "progress", "result"]
     assert spool.result_text("agent-z") == "finished"
     assert not spool.locked("agent-z")
+
+
+def test_the_runner_reports_an_unauthenticated_job_as_a_failure(repo, monkeypatch):
+    """A job that ends with a login prompt must not be relayed as an answer."""
+    runner = _load_runner()
+    spool = _load_spool()
+    spool.ensure()
+    monkeypatch.setattr(runner, "JOB_POLL_SECONDS", 0.2)
+
+    home = repo / "home"
+    (home / ".codebuddy").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGENT_RUNNER_HOME", str(home))
+    monkeypatch.delenv("AGENT_ADD_DIR", raising=False)
+
+    script = repo / "fake-launcher.py"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "sid = args[args.index('--session-id') + 1]\n"
+        "short = 'job12345'\n"
+        "d = os.path.join(os.environ['HOME'], '.codebuddy', 'jobs', short)\n"
+        "os.makedirs(d, exist_ok=True)\n"
+        "print('backgrounded \\u00b7 %s \\u00b7 %s' % (short, sid), flush=True)\n"
+        "json.dump({'sessionId': sid, 'state': 'done',\n"
+        "           'output': {'result': 'Authentication required. Please use'\n"
+        "                      ' /login command to sign in to your account'}},\n"
+        "          open(os.path.join(d, 'state.json'), 'w'))\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("AGENT_CLI", str(script))
+    monkeypatch.delenv("AGENT_CLI_ARGS", raising=False)
+
+    spool.write_request(
+        "agent-z",
+        {"request_id": "agent-z", "repository": "demo", "repo_path": str(repo),
+         "operation": "edit", "task": "x", "prompt": "x", "timeout_seconds": 60},
+    )
+    assert runner.process(spool, "agent-z") == 1
+    kinds = [r["kind"] for r in spool.read_lines("agent-z")]
+    assert kinds == ["started", "error"]
+    assert "not authenticated" in spool.read_lines("agent-z")[-1]["text"]
+
+
+def test_the_runner_reports_a_launcher_that_says_nothing(repo, monkeypatch):
+    """No job id means no job — reported, never waited on."""
+    runner = _load_runner()
+    spool = _load_spool()
+    spool.ensure()
+    monkeypatch.setattr(runner, "JOB_POLL_SECONDS", 0.2)
+
+    home = repo / "home"
+    (home / ".codebuddy").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGENT_RUNNER_HOME", str(home))
+    monkeypatch.setenv("AGENT_CLI", "/bin/true")
+    monkeypatch.delenv("AGENT_CLI_ARGS", raising=False)
+
+    spool.write_request(
+        "agent-z",
+        {"request_id": "agent-z", "repository": "demo", "repo_path": str(repo),
+         "operation": "edit", "task": "x", "prompt": "x", "timeout_seconds": 60},
+    )
+    assert runner.process(spool, "agent-z") == 1
+    kinds = [r["kind"] for r in spool.read_lines("agent-z")]
+    assert kinds == ["started", "error"]
+    assert "did not report a background job" in spool.read_lines("agent-z")[-1]["text"]
 
 
 def _load_spool():
