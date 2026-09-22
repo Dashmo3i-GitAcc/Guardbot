@@ -3724,10 +3724,15 @@ mode of `chat`:
 
 What is isolated, and why each matters:
 
-* **Its own credential.** `GEMINI_AWARENESS_API_KEY`, falling back to
-  `GEMINI_CHAT_API_KEY` exactly as `tts` does — the deployment has no spare key
-  today, and the fallback is the documented precedent. Giving awareness a key of
-  its own is a config change, not a code change.
+* **Its own credential, with no fallback.** `GEMINI_AWARENESS_API_KEY`, and
+  nothing else. It used to fall back to `GEMINI_CHAT_API_KEY`, following the
+  `tts` precedent; that fallback is gone and
+  `GEMINI_AWARENESS_ALLOW_SHARED_KEY` now defaults to `False`. The reason is the
+  one thing the structural isolation below cannot fix: a shared credential is a
+  shared Google project, and therefore one provider-side rate limit that no
+  per-workload counter can partition. The consequence is deliberate — with the
+  key unset, awareness does no work at all, and says so at boot rather than
+  quietly spending the conversation's quota.
 * **Its own daily allowance, per account.** `NEXUS_AWARENESS_DAILY_LIMIT`
   (200). When it is spent, awareness stops for the day and the assistant keeps
   working. That separation is the reason the workload exists: an observant Nexus
@@ -3936,7 +3941,7 @@ database already held are untouched. No migration step is needed.
 | `NEXUS_AWARENESS_DAILY_LIMIT` | `200` | the workload's per-account ceiling |
 | `NEXUS_AWARENESS_CONTEXT_MESSAGES` | `20` | room messages shown to the *addressed* path |
 | `NEXUS_AWARENESS_ACTION_TEXT` | `انجام شد ✅` | fallback confirmation |
-| `GEMINI_AWARENESS_API_KEY` | = chat key | the workload's credential |
+| `GEMINI_AWARENESS_API_KEY` | *(none — required)* | the workload's credential; no fallback |
 | `GEMINI_AWARENESS_MODEL` | = chat model | the workload's model |
 | `GEMINI_AWARENESS_TIMEOUT_SECONDS` | `20` | per-request deadline |
 | `GEMINI_AWARENESS_MAX_RETRIES` | `1` | retries before giving up |
@@ -4844,10 +4849,12 @@ workload to keep them independent.
 ```
 
 The remaining action is an operator's: set `GEMINI_AWARENESS_API_KEY` from a
-third Google project. The warning stops when they do, which is what makes it
-actionable rather than permanent noise. Pacing also cuts the instantaneous
-competition for the shared project by roughly twenty times, because the same 200
-requests are spread over a day instead of an hour.
+separate Google project. Until then the warning stands, and awareness does not
+run — the fallback to the chat key was removed rather than left in place, so the
+condition is a missing capability rather than a silent sharing arrangement. That
+is the fail-closed direction and it is reported at boot. Pacing also cuts the
+instantaneous competition for a shared project by roughly twenty times, because
+the same 200 requests are spread over a day instead of an hour.
 
 ### 42.4 Tests
 
@@ -5180,17 +5187,28 @@ What is actually true on this deployment:
 
 | integration | state | operations |
 |---|---|---|
-| VPN bot (`app/vpnbot.py`) | available when `VPNBOT_API_URL` and `VPNBOT_SHARED_SECRET` are set | `health`, `acquisition.invite` |
+| VPN bot (`app/vpnbot.py`) | available when `VPNBOT_API_URL` and `VPNBOT_SHARED_SECRET` are set | `health`, `status`, `acquisition.invite`, `subscription.lookup`, `service.status`, and six owner-only administrative writes — see §50 |
 | OpenVPN | **absent** | none — no integration exists |
 | TQI panel | **absent** | none — this bot holds no panel credentials |
 | coding agent (`app/agent_bridge.py`) | available when `AGENT_ENABLED` and a repository allowlist are set | `task.submit/status/confirm/cancel` |
 
-The VPN bot's internal API exposes a health probe and a one-way acquisition
-invite. It does **not** expose user records, subscriptions or configuration
-generation to this bot, so those are listed as `unsupported` and the assistant
-is told to explain the gap rather than improvise around it. No endpoint was
-invented: the brief's own rule — inspect the real API, do not invent one — is
-the rule this module follows.
+The VPN bot's internal API exposes a health probe, an acquisition invite, two
+lookups and six administrative writes. It does **not** expose user records or
+configuration generation to this bot, so those are listed as `unsupported` and
+the assistant is told to explain the gap rather than improvise around it. No
+endpoint was invented: the brief's own rule — inspect the real API, do not
+invent one — is the rule this module follows. The list is asserted against the
+paths `app/vpnbot.py` actually implements, so a name in the report with no code
+behind it fails the suite.
+
+**The acquisition flow being switched off no longer reports the whole
+integration as dead.** It used to, and that stopped being true once the reads
+and the writes existed: they do not go through the acquisition path and they
+work either way. The integration is now reported for what it is, with the
+individual operation named in `disabled_operations` beside it — "nothing here
+works" and "this one thing is off" are different answers, and an operator acting
+on the first when the second is true goes looking for a fault that does not
+exist.
 
 The shared secret is read only to decide *whether* the client is configured — a
 boolean — and `test_service_adapters.py` asserts it cannot appear in the report.
@@ -5257,3 +5275,299 @@ and one asserts the resulting sentence does not contain «ضعیف» or «ناپ
 The awareness side needed no change: the live window showed Nexus moving between
 topics normally. What was repeating was the deterministic reply, not the
 conversation.
+
+## 50. The escalation path is closed by name, not by accident
+
+The requirement is one sentence: *Gemini must never be able to change its own
+permission or role.* It was already true — but only incidentally, and that is a
+different thing from being true on purpose.
+
+`rbac.REASON_SELF_TARGET` existed and **nothing emitted it**. Self-promotion was
+refused by the hierarchy check instead, because an actor's own level is never
+below their own level, so the request failed at `REASON_HIGHER_RANK`. The refusal
+was correct and the explanation was wrong: an operator reading "the target is at
+or above your own level" would go looking for a peer they were trying to
+demote, not for the fact that they had aimed at themselves. Worse, the
+`authorize()` docstring stated outright that self-targeting was *allowed* — it
+described the behaviour that the code did not have, which is the kind of comment
+that survives a refactor and then authorises the wrong thing.
+
+So the guard is now explicit. `authorize()` takes `role_change: bool = False`,
+and `authorize_grant()` — which is the only path a promotion or a demotion can
+take — passes `role_change=True`. When it is set and the target is the actor,
+the decision is `REASON_SELF_TARGET`. One guard covers both operations, because
+both carry `changes_role=True`.
+
+**The ordering is load-bearing, and is asserted rather than commented.** The
+self-check sits *after* the owner-protected check and *before* the hierarchy
+check:
+
+* owner targeting themselves still returns `REASON_OWNER_PROTECTED`, which is
+  the more specific and more important refusal — the owner is never a valid
+  target of anything, including their own request;
+* everybody else targeting themselves gets `REASON_SELF_TARGET`, which says what
+  actually happened;
+* and every other operation is untouched: `role_change` defaults to `False`, so
+  self-mute, self-warn and self-delete still behave exactly as they did. The
+  brief's rule is that self-moderation is allowed; the escalation guard is about
+  *authority*, not about a moderator muting themselves.
+
+`ADMIN_SELF_TARGET_TEXT` was added so the command path says the specific thing
+rather than the generic denial, and `main._deny_text` maps it.
+
+`OWNER_ONLY_PERMISSIONS` was referenced nowhere before this and is now
+load-bearing: a test asserts that **no** `ROLE_PERMISSIONS` bundle carries an
+owner-only permission, so "an administrator can be given `nexus.control`" is not
+a policy that could be set wrongly — it is a state the suite refuses to reach.
+That is the same property the new `vpn.read` / `vpn.manage` permissions rely on
+(§51).
+
+Tests: `tests/test_rbac.py` and `tests/test_ai_admin.py` cover self-promotion and
+self-demotion through both interfaces, that the refusal is *not* reported as a
+rank problem, that the owner targeting themselves is still owner-protected, that
+the guard does not change the reason for any other operation, that an actor can
+still change somebody else's role, and that no role bundle carries an owner-only
+permission.
+
+## 51. The VPN operational surface: powerful, and under the owner's hand
+
+### 51.1 What was asked, and the four pieces it became
+
+The owner's decision was explicit: Nexus should have **real operational reach
+over the VPN project** — full administrative capability where the project needs
+it — while every execution stays under server-side authorisation, and only the
+Owner can issue a sensitive command. Four independent pieces:
+
+1. **VPN reads** — subscription, service and integration status.
+2. **VPN writes** — six operations, three of which move money or bulk-reject
+   orders and sit behind an explicit owner confirmation.
+3. **A closed escalation path** — §50.
+4. **Awareness gets its own credential** — §35, and it no longer falls back to
+   the chat pool.
+
+Plus the standing requirements: one central gateway, RBAC, an operation
+allowlist, an audit log, and fail-closed authorisation.
+
+### 51.2 There is no second gateway
+
+`app/admin_service.py` **is** the gateway. The brief forbids a parallel
+architecture, so nothing here adds one. The precedent is `codebuddy_task` →
+`agent_service.submit(request)`, which returns an `AdminResult` from inside the
+one pipeline; the VPN operations follow it exactly. `app/vpn_service.py` holds
+no authority of its own, is never called by a Telegram handler, and cannot be
+reached except through `admin_service.execute` — which is where an actor id
+becomes an authority and where the audit row is written.
+
+The seven new operations (`vpn_service_enabled`, `vpn_notifications`,
+`vpn_plan_active`, `vpn_balance`, `vpn_orders_sweep`, `vpn_transaction_status`,
+`vpn_confirm`) are ordinary entries in the one `OPERATIONS` table, with a new
+`OP_VPN` kind. That kind is not a validation branch — a plan id is not a
+Telegram member and checking it against the member list would be meaningless —
+it is the branch that *skips* the user and message checks and adds the one
+pre-flight that is meaningful: **an operation against an integration this bot
+has not been pointed at is refused before anything is recorded**, rather than
+discovered later as an unreachable host. Either way it lands in `admin_audit` as
+a refusal.
+
+### 51.3 Owner-only, permanently, and structurally
+
+`vpn.read` and `vpn.manage` are appended to `PERMISSIONS` — last, because
+`main.py` uses that tuple as a **positional bitmask** and inserting in the middle
+would silently renumber every stored permission — and to
+`OWNER_ONLY_PERMISSIONS`. Neither appears in any `ROLE_PERMISSIONS` bundle.
+
+The consequence is worth stating plainly: "an administrator edits a customer's
+balance" is not refused, it is **inexpressible**. There is no role an
+administrator can be promoted to that carries the permission, and §50's test
+proves no bundle carries an owner-only permission. So the answer to "could a
+sufficiently senior administrator do this?" is no at the level of the role
+table, not no at the level of a check somebody has to remember to write.
+
+### 51.4 The two-step write, and why the second step is a reference
+
+`vpn_balance`, `vpn_orders_sweep` and `vpn_transaction_status` are recorded and
+**not executed**. `app/vpn_service.py` writes a row into `vpn_pending_ops` and
+returns `OUTCOME_VPN_AWAITING_CONFIRMATION`, which is deliberately *not* a
+success and deliberately not in `_REFUSAL_OUTCOMES` either — it is a state, and
+counting it as a failure would send the owner hunting for a problem that does
+not exist.
+
+The property that makes the second step worth having is that **the confirmation
+is a reference, not an approval**. Everything the execution needs is re-read
+from the row written the first time, by the gateway, after authorisation:
+
+* the model supplies `pending_id` and nothing else;
+* `AdminRequest.pending_id` is named differently from `request_id` on purpose,
+  because `request_id` is already the replay key and one name for two things is
+  how a replay key becomes a token;
+* `app/vpn_service.py` rebuilds the operation from the stored JSON payload, so a
+  confirmation carrying a different amount, a different user or a different
+  transaction cannot smuggle any of them in. `test_the_stored_payload_is_what_runs_not_anything_the_confirmer_supplies`
+  builds exactly that forged request and asserts the stored values are what
+  reach the VPN bot.
+
+Confirmation is an ordinary operation in the table (`vpn_confirm`), not a
+special case outside it. That is the security choice: the second half of a money
+operation is authorised by the same seven steps as the first half — shape,
+system state, replay, target, RBAC, rights, call. It is also a separate *tool*,
+and `vpn_admin` refuses `vpn_confirm` as a value for its `operation` parameter,
+so a single tool call can never both ask for a money operation and approve it.
+
+The four confirmation rules are **not reimplemented**. They live in
+`agent_bridge.resolve_confirmation` — only the owner confirms, there must be
+something pending, a named reference must really be waiting, and a bare
+confirmation resolves only when exactly one thing is — and a second copy of that
+reasoning would be a second answer to "who may approve". The two flows therefore
+cannot drift. The waiting list is scoped to the room the operation was asked in,
+which is the fail-closed direction: the wrong answer is "nothing is waiting",
+never "here, the other group's operation".
+
+The claim is a compare-and-swap on one row, like the captcha claim and for the
+same reason: two confirmations arriving together must not both execute. It is
+taken *before* the call and **released again only when the failure was a
+transport one** — a refusal from the VPN bot is a decision, and re-asking would
+produce the same answer.
+
+### 51.5 Fail-closed, in four outcomes rather than one
+
+`OUTCOME_VPN_UNAVAILABLE`, `OUTCOME_VPN_REFUSED`, `OUTCOME_VPN_ERROR` and
+`OUTCOME_VPN_AWAITING_CONFIRMATION`, because they are four different next steps
+for the owner:
+
+* **unavailable** — the integration could not be reached at all (not configured,
+  unreachable, or its own write switch is off). Look at the wiring.
+* **refused** — it answered and the answer was no. Look at the request.
+* **error** — something on our side of the wire was malformed. Look at this bot.
+* **awaiting confirmation** — nothing ran, and the next step is the owner's own
+  approval.
+
+The rule the brief cares about is that **an unconfigured or unreachable VPN bot
+is recorded as a refusal in `admin_audit`, never reported as done.** Two tests
+assert the audit row, one for the immediate path and one for the two-step path —
+the second is the one that matters, because it is the path where "it went
+through" would be most plausible and most damaging.
+
+### 51.6 The redactor is local, and that is the point
+
+A VPN service is described by a *connection string*, and that string is the
+credential: `vless://…` and its siblings carry the client id in the fragment,
+and a subscription link carries it in the path. So the VPN reads need patterns
+the generic redactor does not have — and they are **not** added to
+`agent_bridge._SECRET_PATTERNS`.
+
+The reason is that a bare 32-hex rule is right for a panel client id and wrong
+for this bot's own identity handle, which is 32 lowercase hex characters and is
+*deliberately* a non-secret — it is how a person is addressed (§45). A global
+rule would quietly rewrite it everywhere and break the thing the identity layer
+exists to provide. `agent_data.redact_vpn` composes the generic redactor with the
+VPN patterns, and `test_the_vpn_redactor_is_not_the_global_one` asserts both
+halves: the VPN redactor removes such a handle, and `identity_view` still returns
+it.
+
+Redaction is the *second* line of defence. The first is that the views copy an
+allowlist field by field and never `**raw`, so a field that is never copied
+cannot be leaked by a redactor that misses it. The VPN bot narrows the same
+object on its own side before serialising, including on **write** responses —
+a write response that embeds a subscription link leaks exactly as much as a read
+does — so the two narrowings are independent and either one alone would hold.
+
+### 51.7 The tool set: five declarations, and the cost of them
+
+Three reads (`vpn_subscription_lookup`, `vpn_service_status`, `get_vpn_status`),
+one write tool (`vpn_admin`) and one confirmation (`confirm_vpn_operation`).
+
+`vpn_admin` carries an `operation` parameter naming which of the six changes is
+wanted, rather than being six near-identical tools. The vocabulary is closed in
+`_enum_for` *and* checked again in `parse_write_call` *and* checked a third time
+by `execute` — the same belt-and-braces the `role` parameter gets. Six separate
+tools were measured as more expensive, and a set of terse descriptions that omit
+the argument-to-operation mapping was rejected: the rule here is to record the
+measurement and the reason rather than to trim descriptions to letters.
+
+The cost was measured. Tool declarations went from 42794 characters to **54141**,
+so the ceiling in `tests/test_awareness_latency.py` was raised from 48000 to
+62000 deliberately, with the measurement and the reasoning written into the
+test. In practice these five are the cheapest kind of growth: `vpn.read` and
+`vpn.manage` are carried by no role bundle, so they are attached for the owner
+and for nobody else, and no administrator's or member's message pays for them.
+
+None of the new tools declares a parameter in the forbidden set (`actor_id`,
+`chat_id`, `is_owner`, `permissions`, `owner`), so the every-tool invariant test
+still passes — and `test_no_vpn_tool_can_name_an_actor_a_room_or_a_permission`
+asserts it for these five specifically. The actor and the room come from the
+caller, never from the arguments.
+
+### 51.8 The other side of the wire
+
+The VPN bot (`/opt/vpn-bot`, a separate repository on its own branch) gained
+eleven internal endpoints: the health probe and acquisition invite it already
+had, a config-only status read, two lookups, and six administrative writes. They
+inherit its existing four-gate `guard_middleware` — CIDR, rate limit, HMAC,
+handler — and reuse its `service_auth`.
+
+One constraint shaped every signature: the HMAC covers
+`method\npath\ntimestamp\nnonce\nSHA256(body)` and the verifier uses
+`request.path`, which **excludes the query string**. A parameter sent as
+`?telegram_id=` would therefore sit outside the signature and a captured request
+could be replayed with a different id, so every parameterised endpoint is POST
+with a signed JSON body. There are no query parameters anywhere.
+
+Application outcomes are 200 with `ok: false` and a machine `code`
+(`not_found`, `panel_error`, `trial_locked`, `invalid_amount`, …); only endpoint
+problems are non-200. So a refusal reaches guardbot as a precise outcome rather
+than as a generic "unreachable", and `admin_disabled` — the VPN bot's own write
+kill switch, `INTERNAL_API_ADMIN_ENABLED`, default off — is reported as
+*unavailable* rather than *refused*, because the next step is to look at the
+VPN bot's configuration rather than at the request.
+
+Every write records the acting operator in the VPN bot's **own** audit table as
+`actor=f"guardbot:{operator_id}"`, the parallel of the dashboard's existing
+`actor=f"dashboard:{user}"`. A service response that embeds the affected service
+is narrowed through the same allowlist a read uses, because a write response
+leaks exactly as much as a read.
+
+### 51.9 The honest limitation
+
+`operator_id` is **asserted** by guardbot and not independently verified by the
+VPN bot. The HMAC proves which *service* asked; the VPN bot trusts guardbot's
+RBAC for which *person* was allowed to. No new configuration surface was added
+to pretend otherwise, and this is written down rather than papered over.
+
+The second honest limitation is the shape of the risk itself: the shared secret's
+power has expanded from "may ask whether to invite somebody" to "may write". The
+mitigations are the owner-only RBAC, the confirmation step on the three
+unrecoverable operations, the VPN bot's independent kill switch, and narrowing
+`INTERNAL_API_ALLOW_CIDRS` to `127.0.0.1/32` — guardbot runs with
+`network_mode: host`, so it does not need the Docker bridge range.
+
+### 51.10 Configuration
+
+| variable | default | what it does |
+|---|---|---|
+| `VPNBOT_API_URL` | *(none)* | the VPN bot's internal API. Empty disables every VPN operation |
+| `VPNBOT_SHARED_SECRET` | *(none)* | the HMAC secret; must match the VPN bot's `SERVICE_SHARED_SECRET` |
+| `VPNBOT_TIMEOUT_SECONDS` | `8` | per-request timeout |
+| `VPN_CONFIRMATION_TTL_SECONDS` | `900` | how long a recorded operation stays confirmable |
+| `INTERNAL_API_ADMIN_ENABLED` | `0` | **on the VPN bot** — closes its write surface independently |
+
+Rollback needs no code change on either side: `INTERNAL_API_ADMIN_ENABLED=0`
+closes the write surface, and unsetting `VPNBOT_API_URL` closes all of it.
+
+### 51.11 Tests
+
+`tests/test_vpn_admin.py` (57) covers authority — every one of the seven
+operations refused for an administrator, with the VPN bot never reached — the
+fail-closed audit rows, the two-step write, the reference-not-payload property,
+the ambiguity rule, expiry, single-use confirmation, and the request boundary
+(undeclared arguments, unknown operations, a string where a boolean belongs, the
+operation tables agreeing).
+
+`tests/test_vpn_tools.py` (27) covers the reads: owner-only exposure *and*
+server-side refusal, the connection string absent from every answer, the
+redactor's locality, and the capability report.
+
+The VPN bot's own `tests/test_internal_api.py` enumerates every route and asserts
+each one is behind the signature check, that a lookup returns no `sub_url` and no
+`vless://`, that an unknown user is a 200 decision rather than an error, that a
+write is audited as `guardbot:<id>` under the right action, and that the write
+surface is closed when its kill switch is off.

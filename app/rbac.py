@@ -99,6 +99,20 @@ PERMISSIONS = (
     # Appended after ``nexus.control`` and not before it: the same bitmask
     # argument applies to both — see the note above.
     "agent.request",
+    # Read the VPN project's own records through its signed service API:
+    # subscriptions, service status, whether its panel is wired. Owner-only
+    # because even after the other side drops the subscription link and the
+    # panel client id, what remains describes a customer's account.
+    "vpn.read",
+    # Change something on the VPN side. Owner-only, permanently, and never
+    # carried by a role: three of the six operations behind it move money or
+    # bulk-reject orders, and the other three change whether a paying customer
+    # has service. That is a different kind of power from moderating a chat.
+    #
+    # Both are appended last for the bitmask reason above. ``main.py``'s
+    # ``_MASK_PERMISSIONS`` is built from this tuple by index, so inserting
+    # anywhere but the end would silently re-point every stored mask.
+    "vpn.manage",
 )
 
 PERMISSION_SET = frozenset(PERMISSIONS)
@@ -108,7 +122,9 @@ PERMISSION_SET = frozenset(PERMISSIONS)
 # the omission silent: this list exists so that "nexus.control is owner-only" is
 # a checked property of the tables below rather than a fact somebody has to
 # notice while editing them.
-OWNER_ONLY_PERMISSIONS = frozenset({"nexus.control", "agent.request"})
+OWNER_ONLY_PERMISSIONS = frozenset(
+    {"nexus.control", "agent.request", "vpn.read", "vpn.manage"}
+)
 
 # The permission implied by every other one. Held by every principal, including
 # a guest, so a handler never has to special-case it.
@@ -210,6 +226,8 @@ PERMISSION_LABELS = {
     "commands.use": "استفاده از دستورهای ربات",
     "nexus.control": "روشن/خاموش کردن نکسوس",
     "agent.request": "درخواست از عامل برنامه‌نویسی",
+    "vpn.read": "دیدن اطلاعات سرویس VPN",
+    "vpn.manage": "تغییر سرویس‌های VPN",
 }
 ROLE_LABELS = {
     ROLE_OWNER: "مالک",
@@ -282,6 +300,11 @@ PERMISSION_TELEGRAM_RIGHT = {
     # promoting somebody in a group could give them the ability to change the
     # code — which is exactly what the owner-only bundle above prevents.
     "agent.request": None,
+    # Neither is reaching into the VPN project. These are application powers
+    # over a different service, and no Telegram administrator flag in a chat
+    # corresponds to any of them.
+    "vpn.read": None,
+    "vpn.manage": None,
 }
 
 # Rights the bot must itself hold before it can grant them to somebody else.
@@ -499,7 +522,11 @@ def grantable_permissions(actor: Principal) -> frozenset[str]:
 
 
 def authorize(
-    actor: Principal, permission: str, *, target: Principal | None = None
+    actor: Principal,
+    permission: str,
+    *,
+    target: Principal | None = None,
+    role_change: bool = False,
 ) -> Decision:
     """Whether ``actor`` may exercise ``permission``, optionally on ``target``.
 
@@ -510,13 +537,35 @@ def authorize(
     1. Is an owner configured at all? If not, nothing is authorised.
     2. Does the actor hold the permission?
     3. Is the target protected (the owner)?
-    4. Is the target at or above the actor's own level?
-    5. Is the actor acting on themselves? Allowed, because "I can delete my own
-       message" and "I can mute myself" are not escalations — but noted, because
-       the alternative reading of a self-targeted ban command is a bug.
+    4. Is this a role change aimed at the actor themselves? Refused outright.
+    5. Is the target at or above the actor's own level?
+    6. Is the actor acting on themselves? Also refused — but by step 5, not by a
+       rule of its own.
 
-    Everything is refused by default: an unknown permission, an unknown actor and
-    an unhandled case all fall out at step 2.
+    Step 4 is the one that exists for its own sake rather than for convenience.
+    A self-targeted *role change* was previously refused only as a side effect of
+    step 5 — the actor's own level equals the target's, so the hierarchy check
+    caught it and reported ``higher_rank``. That is a refusal for the wrong
+    reason: it is an accident of the level arithmetic, it names the wrong rule,
+    and it would stop protecting the moment those numbers were rearranged. The
+    requirement is absolute — nobody promotes or demotes themselves, whatever
+    the levels say — so it is now checked as itself, and it reports
+    ``REASON_SELF_TARGET``.
+
+    Step 4 sits *after* step 3 on purpose: the owner targeting themselves must
+    still answer ``owner_protected``, because "the owner is never a target" is
+    the more fundamental rule and the more informative answer.
+
+    Step 6 is stated as a consequence rather than as a branch, because that is
+    what it is: an earlier version of this docstring claimed self-targeting was
+    *allowed* ("I can mute myself"), and it never was. An actor's own level
+    always equals their own level, so step 5 refuses it for every non-owner, and
+    step 3 refuses it for the owner. The refusal is kept — self-restriction is
+    not a thing anybody needs to do through this path, and allowing it would
+    mean carving an exception into the hierarchy rule.
+
+    Everything else is refused by default: an unknown permission, an unknown
+    actor and an unhandled case all fall out at step 2.
     """
     if not has_owner():
         return Decision(False, REASON_NO_OWNER)
@@ -539,6 +588,11 @@ def authorize(
         # what removes the whole class of "ban the owner" bugs rather than one
         # instance of it.
         return Decision(False, REASON_OWNER_PROTECTED)
+
+    if role_change and target.user_id == actor.user_id:
+        # Never, for anybody, including the owner. A model that could rewrite its
+        # own authority would make every other check in this module advisory.
+        return Decision(False, REASON_SELF_TARGET)
 
     if not actor.is_owner and target.level >= actor.level:
         # A senior admin cannot touch another senior admin, and nobody below the
@@ -566,8 +620,13 @@ def authorize_grant(
 
     Note that the permission set is validated against the *role's* bundle as
     well: a caller cannot ask for ``moderator`` plus ``admins.manage``.
+
+    ``role_change=True`` is what makes the self-target refusal explicit rather
+    than incidental — see :func:`authorize`, step 4. Both callers of this
+    function (``promote_member`` and ``demote_member``) are role changes, so
+    there is no path here that should ever be allowed to aim at the actor.
     """
-    base = authorize(actor, "admins.manage", target=target)
+    base = authorize(actor, "admins.manage", target=target, role_change=True)
     if not base:
         return base
 

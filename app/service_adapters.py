@@ -45,42 +45,76 @@ ABSENT = "absent"
 DISABLED = "disabled"
 
 # The VPN bot's internal service API. This is the *complete* set of endpoints
-# ``app/vpnbot.py`` implements, read from that module rather than guessed: a
-# health probe and a single-purpose acquisition invite. There is deliberately no
-# user lookup, no subscription lookup and no configuration generation, because
-# the upstream service exposes none of those to this bot — inventing an endpoint
-# here would produce a tool that always fails.
-_VPN_OPERATIONS = ("health", "acquisition.invite")
+# ``app/vpnbot.py`` implements, read from that module rather than guessed. It
+# grew from two to eleven when the operational surface was added: a health
+# probe, an acquisition invite, three reads and six owner-only writes.
+#
+# The write entries are listed here even though whether they will *run* also
+# depends on a switch on the other side of the wire. That is not a contradiction
+# — this registry answers "what does the integration support", and the live
+# answer to "is it switched on right now" comes from the VPN bot itself through
+# the ``get_vpn_status`` read. Reporting a capability as absent because a
+# remote flag might be off would be the same dishonesty in the other direction.
+_VPN_OPERATIONS = (
+    "health",
+    "status",
+    "acquisition.invite",
+    "subscription.lookup",
+    "service.status",
+    "admin.service.enabled",
+    "admin.notifications",
+    "admin.plan.active",
+    "admin.balance",
+    "admin.orders.sweep",
+    "admin.transaction.status",
+)
 # The operations a person might reasonably ask for that this integration does
 # *not* support. Listed so the assistant can explain the gap instead of
-# improvising around it.
+# improvising around it — ``subscription.lookup`` was on this list and is not
+# any more, which is exactly the kind of change this list exists to make
+# visible.
 _VPN_UNSUPPORTED = (
     "user.lookup",
-    "subscription.lookup",
     "config.generate",
     "service.restart",
 )
 
 
 def _vpn() -> dict:
-    """The VPN bot integration, from ``app/vpnbot.py`` and configuration."""
+    """The VPN bot integration, from ``app/vpnbot.py`` and configuration.
+
+    The acquisition flow being switched off used to report the whole
+    integration as ``disabled``, and that stopped being true once the reads and
+    the writes existed: they do not go through the acquisition path and they
+    work whether it is on or off. So the integration is reported for what it is
+    — available if it is pointed at a backend — and the individual operations
+    that are switched off are named beside it. "Nothing here works" and "this
+    one thing is off" are different answers, and an operator acting on the first
+    when the second is true goes looking for a fault that does not exist.
+    """
     configured = bool(config.VPNBOT_API_URL and config.VPNBOT_SHARED_SECRET)
+    state = AVAILABLE if configured else UNCONFIGURED
+
+    disabled_operations = []
     if not config.GROUP_TRIAL_ENABLED:
-        state = DISABLED
-    elif configured:
-        state = AVAILABLE
-    else:
-        state = UNCONFIGURED
+        disabled_operations.append("acquisition.invite")
+
     return {
         "name": "vpn_bot",
         "state": state,
         "configured": configured,
+        "acquisition_enabled": bool(config.GROUP_TRIAL_ENABLED),
         "operations": list(_VPN_OPERATIONS) if state == AVAILABLE else [],
+        "disabled_operations": disabled_operations,
         "unsupported": list(_VPN_UNSUPPORTED),
         "note": (
-            "The VPN bot's internal API exposes a health probe and a one-way "
-            "acquisition invite. It does not expose user records, subscriptions "
-            "or configuration generation to this bot, so those are not offered."
+            "The VPN bot's internal API exposes a health probe, an acquisition "
+            "invite, subscription and service lookups, and six owner-only "
+            "administrative writes. The writes are gated twice: this bot's own "
+            "RBAC, and a switch on the VPN bot that can close the write surface "
+            "independently. Which of the two is closed is reported live by the "
+            "get_vpn_status read. Configuration generation and user records are "
+            "not exposed, so those are not offered."
         ),
     }
 

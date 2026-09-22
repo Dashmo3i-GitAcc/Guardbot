@@ -573,6 +573,35 @@ def init() -> None:
             count INTEGER NOT NULL DEFAULT 0,
             last_at INTEGER NOT NULL DEFAULT 0)"""
     )
+    # A VPN-side operation the owner has been asked to approve but has not yet.
+    #
+    # This exists because three of the six VPN operations move money or
+    # bulk-reject orders, and a misheard number in a Persian sentence is not
+    # recoverable. The row is the whole point of the confirmation: what the
+    # model supplies at confirm time is a *reference* to one of these, never the
+    # parameters, so the amount that eventually reaches the panel is the amount
+    # that was recorded here — not something re-derived from a second message.
+    #
+    # ``expires_at`` is what stops a stale approval from being usable later; a
+    # confirmation is about a request somebody made a moment ago, not a standing
+    # permission. ``status`` moves pending → confirmed → done/failed, and the
+    # claim is a compare-and-swap so two confirmations cannot both execute it.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS vpn_pending_ops (
+            request_id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER NOT NULL DEFAULT 0,
+            actor_id INTEGER NOT NULL DEFAULT 0,
+            chat_id INTEGER NOT NULL DEFAULT 0,
+            operation TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            payload TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            confirmed_by INTEGER NOT NULL DEFAULT 0,
+            confirmed_at INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '')"""
+    )
     _conn.commit()
 
 
@@ -2069,6 +2098,148 @@ def identity_resolution_counts() -> dict[str, int]:
             "SELECT outcome, count FROM identity_resolutions"
         ).fetchall()
     return {str(r[0]): int(r[1] or 0) for r in rows}
+
+
+# ── VPN operations awaiting the owner's confirmation ──────────────────────
+_VPN_PENDING_COLS = (
+    "request_id, created_at, expires_at, actor_id, chat_id, operation, "
+    "subject, payload, status, confirmed_by, confirmed_at, outcome, detail"
+)
+
+
+def _vpn_pending_row(row) -> dict:
+    return {
+        "request_id": str(row[0]),
+        "created_at": int(row[1] or 0),
+        "expires_at": int(row[2] or 0),
+        "actor_id": int(row[3] or 0),
+        "chat_id": int(row[4] or 0),
+        "operation": str(row[5] or ""),
+        "subject": str(row[6] or ""),
+        "payload": str(row[7] or "{}"),
+        "status": str(row[8] or ""),
+        "confirmed_by": int(row[9] or 0),
+        "confirmed_at": int(row[10] or 0),
+        "outcome": str(row[11] or ""),
+        "detail": str(row[12] or ""),
+    }
+
+
+def vpn_pending_add(
+    request_id: str,
+    *,
+    actor_id: int,
+    chat_id: int,
+    operation: str,
+    subject: str,
+    payload: str,
+    expires_at: int,
+    now: int | None = None,
+) -> bool:
+    """Record one operation as awaiting approval. ``False`` if the id is taken."""
+    stamp = int(now if now is not None else time.time())
+    try:
+        with _lock:
+            _conn.execute(
+                "INSERT INTO vpn_pending_ops "
+                f"({_VPN_PENDING_COLS}) VALUES (?,?,?,?,?,?,?,?,'pending',0,0,'','')",
+                (
+                    str(request_id),
+                    stamp,
+                    int(expires_at),
+                    int(actor_id),
+                    int(chat_id),
+                    str(operation),
+                    str(subject),
+                    str(payload),
+                ),
+            )
+            _conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def vpn_pending_waiting(
+    *, actor_id: int = 0, chat_id: int = 0, now: int | None = None
+) -> list[dict]:
+    """Unapproved operations that have not expired, oldest first.
+
+    Scoped to the actor and the room when those are given, for the same reason
+    ``audit_recent_actions`` is: one person's pending operation is not another's
+    to approve, and one group's business stays out of another's.
+    """
+    stamp = int(now if now is not None else time.time())
+    sql = (
+        f"SELECT {_VPN_PENDING_COLS} FROM vpn_pending_ops "
+        "WHERE status='pending' AND expires_at > ?"
+    )
+    args: list = [stamp]
+    if actor_id:
+        sql += " AND actor_id = ?"
+        args.append(int(actor_id))
+    if chat_id:
+        sql += " AND chat_id = ?"
+        args.append(int(chat_id))
+    sql += " ORDER BY created_at ASC"
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_vpn_pending_row(r) for r in rows]
+
+
+def vpn_pending_get(request_id: str) -> dict | None:
+    with _lock:
+        row = _conn.execute(
+            f"SELECT {_VPN_PENDING_COLS} FROM vpn_pending_ops WHERE request_id = ?",
+            (str(request_id),),
+        ).fetchone()
+    return _vpn_pending_row(row) if row else None
+
+
+def vpn_pending_claim(request_id: str, *, now: int | None = None) -> bool:
+    """Take ownership of one pending operation. ``True`` for the winner only.
+
+    A compare-and-swap on one row, like the captcha claim and for the same
+    reason: two confirmations arriving together must not both execute. The
+    loser finds the row already claimed and does nothing.
+    """
+    stamp = int(now if now is not None else time.time())
+    with _lock:
+        cursor = _conn.execute(
+            "UPDATE vpn_pending_ops SET status='confirmed', confirmed_at=? "
+            "WHERE request_id = ? AND status='pending' AND expires_at > ?",
+            (stamp, str(request_id), stamp),
+        )
+        _conn.commit()
+        return cursor.rowcount == 1
+
+
+def vpn_pending_finish(request_id: str, *, outcome: str, detail: str = "") -> None:
+    with _lock:
+        _conn.execute(
+            "UPDATE vpn_pending_ops SET status='done', outcome=?, detail=? "
+            "WHERE request_id = ?",
+            (str(outcome)[:64], str(detail)[:400], str(request_id)),
+        )
+        _conn.commit()
+
+
+def vpn_pending_release(request_id: str) -> None:
+    """Put a claimed operation back, for a failure before anything happened."""
+    with _lock:
+        _conn.execute(
+            "UPDATE vpn_pending_ops SET status='pending', confirmed_at=0 "
+            "WHERE request_id = ? AND status='confirmed'",
+            (str(request_id),),
+        )
+        _conn.commit()
+
+
+def vpn_pending_reset() -> None:
+    """Forget every pending operation. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM vpn_pending_ops")
+        _conn.commit()
 
 
 # ── Nexus Awareness: the room window and the understanding of it ──────────

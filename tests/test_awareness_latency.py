@@ -730,6 +730,23 @@ def test_the_tool_declarations_are_the_largest_part_of_the_prompt():
     speaker in a room is an administrator, because ``tool_names_for`` returns
     nothing for a guest — so a member's message still costs no declarations at
     all. The measured size at the time of the raise was 42794.
+
+    Raised again, from 48000 to 62000, when the VPN operational surface was
+    added (``vpn_subscription_lookup``, ``vpn_service_status``,
+    ``get_vpn_status``, ``vpn_admin``, ``confirm_vpn_operation``). The measured
+    size at this raise is 54141. Most of the cost is one tool's description:
+    ``vpn_admin`` carries the argument-to-operation mapping, because a model
+    that has to guess whether a balance change takes ``amount`` or ``delta``
+    produces a malformed call and then a refusal it must explain. The
+    alternative — six near-identical declarations — was measured as more
+    expensive still, and a set of terse descriptions that omit the mapping was
+    rejected outright: the plan's rule is to record the measurement and the
+    reason rather than to trim descriptions to letters.
+
+    These five are also the cheapest kind of growth in practice, because
+    ``vpn.read`` and ``vpn.manage`` are carried by no role bundle: they are
+    attached for the owner and for nobody else, so no administrator's or
+    member's message pays for them.
     """
     principal = rbac.resolve(OWNER)
     declarations = admin_tools.declarations_for(principal)
@@ -744,7 +761,7 @@ def test_the_tool_declarations_are_the_largest_part_of_the_prompt():
 
     assert size > fixed, "declarations are the largest item"
     # A ceiling, so growth is noticed. Raise it deliberately, with a reason.
-    assert size < 48000, f"tool declarations grew to {size} chars"
+    assert size < 62000, f"tool declarations grew to {size} chars"
 
 
 # ══ THE ALLOWANCE ═════════════════════════════════════════════════════════

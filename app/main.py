@@ -3264,6 +3264,7 @@ def _deny_text(decision: rbac.Decision) -> str:
         rbac.REASON_NO_OWNER: config.ADMIN_NOT_CONFIGURED_TEXT,
         rbac.REASON_OWNER_PROTECTED: config.ADMIN_OWNER_PROTECTED_TEXT,
         rbac.REASON_HIGHER_RANK: config.ADMIN_HIGHER_RANK_TEXT,
+        rbac.REASON_SELF_TARGET: config.ADMIN_SELF_TARGET_TEXT,
     }.get(decision.reason, config.ADMIN_DENIED_TEXT)
 
 

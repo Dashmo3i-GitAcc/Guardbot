@@ -352,6 +352,85 @@ def test_the_owner_can_create_a_senior_admin():
     assert db.admin_get(MEMBER)["role"] == rbac.ROLE_SENIOR_ADMIN
 
 
+# ── Nobody, including the model, rewrites their own authority ─────────────
+# The requirement is absolute, so it is asserted through the real path: a model
+# tool call that names the speaker as its own target. The decisive assertion is
+# that nothing reached Telegram and no row was written — a refusal message the
+# bot prints while still promoting is not a refusal.
+def test_a_senior_admin_cannot_promote_themselves_through_the_ai():
+    result, gateway = execute(
+        "promote_member", actor_id=SENIOR, target_id=SENIOR, role="senior_admin"
+    )
+
+    assert not result.ok
+    assert result.outcome == admin_service.OUTCOME_DENIED
+    assert result.reason == rbac.REASON_SELF_TARGET
+    assert gateway.actions() == []
+    assert db.admin_get(SENIOR) is None, "a row was written for a refused promotion"
+
+
+def test_a_senior_admin_cannot_demote_themselves_through_the_ai():
+    result, gateway = execute("demote_member", actor_id=SENIOR, target_id=SENIOR)
+
+    assert not result.ok
+    assert result.reason == rbac.REASON_SELF_TARGET
+    assert gateway.actions() == []
+    assert db.admin_get(SENIOR) is None
+
+
+def test_the_owner_cannot_promote_themselves_through_the_ai():
+    """Refused, and by the stronger rule: the owner is never a target."""
+    result, gateway = execute(
+        "promote_member", target_id=OWNER, role="senior_admin"
+    )
+
+    assert not result.ok
+    assert result.reason == rbac.REASON_OWNER_PROTECTED
+    assert gateway.actions() == []
+
+
+def test_the_self_refusal_survives_the_model_forging_a_target():
+    """A model that names somebody else is unaffected — the guard is on the id.
+
+    The point of asserting this beside the refusal is that the guard must not be
+    a blanket "role changes are off": a senior admin promoting a moderator still
+    works, which the tests above already cover. Here the actor and the target
+    differ by one digit.
+    """
+    result, gateway = execute(
+        "promote_member", actor_id=SENIOR, target_id=MODERATOR, role="moderator"
+    )
+
+    assert result.ok
+    assert any(c[0] == "promote" for c in gateway.actions())
+
+
+def test_the_self_refusal_is_explained_in_terms_of_its_own_rule():
+    """Both audiences must get the right explanation.
+
+    The service layer carries a machine ``reason`` and the model is expected to
+    explain it in its own words, so what matters there is that the reason is the
+    specific one and that a gloss exists for it — a model handed a bare token
+    cannot explain anything. The command path prints a canned sentence, so what
+    matters there is that it is the self-target sentence and not the rank one,
+    which would be a misleading description of what happened.
+    """
+    result, _ = execute(
+        "promote_member", actor_id=SENIOR, target_id=SENIOR, role="senior_admin"
+    )
+
+    assert result.reason == rbac.REASON_SELF_TARGET
+    assert rbac.REASON_SELF_TARGET in admin_service.REASON_GLOSS
+    assert (
+        admin_service.REASON_GLOSS[rbac.REASON_SELF_TARGET]
+        != admin_service.REASON_GLOSS[rbac.REASON_HIGHER_RANK]
+    )
+
+    decision = rbac.Decision(False, rbac.REASON_SELF_TARGET)
+    assert main._deny_text(decision) == config.ADMIN_SELF_TARGET_TEXT
+    assert main._deny_text(decision) != config.ADMIN_HIGHER_RANK_TEXT
+
+
 def test_promotion_grants_only_what_the_role_carries():
     """The caller names a role; the application decides the Telegram flags."""
     _, gateway = execute("promote_member", target_id=MEMBER, role="moderator")

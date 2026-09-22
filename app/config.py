@@ -375,6 +375,92 @@ GROUP_TRIAL_REPLY_PRICING = os.getenv(
 # so there is exactly one place to edit it.
 
 
+# ── The VPN bot's operational surface ─────────────────────────────────────
+# The reads and writes the assistant may perform against the VPN bot, reached
+# through signed requests to its internal API. Two things are worth stating here
+# because the wording below depends on them:
+#
+# * Every one of these operations is gated on ``vpn.read`` / ``vpn.manage``,
+#   which no role bundle carries — so they are the owner's, permanently and
+#   structurally, not by a setting somebody could flip.
+# * The three that move money or bulk-reject orders are not executed when they
+#   are asked for. They are *recorded* and the owner is asked to confirm, in the
+#   same shape the coding-agent bridge uses for its dangerous tasks.
+#
+# The sentences below are the four different next steps an operator can be
+# given, so they are four sentences and not one "refused".
+
+# How long a recorded VPN operation stays confirmable. Long enough that the
+# owner can read a message and reply, short enough that a forgotten operation
+# does not stay armed for a day.
+VPN_CONFIRMATION_TTL_SECONDS = _int("VPN_CONFIRMATION_TTL_SECONDS", 900)
+
+# Asked when a money operation has been recorded and is waiting. It names the
+# operation and its subject, because the owner is being asked to approve a
+# specific thing and «اوکی» to an unnamed request is not an approval.
+VPN_CONFIRM_REQUIRED_TEXT = os.getenv(
+    "VPN_CONFIRM_REQUIRED_TEXT",
+    "🔐 این عملیات روی سرویس VPN پول یا سفارش‌ها رو تغییر می‌ده، پس هنوز "
+    "اجرا نشده:\n"
+    "• {operation}\n"
+    "• {subject}\n\n"
+    "اگه مطمئنی، صریح تأییدش کن.",
+)
+# The same state without the detail, for the outcome-to-sentence table. The
+# sentence above carries ``{operation}`` and ``{subject}``, so it is only ever
+# used where both are known; this is what a caller that has no operation to name
+# gets, so a placeholder can never reach a chat.
+VPN_AWAITING_CONFIRMATION_TEXT = os.getenv(
+    "VPN_AWAITING_CONFIRMATION_TEXT",
+    "🔐 این عملیات VPN نیاز به تأیید صریح تو داره، پس هنوز اجرا نشده.",
+)
+VPN_CONFIRM_NOTHING_TEXT = os.getenv(
+    "VPN_CONFIRM_NOTHING_TEXT",
+    "الان هیچ عملیات VPNی منتظر تأیید نیست.",
+)
+VPN_CONFIRM_AMBIGUOUS_TEXT = os.getenv(
+    "VPN_CONFIRM_AMBIGUOUS_TEXT",
+    "چند عملیات VPN منتظر تأیید هستن؛ کدوم رو تأیید می‌کنی؟",
+)
+VPN_CONFIRM_NOT_WAITING_TEXT = os.getenv(
+    "VPN_CONFIRM_NOT_WAITING_TEXT",
+    "اون عملیات در انتظار تأیید نیست.",
+)
+VPN_CONFIRM_EXPIRED_TEXT = os.getenv(
+    "VPN_CONFIRM_EXPIRED_TEXT",
+    "⌛️ مهلت تأیید این عملیات گذشته، پس اجرا نشد. دوباره درخواستش کن.",
+)
+VPN_CONFIRM_OWNER_ONLY_TEXT = os.getenv(
+    "VPN_CONFIRM_OWNER_ONLY_TEXT",
+    "⛔️ تأیید عملیات VPN فقط کار مالکه.",
+)
+VPN_CONFIRMED_TEXT = os.getenv(
+    "VPN_CONFIRMED_TEXT",
+    "✅ تأیید شد؛ عملیات VPN اجرا شد.",
+)
+# The VPN bot could not be asked at all — not configured, unreachable, or
+# answering something that is not JSON. Distinct from a refusal, because the
+# next step is to look at the integration rather than at the request.
+VPN_UNAVAILABLE_TEXT = os.getenv(
+    "VPN_UNAVAILABLE_TEXT",
+    "⛔️ الان به سرویس VPN دسترسی ندارم، پس هیچ تغییری اعمال نشد. "
+    "لطفاً بعداً دوباره امتحان کن.",
+)
+# The VPN bot answered, and the answer was no: an unknown id, a panel error, a
+# trial plan that may not be switched off, an amount beyond the fat-finger
+# limit. The reason is in the detail; this is the sentence.
+VPN_REFUSED_TEXT = os.getenv(
+    "VPN_REFUSED_TEXT",
+    "⛔️ سرویس VPN این درخواست رو رد کرد، پس چیزی تغییر نکرد.",
+)
+# A failure on our side of the wire that is not the other service's decision —
+# a malformed operation, or a pending record that could not be written.
+VPN_FAILED_TEXT = os.getenv(
+    "VPN_FAILED_TEXT",
+    "⚠️ این عملیات VPN کامل نشد. جزئیات در گزارش ثبت شد.",
+)
+
+
 # ---------------- Gemini: the second opinion on an ambiguous message ----------
 # The rule engine in app/intent.py is fast, free, offline and explainable, and it
 # stays the first and last word on anything it is sure about. What it cannot do
@@ -1524,6 +1610,13 @@ ADMIN_HIGHER_RANK_TEXT = os.getenv(
     "ADMIN_HIGHER_RANK_TEXT",
     "⛔️ این کاربر سطح بالاتری از تو داره؛ نمی‌تونی تغییرش بدی.",
 )
+# Aimed at a role change on the person issuing it. This is not a hierarchy
+# refusal and must not read like one: the level arithmetic is irrelevant here,
+# because nobody — not even the owner — rewrites their own role or permissions.
+ADMIN_SELF_TARGET_TEXT = os.getenv(
+    "ADMIN_SELF_TARGET_TEXT",
+    "⛔️ نمی‌تونی نقش یا دسترسی‌های خودت رو تغییر بدی.",
+)
 ADMIN_TARGET_NOT_FOUND_TEXT = os.getenv(
     "ADMIN_TARGET_NOT_FOUND_TEXT",
     "روی پیام کسی ریپلای کن تا مشخص بشه منظورت کیه.",
@@ -1896,29 +1989,31 @@ def _deadline(seconds: float) -> float:
 # one an operator already knows. It is a *separate setting* so it can be moved
 # without touching the assistant.
 #
-# The credential defaults to the conversation's, and that follows the precedent
-# ``tts`` sets rather than weakening the isolation requirement. What the brief
-# requires isolated is isolated and it is isolated structurally: histories, rate
-# windows, circuit breakers, failure state and daily allowances are all keyed by
-# **workload**, in ``gemini_pool`` and in ``db``, so awareness keeps its own
-# allowance and its own breaker even when the two share a credential. An
-# operator who has a spare key gives awareness one by setting
-# ``GEMINI_AWARENESS_API_KEY``.
+# The credential is its own, and there is no fallback. This is the operator's
+# decision, taken deliberately, and it reverses what this comment used to say.
 #
-# The default is *reported*, though. Sharing a credential means sharing a Google
-# project, and therefore a provider-side rate limit that no per-workload counter
-# can partition — and awareness is not a mode of the conversation the way tts is,
-# because it runs on its own timer in its own rooms rather than as part of a turn
-# that already happened. Measured on the deployment that produced this comment,
-# awareness and chat shared this key and the collision cost 26% of conversational
-# turns to rate limits, plus an awareness pool that spent its day's allowance and
-# then failed every pass until the reset. So ``gemini_pool.shared_credentials``
-# now reports this pairing at boot, and the operator decides whether to spend a
-# key on it.
-GEMINI_AWARENESS_API_KEY = (
-    os.getenv("GEMINI_AWARENESS_API_KEY", "").strip() or GEMINI_CHAT_API_KEY
-)
-GEMINI_AWARENESS_ALLOW_SHARED_KEY = _bool("GEMINI_AWARENESS_ALLOW_SHARED_KEY", True)
+# What the previous arrangement got right: the isolation that matters
+# structurally *was* already structural — histories, rate windows, circuit
+# breakers, failure state and daily allowances are all keyed by **workload**, so
+# awareness never spent the conversation's allowance even when the two shared a
+# key. What it got wrong was everything the provider does above us. Sharing a
+# credential means sharing a Google project, and therefore sharing one
+# provider-side rate limit that no per-workload counter can partition. Measured
+# on the deployment that produced the earlier comment, awareness and chat shared
+# this key and the collision cost 26% of conversational turns to rate limits,
+# plus an awareness pool that exhausted its allowance and then failed every pass
+# until the reset.
+#
+# So the fallback is gone and ``GEMINI_AWARENESS_ALLOW_SHARED_KEY`` now defaults
+# to False. The consequence is deliberate and must be stated plainly: with no
+# ``GEMINI_AWARENESS_API_KEY`` set, awareness has **no** credential and does no
+# work at all. That is the fail-closed direction — a workload that cannot run on
+# its own allowance does not run on somebody else's — and it is reported at boot
+# rather than discovered later. Setting the key is the operator action; there is
+# no way to satisfy this from inside the application, and inventing one would
+# mean going back to sharing.
+GEMINI_AWARENESS_API_KEY = os.getenv("GEMINI_AWARENESS_API_KEY", "").strip()
+GEMINI_AWARENESS_ALLOW_SHARED_KEY = _bool("GEMINI_AWARENESS_ALLOW_SHARED_KEY", False)
 GEMINI_AWARENESS_MODEL = os.getenv(
     "GEMINI_AWARENESS_MODEL", GEMINI_CHAT_MODEL
 ).strip()

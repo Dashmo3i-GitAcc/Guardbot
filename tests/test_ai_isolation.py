@@ -24,6 +24,7 @@ from app import (
     chat,
     config,
     db,
+    gemini_pool,
     mod_policy,
     transcribe,
 )
@@ -664,3 +665,56 @@ def test_the_speech_workload_is_never_reached_from_the_classifier():
     assert "transcribe" not in names
     assert "transcribe_ref" not in names
     assert "is_transcribable" not in names
+
+
+# ── The awareness workload's credential is its own ────────────────────────
+# This reverses an earlier arrangement, so it is pinned in two ways: the
+# behaviour of the builder that decides which keys a workload may draw on, and
+# the source of the assignment itself. A behavioural test alone would pass if
+# somebody reintroduced the fallback behind a flag; a source test alone would
+# pass if the flag were flipped. Both are needed.
+def test_the_awareness_workload_does_not_fall_back_to_the_chat_key():
+    """The fallback is gone, not merely disabled by a flag.
+
+    ``chat.awareness`` already degrades to ``skipped="no_key"`` when it has no
+    credential, so the property to pin is that no credential is reachable: with
+    its own key empty and nothing in the shared pool, the workload has none —
+    even though a chat key exists.
+    """
+    assert "GEMINI_CHAT_API_KEY" not in inspect.getsource(config).split(
+        "GEMINI_AWARENESS_API_KEY ="
+    )[1].split("\n")[0]
+
+    keys = config._pool_key_list(
+        "", "GEMINI_AWARENESS_API_KEY", [], allow_shared=False
+    )
+    assert keys == []
+
+
+def test_the_awareness_workload_does_not_draw_on_the_shared_pool_by_default():
+    """``*_ALLOW_SHARED_KEY`` is opt-in, and awareness now joins the others."""
+    assert config.GEMINI_AWARENESS_ALLOW_SHARED_KEY is False
+
+    keys = config._pool_key_list(
+        "", "GEMINI_AWARENESS_API_KEY", ["k-shared"], allow_shared=False
+    )
+    assert keys == []
+
+
+def test_a_workload_with_no_credential_reports_itself_rather_than_borrowing():
+    """The end of the chain: no key means no work, and it says so."""
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(config, "GEMINI_CHAT_API_KEY", "k-chat")
+        monkeypatch.setattr(config, "GEMINI_AWARENESS_API_KEY", "")
+        monkeypatch.setattr(config, "NEXUS_AWARENESS_ENABLED", True)
+        monkeypatch.setattr(
+            gemini_pool, "has_accounts", lambda workload: False
+        )
+
+        reply = asyncio.run(chat.awareness("a transcript"))
+
+        assert reply.skipped == "no_key"
+        assert reply.answered is False
+    finally:
+        monkeypatch.undo()

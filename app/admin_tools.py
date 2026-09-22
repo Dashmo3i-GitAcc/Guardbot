@@ -40,7 +40,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import admin_service, agent_data, config, db, nexus, rbac
+from . import admin_service, agent_data, config, db, nexus, rbac, vpnbot
 
 log = logging.getLogger("guardbot.admin.tools")
 
@@ -527,6 +527,144 @@ TOOLS: dict[str, ToolSpec] = {
         kind=KIND_READ,
         permission="moderation.review",
     ),
+    # -- the VPN bot: owner only, reads and writes alike ---------------------
+    # Five declarations rather than eleven, and the split is not cosmetic. The
+    # three reads answer questions; the one write tool carries an ``operation``
+    # parameter naming which of the six changes is wanted, the way
+    # ``codebuddy_task`` carries a classification rather than being ten tools.
+    # ``confirm_vpn_operation`` is separate because it is the *second* half of a
+    # money operation and must be separately askable — a model that could fold
+    # "do it" and "yes, really" into one call would have removed the step the
+    # step exists for.
+    #
+    # Every one of these is gated on ``vpn.read`` / ``vpn.manage``, which no
+    # role bundle carries, so they are offered to the owner and to nobody else.
+    "vpn_subscription_lookup": ToolSpec(
+        name="vpn_subscription_lookup",
+        description=(
+            "Look up the VPN services belonging to one Telegram account, by "
+            "numeric Telegram user id. Returns the service list only: never a "
+            "subscription link, a configuration URI or a panel client id, "
+            "because those are credentials. Answers with an explicit error when "
+            "the VPN service cannot be reached."
+        ),
+        kind=KIND_READ,
+        permission="vpn.read",
+        parameters=(
+            ("telegram_id", "INTEGER", "Numeric Telegram user id to look up."),
+        ),
+        required=("telegram_id",),
+    ),
+    "vpn_service_status": ToolSpec(
+        name="vpn_service_status",
+        description=(
+            "Look up one VPN service by its own numeric id: plan, status, "
+            "expiry and traffic. Use it to check what you are about to change "
+            "before changing it. Credentials are never returned."
+        ),
+        kind=KIND_READ,
+        permission="vpn.read",
+        parameters=(
+            ("service_id", "INTEGER", "Numeric VPN service id to look up."),
+        ),
+        required=("service_id",),
+    ),
+    "get_vpn_status": ToolSpec(
+        name="get_vpn_status",
+        description=(
+            "Whether the VPN service is reachable, what it currently has "
+            "switched on — its acquisition flow, its panel, and whether its "
+            "administrative write surface is open — and which VPN operations "
+            "are recorded and still waiting for the owner's confirmation. Use "
+            "it before telling the owner something is broken, and before "
+            "asking them to confirm something."
+        ),
+        kind=KIND_READ,
+        permission="vpn.read",
+    ),
+    "vpn_admin": ToolSpec(
+        name="vpn_admin",
+        description=(
+            "Change something in the VPN service. Owner only. Pick `operation` "
+            "and supply only the arguments it needs:\n"
+            "- vpn_service_enabled: service_id, enabled\n"
+            "- vpn_notifications: telegram_id, enabled\n"
+            "- vpn_plan_active: plan_id, enabled\n"
+            "- vpn_balance: telegram_id, amount (signed), reason\n"
+            "- vpn_orders_sweep: days, reason\n"
+            "- vpn_transaction_status: transaction_id, status, reason, "
+            "compensate\n"
+            "The last three move money or reject orders. They are NOT executed "
+            "when you call this: the operation is recorded and the owner is "
+            "asked to confirm it explicitly. Never tell the owner it is done — "
+            "say it is waiting for their confirmation. "
+            "This is refused for anybody who is not the owner of this bot."
+        ),
+        kind=KIND_WRITE,
+        permission="vpn.manage",
+        operation="vpn_admin",
+        parameters=(
+            (
+                "operation",
+                "STRING",
+                "One of: vpn_service_enabled, vpn_notifications, "
+                "vpn_plan_active, vpn_balance, vpn_orders_sweep, "
+                "vpn_transaction_status.",
+            ),
+            ("telegram_id", "INTEGER", "Numeric Telegram user id. Optional."),
+            ("service_id", "INTEGER", "Numeric VPN service id. Optional."),
+            ("plan_id", "INTEGER", "Numeric plan id. Optional."),
+            ("transaction_id", "INTEGER", "Numeric transaction id. Optional."),
+            (
+                "enabled",
+                "BOOLEAN",
+                "The state to set, for the three toggle operations. Optional.",
+            ),
+            (
+                "amount",
+                "INTEGER",
+                "Signed balance change, for vpn_balance. Optional.",
+            ),
+            (
+                "days",
+                "INTEGER",
+                "How far back the sweep reaches, for vpn_orders_sweep. Optional.",
+            ),
+            (
+                "compensate",
+                "BOOLEAN",
+                "Whether to compensate, for vpn_transaction_status. Optional.",
+            ),
+            (
+                "reason",
+                "STRING",
+                "Why, in the owner's words. Required for the three that change "
+                "money or orders. Optional.",
+            ),
+        ),
+        required=("operation",),
+    ),
+    "confirm_vpn_operation": ToolSpec(
+        name="confirm_vpn_operation",
+        description=(
+            "Release a recorded VPN operation the owner has approved. Use this "
+            "only when the owner approves an operation you told them about — "
+            "«تأییدش کن», «اوکی», «برو جلو». Pass `pending_id` when they named "
+            "one; leave it out when they simply approved. This is a request to "
+            "confirm, not a confirmation: the server checks that the person "
+            "asking is the owner and that exactly one operation is waiting, and "
+            "answers with a question when more than one is. If it answers with "
+            "a question, ask the owner which — never pick. You cannot change "
+            "the amount, the user or anything else at this point; the recorded "
+            "operation is what runs."
+        ),
+        kind=KIND_WRITE,
+        permission="vpn.manage",
+        operation="vpn_confirm",
+        parameters=(
+            ("pending_id", "STRING", "The recorded operation to confirm. Optional."),
+        ),
+    ),
 }
 
 
@@ -593,6 +731,13 @@ def _enum_for(tool: str, param: str) -> list[str] | None:
         return sorted(agent_bridge.OPERATIONS)
     if (tool, param) == ("codebuddy_task", "reply_mode"):
         return ["text", "document", "both"]
+    if (tool, param) == ("vpn_admin", "operation"):
+        # The six writes and not ``vpn_confirm``: confirming is its own tool,
+        # and offering it here would invite a model to fold "do it" and "yes,
+        # really" into one call, which is the step the step exists to prevent.
+        from . import vpn_service
+
+        return sorted(vpn_service.VPN_OPS)
     return None
 
 
@@ -1030,8 +1175,48 @@ def parse_write_call(
             "reply_mode": str(args.get("reply_mode", "") or ""),
         }
 
+    # ── The VPN payload ───────────────────────────────────────────────────
+    # ``vpn_admin`` names its operation in an argument rather than being six
+    # tools, so this is where the argument becomes the operation the service
+    # will authorise. The vocabulary is closed here *and* checked again in
+    # ``admin_service``: a name that is not one of the six never becomes a
+    # request at all, and a request that somehow carried one would be refused
+    # as an unknown operation before any other check ran.
+    #
+    # ``vpn_confirm`` is refused as a value for this parameter on purpose. It
+    # is a separate tool, and allowing it here would let one call both ask for a
+    # money operation and approve it — which is the whole thing the two-step
+    # shape exists to make impossible.
+    operation = spec.operation
+    vpn_fields: dict[str, Any] = {}
+    if spec.operation == "vpn_admin":
+        chosen = str(args.get("operation", "") or "").strip().lower()
+        if chosen not in admin_service.VPN_OPERATIONS or chosen == "vpn_confirm":
+            log.info("vpn_admin called with an unusable operation %r", chosen)
+            return None
+        operation = chosen
+        # ``telegram_id`` is the subject of two of the six, and it is the same
+        # thing a user-targeted operation carries — so it lands in ``target_id``
+        # and there stays one answer to "who is this about".
+        target = _coerce_int(args, "telegram_id")
+        vpn_fields = {
+            "service_id": _coerce_int(args, "service_id"),
+            "plan_id": _coerce_int(args, "plan_id"),
+            "transaction_id": _coerce_int(args, "transaction_id"),
+            "days": _coerce_int(args, "days"),
+            "amount": _coerce_int(args, "amount"),
+            # Passed through raw: ``AdminRequest.normalized`` is the one place a
+            # value becomes a boolean, and it refuses a string rather than
+            # reading ``bool("false")`` as ``True``.
+            "enabled": args.get("enabled"),
+            "compensate": args.get("compensate"),
+            "status": str(args.get("status", "") or ""),
+        }
+    elif spec.operation == "vpn_confirm":
+        vpn_fields = {"pending_id": str(args.get("pending_id", "") or "")}
+
     return admin_service.AdminRequest(
-        operation=spec.operation,
+        operation=operation,
         chat_id=chat_id,
         actor_id=actor_id,
         target_id=target,
@@ -1047,6 +1232,7 @@ def parse_write_call(
         # stack.
         at=int(time.time()),
         **agent_fields,
+        **vpn_fields,
     )
 
 
@@ -1266,7 +1452,65 @@ async def run_read_tool(
     if name == "get_service_status":
         return agent_data.service_status()
 
+    # -- the VPN reads: owner only, and never a credential -------------------
+    if name == "vpn_subscription_lookup":
+        # ``telegram_id`` rather than ``user_id``: the parameter is named for
+        # what it is in the VPN bot's vocabulary, and reading it through
+        # ``_coerce_user_id`` would look for a key the schema never declared.
+        target = _coerce_int(args, "telegram_id")
+        if not target:
+            return {"error": "no telegram id supplied"}
+        return await _vpn_read(
+            vpnbot.subscription_lookup(target), agent_data.vpn_subscription_view
+        )
+
+    if name == "vpn_service_status":
+        service_id = _coerce_int(args, "service_id")
+        if not service_id:
+            return {"error": "no service id supplied"}
+        return await _vpn_read(
+            vpnbot.service_status(service_id), agent_data.vpn_one_service_view
+        )
+
+    if name == "get_vpn_status":
+        # The integration's own report, plus what this room has recorded and not
+        # yet approved. Both halves are needed to answer "what is waiting for
+        # me?" without the model reconstructing it from the conversation.
+        from . import vpn_service
+
+        answer = await _vpn_read(vpnbot.status(), agent_data.vpn_status_view)
+        if "error" not in answer:
+            answer["waiting_for_confirmation"] = vpn_service.pending_lines(
+                chat_id=chat_id
+            )
+        return answer
+
     return {"error": f"unknown tool {name}"}
+
+
+async def _vpn_read(call, build) -> dict:
+    """Await one VPN read and shape it, or answer with the transport failure.
+
+    The two failure modes are kept apart, and that is the whole point of the
+    helper: "the VPN bot could not be asked" is the integration's problem, and
+    it comes back as an explicit error rather than as an empty result — a model
+    told "there are no services" will say so, while a model told ``{}`` will
+    fill the gap in itself. A refusal the VPN bot decided on never reaches here,
+    because a decision is a 200 with ``ok: false`` and is shaped by ``build``.
+
+    ``call`` is a coroutine, already built, because the three reads have three
+    different argument shapes and wrapping them in a lambda to satisfy one
+    signature would obscure more than it hides.
+    """
+    try:
+        answer = await call
+    except vpnbot.VpnBotError as exc:
+        log.info("vpn read failed: %s", exc.code)
+        return agent_data.vpn_unreachable(exc.code)
+    except Exception as exc:  # noqa: BLE001 - a read never raises into the loop
+        log.exception("vpn read failed unexpectedly")
+        return agent_data.vpn_unreachable(type(exc).__name__)
+    return build(answer)
 
 
 def agent_status(*, chat_id: int = 0, limit: int = 6) -> dict:

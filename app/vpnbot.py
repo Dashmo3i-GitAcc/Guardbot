@@ -34,6 +34,22 @@ SERVICE_NAME = "guardbot"
 INVITE_PATH = "/internal/acquisition/invite"
 HEALTH_PATH = "/internal/health"
 
+# The operational surface. Reads and writes both travel as POST with a signed
+# body, including the reads: the signature covers the method, the path, the
+# timestamp, the nonce and the body hash, and it is verified against the path
+# *without* the query string. A parameter sent as ``?telegram_id=`` would
+# therefore sit outside the signature and a captured request could be replayed
+# with a different id, so no parameter is ever sent that way.
+STATUS_PATH = "/internal/status"
+SUBSCRIPTION_LOOKUP_PATH = "/internal/subscription/lookup"
+SERVICE_STATUS_PATH = "/internal/service/status"
+SERVICE_ENABLED_PATH = "/internal/admin/service/enabled"
+NOTIFICATIONS_PATH = "/internal/admin/notifications"
+PLAN_ACTIVE_PATH = "/internal/admin/plan/active"
+BALANCE_PATH = "/internal/admin/balance"
+ORDERS_SWEEP_PATH = "/internal/admin/orders/sweep"
+TRANSACTION_STATUS_PATH = "/internal/admin/transaction/status"
+
 # Refusal codes that describe *our* side of the wire, as opposed to a decision
 # the VPN bot made about the user.
 ERR_NOT_CONFIGURED = "not_configured"
@@ -176,3 +192,135 @@ async def request_invite(
 
 async def health() -> dict:
     return await _call("GET", HEALTH_PATH)
+
+
+async def status() -> dict:
+    """What the integration can currently do, and whether its panel is wired."""
+    return await _call("GET", STATUS_PATH)
+
+
+async def subscription_lookup(telegram_id: int) -> dict:
+    """Every VPN service belonging to one Telegram account.
+
+    The answer never contains a subscription link or a panel client id — the
+    VPN bot drops those fields before serialising, rather than trusting this
+    side to redact them.
+    """
+    return await _call(
+        "POST", SUBSCRIPTION_LOOKUP_PATH, {"telegram_id": int(telegram_id)}
+    )
+
+
+async def service_status(service_id: int) -> dict:
+    return await _call("POST", SERVICE_STATUS_PATH, {"service_id": int(service_id)})
+
+
+# ── Writes ────────────────────────────────────────────────────────────────
+# Every write carries ``operator_id``: the Telegram id of the person on whose
+# behalf this bot is acting. The VPN bot records it as ``guardbot:<id>`` in its
+# own audit table, the way the dashboard records ``dashboard:<user>``. That id
+# is *asserted* by us and not independently proven by the other side — the HMAC
+# proves which service asked, and the owner-only check happened here. Recording
+# it anyway is what makes "who changed this" answerable from either side.
+async def set_service_enabled(
+    service_id: int, enabled: bool, *, operator_id: int, interface: str = ""
+) -> dict:
+    return await _call(
+        "POST",
+        SERVICE_ENABLED_PATH,
+        {
+            "service_id": int(service_id),
+            "enabled": bool(enabled),
+            "operator_id": int(operator_id),
+            "interface": interface or "",
+        },
+    )
+
+
+async def set_notifications_enabled(
+    telegram_id: int, enabled: bool, *, operator_id: int, interface: str = ""
+) -> dict:
+    return await _call(
+        "POST",
+        NOTIFICATIONS_PATH,
+        {
+            "telegram_id": int(telegram_id),
+            "enabled": bool(enabled),
+            "operator_id": int(operator_id),
+            "interface": interface or "",
+        },
+    )
+
+
+async def set_plan_active(
+    plan_id: int, active: bool, *, operator_id: int, interface: str = ""
+) -> dict:
+    return await _call(
+        "POST",
+        PLAN_ACTIVE_PATH,
+        {
+            "plan_id": int(plan_id),
+            "active": bool(active),
+            "operator_id": int(operator_id),
+            "interface": interface or "",
+        },
+    )
+
+
+async def adjust_balance(
+    telegram_id: int,
+    delta: int,
+    reason: str,
+    *,
+    operator_id: int,
+    interface: str = "",
+) -> dict:
+    return await _call(
+        "POST",
+        BALANCE_PATH,
+        {
+            "telegram_id": int(telegram_id),
+            "delta": int(delta),
+            "reason": str(reason),
+            "operator_id": int(operator_id),
+            "interface": interface or "",
+        },
+    )
+
+
+async def reject_stale_orders(
+    days: int, reason: str, *, operator_id: int, interface: str = ""
+) -> dict:
+    return await _call(
+        "POST",
+        ORDERS_SWEEP_PATH,
+        {
+            "days": int(days),
+            "reason": str(reason),
+            "operator_id": int(operator_id),
+            "interface": interface or "",
+        },
+    )
+
+
+async def set_transaction_status(
+    transaction_id: int,
+    status: str,
+    reason: str,
+    *,
+    operator_id: int,
+    compensate: bool = False,
+    interface: str = "",
+) -> dict:
+    return await _call(
+        "POST",
+        TRANSACTION_STATUS_PATH,
+        {
+            "transaction_id": int(transaction_id),
+            "status": str(status),
+            "reason": str(reason),
+            "compensate": bool(compensate),
+            "operator_id": int(operator_id),
+            "interface": interface or "",
+        },
+    )

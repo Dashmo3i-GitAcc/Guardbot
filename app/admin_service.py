@@ -47,7 +47,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Protocol, runtime_checkable
 
-from . import config, db, nexus, rbac
+from . import config, db, nexus, rbac, vpnbot
 
 log = logging.getLogger("guardbot.admin")
 
@@ -71,6 +71,16 @@ log = logging.getLogger("guardbot.admin")
 OP_USER = "user"
 OP_MESSAGE = "message"
 OP_SYSTEM = "system"
+# The fourth kind is for an operation whose subject is not anybody in a chat and
+# not a message, but an object inside another service: a VPN service, a plan, a
+# transaction. There is nothing here for the gateway to validate — a plan id is
+# not a Telegram user and checking it against Telegram's member list would be
+# meaningless — so the kind exists to *skip* the user and message branches
+# rather than to add a third validation. What it does add is a pre-flight: an
+# operation against an integration this bot has not been pointed at can never
+# succeed, so it is refused here, before anything is recorded, rather than
+# discovered as an unreachable host later.
+OP_VPN = "vpn"
 
 
 @dataclass(frozen=True)
@@ -214,7 +224,93 @@ OPERATIONS: dict[str, Operation] = {
         "agent.task",
         kind=OP_SYSTEM,
     ),
+    # ── The VPN bot's operational surface ─────────────────────────────────
+    # Six writes against another service, and the one operation that releases
+    # them. They carry no Telegram right — none of them touches a chat — and the
+    # permission behind every one of them is ``vpn.manage``, which no role
+    # bundle carries. So "an administrator edits a customer's balance" is not
+    # refused, it is inexpressible, exactly as "an administrator silences the
+    # assistant" is.
+    #
+    # Three of the six are marked in ``app/vpn_service.py`` as requiring the
+    # owner's explicit confirmation. That is not a property of the operation
+    # table, and deliberately so: the table says *who may ask*, and the adapter
+    # says *what the ask produces*. A money operation asked for by the owner is
+    # still recorded and still waits, because the whole point of the second step
+    # is that the same sentence cannot both authorise and execute.
+    #
+    # ``vpn_confirm`` is an ordinary operation in this table rather than a
+    # special case outside it, and that is the security choice: confirming goes
+    # through the same seven steps as everything else — shape, state, replay,
+    # target, RBAC, rights, call — so the second half of a money operation is
+    # authorised by the same code as the first half.
+    "vpn_service_enabled": _op(
+        "vpn_service_enabled",
+        "vpn.manage",
+        None,
+        "vpn.service.enabled",
+        kind=OP_VPN,
+    ),
+    "vpn_notifications": _op(
+        "vpn_notifications",
+        "vpn.manage",
+        None,
+        "vpn.notifications",
+        kind=OP_VPN,
+    ),
+    "vpn_plan_active": _op(
+        "vpn_plan_active",
+        "vpn.manage",
+        None,
+        "vpn.plan.active",
+        kind=OP_VPN,
+    ),
+    "vpn_balance": _op(
+        "vpn_balance",
+        "vpn.manage",
+        None,
+        "vpn.balance",
+        kind=OP_VPN,
+    ),
+    "vpn_orders_sweep": _op(
+        "vpn_orders_sweep",
+        "vpn.manage",
+        None,
+        "vpn.orders.sweep",
+        kind=OP_VPN,
+    ),
+    "vpn_transaction_status": _op(
+        "vpn_transaction_status",
+        "vpn.manage",
+        None,
+        "vpn.transaction.status",
+        kind=OP_VPN,
+    ),
+    "vpn_confirm": _op(
+        "vpn_confirm",
+        "vpn.manage",
+        None,
+        "vpn.confirm",
+        kind=OP_VPN,
+    ),
 }
+
+# The VPN operations, by name. Kept here rather than imported from
+# ``app/vpn_service.py`` because that module imports this one, and a cycle at
+# import time would make authorising a ban depend on the VPN adapter being
+# importable. ``tests/test_vpn_admin.py`` asserts the two sets agree, so the
+# duplication cannot drift silently.
+VPN_OPERATIONS = frozenset(
+    {
+        "vpn_service_enabled",
+        "vpn_notifications",
+        "vpn_plan_active",
+        "vpn_balance",
+        "vpn_orders_sweep",
+        "vpn_transaction_status",
+        "vpn_confirm",
+    }
+)
 
 # The role names an actor may ask for, mapped to the canonical role. Kept here
 # rather than in ``app/main.py`` because both interfaces accept them now, and two
@@ -259,6 +355,17 @@ OUTCOME_AGENT_REJECTED = "agent_rejected"
 OUTCOME_AGENT_BUSY = "agent_busy"
 OUTCOME_AGENT_DUPLICATE = "agent_duplicate"
 OUTCOME_AGENT_WAITING = "agent_waiting"
+# ── The VPN bot ───────────────────────────────────────────────────────────
+# Four outcomes, and the split is the one that decides what the owner does
+# next. "Unavailable" means the integration could not be reached at all — look
+# at the wiring. "Refused" means it answered and the answer was no — look at
+# the request. "Error" means something on our side of the wire was malformed.
+# "Awaiting confirmation" is not a failure: nothing ran, and the next step is
+# the owner's own approval.
+OUTCOME_VPN_UNAVAILABLE = "vpn_unavailable"
+OUTCOME_VPN_REFUSED = "vpn_refused"
+OUTCOME_VPN_ERROR = "vpn_error"
+OUTCOME_VPN_AWAITING_CONFIRMATION = "vpn_awaiting_confirmation"
 
 # Which interfaces can raise a request. Recorded in the audit trail, because
 # "was this a person typing or a model proposing?" is the first question after
@@ -315,6 +422,30 @@ class AdminRequest:
     # to ``text`` in the bridge, and no value here can change what is delivered
     # versus what is withheld.
     reply_mode: str = ""
+    # ── The VPN payload ───────────────────────────────────────────────────
+    # Ids and values for one operation against the VPN bot. All data, none of
+    # it authority: the ids say *which* object, and whether the actor may touch
+    # it is decided in ``authorize`` from the permission on the operation.
+    #
+    # ``enabled`` is a tri-state and that is the point. A service toggle has
+    # three meaningful states — "turn it on", "turn it off" and "nobody said" —
+    # and collapsing the third into ``False`` would make a model that forgot
+    # the argument silently disable something. ``None`` is refused as malformed
+    # by ``app/vpn_service.py``.
+    service_id: int = 0
+    plan_id: int = 0
+    transaction_id: int = 0
+    days: int = 0
+    amount: int = 0
+    enabled: bool | None = None
+    compensate: bool = False
+    status: str = ""
+    # The id of a *recorded* VPN operation this request refers to. It is a
+    # reference, not an approval: what it names is looked up, and everything the
+    # execution needs is re-read from that row. Named ``pending_id`` rather than
+    # ``request_id`` because ``request_id`` below is already the replay key, and
+    # one name for two different things is how a replay key becomes a token.
+    pending_id: str = ""
     request_id: str = ""
     interface: str = INTERFACE_PYTHON
     # When the request was created, as a unix timestamp. Checked against the
@@ -335,6 +466,24 @@ class AdminRequest:
             except (TypeError, ValueError):
                 return default
 
+        def _tri_bool(value) -> bool | None:
+            """A real boolean, or ``None`` when nobody said.
+
+            ``bool("false")`` is ``True``, so a string is *not* coerced: a
+            model that sends the word rather than the value has not expressed a
+            state, and treating it as one would be guessing. ``int`` is accepted
+            because the typed command path builds these in Python.
+            """
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int):
+                return bool(value)
+            return None
+
+        def _flag(value) -> bool:
+            decided = _tri_bool(value)
+            return bool(decided)
+
         role = str(self.role or "").strip().lower()
         return replace(
             self,
@@ -353,6 +502,15 @@ class AdminRequest:
             task=str(self.task or "").strip()[: int(db.AGENT_TASK_MAX_CHARS)],
             agent_operation=str(self.agent_operation or "").strip().lower()[:40],
             reply_mode=str(self.reply_mode or "").strip().lower()[:16],
+            service_id=_int(self.service_id),
+            plan_id=_int(self.plan_id),
+            transaction_id=_int(self.transaction_id),
+            days=_int(self.days),
+            amount=_int(self.amount),
+            enabled=_tri_bool(self.enabled),
+            compensate=_flag(self.compensate),
+            status=str(self.status or "").strip().lower()[:32],
+            pending_id=str(self.pending_id or "").strip()[:64],
             request_id=str(self.request_id or "")[:120],
             interface=self.interface if self.interface in (INTERFACE_AI, INTERFACE_PYTHON)
             else INTERFACE_PYTHON,
@@ -523,11 +681,29 @@ def authorize(
     handed out, not merely *who* may act.
     """
     actor = actor if actor is not None else rbac.resolve(request.actor_id)
-    target = rbac.resolve(request.target_id) if request.target_id else None
 
     operation = OPERATIONS.get(request.operation)
     if operation is None:
         return rbac.Decision(False, rbac.REASON_MISSING_PERMISSION, "unknown operation")
+
+    # Only a *user-targeted* operation has a target the hierarchy rules are
+    # about. This distinction is load-bearing, and it was found by a live run
+    # rather than by a test: a VPN operation's ``target_id`` is the **subject**
+    # of the change — the customer whose balance moves, whose reminders are
+    # muted — and resolving it into a principal makes the owner-protection and
+    # hierarchy checks fire against that customer. A balance change for the
+    # owner would be refused as "the target is the owner", and one for an
+    # administrator would be refused as "the target is at your own level".
+    # Neither has anything to do with who may change a balance, which
+    # ``vpn.manage`` has already decided.
+    #
+    # ``promote_member`` and ``demote_member`` are ``OP_USER`` and keep their
+    # target; the system operations never carried one.
+    target = (
+        rbac.resolve(request.target_id)
+        if request.target_id and operation.kind == OP_USER
+        else None
+    )
 
     if operation.changes_role:
         role = request.role or rbac.ROLE_MODERATOR
@@ -631,6 +807,21 @@ async def execute(
     elif operation.kind == OP_MESSAGE:
         if not request.message_id:
             return _result(request, OUTCOME_BAD_TARGET, detail="message_id")
+    elif operation.kind == OP_VPN:
+        # Nothing to validate here. The subject is an object inside another
+        # service, and its per-operation requirements are the adapter's own
+        # business — ``app/vpn_service.py`` refuses a missing amount by naming
+        # the field. What this branch does is the pre-flight the kind exists
+        # for: an operation against an integration this bot has not been pointed
+        # at cannot succeed, so it is refused *here*, before anything is
+        # recorded, rather than discovered later as an unreachable host. Either
+        # way it lands in ``admin_audit`` as a refusal, never as a success.
+        if not vpnbot.is_configured():
+            result = _result(
+                request, OUTCOME_VPN_UNAVAILABLE, detail="not_configured"
+            )
+            _record(request, result)
+            return result
 
     # 5. Authorisation, resolved here, from the id. Nothing the caller said
     #    about itself is trusted, because nothing the caller said about itself
@@ -759,6 +950,15 @@ async def _apply(
         from . import agent_service
 
         return await agent_service.submit(request)
+    elif request.operation in VPN_OPERATIONS:
+        # The same shape as the line above, for the same reason and one more:
+        # ``app/vpn_service.py`` imports this module for its ``AdminResult``, so
+        # a module-scope import here would be a cycle. Importing it at the point
+        # of use keeps "authorise a ban" independent of whether the VPN adapter
+        # can be imported at all.
+        from . import vpn_service
+
+        return await vpn_service.submit(request)
     else:  # pragma: no cover - OPERATIONS and this branch move together
         raise ValueError(f"unhandled operation {request.operation}")
     return ""
@@ -970,6 +1170,10 @@ def message_for(outcome: str) -> str:
         OUTCOME_AGENT_BUSY: config.AGENT_BUSY_TEXT,
         OUTCOME_AGENT_DUPLICATE: config.AGENT_DUPLICATE_TEXT,
         OUTCOME_AGENT_WAITING: config.AGENT_WAITING_TEXT,
+        OUTCOME_VPN_UNAVAILABLE: config.VPN_UNAVAILABLE_TEXT,
+        OUTCOME_VPN_REFUSED: config.VPN_REFUSED_TEXT,
+        OUTCOME_VPN_ERROR: config.VPN_FAILED_TEXT,
+        OUTCOME_VPN_AWAITING_CONFIRMATION: config.VPN_AWAITING_CONFIRMATION_TEXT,
     }.get(outcome, config.ADMIN_DENIED_TEXT)
 
 
@@ -1016,6 +1220,21 @@ OUTCOME_GLOSS = {
     OUTCOME_AGENT_WAITING: (
         "the task is recorded but has not started: it is a dangerous operation "
         "and is waiting for the owner to confirm it explicitly"
+    ),
+    OUTCOME_VPN_UNAVAILABLE: (
+        "the VPN service could not be reached at all, so nothing was changed"
+    ),
+    OUTCOME_VPN_REFUSED: (
+        "the VPN service answered and refused: an unknown id, a panel error, or "
+        "a value it will not accept"
+    ),
+    OUTCOME_VPN_ERROR: (
+        "the operation did not complete because of a problem on this side of "
+        "the wire, not a decision by the VPN service"
+    ),
+    OUTCOME_VPN_AWAITING_CONFIRMATION: (
+        "the operation was recorded but has not run: it moves money or rejects "
+        "orders, and is waiting for the owner to confirm it explicitly"
     ),
 }
 
@@ -1136,6 +1355,9 @@ _REFUSAL_OUTCOMES = frozenset({
     OUTCOME_AGENT_DISABLED,
     OUTCOME_AGENT_REJECTED,
     OUTCOME_AGENT_BUSY,
+    OUTCOME_VPN_UNAVAILABLE,
+    OUTCOME_VPN_REFUSED,
+    OUTCOME_VPN_ERROR,
 })
 
 

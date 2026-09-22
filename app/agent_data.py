@@ -32,6 +32,7 @@ This is context for an answer, not a copy of the database in a prompt.
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from . import config, db, nexus, rbac
@@ -86,6 +87,68 @@ def _clean(value):
         return {k: _clean(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_clean(v) for v in value]
+    return value
+
+
+# ── The VPN redactor, and why it is a second one ──────────────────────────
+# A VPN service is described by a *connection string*, and that string is the
+# credential: ``vless://…`` and its siblings carry the client id in the
+# fragment, and a subscription link carries it in the path. So the VPN reads
+# need patterns the generic redactor does not have.
+#
+# They are kept here rather than added to ``agent_bridge._SECRET_PATTERNS`` for
+# a specific reason: a bare 32-hex rule is right for a panel client id and wrong
+# for this bot's own identity handle, which is a deliberate non-secret that
+# ``identity_view`` returns on purpose. A global rule would quietly rewrite it
+# and break the thing the identity layer exists to provide. Two redactors, each
+# applied where it belongs, cannot interfere.
+_VPN_SECRET_PATTERNS: tuple[re.Pattern, ...] = (
+    # A configuration URI. The whole thing goes: there is no useful part left
+    # once the credential in it is removed, and a half-URI invites the reader to
+    # reconstruct the rest.
+    re.compile(
+        r"(?i)\b(?:vless|vmess|trojan|hysteria2|hysteria|tuic|wireguard|"
+        r"v2ray|clash|ssr|ss)://\S+"
+    ),
+    # A subscription link, by the parameter the panel uses and by the path it
+    # serves on. The VPN bot omits the field entirely before serialising, so
+    # this is the second line of defence — for a value that arrives inside a
+    # string somebody else assembled.
+    re.compile(r"(?i)\bsub_url\s*[:=]\s*\S+"),
+    re.compile(r"(?i)https?://\S+/(?:sub|subscription|link)/\S*"),
+    # A panel client id, hyphenated or bare.
+    re.compile(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+    ),
+    re.compile(r"\b[0-9a-fA-F]{32}\b"),
+)
+
+
+def redact_vpn(value):
+    """Scrub VPN credentials, then anything else credential-shaped.
+
+    Both redactors, in that order, so a token that happens to sit inside a
+    connection string is removed by whichever pattern sees it first.
+    """
+    if not isinstance(value, str):
+        return value
+    from . import agent_bridge
+
+    out = agent_bridge.redact(value)
+    for pattern in _VPN_SECRET_PATTERNS:
+        out = pattern.sub(agent_bridge.REDACTED, out)
+    return out
+
+
+def _clean_vpn(value):
+    """``_clean`` for VPN payloads: the VPN redactor, recursively."""
+    if isinstance(value, str):
+        return redact_vpn(value)
+    if isinstance(value, dict):
+        return {k: _clean_vpn(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean_vpn(v) for v in value]
     return value
 
 
@@ -481,6 +544,114 @@ def service_status() -> dict:
             "summary": service_adapters.summary(),
         }
     )
+
+
+# ── The VPN reads ─────────────────────────────────────────────────────────
+# The fields a VPN service may be described by, mirroring the allowlist the VPN
+# bot applies before it serialises (``user_services.PUBLIC_SERVICE_FIELDS``).
+#
+# Two independent narrowings of the same object, and that is deliberate rather
+# than redundant: the VPN bot's copy protects every caller of its API, and this
+# one holds even if a future version of that API starts sending more. The
+# connection string and the panel client id are absent from both lists — the
+# plan's rule is that omitting beats redacting, because a field that is never
+# copied cannot be leaked by a redactor that misses.
+VPN_SERVICE_FIELDS = (
+    "id",
+    "display_name",
+    "plan_name",
+    "status",
+    "enable",
+    "is_trial",
+    "days_left",
+    "days_left_short",
+    "expires_at",
+    "total_bytes",
+    "used_bytes",
+    "limit_ip",
+)
+
+# Ceilings. A list of services is context for an answer, not a dump.
+MAX_VPN_SERVICES = 20
+
+
+def vpn_service_view(raw) -> dict:
+    """One VPN service, field by field. Never ``**raw``.
+
+    Only scalars are copied, and only the ones on the allowlist. A nested
+    object — which is where a credential would hide — is dropped rather than
+    walked, because there is no field in this shape that is meant to be one.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for key in VPN_SERVICE_FIELDS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            out[key] = value
+        elif isinstance(value, str):
+            out[key] = redact_vpn(value)[:120]
+    return out
+
+
+def vpn_subscription_view(answer) -> dict:
+    """Every VPN service belonging to one Telegram account.
+
+    The count is computed from the narrowed rows rather than taken from the
+    answer, so a row that was dropped for being unreadable cannot inflate it.
+    """
+    if not isinstance(answer, dict):
+        return {"error": "the VPN service answered something that was not readable"}
+    raw = answer.get("services")
+    rows = [vpn_service_view(item) for item in raw] if isinstance(raw, list) else []
+    rows = [row for row in rows if row][:MAX_VPN_SERVICES]
+    return {
+        "found": bool(answer.get("found")),
+        "telegram_id": int(answer.get("telegram_id") or 0),
+        "has_service": bool(answer.get("has_service")),
+        "count": len(rows),
+        "services": rows,
+    }
+
+
+def vpn_one_service_view(answer) -> dict:
+    """One VPN service by its own id, or an explicit "there is no such service"."""
+    if not isinstance(answer, dict):
+        return {"error": "the VPN service answered something that was not readable"}
+    return {
+        "found": bool(answer.get("found")),
+        "service_id": int(answer.get("service_id") or 0),
+        "service": vpn_service_view(answer.get("service")),
+    }
+
+
+def vpn_status_view(answer) -> dict:
+    """What the VPN integration currently has switched on, from its own report."""
+    if not isinstance(answer, dict):
+        return {"error": "the VPN service answered something that was not readable"}
+    return {
+        "service": str(answer.get("service") or "")[:40],
+        "acquisition_enabled": bool(answer.get("acquisition")),
+        "admin_writes_enabled": bool(answer.get("admin_writes")),
+        "panel_configured": bool(answer.get("panel_configured")),
+        "bot_username_configured": bool(answer.get("bot_username_configured")),
+    }
+
+
+def vpn_unreachable(code: str = "") -> dict:
+    """The answer when the VPN bot could not be asked at all.
+
+    An explicit error rather than an empty success, for the same reason the rest
+    of this module does it: a model told "no services" will say so, while a
+    model told ``{}`` will fill the gap in itself. The code is one of
+    ``app/vpnbot.py``'s four, and it carries no URL and no detail string.
+    """
+    return {
+        "error": "the VPN service could not be reached",
+        "code": str(code or "")[:40],
+    }
 
 
 def principal_view(user_id: int) -> dict:

@@ -437,3 +437,128 @@ def test_a_config_entry_naming_the_owner_is_ignored(monkeypatch):
 def test_configured_admins_are_counted_for_the_startup_log(monkeypatch):
     monkeypatch.setattr(config, "CONFIG_ADMINS", ["1:helper", "2:moderator", "junk"])
     assert rbac.configured_admin_count() == 2
+
+
+# ── Nobody rewrites their own authority ───────────────────────────────────
+# The requirement is absolute, so it is asserted as itself rather than through
+# the level arithmetic that used to catch it by accident. `REASON_SELF_TARGET`
+# was defined but never emitted before this; the first test is the "no dead
+# constant" check that keeps the vocabulary and the behaviour together.
+def test_a_senior_admin_cannot_promote_themselves(staff):
+    senior = staff["senior"]
+
+    decision = rbac.authorize_grant(
+        senior, rbac.ROLE_HELPER, rbac.ROLE_PERMISSIONS[rbac.ROLE_HELPER],
+        target=senior,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == rbac.REASON_SELF_TARGET
+
+
+def test_a_senior_admin_cannot_demote_themselves(staff):
+    senior = staff["senior"]
+
+    decision = rbac.authorize_grant(
+        senior, rbac.ROLE_HELPER, rbac.ROLE_PERMISSIONS[rbac.ROLE_HELPER],
+        target=senior,
+    )
+
+    assert decision.reason == rbac.REASON_SELF_TARGET
+
+
+def test_the_self_refusal_is_not_reported_as_a_rank_problem(staff):
+    """The reason names the rule that actually applies.
+
+    Reporting ``higher_rank`` here would be true by arithmetic and false as an
+    explanation: the actor is not below anybody, they are aiming at themselves.
+    """
+    senior = staff["senior"]
+
+    decision = rbac.authorize_grant(
+        senior, rbac.ROLE_HELPER, rbac.ROLE_PERMISSIONS[rbac.ROLE_HELPER],
+        target=senior,
+    )
+
+    assert decision.reason != rbac.REASON_HIGHER_RANK
+    assert decision.reason == rbac.REASON_SELF_TARGET
+
+
+def test_even_the_owner_cannot_change_their_own_role(staff):
+    """The owner is refused, and by the more fundamental rule.
+
+    ``owner_protected`` wins the ordering on purpose — "the owner is never a
+    target" is the stronger statement, and it is the more useful sentence.
+    """
+    owner = staff["owner"]
+
+    decision = rbac.authorize_grant(
+        owner, rbac.ROLE_SENIOR_ADMIN, rbac.ROLE_PERMISSIONS[rbac.ROLE_SENIOR_ADMIN],
+        target=owner,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == rbac.REASON_OWNER_PROTECTED
+
+
+def test_the_self_guard_only_changes_the_reason_for_other_operations(staff):
+    """Self-targeting is refused either way; only the named rule changes.
+
+    This is worth pinning because an earlier docstring claimed self-mute was
+    *allowed*. It never was: an actor's own level equals their own level, so the
+    hierarchy check refuses it. The new guard does not make self-targeting
+    stricter — it makes the refusal for a *role change* name the rule that
+    actually applies.
+    """
+    senior = staff["senior"]
+
+    plain = rbac.authorize(senior, "moderation.mute", target=senior)
+    flagged = rbac.authorize(senior, "moderation.mute", target=senior, role_change=True)
+
+    assert plain.allowed is False
+    assert flagged.allowed is False
+    # Without the flag it is still the hierarchy check that catches it, which is
+    # correct for a non-role operation.
+    assert plain.reason == rbac.REASON_HIGHER_RANK
+    assert flagged.reason == rbac.REASON_SELF_TARGET
+
+
+def test_an_actor_can_still_change_somebody_elses_role(staff):
+    """The guard refuses the self-target, not the operation."""
+    senior = staff["senior"]
+
+    decision = rbac.authorize_grant(
+        senior, rbac.ROLE_HELPER, rbac.ROLE_PERMISSIONS[rbac.ROLE_HELPER],
+        target=staff["moderator"],
+    )
+
+    assert decision.allowed is True
+
+
+# ── The owner-only set is enforced, not just documented ───────────────────
+def test_no_role_bundle_carries_an_owner_only_permission():
+    """``OWNER_ONLY_PERMISSIONS`` is the list of things that are not assignable.
+
+    It was documentation with nothing reading it. A permission that is meant to
+    be the owner's alone and appears in a role bundle is a grant that
+    ``authorize_grant`` would happily hand out, so the invariant is asserted
+    rather than described.
+    """
+    for role, bundle in rbac.ROLE_PERMISSIONS.items():
+        overlap = bundle & rbac.OWNER_ONLY_PERMISSIONS
+        assert not overlap, f"{role} carries {sorted(overlap)}"
+
+
+def test_an_owner_only_permission_cannot_be_granted_through_a_role(staff):
+    """Even the owner cannot hand one out, because no bundle carries it.
+
+    ``authorize_grant`` validates the requested set against the role's bundle,
+    so an owner-only permission is unexpressible as a promotion — not merely
+    discouraged.
+    """
+    for permission in sorted(rbac.OWNER_ONLY_PERMISSIONS):
+        carriers = [
+            role for role, bundle in rbac.ROLE_PERMISSIONS.items()
+            if permission in bundle
+        ]
+        assert carriers == [], f"{permission} is carried by {carriers}"
