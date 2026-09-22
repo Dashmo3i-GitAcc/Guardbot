@@ -14,6 +14,7 @@ fail when someone writes the import.
 """
 import asyncio
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -481,3 +482,185 @@ def test_the_four_workloads_have_four_separate_switches():
     for name in ("GEMINI_ENABLED", "GEMINI_CHAT_ENABLED", "GEMINI_MOD_ENABLED",
                  "TRANSCRIBE_ENABLED"):
         assert isinstance(getattr(config, name), bool)
+
+
+# ══ THE OBSERVER: awareness is a workload, not a mode ═════════════════════
+# The four workloads above were the ones the brief named. Group Awareness added
+# a fifth — the assistant reading a room on its own timer — and it is the one
+# whose separation is easiest to get wrong, because it is configured to share
+# the conversation's *credential* by default. The brief's own words for why the
+# counters still matter: an observant Nexus must not be able to spend the
+# allowance a person is waiting on an answer to.
+def _pool(name: str):
+    from app import gemini_pool
+
+    return gemini_pool.pool_for(name)
+
+
+def test_awareness_owns_its_own_pool_and_its_own_allowance():
+    """Two pools, two allowances, two account lists — whatever the key says."""
+    awareness_pool = _pool("awareness")
+    chat_pool = _pool("chat")
+
+    assert awareness_pool is not None and chat_pool is not None
+    assert awareness_pool is not chat_pool
+    assert awareness_pool.accounts is not chat_pool.accounts
+    assert awareness_pool.daily_budget == max(1, config.NEXUS_AWARENESS_DAILY_LIMIT)
+    assert chat_pool.daily_budget == max(1, config.GEMINI_CHAT_DAILY_LIMIT)
+
+
+def test_spending_the_awareness_allowance_does_not_spend_the_chat_allowance():
+    """The brief's sentence, as an assertion.
+
+    The two workloads may share a Google project — the operator's choice, and
+    reported at boot when they do — but they must not share the application's
+    own count of what is left.
+    """
+    awareness_pool, chat_pool = _pool("awareness"), _pool("chat")
+    if not awareness_pool.daily_budget or not chat_pool.daily_budget:
+        pytest.skip("a pool without an allowance has nothing to partition")
+
+    before = chat_pool.daily_remaining()
+    for _ in range(5):
+        db.daily_add("awareness", "1", db.ai_day())
+    for account in awareness_pool.accounts:
+        account._daily_day = ""  # drop the per-day cache so it re-reads
+
+    assert chat_pool.daily_remaining() == before, "the conversation's budget moved"
+
+
+def test_the_awareness_brake_reads_the_awareness_allowance(monkeypatch):
+    """The pacing rule must not be reading the conversation's budget.
+
+    Written as a behaviour rather than as a source assertion, because the bug it
+    guards against is a one-word mistake — ``pool_for("chat")`` — that reads
+    perfectly.
+    """
+    from app import gemini_pool, main
+
+    class FakePool:
+        def __init__(self, budget, remaining):
+            self.daily_budget = budget
+            self._remaining = remaining
+
+        def daily_remaining(self, now=None):
+            return self._remaining
+
+    # The conversation is nearly spent; awareness is not. If the brake reads the
+    # wrong pool it will pace awareness to the conversation's poverty.
+    monkeypatch.setattr(
+        gemini_pool,
+        "pool_for",
+        lambda workload: {
+            "chat": FakePool(500, 1),
+            "awareness": FakePool(200, 200),
+        }[workload],
+    )
+
+    # Pinned to the start of an API day, so the two answers are 432 and 86400
+    # seconds rather than two numbers that happen to be close near midnight.
+    at_day_start = db._API_DAY_OFFSET + 3 * 86400.0
+    gap = main._awareness_allowance_gap(at_day_start)
+
+    assert gap == pytest.approx(86400.0 / 200), (
+        "awareness was paced against the conversation's allowance"
+    )
+
+
+def test_awareness_has_its_own_model_timeout_and_breaker_settings():
+    """Four settings that would silently become the conversation's if unset."""
+    pairs = (
+        (config.GEMINI_AWARENESS_MODEL, config.GEMINI_CHAT_MODEL),
+        (config.GEMINI_AWARENESS_TIMEOUT_SECONDS, config.GEMINI_CHAT_TIMEOUT_SECONDS),
+        (
+            config.GEMINI_AWARENESS_CIRCUIT_FAILURES,
+            config.GEMINI_CHAT_CIRCUIT_FAILURES,
+        ),
+        (config.GEMINI_AWARENESS_CIRCUIT_SECONDS, config.GEMINI_CHAT_CIRCUIT_SECONDS),
+    )
+
+    for awareness_setting, _chat_setting in pairs:
+        assert awareness_setting is not None, "an unset setting is a shared one"
+
+    # They are separate names, so an operator can move one without the other.
+    source = inspect.getsource(config)
+    for name in (
+        "GEMINI_AWARENESS_MODEL",
+        "GEMINI_AWARENESS_TIMEOUT_SECONDS",
+        "GEMINI_AWARENESS_CIRCUIT_FAILURES",
+        "GEMINI_AWARENESS_CIRCUIT_SECONDS",
+        "NEXUS_AWARENESS_DAILY_LIMIT",
+    ):
+        assert f"{name} = " in source, f"{name} is not a setting of its own"
+
+
+# ══ THE VOICE PIPELINE: the transcript crosses, the audio does not ════════
+def test_a_transcript_is_what_reaches_the_conversation_never_the_audio():
+    """The audio goes to the speech workload and nowhere else.
+
+    This is the requirement's "no voice message may enter conversational
+    Gemini", and it holds because of one return: the transcribable branch of
+    ``_prepare_conversation_media`` hands back ``None`` for the parts and the
+    transcript for the text. If it ever handed back the bytes as well, the
+    conversational model would be receiving audio — a second, invisible speech
+    workload running on the conversation's allowance, with the conversation's
+    history.
+    """
+    from app import main
+
+    ref = SimpleNamespace(
+        kind="voice", is_transcribable=True, is_visual=False, duration=3
+    )
+    seen: list = []
+
+    async def _fake_transcribe(candidate, *, download):
+        seen.append(candidate)
+        return transcribe.Transcript(ok=True, text="سلام", model="stub")
+
+    class _Media:
+        @staticmethod
+        def describe(msg):
+            return ref
+
+    monkeypatch_ = pytest.MonkeyPatch()
+    try:
+        monkeypatch_.setattr(main, "media", _Media)
+        monkeypatch_.setattr(main.transcribe, "transcribe_ref", _fake_transcribe)
+
+        parts, kind, text, want_voice, problem = asyncio.run(
+            main._prepare_conversation_media(
+                SimpleNamespace(), SimpleNamespace(), "/tmp"
+            )
+        )
+    finally:
+        monkeypatch_.undo()
+
+    assert seen, "the audio must reach the speech workload"
+    assert parts is None, "and must not reach the conversation as bytes"
+    assert text == "سلام", "the transcript is what the conversation carries"
+    assert kind == "voice"
+    assert want_voice is True
+    assert problem == main.PREPARE_OK
+
+
+def test_the_speech_workload_is_never_reached_from_the_classifier():
+    """Transcription is not part of acquisition, in either direction.
+
+    The acquisition pipeline reads text that people typed. Sending it audio
+    would make the classifier a second speech workload on a budget that was
+    sized for text, and would mean a voice note could change what happens to the
+    person who sent it — which is a moderation decision made by a workload that
+    is not the moderation workload.
+    """
+    import ast
+
+    tree = ast.parse(inspect.getsource(ai_intent))
+    names = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    } | {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+
+    assert "transcribe" not in names
+    assert "transcribe_ref" not in names
+    assert "is_transcribable" not in names
