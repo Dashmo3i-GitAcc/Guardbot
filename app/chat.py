@@ -34,6 +34,11 @@ import time
 from dataclasses import dataclass
 
 from . import config, db, gemini_pool
+# The awareness module is imported under an alias because this file defines a
+# *function* named ``awareness`` — the pass itself — and a plain import would be
+# shadowed by it at every call site inside that function. The alias is only used
+# for the switch, which the pass must consult before it spends the key.
+from . import awareness as awareness_layer
 
 log = logging.getLogger("guardbot.chat")
 
@@ -1604,7 +1609,13 @@ async def awareness(
     becomes a typed request that the execution layer re-authorises against the
     speaker's real id. Awareness may *ask*; it still cannot *do*.
     """
-    if not config.NEXUS_AWARENESS_ENABLED:
+    # The **effective** state, which is ``configured() and running()``: the
+    # deploy-time setting *and* the owner's spoken switch. This is the last gate
+    # before the awareness API key is used, so it is the one that makes the
+    # owner's «آگاهی خاموش» a promise rather than a policy — with it off, this
+    # function returns before the key is read, before the pool is consulted and
+    # before any request is built, whatever a caller upstream believed.
+    if not awareness_layer.enabled():
         return AwarenessReply(skipped="disabled", model=config.GEMINI_AWARENESS_MODEL)
     if not (
         config.GEMINI_AWARENESS_API_KEY

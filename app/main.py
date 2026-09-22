@@ -2173,7 +2173,7 @@ def _nexus_state_request(operation: str, actor: rbac.Principal, chat_id: int):
     )
 
 
-async def _nexus_state_command(
+async def _owner_state_command(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
     actor: rbac.Principal,
@@ -2188,19 +2188,31 @@ async def _nexus_state_command(
     right design here for exactly that reason, and it is why this is the one
     place in the Nexus layer where the wording is matched rather than understood.
 
-    Three conditions, all required, and the third is what stops the group's
-    conversation from toggling the bot:
+    **Two switches can be spoken about, and they are not the same switch.** Nexus
+    off is "the assistant is silent"; awareness off is "the assistant is
+    answering, and not reading the room". The owner asked for the second one by
+    name, and the whole point of it is that the first must not happen instead:
+    «اورنس خاموش» and «نکسوس خاموش» share the verb, so a router that read only
+    the verb would silence the assistant when the owner meant to stop it reading
+    the room. Which switch is meant is decided by ``awareness.named`` and it wins
+    over the assistant's own name.
 
-    * the speaker must be the owner, resolved from their Telegram id;
-    * the message must be aimed at Nexus, by name or by reply or by mention;
+    Three conditions, all required, and the third is what stops the group's
+    conversation from toggling either switch:
+
+    * the speaker must be the owner, resolved from their Telegram id — never
+      from what they wrote about themselves;
+    * the message must be aimed at one of the two, by name or by reply or by
+      mention. Naming the awareness layer counts as aiming, because that is how
+      the owner actually addresses it;
     * and the words must ask for exactly one direction — ``command_from``
       refuses a contradiction or a negation rather than guessing.
 
     The transition itself is not performed here. It becomes a typed request and
     goes to ``app/admin_service.py``, which re-authorises it against
-    ``nexus.control`` and audits it, exactly like every other action. The model
-    has a tool that reaches the same operation, so there is one implementation
-    and two ways to ask.
+    ``nexus.control`` and audits it, exactly like every other action. So this
+    function decides *what was asked for*, and the service decides whether the
+    person asking may have it.
     """
     msg = update.effective_message
     room = update.effective_chat
@@ -2208,13 +2220,37 @@ async def _nexus_state_command(
         return False
     if not actor.is_owner:
         return False
-    if not (nexus.is_named(text) or _addressed_to_bot(msg, ctx)):
+    about_awareness = awareness.named(text)
+    if not (
+        nexus.is_named(text) or about_awareness or _addressed_to_bot(msg, ctx)
+    ):
         return False
     wanted = nexus.command_from(text)
     if wanted is None:
         return False
 
-    operation = "nexus_online" if wanted == nexus.ONLINE else "nexus_offline"
+    # The target. ``about_awareness`` is tested first and the order is the
+    # safety property rather than a preference: it is the more specific
+    # instruction, and getting it wrong silences the assistant instead of the
+    # layer the owner was talking about.
+    wants_on = wanted == nexus.ONLINE
+    if about_awareness:
+        operation = "awareness_online" if wants_on else "awareness_offline"
+        done = (
+            config.NEXUS_AWARENESS_ON_DONE_TEXT
+            if wants_on
+            else config.NEXUS_AWARENESS_OFF_DONE_TEXT
+        )
+        already = config.NEXUS_AWARENESS_ALREADY_TEXT
+        was_on = awareness.running()
+    else:
+        operation = "nexus_online" if wants_on else "nexus_offline"
+        done = (
+            config.NEXUS_ONLINE_DONE_TEXT if wants_on else config.NEXUS_OFFLINE_DONE_TEXT
+        )
+        already = config.NEXUS_ALREADY_TEXT
+        was_on = nexus.is_online()
+
     result = await admin_service.execute(
         _nexus_state_request(operation, actor, room.id),
         TelegramGateway(ctx),
@@ -2223,9 +2259,9 @@ async def _nexus_state_command(
     )
     if not result.ok:
         log.info(
-            "nexus state command refused actor=%s wanted=%s outcome=%s reason=%s",
+            "owner state command refused actor=%s operation=%s outcome=%s reason=%s",
             actor.user_id,
-            wanted,
+            operation,
             result.outcome,
             result.reason,
         )
@@ -2234,15 +2270,49 @@ async def _nexus_state_command(
         )
         return True
 
-    log.info("nexus state command actor=%s state=%s", actor.user_id, wanted)
-    await _reply_in_group(
-        ctx,
-        room.id,
-        config.NEXUS_ONLINE_DONE_TEXT
-        if wanted == nexus.ONLINE
-        else config.NEXUS_OFFLINE_DONE_TEXT,
-        reply_to=msg.message_id,
+    log.info(
+        "owner state command actor=%s operation=%s", actor.user_id, operation
     )
+    # The stored switch and the *effective* state are two halves of one answer,
+    # and «آگاهی روشن» can only move one of them. When the deployment has the
+    # layer off, the row is stored and nothing runs — so this is checked before
+    # the no-op branch below, because "already on" would be just as wrong as
+    # "turned on": either sentence reports a half that is not the whole.
+    if about_awareness and wants_on and not awareness.configured():
+        await _reply_in_group(
+            ctx,
+            room.id,
+            config.NEXUS_AWARENESS_CONFIG_OFF_TEXT,
+            reply_to=msg.message_id,
+        )
+        return True
+    # "Nothing changed" and "it changed" are different facts and the owner
+    # acted in order to change something. A bare confirmation for a no-op is the
+    # sentence that makes an owner say "it doesn't work" about a switch that is
+    # already in the state they asked for.
+    if was_on == wants_on:
+        # ``already`` is the right sentence for whichever switch was spoken
+        # about, and both of them take a ``{state}`` placeholder. The label is
+        # read from the same source the live gate reads, so the sentence cannot
+        # report a state the switch is not actually in: ``nexus.state_label()``
+        # describes the persisted Nexus state, and the awareness labels are the
+        # pair ``/nexus status`` prints.
+        if about_awareness:
+            state_label = (
+                config.NEXUS_AWARENESS_ON_LABEL
+                if wants_on
+                else config.NEXUS_AWARENESS_OFF_LABEL
+            )
+        else:
+            state_label = nexus.state_label()
+        await _reply_in_group(
+            ctx,
+            room.id,
+            already.format(state=state_label),
+            reply_to=msg.message_id,
+        )
+        return True
+    await _reply_in_group(ctx, room.id, done, reply_to=msg.message_id)
     return True
 
 
@@ -2276,7 +2346,7 @@ def _nexus_status_text() -> str:
             ),
             awareness=(
                 config.NEXUS_AWARENESS_ON_LABEL
-                if config.NEXUS_AWARENESS_ENABLED
+                if awareness.enabled()
                 else config.NEXUS_AWARENESS_OFF_LABEL
             ),
             mode=admin_service.mode_line(),
@@ -3075,7 +3145,7 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 2. The owner's spoken state command. Checked first because it is the one
     #    thing that must work when Nexus is already off — the model is not
     #    consulted at all in that state, so this is the only way back.
-    if await _nexus_state_command(update, ctx, principal, text):
+    if await _owner_state_command(update, ctx, principal, text):
         return
 
     # 3. Authorized, and awake. Both refusals are silent: an ordinary member is
@@ -3160,7 +3230,7 @@ async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     # first: it is the only way back when Nexus is already off, and it reaches
     # the transition through ``admin_service``, which re-authorises it against
     # ``nexus.control``. It grants nothing by itself.
-    if await _nexus_state_command(update, ctx, principal, _message_text(msg)):
+    if await _owner_state_command(update, ctx, principal, _message_text(msg)):
         return
 
     if not nexus.accepts_private(principal):
@@ -4731,7 +4801,7 @@ async def post_init(app: Application) -> None:
         )
         log.info(
             "Nexus awareness: tick=%.0fs deadline_tick=%.1fs debounce=%.0fs "
-            "max_wait=%.0fs min_interval=%.0fs window=%d msgs/%d chars",
+            "max_wait=%.0fs min_interval=%.0fs window=%d msgs/%d chars owner=%s",
             tick,
             AWARENESS_DEADLINE_TICK_SECONDS,
             float(config.NEXUS_AWARENESS_DEBOUNCE_SECONDS),
@@ -4739,7 +4809,19 @@ async def post_init(app: Application) -> None:
             float(config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS),
             int(config.NEXUS_AWARENESS_WINDOW_MESSAGES),
             int(config.NEXUS_AWARENESS_WINDOW_CHARS),
+            # The owner's own switch, read from the persisted row. The jobs are
+            # registered on the deploy-time setting either way — that is what
+            # lets the owner switch the layer back on without a restart — so
+            # this field is the difference between "registered" and "reading
+            # the room", and an operator reading the log needs both.
+            "on" if awareness.running() else "off",
         )
+        if not awareness.running():
+            log.info(
+                "Nexus awareness: the owner has switched the layer off; the "
+                "sweeper is registered and idle, and will read the room again "
+                "when the owner says «آگاهی روشن»."
+            )
         if not (
             config.GEMINI_AWARENESS_API_KEY
             or gemini_pool.has_accounts("awareness")

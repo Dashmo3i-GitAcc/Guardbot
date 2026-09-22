@@ -40,7 +40,17 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import admin_service, agent_data, config, db, identity, nexus, rbac, vpnbot
+from . import (
+    admin_service,
+    agent_data,
+    awareness,
+    config,
+    db,
+    identity,
+    nexus,
+    rbac,
+    vpnbot,
+)
 
 log = logging.getLogger("guardbot.admin.tools")
 
@@ -228,6 +238,42 @@ TOOLS: dict[str, ToolSpec] = {
         kind=KIND_WRITE,
         permission="nexus.control",
         operation="nexus_online",
+    ),
+    # -- the awareness layer: owner only, and *not* the assistant's switch ----
+    # These are separate tools from the pair above because they change a
+    # different thing. Nexus off means "the assistant is silent"; awareness off
+    # means "the assistant still answers, and stops reading the room". The
+    # distinction exists because the two share a verb in Persian — «خاموش» — so
+    # a model given only the Nexus pair will reach for ``nexus_offline`` when the
+    # owner says «آگاهی خاموش», which silences the assistant instead of the
+    # reading. The descriptions therefore name the layer explicitly and say what
+    # does *not* happen, because that is the mistake being prevented.
+    "awareness_offline": ToolSpec(
+        name="awareness_offline",
+        description=(
+            "Switch off only the awareness layer: the assistant keeps "
+            "answering chat normally and quickly, but stops reading and "
+            "analysing the group conversation. It does NOT switch the "
+            "assistant itself off — do not use nexus_offline for this. Use it "
+            "when the owner asks to turn awareness/the room-reading off, such "
+            "as 'آگاهی خاموش' or 'awareness off'. Owner only."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="awareness_offline",
+    ),
+    "awareness_online": ToolSpec(
+        name="awareness_online",
+        description=(
+            "Switch the awareness layer back on, so the assistant reads and "
+            "analyses the group conversation again. It does NOT switch the "
+            "assistant itself on — that is nexus_online. Use it when the owner "
+            "asks for awareness/the room-reading back, such as 'آگاهی روشن' or "
+            "'awareness on'. Owner only."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="awareness_online",
     ),
     # -- the coding agent: owner only, like the assistant's own switch --------
     # One tool that asks for work, two that act on a request already recorded,
@@ -1591,6 +1637,11 @@ async def run_read_tool(
         return {
             "online": nexus.is_online(),
             "state": nexus.state(),
+            # The awareness layer is a *different* switch from ``online``, and
+            # the model is asked about both ("is Nexus reading the room?"). It is
+            # reported here as the effective state — configuration and the
+            # owner's switch together — because that is what the gates act on.
+            "awareness_reading_the_room": awareness.enabled(),
             "answers_only_administrators": bool(config.NEXUS_ACTORS_ONLY),
             "observes_administrators": bool(config.NEXUS_OBSERVE_ADMINS),
             "who_may_switch_it": "the owner only",

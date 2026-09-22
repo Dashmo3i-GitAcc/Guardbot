@@ -29,11 +29,17 @@ def fresh_nexus_state():
     unread message arrived, and when the age purge last ran. Both are in-process
     and both are read as "how long has it been", so a value left behind by one
     test would make the next one's wait or purge depend on test order.
+
+    It also caches the owner's awareness switch, and that one is worse to leak
+    than either clock: a test that switches the layer off would leave every
+    later test capturing nothing and passing no rooms, and the failures would
+    read as "awareness is broken" rather than "a test forgot to reset".
     """
     from app import awareness, main, nexus
 
     nexus.reset_state()
     awareness.reset_timers()
+    awareness.reset_switch()
     # The duplicate-reply marker: a room id left behind by one test would make
     # the next test's ambient pass refuse to answer, which is exactly the kind of
     # order-dependent failure that hides a real defect.
@@ -46,6 +52,7 @@ def fresh_nexus_state():
     yield
     nexus.reset_state()
     awareness.reset_timers()
+    awareness.reset_switch()
     main._nexus_addressed.clear()
     main._bot_rights_cache.clear()
 

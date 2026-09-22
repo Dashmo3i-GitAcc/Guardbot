@@ -3111,7 +3111,10 @@ simply stops, and the report says why.
 2. **The room is captured** — `_awareness_capture`, for everybody, before every
    gate and at no AI cost (§35). Understanding the room is the feature.
 3. **The owner's spoken state command** — checked before the actor gate, because
-   it is the one thing that must work when Nexus is already off.
+   it is the one thing that must work when Nexus is already off. It speaks about
+   **two** switches, and `awareness.named` decides which one the words are about
+   before Nexus's own name is considered (§35.14): «نکسوس خاموش» silences the
+   assistant, «آگاهی خاموش» only stops it reading the room.
 4. **Authorized and awake** — `nexus.accepts(principal)`. A guest is refused
    here, silently. Their message has already joined the room window; it still
    cannot reach Gemini through the conversational path and it still cannot
@@ -3206,6 +3209,10 @@ There are two ways back, and the first is deliberately dumb:
 A bare «خاموش شو» with no name and no reply is **not** a state command: it is
 ordinary conversation, and the bot stays on. `test_the_owner_state_phrase_needs_the_name_or_an_address`
 pins that.
+
+The same spoken path also carries the **awareness** switch, which is a different
+switch with the same verb — «آگاهی خاموش» stops the reading, not the answering.
+See §35.14.
 
 ### 34.7 Natural-language administration and target resolution
 
@@ -3974,10 +3981,92 @@ database already held are untouched. No migration step is needed.
 | `GEMINI_AWARENESS_CIRCUIT_FAILURES` | `5` | failures before the breaker opens |
 | `GEMINI_AWARENESS_CIRCUIT_SECONDS` | `300` | how long the breaker stays open |
 | `NEXUS_AWARENESS_ON_LABEL` / `_OFF_LABEL` | `فعال` / `غیرفعال` | the `/nexus status` line |
+| `NEXUS_AWARENESS_NAMES` | `awareness,اورنس,آگاهی,اگاهی` | the words that name *this layer* in a spoken switch (§35.14) |
+| `NEXUS_AWARENESS_OFF_DONE_TEXT` / `_ON_DONE_TEXT` | see `.env.example` | the two confirmations for the spoken switch |
+| `NEXUS_AWARENESS_ALREADY_TEXT` | `آگاهی از قبل {state} بود.` | said when the switch is already in the asked-for state |
+| `NEXUS_AWARENESS_CONFIG_OFF_TEXT` | see `.env.example` | said when the owner asks for the layer back but the master switch is off |
 
 Each is documented in `.env.example`. The two tables are created with
 `CREATE TABLE IF NOT EXISTS`, so there is no migration step and an existing
 database picks them up on restart; `tests/test_db_migration.py` proves it.
+
+### 35.14 Two switches, and the verb they share
+
+`NEXUS_AWARENESS_ENABLED` is a *deploy-time* decision: it is read once, it
+cannot change without a restart, and it is the wrong thing to reach for when the
+owner wants the pre-awareness chat speed back **now**. So the owner asked for a
+second, spoken switch, and it is a genuinely different switch from the one
+`app/nexus.py` owns:
+
+| | Nexus offline | Awareness off |
+|---|---|---|
+| what stops | the assistant answering anybody | the assistant reading the room |
+| ordinary chat | silent | **still answered, at the old speed** |
+| stored in | `nexus_state` | `awareness_control` |
+| default when never set | online | on |
+
+They are separate tables and separate operations on purpose. Collapsing them
+into one would mean an owner who wanted a faster chat had to silence the bot,
+which is the opposite of what they asked for.
+
+**The verb is shared and the nouns are not.** «آگاهی خاموش» and «نکسوس خاموش»
+both contain «خاموش», so a router that read only the verb would silence the
+*assistant* when the owner meant to silence the *reading* — and that is not
+hypothetical: it is the bug that produced this feature. The owner typed
+«اورنس خاموش», `nexus.is_named` did not match it (the transliteration is in
+neither `NEXUS_NAMES` nor any dictionary), the message fell through to the
+model, and the model called `nexus_online` — silencing the assistant. The fix is
+`awareness.named(text)`: a whole-word match against `NEXUS_AWARENESS_NAMES`,
+asked **before** Nexus's own name, because it is the more specific instruction
+and getting it wrong has the worse failure.
+
+`main._owner_state_command` is the one place that decides *what was asked for*.
+It requires three things, and the third is what stops the group's own
+conversation from toggling either switch:
+
+* the speaker is the owner, resolved from their Telegram id;
+* the message is aimed at one of the two, by name, by reply, or by mention —
+  naming the awareness layer counts as aiming, because that is how the owner
+  addresses it;
+* and `nexus.command_from` resolves the words to exactly one direction. A
+  negation or a contradiction returns `None` rather than a guess.
+
+The transition is then a typed request through `admin_service.execute`, which
+re-authorises it against `nexus.control` (owner-only) and audits it as
+`awareness.offline` / `awareness.online`. Both operations set
+`requires_nexus_online=False`, because a switch that needed the assistant awake
+would be unreachable in exactly the state where it is most wanted.
+
+**Off means off on every path**, and each one is gated separately so that a
+missing gate cannot hide behind another:
+
+* `awareness.capture` keeps no window — nothing to read later, either;
+* `awareness.room_block` returns `""`, so the addressed path pays no render and
+  carries no room tokens;
+* `awareness.due` returns `disabled`, so the sweeper, the urgency hint and the
+  deadline tick all refuse before a transcript is built;
+* and `chat.awareness` — the function that reads the API key — refuses before
+  the key is touched, which is the last gate and the one that makes the promise
+  true whatever a caller upstream believed.
+
+The switch is a single persisted row, read through a module cache
+(`awareness.running()`), so the capture path costs no query per message; a row
+that has never been written means **on**, so a deployment that has never used
+the switch behaves exactly as its configuration asks. Nothing here needs a
+restart, and `awareness.enabled()` — `configured() and running()` — is the one
+answer every gate acts on. The metrics, `/nexus status`, `get_nexus_status` and
+`agent_data.nexus_diagnostics` all report that effective state rather than the
+configuration, because a status line that says "on" after the owner said
+«خاموش» describes a different bot from the one running. The one case a spoken
+command cannot cover is the deploy-time master being off: «آگاهی روشن» stores
+the row and the layer still does not run, so the reply says a restart is needed
+rather than reporting the half that changed.
+
+`tests/test_awareness_switch.py` (32 tests) pins the owner's real spellings, the
+disambiguation in both directions, owner-only authority, every "off means off"
+path, the reply never saying the assistant is off, persistence across a
+restart, the no-op label, the master switch not being overridable by a message,
+and that no reply ever carries the key.
 
 ## 36. The assistant reads a room when its own clock expires
 

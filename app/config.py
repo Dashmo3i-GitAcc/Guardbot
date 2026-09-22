@@ -877,6 +877,24 @@ NEXUS_ACTORS_ONLY = _bool("NEXUS_ACTORS_ONLY", True)
 # kind: a stranger writing "نکسوس" is still refused by the actor gate.
 NEXUS_NAMES = _str_list(os.getenv("NEXUS_NAMES", "nexus,نکسوس"))
 
+# The names the awareness layer is called by, when an owner switches it off or
+# on out loud.
+#
+# This exists because the layer has no Telegram username to mention and no one
+# obvious name. The room in this deployment calls it «اورنس» — a transliteration
+# of "awareness" that is in neither dictionary — while the code and the
+# documentation call it "awareness" and Persian would call it «آگاهی». All three
+# have to work, or the owner says the word they actually use and nothing happens,
+# which is exactly the bug that produced this setting.
+#
+# Matched as whole words, case-insensitively, and used only to decide *which
+# switch* a spoken command is about. It is not an authority of any kind: the
+# speaker is checked against the owner id separately, and the transition itself
+# goes through ``app/admin_service.py`` like every other administrative act.
+NEXUS_AWARENESS_NAMES = _str_list(
+    os.getenv("NEXUS_AWARENESS_NAMES", "awareness,اورنس,آگاهی,اگاهی")
+)
+
 # Whether Nexus records what an authorized administrator says when they are not
 # talking to it.
 #
@@ -1754,6 +1772,40 @@ NEXUS_ACTORS_ONLY_OFF_LABEL = os.getenv("NEXUS_ACTORS_ONLY_OFF_LABEL", "همه")
 # inside a group, and only one of them is a bug.
 NEXUS_AWARENESS_ON_LABEL = os.getenv("NEXUS_AWARENESS_ON_LABEL", "فعال")
 NEXUS_AWARENESS_OFF_LABEL = os.getenv("NEXUS_AWARENESS_OFF_LABEL", "غیرفعال")
+
+# The two confirmations for the awareness switch, separate sentences for the
+# same reason Nexus's own two are: "the room is being read again" and "the room
+# is not being read" are the two facts an owner most needs to read
+# unambiguously, and a templated sentence that got the state wrong would be read
+# as the opposite of what happened.
+#
+# They deliberately do **not** say Nexus is off. An owner who reads a bare
+# «خاموش شد» after switching awareness off would reasonably conclude the
+# assistant had stopped answering, which is the one thing this switch must never
+# do — so the wording names the layer and says the chat keeps working.
+NEXUS_AWARENESS_OFF_DONE_TEXT = os.getenv(
+    "NEXUS_AWARENESS_OFF_DONE_TEXT",
+    "🙈 آگاهی خاموش شد. از این به بعد چت معمولی و سریع جواب می‌دم و اتاق رو تحلیل نمی‌کنم.",
+)
+NEXUS_AWARENESS_ON_DONE_TEXT = os.getenv(
+    "NEXUS_AWARENESS_ON_DONE_TEXT",
+    "👁 آگاهی روشن شد. از این به بعد اتاق رو هم تحلیل می‌کنم.",
+)
+NEXUS_AWARENESS_ALREADY_TEXT = os.getenv(
+    "NEXUS_AWARENESS_ALREADY_TEXT",
+    "آگاهی از قبل {state} بود.",
+)
+# Said when the owner asks for the layer back and the *deployment* has it off.
+# The spoken switch and the deploy-time setting are two halves of one answer, and
+# «آگاهی روشن» can only move one of them: the row is stored, the layer still does
+# not run, and a confirmation that said otherwise would be the same class of lie
+# this whole feature exists to remove. The fix is a restart, and only the
+# operator can do it, so the sentence says so rather than pretending.
+NEXUS_AWARENESS_CONFIG_OFF_TEXT = os.getenv(
+    "NEXUS_AWARENESS_CONFIG_OFF_TEXT",
+    "⚠️ آگاهی توی تنظیمات این ربات خاموش شده، پس با پیام روشن نمی‌شه. "
+    "برای روشن کردنش باید NEXUS_AWARENESS_ENABLED=true باشه و ربات ری‌استارت بشه.",
+)
 NEXUS_NEVER_CHANGED_TEXT = os.getenv("NEXUS_NEVER_CHANGED_TEXT", "—")
 NEXUS_STATUS_HINT = os.getenv(
     "NEXUS_STATUS_HINT",

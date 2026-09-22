@@ -85,9 +85,124 @@ def role_of(principal: rbac.Principal) -> str:
     return ROLE_MEMBER
 
 
-def capture_enabled() -> bool:
-    """Whether the room window is being kept at all."""
+# ── The switch ────────────────────────────────────────────────────────────
+# Whether the layer is running. Two values decide it, and they are answers to
+# two different questions:
+#
+# * ``config.NEXUS_AWARENESS_ENABLED`` is what the *configuration* asks for.
+#   It is the operator's decision at deploy time and it cannot change without a
+#   restart — which is exactly what makes it the wrong thing to reach for when
+#   the owner wants the conversational speed back *now*.
+# * the stored row is what the *owner* last asked for, in a message, and it
+#   survives a restart.
+#
+# The layer runs when both say yes. That answer is ``enabled()``, and every gate
+# in the feature asks it rather than reading either half directly, so "is
+# awareness running" is decided in exactly one place. The cost of getting this
+# wrong is asymmetric and worth stating: a gate that reads only the
+# configuration keeps spending the awareness allowance and keeps transcribing
+# administrator voice notes after the owner has switched the layer off, and the
+# owner would have no way to see that from the group.
+_running: bool | None = None
+
+
+def configured() -> bool:
+    """What the configuration asks for. Never what the owner last said."""
     return bool(config.NEXUS_AWARENESS_ENABLED)
+
+
+def running() -> bool:
+    """Whether the owner has left the layer switched on.
+
+    Read from the database once and cached, because this is asked on the capture
+    path for every message in every group: a query there would be a query per
+    message for a fact that changes when somebody types a sentence.
+
+    The default when nothing has ever been written is **on**, so a deployment
+    that has never used the switch behaves exactly as its configuration asks.
+    That is also why ``None`` is not treated as "off" — the row's absence means
+    "nobody has touched this", not "somebody turned it off".
+    """
+    global _running
+    if _running is None:
+        try:
+            row = db.awareness_control_get()
+        except Exception:  # noqa: BLE001 - a switch must never fail a message
+            log.exception("could not read the awareness switch")
+            return True
+        _running = True if row is None else bool(row["enabled"])
+    return _running
+
+
+def set_running(enabled: bool, *, actor_id: int = 0, reason: str = "") -> bool:
+    """Flip the switch, persist it, and return the state it is now in.
+
+    There is deliberately **no permission check here**, for the same reason
+    ``nexus.set_state`` has none: the authority for every administrative act in
+    this bot lives in exactly one place, ``app/admin_service.execute``, which
+    re-resolves the actor from their Telegram id. A second check in this
+    function would be a second authority model, and the whole architecture rests
+    on there being one.
+    """
+    global _running
+    row = db.awareness_control_set(enabled, actor_id=actor_id, reason=reason)
+    _running = bool(row["enabled"])
+    return _running
+
+
+def reset_switch() -> None:
+    """Forget the cached switch, so the next read comes from the database.
+
+    For tests, and for the same reason ``nexus.reset_state`` exists: a cache
+    that cannot be cleared makes every test that touches the switch depend on
+    the order the tests ran in.
+    """
+    global _running
+    _running = None
+
+
+def capture_enabled() -> bool:
+    """Whether the room window is being kept at all.
+
+    The same gate as ``enabled`` today — there is one switch, not two — but it
+    keeps its own name because the two call sites are asking different questions
+    and a future change could reasonably answer them differently. What matters
+    now is that neither of them can answer "yes" while the owner has said no.
+    """
+    return enabled()
+
+
+# ── Being named in a spoken command ───────────────────────────────────────
+def named(text: str) -> bool:
+    """Whether the message names the *awareness layer* rather than Nexus.
+
+    Whole-word and case-insensitive, matching how ``app/nexus.py`` matches
+    Nexus's own names: the two functions are asked about the same sentence and
+    have to agree about what a word is.
+
+    This is the disambiguation the switch depends on, and the reason it lives
+    here rather than in the router. «اورنس خاموش» and «نکسوس خاموش» both contain
+    «خاموش», so a router that looked only at the verb would silence the
+    *assistant* when the owner meant to silence the reading of the room — which
+    is precisely the confusion the owner asked to have ruled out. Which switch
+    the words are about is decided here, and the caller gives this answer
+    priority over the name of the assistant.
+
+    Matched as whole words for the usual reason in this language: «اورنس» inside
+    a longer word is a different word, and a substring match would let ordinary
+    conversation reach a switch.
+    """
+    if not text:
+        return False
+    for name in config.NEXUS_AWARENESS_NAMES:
+        if not name:
+            continue
+        try:
+            if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.IGNORECASE):
+                return True
+        except re.error:  # pragma: no cover - re.escape makes this unreachable
+            continue
+    return False
 
 
 # ── When the batch started waiting ────────────────────────────────────────
@@ -497,7 +612,12 @@ class Due:
 
 
 def enabled() -> bool:
-    return bool(config.NEXUS_AWARENESS_ENABLED)
+    """Whether the layer runs at all: configuration *and* the owner agree.
+
+    The one gate every path in the feature asks. See the switch block above for
+    why it is two values rather than one.
+    """
+    return configured() and running()
 
 
 def due(
@@ -832,7 +952,17 @@ def room_block(chat_id: int, *, limit: int = 0, budget: int = 0) -> str:
     Used by the *direct* answer path, where the user turn is the message being
     answered and the room has to come from somewhere else. The awareness pass
     does not need this: there, the transcript *is* the user turn.
+
+    Returns empty when the layer is not running, and the gate is here rather
+    than at the call site on purpose. This is the one piece of awareness that
+    reaches the *conversational* path, so it is the one that decides whether
+    switching awareness off actually gives the speed back: an owner who turned
+    the layer off would otherwise still pay for a rendered room window on every
+    addressed reply, still spend the tokens to carry it, and still have no way
+    to tell that the switch had not done what it said.
     """
+    if not enabled():
+        return ""
     body = render(chat_id, limit=limit, budget=budget)
     if not body:
         return ""
@@ -902,7 +1032,14 @@ def metrics() -> dict:
     a metric's clothes.
     """
     out = {
-        "enabled": bool(config.NEXUS_AWARENESS_ENABLED),
+        # The **effective** state, not the configuration: ``enabled()`` is
+        # ``configured() and running()``, which is the same answer every gate in
+        # the feature acts on. Reporting ``config.NEXUS_AWARENESS_ENABLED`` here
+        # would tell an owner who just typed «آگاهی خاموش» that the layer is
+        # still on, because the deploy-time setting has not changed — the metric
+        # would describe the configuration while the behaviour described
+        # something else, which is the drift this whole switch is meant to end.
+        "enabled": enabled(),
         "rooms": 0,
         "passes": 0,
         "relevant": 0,

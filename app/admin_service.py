@@ -200,6 +200,33 @@ OPERATIONS: dict[str, Operation] = {
         kind=OP_SYSTEM,
         requires_nexus_online=False,
     ),
+    # ── The awareness layer's own switch ──────────────────────────────────
+    # Deliberately separate operations rather than a parameter on the two
+    # above, because they are separate facts: "the assistant is silent" and
+    # "the assistant is answering without reading the room" are different
+    # states with different causes, and one audit action that covered both
+    # would leave an operator unable to tell which had happened.
+    #
+    # ``requires_nexus_online=False`` for the same reason the two above carry
+    # it: the switch has to be reachable in the state it is most likely to be
+    # wanted in, and a request that could only be authorised while the layer
+    # was running could never be used to stop it.
+    "awareness_offline": _op(
+        "awareness_offline",
+        "nexus.control",
+        None,
+        "awareness.offline",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
+    "awareness_online": _op(
+        "awareness_online",
+        "nexus.control",
+        None,
+        "awareness.online",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
     # ── The coding agent ──────────────────────────────────────────────────
     # Asking the host's coding agent to work on one of this system's own
     # repositories. It is an operation here, rather than a separate front door,
@@ -943,6 +970,18 @@ async def _apply(
         nexus.set_state(nexus.OFFLINE, actor_id=request.actor_id, reason=request.interface)
     elif request.operation == "nexus_online":
         nexus.set_state(nexus.ONLINE, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "awareness_offline":
+        # Imported here rather than at module scope for the same reason the two
+        # branches below are: ``app/awareness.py`` is a peer that reads this
+        # module's ``AdminResult``, and a module-scope import would make
+        # "authorise a ban" depend on the awareness layer being importable.
+        from . import awareness
+
+        awareness.set_running(False, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "awareness_online":
+        from . import awareness
+
+        awareness.set_running(True, actor_id=request.actor_id, reason=request.interface)
     elif request.operation == "codebuddy_task":
         # Imported here rather than at module scope: the bridge imports this
         # module's peers, and a cycle at import time would make ``admin_service``

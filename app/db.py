@@ -366,6 +366,28 @@ def init() -> None:
             changed_by INTEGER NOT NULL DEFAULT 0,
             reason TEXT NOT NULL DEFAULT '')"""
     )
+    # Whether the awareness layer is running, as a fact about the deployment
+    # rather than about the process.
+    #
+    # It is persisted for the same reason ``nexus_state`` is, and the reason is
+    # the whole point of the switch: the owner turns awareness off to get the
+    # conversational speed back, and a container restart must not silently turn
+    # it back on. An in-memory flag would do exactly that, and it would do it at
+    # the least convenient moment — a redeploy.
+    #
+    # Deliberately **not** a column on ``nexus_state``. The two are different
+    # facts with different defaults and different consequences: Nexus off is
+    # "the assistant is silent", awareness off is "the assistant is answering,
+    # and not reading the room". Sharing a row would make one switch's default
+    # decide the other's, which is the confusion this table exists to prevent.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS awareness_control (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            changed_at INTEGER NOT NULL DEFAULT 0,
+            changed_by INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '')"""
+    )
     # Who has spoken in a monitored group, so a name can be resolved to the
     # Telegram user id that actually identifies somebody.
     #
@@ -1889,6 +1911,72 @@ def nexus_state_reset() -> None:
         _conn.commit()
 
 
+def awareness_control_get() -> dict | None:
+    """The stored awareness switch, or None when it has never been set.
+
+    ``None`` means "nobody has ever touched this switch", which is the normal
+    state of a fresh install and deliberately not the same fact as "off". The
+    caller supplies the default, exactly as ``nexus_state_get`` does, so that a
+    deployment which has never used the switch keeps the behaviour its
+    configuration asked for.
+    """
+    with _lock:
+        row = _conn.execute(
+            "SELECT enabled, changed_at, changed_by, reason "
+            "FROM awareness_control WHERE id=1"
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "enabled": bool(row[0]),
+        "changed_at": int(row[1] or 0),
+        "changed_by": int(row[2] or 0),
+        "reason": str(row[3] or ""),
+    }
+
+
+def awareness_control_set(
+    enabled: bool, *, actor_id: int = 0, reason: str = ""
+) -> dict:
+    """Write the one switch row and return it. Last write wins, by design.
+
+    The switch is a single fact about the deployment, not an append-only
+    record, so an update is correct here where it would be wrong for the audit
+    table: the audit trail keeps the history of who toggled it, and this keeps
+    the current answer.
+    """
+    row = {
+        "enabled": bool(enabled),
+        "changed_at": int(time.time()),
+        "changed_by": int(actor_id or 0),
+        "reason": str(reason or "")[:200],
+    }
+    _exec(
+        """INSERT INTO awareness_control
+               (id, enabled, changed_at, changed_by, reason)
+           VALUES (1,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+               enabled=excluded.enabled,
+               changed_at=excluded.changed_at,
+               changed_by=excluded.changed_by,
+               reason=excluded.reason""",
+        (
+            int(row["enabled"]),
+            row["changed_at"],
+            row["changed_by"],
+            row["reason"],
+        ),
+    )
+    return row
+
+
+def awareness_control_reset() -> None:
+    """Forget the switch row, so the configured default applies again."""
+    with _lock:
+        _conn.execute("DELETE FROM awareness_control")
+        _conn.commit()
+
+
 # ── People: identity memory, metadata only ────────────────────────────────
 def people_remember(
     chat_id: int,
@@ -2593,10 +2681,18 @@ def awareness_advance(chat_id: int, *, seen_message_id: int) -> None:
 
 
 def awareness_reset() -> None:
-    """Forget every room's understanding and window. For tests."""
+    """Forget every room's understanding and window, and the owner's switch.
+
+    For tests. The switch belongs here as much as the rooms do: it is the one
+    other piece of awareness state that outlives a single test, and a test that
+    switched the layer off without clearing it would leave every later test in
+    the process reading an empty room — a failure that reads as "awareness is
+    broken" rather than as a leaked fixture.
+    """
     with _lock:
         _conn.execute("DELETE FROM awareness_state")
         _conn.execute("DELETE FROM group_messages")
+        _conn.execute("DELETE FROM awareness_control")
         _conn.commit()
 
 

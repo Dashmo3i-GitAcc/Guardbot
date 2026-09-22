@@ -35,7 +35,7 @@ import logging
 import re
 import time
 
-from . import config, db, nexus, rbac
+from . import awareness, config, db, nexus, rbac
 
 log = logging.getLogger("guardbot.agent.data")
 
@@ -402,7 +402,12 @@ def nexus_diagnostics(chat_id: int = 0) -> dict:
         "chat_id": chat_id,
         "nexus_state": nexus.state(),
         "nexus_online": nexus.is_online(),
-        "awareness_enabled": bool(getattr(config, "NEXUS_AWARENESS_ENABLED", False)),
+        # The **effective** state — ``configured() and running()`` — because the
+        # diagnostic exists to explain why Nexus did or did not act. Reading the
+        # configuration here would keep saying "awareness is on" after the owner
+        # switched it off with a message, and the model would then be told the
+        # room is being read when it is not.
+        "awareness_enabled": awareness.enabled(),
         "observe_admins": bool(getattr(config, "NEXUS_OBSERVE_ADMINS", False)),
         "actors_only": bool(getattr(config, "NEXUS_ACTORS_ONLY", False)),
         "reasons": [],
