@@ -35,6 +35,8 @@ import io
 import logging
 import time
 
+from telegram.constants import ChatAction
+
 from . import agent_bridge, agent_service, agent_spool, config, db
 
 log = logging.getLogger("guardbot.agent")
@@ -45,6 +47,14 @@ log = logging.getLogger("guardbot.agent")
 # nothing is lost or repeated by this being volatile.
 _last_progress_at: dict[str, float] = {}
 _progress_sent: dict[str, int] = {}
+
+# The one message a running task narrates itself in, and the text currently on
+# it. Both are in memory for the same reason as the throttle: they describe how
+# this process is presenting a task, not what the task has done. A restart
+# simply starts a fresh working message, and the offset guarantees nothing is
+# delivered twice because of it.
+_working_message: dict[str, int] = {}
+_working_text: dict[str, str] = {}
 _last_prune_at: float = 0.0
 
 PRUNE_INTERVAL_SECONDS = 3600.0
@@ -55,6 +65,8 @@ def reset_state() -> None:
     global _last_prune_at
     _last_progress_at.clear()
     _progress_sent.clear()
+    _working_message.clear()
+    _working_text.clear()
     _last_prune_at = 0.0
 
 
@@ -170,15 +182,20 @@ async def _on_started(ctx, row: dict, record: dict) -> None:
         started_at=int(record.get("at") or time.time()),
         session_id=session_id,
     )
-    await _say(
-        ctx,
-        row,
-        config.AGENT_PROGRESS_HEADER.format(
-            request_id=request_id,
-            repository=row.get("repository", ""),
-            status=agent_bridge.status_label("running"),
-        ),
+    header = config.AGENT_PROGRESS_HEADER.format(
+        request_id=request_id,
+        repository=row.get("repository", ""),
+        status=agent_bridge.status_label("running"),
     )
+    if config.AGENT_WORKING_MESSAGE:
+        # Open the one message this task will narrate itself in. Progress lines
+        # rewrite it instead of arriving as a message each.
+        sent = await _send(ctx, row, header)
+        if sent:
+            _working_message[request_id] = sent
+            _working_text[request_id] = agent_bridge.redact(header)
+        return
+    await _say(ctx, row, header)
 
 
 async def _on_progress(ctx, row: dict, text: str) -> None:
@@ -201,17 +218,26 @@ async def _on_progress(ctx, row: dict, text: str) -> None:
     cap = max(80, int(config.AGENT_PROGRESS_MAX_CHARS))
     if len(body) > cap:
         body = body[:cap] + "…"
-    await _say(
-        ctx,
-        row,
-        config.AGENT_PROGRESS_HEADER.format(
-            request_id=request_id,
-            repository=row.get("repository", ""),
-            status=agent_bridge.status_label("running"),
-        )
-        + "\n"
-        + body,
+    header = config.AGENT_PROGRESS_HEADER.format(
+        request_id=request_id,
+        repository=row.get("repository", ""),
+        status=agent_bridge.status_label("running"),
     )
+    if config.AGENT_WORKING_MESSAGE:
+        # The header was sent once when the task started, so this is a rewrite
+        # of that message: a count and how long the task has been going, then
+        # the newest line. Earlier lines are overwritten rather than lost from
+        # the record — the record is the database, and the answer is what the
+        # owner is waiting for.
+        line = (
+            f"{header}\n"
+            f"… پیشرفت {_progress_sent[request_id]} · "
+            f"{_elapsed(row.get('started_at'), now)}\n"
+            f"• {body}"
+        )
+        await _working_update(ctx, row, line)
+        return
+    await _say(ctx, row, header + "\n" + body)
 
 
 async def _on_question(ctx, row: dict, text: str) -> None:
@@ -254,18 +280,16 @@ async def _on_result(ctx, row: dict, text: str) -> None:
 
     body = agent_bridge.redact(text or "")
     plan = agent_bridge.reply_plan(body, row.get("reply_mode") or "text")
+    _forget_working(request_id)
 
     if plan["document"]:
         await _send_document(ctx, row, body)
-    for chunk in plan["chunks"]:
+    total = len(plan["chunks"])
+    for index, chunk in enumerate(plan["chunks"], start=1):
         await _say(
             ctx,
             row,
-            config.AGENT_RESULT_HEADER.format(
-                request_id=request_id, repository=row.get("repository", "")
-            )
-            + "\n"
-            + agent_bridge.redact(chunk),
+            _chunk_header(row, index, total) + "\n" + agent_bridge.redact(chunk),
         )
     if not plan["chunks"] and not plan["document"]:
         # An empty answer is still an answer, and saying so is better than
@@ -273,11 +297,7 @@ async def _on_result(ctx, row: dict, text: str) -> None:
         await _say(
             ctx,
             row,
-            config.AGENT_RESULT_HEADER.format(
-                request_id=request_id, repository=row.get("repository", "")
-            )
-            + "\n"
-            + "عامل چیزی برای گزارش برنگرداند.",
+            _chunk_header(row, 1, 1) + "\n" + "عامل چیزی برای گزارش برنگرداند.",
         )
 
     db.agent_task_update(
@@ -304,6 +324,7 @@ async def _on_error(ctx, row: dict, text: str) -> None:
         finished_at=int(time.time()),
     )
     agent_spool.release(request_id)
+    _forget_working(request_id)
     await _say(
         ctx,
         row,
@@ -324,6 +345,7 @@ async def _on_cancelled(ctx, row: dict, text: str) -> None:
         request_id, status="cancelled", finished_at=int(time.time())
     )
     agent_spool.release(request_id)
+    _forget_working(request_id)
     await _say(
         ctx,
         row,
@@ -371,6 +393,7 @@ async def _enforce_timeout(ctx, row: dict, now: float) -> None:
         finished_at=int(time.time()),
     )
     agent_spool.release(request_id)
+    _forget_working(request_id)
     await _say(
         ctx,
         row,
@@ -393,6 +416,100 @@ def _maybe_prune(now: float) -> None:
 
 
 # ── Sending ───────────────────────────────────────────────────────────────
+def _chunk_header(row: dict, index: int, total: int) -> str:
+    """The header for one part of an answer.
+
+    The first part carries the result header, because that is the sentence that
+    says the work finished. Later parts carry the continuation header with their
+    part number, so a three-part answer reads as one answer rather than three
+    identical "done" messages. A single-part answer is not numbered — there is
+    nothing to distinguish it from.
+    """
+    request_id = str(row.get("request_id") or "")
+    repository = row.get("repository", "")
+    if index <= 1:
+        head = config.AGENT_RESULT_HEADER.format(
+            request_id=request_id, repository=repository
+        )
+        return head + (f" ({index}/{total})" if total > 1 else "")
+    return config.AGENT_CONTINUATION_HEADER.format(
+        request_id=request_id, repository=repository, part=index, total=total
+    )
+
+
+def _elapsed(started_at, now: float) -> str:
+    """How long a task has been running, in the shortest honest form."""
+    try:
+        seconds = int(now - float(started_at or 0))
+    except (TypeError, ValueError):
+        return "-"
+    if seconds < 0:
+        return "-"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def _forget_working(request_id: str) -> None:
+    """Stop treating a task's message as editable. Called when it ends."""
+    _working_message.pop(request_id, None)
+    _working_text.pop(request_id, None)
+
+
+async def _typing(ctx, chat_id: int) -> None:
+    """Show the "typing" indicator. Best effort; never worth an exception."""
+    try:
+        await ctx.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception as exc:  # noqa: BLE001 - an indicator is not a delivery
+        log.debug("could not send the agent typing action: %s", exc)
+
+
+async def _working_update(ctx, row: dict, text: str) -> None:
+    """Rewrite the task's single working message, or open one if there is none.
+
+    The edit is the point: a task that runs for minutes should be one calm
+    message that changes, not twenty that arrive. Two failures are expected and
+    handled rather than raised — there may be no message to edit (a restart
+    dropped the id, or the working message is switched off), and Telegram may
+    refuse the edit (the message was deleted, or it is older than the edit
+    window). Either one falls back to sending a new message, because silence
+    would be worse than a second message.
+
+    Identical text is skipped: Telegram rejects an edit that changes nothing,
+    and that is a refusal with nothing behind it to report.
+    """
+    request_id = str(row.get("request_id") or "")
+    chat_id = int(row.get("chat_id") or 0)
+    if not chat_id or ctx is None:
+        return
+    body = agent_bridge.redact(text or "")
+    if not body.strip():
+        return
+    await _typing(ctx, chat_id)
+    if _working_text.get(request_id) == body:
+        return
+    message_id = _working_message.get(request_id, 0)
+    if message_id:
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=body[:4000]
+            )
+            _working_text[request_id] = body
+            return
+        except Exception as exc:  # noqa: BLE001 - fall back to a new message
+            log.info(
+                "could not edit the working message for %s (%s); sending a new one",
+                request_id,
+                exc,
+            )
+    sent = await _send(ctx, row, body)
+    if sent:
+        _working_message[request_id] = sent
+        _working_text[request_id] = body
+
+
 async def _say(ctx, row: dict, text: str) -> None:
     """Send one message to the chat that asked. Never raises.
 
@@ -401,16 +518,23 @@ async def _say(ctx, row: dict, text: str) -> None:
     ``/agent`` and get the truth. Raising here would instead abort the delivery
     loop and lose the rest of the transcript.
     """
+    await _send(ctx, row, text)
+
+
+async def _send(ctx, row: dict, text: str) -> int:
+    """Send one message and return its id, or 0 when it could not be sent."""
     chat_id = int(row.get("chat_id") or 0)
     if not chat_id or ctx is None:
-        return
+        return 0
     body = agent_bridge.redact(text or "")
     if not body.strip():
-        return
+        return 0
     try:
-        await ctx.bot.send_message(chat_id=chat_id, text=body[:4000])
+        message = await ctx.bot.send_message(chat_id=chat_id, text=body[:4000])
     except Exception as exc:  # noqa: BLE001 - delivery is best effort
         log.warning("could not send agent message to %s: %s", chat_id, exc)
+        return 0
+    return int(getattr(message, "message_id", 0) or 0)
 
 
 async def _send_document(ctx, row: dict, text: str) -> None:
@@ -439,16 +563,10 @@ async def _send_document(ctx, row: dict, text: str) -> None:
     except Exception as exc:  # noqa: BLE001 - fall back to chat, never drop
         log.warning("could not send the agent document to %s: %s", chat_id, exc)
 
-    for chunk in agent_bridge.chunk_text(agent_bridge.redact(text)):
-        await _say(
-            ctx,
-            row,
-            config.AGENT_RESULT_HEADER.format(
-                request_id=request_id, repository=row.get("repository", "")
-            )
-            + "\n"
-            + chunk,
-        )
+    chunks = agent_bridge.chunk_text(agent_bridge.redact(text))
+    total = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        await _say(ctx, row, _chunk_header(row, index, total) + "\n" + chunk)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────

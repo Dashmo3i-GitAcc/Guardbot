@@ -1202,6 +1202,14 @@ AGENT_PROGRESS_MIN_INTERVAL_SECONDS = _float(
 )
 AGENT_PROGRESS_MAX_MESSAGES = _int("AGENT_PROGRESS_MAX_MESSAGES", 20)
 
+# One "working" message, edited in place, instead of one message per progress
+# line. A task used to be able to produce twenty near-identical messages, each
+# repeating the same header; the owner asked for fewer and calmer. The throttle
+# above now limits *edits* rather than messages, and the answer at the end is
+# still always sent as its own message — only progress is overwritten. Set this
+# to 0 to go back to a message per progress line.
+AGENT_WORKING_MESSAGE = _bool("AGENT_WORKING_MESSAGE", True)
+
 # How long a finished task is kept before the retention prune drops it.
 AGENT_RETENTION_SECONDS = _int("AGENT_RETENTION_SECONDS", 14 * 24 * 3600)
 
@@ -1285,6 +1293,13 @@ AGENT_PROGRESS_HEADER = os.getenv(
 AGENT_RESULT_HEADER = os.getenv(
     "AGENT_RESULT_HEADER",
     "✅ {request_id} — {repository}: انجام شد",
+)
+# The header on the second and later parts of a long answer. It carries the part
+# number so a three-part answer reads as one answer rather than three identical
+# "done" messages.
+AGENT_CONTINUATION_HEADER = os.getenv(
+    "AGENT_CONTINUATION_HEADER",
+    "↩️ {request_id} — {repository} ({part}/{total})",
 )
 AGENT_FAILED_HEADER = os.getenv(
     "AGENT_FAILED_HEADER",

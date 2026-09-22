@@ -4439,6 +4439,18 @@ fault than losing an answer. Progress is throttled by count and by interval,
 because a chatty agent must not become a chatty bot; the result is never
 throttled.
 
+A running task narrates itself in **one message, edited in place**, rather than
+one message per progress line. The header sent when the task starts is that
+message; each progress line rewrites it with a count, how long the task has been
+running, and the newest line. The throttle above therefore limits *edits* rather
+than messages. The answer at the end is always a new message — progress is
+overwritten, never the answer — and when the task ends the message is forgotten
+so a late line cannot rewrite it. Two failures are handled rather than raised: a
+missing id (a restart dropped it, or the feature is off) and a refused edit (the
+message was deleted, or is older than the edit window). Either falls back to
+sending a new message, because silence is worse than a second message.
+`AGENT_WORKING_MESSAGE=0` restores a message per progress line.
+
 ### 39.12 Secrets
 
 The brief is explicit that no API key, bot token, Gemini key, DeepSeek key, SSH
@@ -4598,7 +4610,8 @@ The full sequence:
 | `AGENT_DOCUMENT_CHARS` | `3500` | when a file is kinder than chat |
 | `AGENT_PROGRESS_MAX_CHARS` | `600` | how long a progress line may be |
 | `AGENT_PROGRESS_MIN_INTERVAL_SECONDS` | `10` | the throttle |
-| `AGENT_PROGRESS_MAX_MESSAGES` | `20` | the progress ceiling |
+| `AGENT_PROGRESS_MAX_MESSAGES` | `20` | the progress ceiling (edits, when the working message is on) |
+| `AGENT_WORKING_MESSAGE` | `1` | narrate in one edited message; `0` for a message per line |
 | `AGENT_RETENTION_SECONDS` | `1209600` | how long a finished task is kept |
 
 The `AGENT_*_TEXT` and `AGENT_*_HEADER` variables are the Persian copy for each

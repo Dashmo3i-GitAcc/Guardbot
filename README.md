@@ -304,8 +304,9 @@ a name never grants anything: authority always comes from the Telegram id.
 
 The owner can ask Nexus in the group for a change to this system's own code —
 «توی guardbot این باگ رو درست کن» — and Nexus hands the work to a coding agent
-running on the host. The answer comes back into the same conversation: progress
-lines while it works, then the result, chunked in order or as a document.
+running on the host. The answer comes back into the same conversation: a single
+message that narrates the run as it works, then the result as its own message,
+chunked in order or as a document.
 
 It is **owner-only**, and structurally so: the permission behind it is held by no
 role, so an administrator cannot be given it however they are promoted. Nexus

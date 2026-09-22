@@ -224,17 +224,49 @@ def test_pending_requests_are_listed_oldest_first():
 
 
 # ── The container's end ───────────────────────────────────────────────────
-class FakeBot:
-    """Records what would have been sent, and can be told to fail."""
+class _FakeMessage:
+    """What ``send_message`` returns: an object with an id to edit later."""
 
-    def __init__(self, *, fail=False):
+    def __init__(self, message_id: int):
+        self.message_id = message_id
+
+
+class FakeBot:
+    """Records what would have been sent, and can be told to fail.
+
+    Three separate channels, because the delivery loop treats them differently:
+    ``sent`` is a new message, ``edits`` is a rewrite of the task's one working
+    message, and ``typing`` is the indicator. Two failure switches, because
+    ``fail`` (nothing works) and ``fail_edit`` (only the rewrite is refused)
+    exercise different fallbacks — the second is the one that must degrade to a
+    new message rather than lose the line.
+
+    ``send_message`` returns a message carrying an id, because that id is what
+    the working-message code stores in order to edit it on the next line.
+    """
+
+    def __init__(self, *, fail=False, fail_edit=False):
         self.sent: list[tuple] = []
+        self.edits: list[tuple] = []
+        self.typing: list[int] = []
         self.fail = fail
+        self.fail_edit = fail_edit
+        self._next_id = 1000
 
     async def send_message(self, chat_id, text):
         if self.fail:
             raise RuntimeError("telegram said no")
+        self._next_id += 1
         self.sent.append(("message", chat_id, text))
+        return _FakeMessage(self._next_id)
+
+    async def edit_message_text(self, chat_id, message_id, text):
+        if self.fail or self.fail_edit:
+            raise RuntimeError("telegram said no")
+        self.edits.append((chat_id, message_id, text))
+
+    async def send_chat_action(self, chat_id, action):
+        self.typing.append(chat_id)
 
     async def send_document(self, chat_id, document, filename=None, caption=None):
         if self.fail:
@@ -243,8 +275,8 @@ class FakeBot:
 
 
 class FakeCtx:
-    def __init__(self, *, fail=False):
-        self.bot = FakeBot(fail=fail)
+    def __init__(self, *, fail=False, fail_edit=False):
+        self.bot = FakeBot(fail=fail, fail_edit=fail_edit)
 
 
 def _task(*, task="change the parser", operation="edit", reply_mode="text"):
@@ -272,6 +304,17 @@ def _tick(ctx):
 
 def _texts(ctx):
     return [entry[2] for entry in ctx.bot.sent if entry[0] == "message"]
+
+
+def _delivered(ctx):
+    """Every line that reached the chat, as a message or as an edit.
+
+    The working message means a progress line can arrive without a new message,
+    so a test about *what was said* has to look at both channels. Order within a
+    channel is preserved by the lists; the two are only ever compared for
+    membership or counted, never interleaved.
+    """
+    return _texts(ctx) + [edit[2] for edit in ctx.bot.edits]
 
 
 # ── Delivery ──────────────────────────────────────────────────────────────
@@ -341,13 +384,13 @@ def test_progress_lines_are_delivered_but_throttled(monkeypatch):
         agent_spool.append(request_id, "progress", f"step {i}")
     ctx = FakeCtx()
     _tick(ctx)
-    progress = [t for t in _texts(ctx) if "step" in t]
+    progress = [t for t in _delivered(ctx) if "step" in t]
     assert len(progress) == 2
     # And the transcript is still delivered in full when it matters: the result
     # is not throttled.
     agent_spool.append(request_id, "result", "done")
     _tick(ctx)
-    assert any("done" in t for t in _texts(ctx))
+    assert any("done" in t for t in _delivered(ctx))
 
 
 def test_a_progress_line_is_never_sent_before_the_one_it_followed():
@@ -358,11 +401,115 @@ def test_a_progress_line_is_never_sent_before_the_one_it_followed():
     agent_spool.append(request_id, "result", "final")
     ctx = FakeCtx()
     _tick(ctx)
-    bodies = _texts(ctx)
-    positions = [
-        bodies.index(t) for t in bodies if "step" in t or "final" in t
-    ]
-    assert positions == sorted(positions)
+    # Each rewrite carries the newest line, and the rewrites arrive in the order
+    # the runner wrote them — a progress line cannot overtake the one before it.
+    steps = [t for t in _delivered(ctx) if "step" in t]
+    numbers = [int(t.rsplit("step ", 1)[1]) for t in steps]
+    assert numbers == sorted(numbers) == [0, 1, 2]
+    # The answer is its own message rather than a rewrite of the narration.
+    assert any("final" in t for t in _texts(ctx))
+
+
+# ── One calm working message ──────────────────────────────────────────────
+def test_progress_rewrites_one_working_message_instead_of_posting_each_line():
+    """A task narrates itself in one message, not twenty.
+
+    The header sent when the task started is the message; every progress line
+    after it is an edit of that same message, so a long run does not push the
+    owner's chat off the screen.
+    """
+    request_id = _task()
+    agent_spool.append(request_id, "started")
+    for i in range(3):
+        agent_spool.append(request_id, "progress", f"step {i}")
+    ctx = FakeCtx()
+    _tick(ctx)
+    assert len(_texts(ctx)) == 1
+    assert len(ctx.bot.edits) == 3
+    # Every edit targets the one message the start opened.
+    assert len({edit[1] for edit in ctx.bot.edits}) == 1
+    assert "step 2" in ctx.bot.edits[-1][2]
+
+
+def test_a_progress_line_that_cannot_be_written_falls_back_to_a_message():
+    """The edit may be refused — the message was deleted, or too old to edit.
+
+    Falling back to a new message is the point: silence would be worse, and a
+    refusal must not abort the loop and lose the lines after it.
+    """
+    request_id = _task()
+    agent_spool.append(request_id, "started")
+    agent_spool.append(request_id, "progress", "step 0")
+    ctx = FakeCtx(fail_edit=True)
+    _tick(ctx)
+    assert ctx.bot.edits == []
+    assert any("step 0" in t for t in _texts(ctx))
+
+
+def test_the_answer_is_never_written_into_the_working_message():
+    """Progress is overwritten; the answer is not. It is what was asked for."""
+    request_id = _task()
+    agent_spool.append(request_id, "started")
+    agent_spool.append(request_id, "progress", "step 0")
+    agent_spool.append(request_id, "result", "the answer")
+    ctx = FakeCtx()
+    _tick(ctx)
+    assert all("the answer" not in edit[2] for edit in ctx.bot.edits)
+    assert any("the answer" in t for t in _texts(ctx))
+
+
+def test_a_line_after_the_answer_cannot_rewrite_the_message_it_arrived_in():
+    """The narration is closed when the answer arrives.
+
+    A ``progress`` line that follows the ``result`` in the stream must not edit
+    the message the owner already read the answer in; it becomes a new message
+    or nothing, never a rewrite.
+    """
+    request_id = _task()
+    agent_spool.append(request_id, "started")
+    agent_spool.append(request_id, "result", "the answer")
+    agent_spool.append(request_id, "progress", "late noise")
+    ctx = FakeCtx()
+    _tick(ctx)
+    assert ctx.bot.edits == []
+    assert any("late noise" in t for t in _texts(ctx))
+
+
+def test_a_long_answer_numbers_its_parts(monkeypatch):
+    """A many-part answer reads as one answer, not N identical "done"s."""
+    monkeypatch.setattr(config, "AGENT_CHUNK_CHARS", 400)
+    request_id = _task()
+    body = "\n".join(f"line {i} of a long transcript" for i in range(200))
+    agent_spool.append(request_id, "started")
+    agent_spool.append(request_id, "result", body)
+    ctx = FakeCtx()
+    _tick(ctx)
+    answers = [t for t in _texts(ctx) if "line " in t]
+    assert len(answers) > 1
+    assert answers[0].startswith(f"✅ {request_id} — demo: انجام شد (1/")
+    assert answers[1].startswith(f"↩️ {request_id} — demo (2/")
+
+
+def test_the_working_message_shows_the_typing_indicator():
+    request_id = _task()
+    agent_spool.append(request_id, "started")
+    agent_spool.append(request_id, "progress", "step 0")
+    ctx = FakeCtx()
+    _tick(ctx)
+    assert set(ctx.bot.typing) == {CHAT}
+
+
+def test_the_working_message_can_be_switched_off(monkeypatch):
+    """With it off, the old behaviour returns: one message per progress line."""
+    monkeypatch.setattr(config, "AGENT_WORKING_MESSAGE", False)
+    request_id = _task()
+    agent_spool.append(request_id, "started")
+    for i in range(2):
+        agent_spool.append(request_id, "progress", f"step {i}")
+    ctx = FakeCtx()
+    _tick(ctx)
+    assert ctx.bot.edits == []
+    assert len([t for t in _texts(ctx) if "step" in t]) == 2
 
 
 def test_a_long_answer_is_chunked_in_order(monkeypatch):
