@@ -162,7 +162,7 @@ def probe(monkeypatch):
 
 # ── Telegram doubles ──────────────────────────────────────────────────────
 class FakeBot:
-    def __init__(self, *, delete_fails=False):
+    def __init__(self, *, delete_fails=False, set_commands_fails=False):
         self.id = 1
         self.username = "guardbot"
         self.sent = []
@@ -170,12 +170,26 @@ class FakeBot:
         self.deleted = []
         self.answers = []
         self.delete_fails = delete_fails
+        self.set_commands_fails = set_commands_fails
+        # Every keyboard handed to `send_message`, so a test can assert that the
+        # owner was given a way in and a stranger was not.
+        self.markups = []
+        # `(commands, scope)` for each `set_my_commands` call, in order.
+        self.commands = []
         self._next_id = 100
 
     async def send_message(self, chat_id, text, **kwargs):
         self.sent.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
         self._next_id += 1
         return SimpleNamespace(message_id=self._next_id)
+
+    async def set_my_commands(self, commands, scope=None, **kwargs):
+        if self.set_commands_fails:
+            raise TelegramError("cannot set commands")
+        self.commands.append(
+            (tuple((c.command, c.description) for c in commands), scope)
+        )
 
     async def delete_message(self, chat_id, message_id, **kwargs):
         if self.delete_fails:
@@ -246,6 +260,7 @@ def message_update(
         effective_message=msg,
         effective_chat=SimpleNamespace(id=chat_id, type=chat_type),
         effective_user=SimpleNamespace(id=actor, full_name=f"user{actor}",
+                                       first_name=f"user{actor}",
                                        username=None, is_bot=False),
         callback_query=None,
     )
@@ -1190,3 +1205,246 @@ def test_the_dashboard_never_reaches_telegram_by_itself():
     source = inspect.getsource(gemini_keys)
     assert "send_message" not in source
     assert "edit_message_text" not in source
+
+
+# ── Discoverability: the command menu and the entry button ────────────────
+# The feature worked and the owner could not find it. That is a defect in its own
+# right — "it is there if you already know the name" is not a user interface —
+# and these tests pin the two things that make it findable: the menu Telegram is
+# told about, and the button on the two screens a person actually lands on.
+#
+# The menu is derived from the same functions that register the handlers, so the
+# central invariant is not "the menu has a fixed list" but "the menu and the
+# registrations are the same set". A hard-coded expectation would pass while the
+# two drifted.
+def _registered_names() -> set[str]:
+    return {
+        name
+        for source in (
+            main.admin_command_handlers(),
+            main.chat_command_handlers(),
+            main.transcribe_command_handlers(),
+        )
+        for name, _handler in source
+    }
+
+
+def test_the_menu_advertises_exactly_the_commands_that_are_registered(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
+    public, owner = main.command_menu()
+    assert {name for name, _label in owner} == _registered_names()
+
+
+def test_the_public_menu_is_a_subset_of_the_owner_menu(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
+    public, owner = main.command_menu()
+    assert set(public) <= set(owner)
+
+
+def test_a_stranger_is_not_told_the_bot_has_a_credential_dashboard(monkeypatch):
+    """The public list is what every chat sees. It must not name `/keys`."""
+    monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
+    public, owner = main.command_menu()
+    names = {name for name, _label in public}
+    assert config.GEMINI_KEYS_COMMAND not in names
+    assert "ban" not in names and "promote" not in names
+    # …and the owner's list does have it, or the feature is still unfindable.
+    assert config.GEMINI_KEYS_COMMAND in {name for name, _label in owner}
+
+
+def test_the_conversational_commands_disappear_with_the_assistant(monkeypatch):
+    """A menu entry for a command that was never registered is a dead button."""
+    monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", False)
+    public, _owner = main.command_menu()
+    names = {name for name, _label in public}
+    assert "start" not in names and "reset" not in names
+    assert main.chat_command_handlers() == ()
+
+
+def test_the_voice_command_follows_its_setting(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIBE_COMMAND", "transcribe")
+    assert [name for name, _ in main.transcribe_command_handlers()] == ["transcribe"]
+    public, _owner = main.command_menu()
+    assert "transcribe" in {name for name, _label in public}
+
+    monkeypatch.setattr(config, "TRANSCRIBE_COMMAND", "")
+    assert main.transcribe_command_handlers() == ()
+    public, _owner = main.command_menu()
+    assert "transcribe" not in {name for name, _label in public}
+
+
+def test_no_menu_label_is_empty_or_absurdly_long():
+    """Telegram rejects a description over 256 characters, silently at best."""
+    public, owner = main.command_menu()
+    for name, label in (*public, *owner):
+        assert name and label
+        assert len(label) <= 256, name
+
+
+def test_publishing_the_menu_tells_telegram_both_scopes(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
+    bot = FakeBot()
+    asyncio.run(main._publish_command_menu(SimpleNamespace(bot=bot)))
+    assert len(bot.commands) == 2
+    public, owner = main.command_menu()
+    assert bot.commands[0] == (public, None)
+    commands, scope = bot.commands[1]
+    assert commands == owner
+    # A chat-scoped list, aimed at the owner's own chat and nobody else's.
+    assert scope is not None and scope.chat_id == OWNER
+
+
+def test_publishing_the_menu_does_not_fail_the_start_when_telegram_is_down(caplog):
+    """A missing menu is cosmetic; refusing to boot over one would be an outage."""
+    bot = FakeBot(set_commands_fails=True)
+    with caplog.at_level("WARNING"):
+        asyncio.run(main._publish_command_menu(SimpleNamespace(bot=bot)))
+    assert "could not publish the command menu" in caplog.text
+    assert bot.commands == []
+
+
+def test_publishing_the_menu_does_not_fail_the_start_on_an_unexpected_error(caplog):
+    """This runs inside `post_init`, so anything escaping it stops the bot.
+
+    A bot object without `set_my_commands` is the cheapest stand-in for "some
+    failure nobody predicted": the point is that *no* failure here is allowed to
+    take the bot down, and that it is still logged rather than swallowed.
+    """
+    with caplog.at_level("WARNING"):
+        asyncio.run(main._publish_command_menu(SimpleNamespace(bot=SimpleNamespace())))
+    assert "could not publish the command menu" in caplog.text
+
+
+def test_the_menu_is_not_published_when_there_is_no_owner(monkeypatch):
+    """Without an owner there is no chat to scope the administrative list to."""
+    monkeypatch.setattr(config, "OWNER_USER_ID", 0)
+    bot = FakeBot()
+    asyncio.run(main._publish_command_menu(SimpleNamespace(bot=bot)))
+    assert len(bot.commands) == 1
+
+
+def test_the_owner_gets_a_button_to_the_dashboard_on_start(monkeypatch):
+    _pools_config(monkeypatch)
+    bot = FakeBot()
+    run_handler(main.on_chat_start, message_update(bot, actor=OWNER), ctx_for(bot))
+    keyboard = bot.markups[0]
+    assert keyboard is not None
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == [f"{gemini_keys.PREFIX}home"]
+    assert buttons[0].text == gemini_keys.TEXT_BUTTON_OPEN
+
+
+def test_a_stranger_gets_no_button_on_start(monkeypatch):
+    _pools_config(monkeypatch)
+    bot = FakeBot()
+    run_handler(main.on_chat_start, message_update(bot, actor=STRANGER), ctx_for(bot))
+    assert bot.sent, "the greeting is still sent"
+    assert bot.markups == [None]
+
+
+def test_whoami_offers_the_button_to_the_owner_and_to_nobody_else(monkeypatch):
+    _pools_config(monkeypatch)
+    bot = FakeBot()
+    run_handler(main.cmd_whoami, message_update(bot, actor=OWNER), ctx_for(bot))
+    assert bot.markups[0] is not None
+    run_handler(main.cmd_whoami, message_update(bot, actor=STRANGER), ctx_for(bot))
+    assert bot.markups[1] is None
+
+
+def test_the_button_payload_opens_a_real_screen(monkeypatch):
+    """The button must not be a dead end, so its payload goes through the parser."""
+    monkeypatch.setattr(config, "OWNER_USER_ID", OWNER)
+    from app import rbac
+
+    keyboard = main._owner_menu_keyboard(rbac.resolve(OWNER))
+    payload = keyboard.inline_keyboard[0][0].callback_data
+    assert payload == f"{gemini_keys.PREFIX}home"
+    parsed = gemini_keys.parse(payload)
+    assert parsed is not None
+    verb, _first, _second = parsed
+    assert verb in main._KEY_SCREENS
+
+
+def test_the_owner_button_is_absent_for_a_principal_who_is_not_the_owner():
+    from app import rbac
+
+    assert main._owner_menu_keyboard(rbac.resolve(STRANGER)) is None
+
+
+# ── The entry filter: a command is never key material ─────────────────────
+def _ptb_update(text, *, private=True, edited=False):
+    from telegram import Chat, Message, MessageEntity, Update, User
+
+    user = User(id=OWNER, first_name="Owner", is_bot=False)
+    chat = Chat(id=PRIVATE if private else CHAT,
+                type=Chat.PRIVATE if private else Chat.SUPERGROUP)
+    entities = None
+    if text.startswith("/"):
+        command = text.split()[0]
+        entities = [
+            MessageEntity(
+                type=MessageEntity.BOT_COMMAND, offset=0, length=len(command)
+            )
+        ]
+    message = Message(
+        message_id=1, date=None, chat=chat, from_user=user, text=text,
+        entities=entities,
+    )
+    if edited:
+        return Update(update_id=1, edited_message=message)
+    return Update(update_id=1, message=message)
+
+
+def test_the_entry_filter_accepts_a_private_key_message():
+    accepts = main.key_entry_filter()
+    assert accepts.check_update(_ptb_update(KEY_NEW))
+
+
+def test_the_entry_filter_refuses_a_command():
+    """The registered filter is the thing under test, not a copy of it."""
+    accepts = main.key_entry_filter()
+    assert not accepts.check_update(_ptb_update("/keys"))
+    assert not accepts.check_update(_ptb_update(f"/keys {KEY_NEW}"))
+
+
+def test_the_entry_filter_refuses_a_group_and_an_edit():
+    accepts = main.key_entry_filter()
+    assert not accepts.check_update(_ptb_update(KEY_NEW, private=False))
+    assert not accepts.check_update(_ptb_update(KEY_NEW, edited=True))
+
+
+def test_the_entry_filter_refuses_media():
+    """A caption is not a credential, and this handler must not see one."""
+    from telegram import Chat, Message, Update, User
+
+    message = Message(
+        message_id=1,
+        date=None,
+        chat=Chat(id=PRIVATE, type=Chat.PRIVATE),
+        from_user=User(id=OWNER, first_name="Owner", is_bot=False),
+        photo=[SimpleNamespace(file_id="x", file_unique_id="y", width=1, height=1)],
+        caption=KEY_NEW,
+    )
+    assert not main.key_entry_filter().check_update(
+        Update(update_id=1, message=message)
+    )
+
+
+def test_a_command_with_a_prompt_armed_reaches_the_command_handler(monkeypatch):
+    """End to end: `/keys` while armed opens the dashboard, it is not swallowed.
+
+    The filter is asserted directly above; this is the behaviour the owner cares
+    about, driven through the real handler so the two cannot diverge.
+    """
+    _pools_config(monkeypatch)
+    gemini_pool.build_pools()
+    bot = FakeBot()
+    gemini_keys.begin_add(OWNER, "chat")
+    stopped = run_handler(
+        main.on_key_message, message_update(bot, actor=OWNER, text="/keys"),
+        ctx_for(bot),
+    )
+    assert stopped is False
+    assert bot.deleted == []
+    assert gemini_keys.pending_for(OWNER) == "chat"
+

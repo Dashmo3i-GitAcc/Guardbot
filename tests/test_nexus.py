@@ -1566,8 +1566,17 @@ def test_the_visibility_report_is_run_at_startup():
 
 
 def test_the_nexus_command_is_registered():
+    """`main()` registers from `admin_command_handlers()`, and `/nexus` is in it.
+
+    The literal tuple moved into that function so that the command menu
+    published to Telegram can be derived from the same list — see
+    `test_the_menu_advertises_exactly_the_commands_that_are_registered`. Both
+    halves are asserted here because either one alone would pass while the
+    command was unreachable.
+    """
     source = inspect.getsource(main.main)
-    assert '("nexus", cmd_nexus)' in source
+    assert "for command, handler in admin_command_handlers()" in source
+    assert "nexus" in {name for name, _handler in main.admin_command_handlers()}
 
 
 def test_the_nexus_command_reports_the_state(monkeypatch):

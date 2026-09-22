@@ -6103,7 +6103,7 @@ existed.
 
 ### 50.11 Tests
 
-`tests/test_gemini_keys.py` (86) covers the store (shape, `0600`, atomicity,
+`tests/test_gemini_keys.py` (108) covers the store (shape, `0600`, atomicity,
 idempotence, the unmanaged-workload refusal, refusing to overwrite an unreadable
 file, concurrent writers, `repr` not rendering the credential), the pool wiring
 (runtime credentials joining and leaving the live pool, environment keys staying
@@ -6112,9 +6112,64 @@ stopping `build_pools`, counters surviving a reload), the probe (valid, invalid,
 unreachable, no usable model, redaction, no cached client for a rejected key),
 every screen (rendering, length, no credential, the remove button only for
 runtime credentials, the empty-workload warning), the payload parser, the prompt
-lifecycle, and the handlers end to end — including the three isolation
-properties: the stop, the deletion, and that a non-key message is left to the
-dispatcher.
+lifecycle, discoverability (§50.12), and the handlers end to end — including the
+three isolation properties: the stop, the deletion, and that a non-key message is
+left to the dispatcher.
 
 `tests/test_gemini_pool.py` gained the `reload`/`probe` seams; the whole suite is
-2016 passing.
+2038 passing.
+
+### 50.12 Discoverability: the menu, and the button
+
+The control plane shipped working and unfindable. The owner reported "no button
+has been set up in the bot" and cleared their chat history looking for it. The
+diagnosis was not a rendering problem in this code at all: **the bot had never
+called `setMyCommands`**, so Telegram's command list for it was empty
+(`getMyCommands` returned `[]`), and Telegram therefore rendered no menu button
+and no command list. Every command — `/keys` included — was reachable only by
+somebody who already knew it existed. Clearing a chat's history does not change
+that: the menu is served from Telegram's own state, not from the chat.
+
+Two things were added, and they are deliberately not the same thing:
+
+* **`_publish_command_menu(app)`**, called from `post_init`, tells Telegram the
+  command list for **two scopes**. Everybody gets the commands anybody may use;
+  the owner's chat additionally gets the administrative ones. `/ban`,
+  `/promote` and `/keys` are *not* published to every chat — advertising the
+  moderation surface to the people it is aimed at, and telling a stranger the bot
+  has a credential dashboard, are both the wrong thing to do. The owner's list
+  is scoped with `BotCommandScopeChat(chat_id=owner_id)`, so it lands in the
+  owner's chat and nowhere else.
+* **A button on `/start` and `/whoami`**, because a menu has to be *noticed*
+  before it can be used, and those are the two screens a person actually lands
+  on. The button carries `gk:home` — the same screen `/keys` opens — so it is an
+  entry point, not a second implementation. It is built by
+  `_owner_menu_keyboard(actor)`, which returns `None` for anybody who is not the
+  owner, so the two callers do not each have to remember the check.
+
+**The menu cannot drift from the registrations.** `main()` no longer contains a
+literal list of commands. It registers from `admin_command_handlers()`,
+`chat_command_handlers()` and `transcribe_command_handlers()`, and the published
+menu is derived from those same three functions. A menu written out separately
+would eventually name a command that does not exist, and a dead menu entry is
+worse than no menu at all — tapping it does nothing, and "the bot is broken" is
+the only reasonable conclusion. Two consequences fall out of this for free:
+`/start` and `/reset` disappear from the menu when `GEMINI_CHAT_ENABLED` is off,
+and the voice command follows `TRANSCRIBE_COMMAND`, because in both cases the
+menu asks the function that registers the handler rather than assuming.
+
+Publishing is **best effort and never fatal**. It runs inside `post_init`, so
+anything escaping it would stop the bot from starting; a cosmetic menu is not
+worth an outage. The catch is therefore deliberately broad rather than
+`TelegramError`, and it logs a traceback so a real bug is still visible.
+
+One filter change belongs to this section rather than to §50.5: the credential
+entry handler now uses `key_entry_filter()`, which excludes `filters.COMMAND`
+(alongside the private-chat and not-an-edit conditions). A command is a command
+even with a prompt armed — `/keys` re-opens the dashboard rather than being
+weighed as candidate key material. Today the store's shape check would reject a
+command anyway; the point is that "the owner's own commands are never read as a
+credential" should not depend on that check staying strict. The filter is a
+named function for the same reason the other handlers' filters are: the test
+asserts the registered filter, not a copy of it.
+

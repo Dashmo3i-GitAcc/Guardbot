@@ -12,7 +12,7 @@ erodes: a later change to a filter, or one missing guard, would turn a
 """
 from types import SimpleNamespace
 
-from app import main
+from app import config, main
 
 
 class _Bot:
@@ -139,12 +139,24 @@ def test_the_conversational_handlers_do_not_block_the_dispatcher():
     assert "on_private_text, block=False" in source
 
 
-def test_start_and_reset_are_registered():
+def test_start_and_reset_are_registered(monkeypatch):
+    """`main()` registers whatever `chat_command_handlers()` returns.
+
+    The literal `CommandHandler("start", …)` line moved into that function when
+    the command menu was added, because the menu has to name exactly the
+    commands that are registered. The property to pin is therefore the wiring
+    plus the list, not a line of source inside `main()` — which is why this
+    asserts both halves.
+    """
     import inspect
 
     source = inspect.getsource(main.main)
-    assert 'CommandHandler("start"' in source
-    assert 'CommandHandler("reset"' in source
+    assert "for command, handler in chat_command_handlers()" in source
+    monkeypatch.setattr(config, "GEMINI_CHAT_ENABLED", True)
+    assert [name for name, _handler in main.chat_command_handlers()] == [
+        "start",
+        "reset",
+    ]
 
 
 class _ChatBot:

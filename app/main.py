@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -1913,11 +1915,31 @@ def private_chat_filter():
     )
 
 
+def key_entry_filter():
+    """Private *plain text*, for the credential-entry handler.
+
+    Narrower than `private_chat_filter` on purpose: media has no business here,
+    an edited message would mean the credential had already been delivered once,
+    and a command is a command even with a prompt armed — `/keys` re-opens the
+    dashboard rather than being weighed as candidate key material. Today the
+    store's shape check would reject a command anyway; the point is that "the
+    owner's own commands are never read as a credential" should not depend on
+    that check staying strict.
+    """
+    return (
+        filters.TEXT
+        & ~filters.COMMAND
+        & filters.ChatType.PRIVATE
+        & ~filters.UpdateType.EDITED_MESSAGE
+    )
+
+
 async def _send_chat(
     ctx: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     text: str,
     reply_to: int | None = None,
+    keyboard: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Send one conversational message. Returns whether it was actually sent.
 
@@ -1929,6 +1951,9 @@ async def _send_chat(
     The return value exists for the awareness window: what the assistant said
     out loud is part of the conversation the next pass has to understand, and a
     reply that failed to send must not appear there as though it had.
+
+    ``keyboard`` is appended last and defaults to None so the existing callers,
+    which pass ``reply_to`` positionally, keep working untouched.
     """
     safe = html.escape(text)
     try:
@@ -1941,6 +1966,7 @@ async def _send_chat(
             safe,
             parse_mode="HTML",
             reply_to_message_id=reply_to,
+            reply_markup=keyboard,
             disable_web_page_preview=True,
         )
     except TelegramError as exc:
@@ -2778,7 +2804,12 @@ async def on_chat_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # A plain first name rather than `mention()`: `_send_chat` escapes what it
     # sends, so an HTML mention would arrive as visible markup.
     name = (user.first_name or "").strip() or "دوست عزیز"
-    await _send_chat(ctx, room.id, config.GEMINI_CHAT_START_TEXT.format(name=name))
+    await _send_chat(
+        ctx,
+        room.id,
+        config.GEMINI_CHAT_START_TEXT.format(name=name),
+        keyboard=_owner_menu_keyboard(_actor(update)),
+    )
 
 
 # ------------------------------------------------- administration
@@ -3140,6 +3171,7 @@ async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         config.ADMIN_WHOAMI_TEXT.format(
             user_id=actor.user_id, role=actor.label, perms=perms
         ),
+        keyboard=_owner_menu_keyboard(actor),
         reply_to=msg.message_id,
     )
 
@@ -3389,6 +3421,173 @@ _KEY_SCREENS = {
         [[("⬅️ بازگشت", f"{gemini_keys.PREFIX}a:{first}:{second}")]],
     ),
 }
+
+
+def _owner_menu_keyboard(actor: rbac.Principal) -> InlineKeyboardMarkup | None:
+    """The owner's one-tap way into the key dashboard, or None for anybody else.
+
+    Telegram's command menu lists `/keys` once it is published, but a menu has to
+    be noticed before it can be used — and the owner's report was precisely that
+    nothing was visible. This puts the same entry point on the two screens a
+    person actually lands on.
+    """
+    if not actor.is_owner:
+        return None
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    gemini_keys.TEXT_BUTTON_OPEN,
+                    callback_data=f"{gemini_keys.PREFIX}home",
+                )
+            ]
+        ]
+    )
+
+
+def admin_command_handlers() -> tuple[tuple[str, object], ...]:
+    """Every typed command this bot registers, as ``(name, handler)``.
+
+    One definition read twice: ``main()`` registers from it, and the command menu
+    Telegram is told about is derived from it. A menu written out separately
+    would eventually name a command that does not exist, and a dead menu entry is
+    worse than no menu at all — tapping it does nothing, and "the bot is broken"
+    is the only reasonable conclusion.
+    """
+    return (
+        ("whoami", cmd_whoami),
+        ("admins", cmd_admins),
+        ("pool", cmd_pool),
+        (config.GEMINI_KEYS_COMMAND, cmd_keys),
+        ("nexus", cmd_nexus),
+        ("agent", cmd_agent),
+        ("promote", cmd_promote),
+        ("demote", cmd_demote),
+        ("ban", cmd_ban),
+        ("unban", cmd_unban),
+        ("mute", cmd_mute),
+        ("unmute", cmd_unmute),
+        ("warn", cmd_warn),
+        ("del", cmd_delete),
+    )
+
+
+def chat_command_handlers() -> tuple[tuple[str, object], ...]:
+    """The conversational commands — empty when the assistant is switched off.
+
+    A function rather than a constant because the registration and the published
+    command menu both have to ask the same question. `/start` is not registered
+    when the assistant is off, so a menu that advertised it would offer an entry
+    that does nothing when tapped, which reads as a broken bot.
+    """
+    if not config.GEMINI_CHAT_ENABLED:
+        return ()
+    return (("start", on_chat_start), ("reset", on_chat_reset))
+
+
+# What the public half of the menu calls each conversational command. Kept
+# beside `chat_command_handlers` so the two cannot disagree about the names.
+CHAT_COMMAND_LABELS = {"start": "شروع", "reset": "پاک کردن گفتگو"}
+
+
+def transcribe_command_handlers() -> tuple[tuple[str, object], ...]:
+    """The voice-to-text command, or nothing when it is not configured.
+
+    Same reasoning as `chat_command_handlers`: the name is a setting, so the
+    menu has to ask the function that registers it rather than assume it.
+    """
+    if not config.TRANSCRIBE_COMMAND:
+        return ()
+    return ((config.TRANSCRIBE_COMMAND, on_transcribe_command),)
+
+
+# Descriptions for the administrative commands, in the order the menu shows
+# them. Names only — the list is filtered against what is actually registered.
+OWNER_COMMAND_LABELS = (
+    (config.GEMINI_KEYS_COMMAND, "کلیدهای Gemini — افزودن، حذف و مصرف"),
+    ("pool", "وضعیت استخر و حساب‌های Gemini"),
+    ("nexus", "روشن یا خاموش کردن دستیار"),
+    ("agent", "درخواست تغییر کد"),
+    ("admins", "لیست مدیران"),
+    ("promote", "ارتقای یک نفر به مدیر"),
+    ("demote", "گرفتن نقش مدیر"),
+    ("ban", "بن کردن"),
+    ("unban", "رفع بن"),
+    ("mute", "سکوت"),
+    ("unmute", "رفع سکوت"),
+    ("warn", "اخطار"),
+    ("del", "حذف پیام"),
+)
+
+
+def command_menu() -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
+    """``(public, owner)`` — the two command lists Telegram is told about.
+
+    Two scopes because the two audiences are different, and the difference is
+    the project's usual rule about where operational detail belongs. Everybody
+    gets the commands anybody may use; the owner additionally gets the
+    administrative ones. Publishing `/ban`, `/promote` and `/keys` to every chat
+    would advertise the moderation surface to the people it is aimed at, and
+    would tell a stranger the bot has a credential dashboard.
+
+    Every entry is derived from the same functions that register the handlers —
+    `chat_command_handlers`, `transcribe_command_handlers` and
+    `admin_command_handlers` — so a name can only appear in the menu if that
+    command actually exists. A menu entry with nothing behind it is worse than a
+    missing one: tapping it does nothing, and "the bot is broken" is the only
+    reasonable conclusion.
+    """
+    admin = dict(admin_command_handlers())
+    public: list[tuple[str, str]] = [
+        (name, CHAT_COMMAND_LABELS[name]) for name, _handler in chat_command_handlers()
+    ]
+    if "whoami" in admin:
+        public.append(("whoami", "نقش من"))
+    for name, _handler in transcribe_command_handlers():
+        public.append((name, "تبدیل صدا به متن"))
+    owner = list(public)
+    seen = {name for name, _label in owner}
+    for name, label in OWNER_COMMAND_LABELS:
+        if name in admin and name not in seen:
+            owner.append((name, label))
+            seen.add(name)
+    return tuple(public), tuple(owner)
+
+
+async def _publish_command_menu(app: Application) -> None:
+    """Tell Telegram which commands this bot has, for each scope.
+
+    Why this exists at all: without it the bot's command list is *empty*, so
+    Telegram renders no menu button and no command list. Every command this bot
+    has — `/keys` included — was reachable only by typing it from memory, which
+    is not a user interface. The owner reported exactly that.
+
+    Best effort, and never fatal. A bot that cannot reach Telegram at boot has a
+    larger problem than a missing menu, and failing to start over one would turn
+    a cosmetic failure into an outage. The catch is deliberately broad rather
+    than ``TelegramError`` for that reason: this runs inside ``post_init``, so
+    *anything* that escapes here stops the bot from starting — and no possible
+    failure of a cosmetic menu is worth an outage. It is logged with a traceback,
+    so a real bug is still visible rather than silent.
+    """
+    try:
+        public, owner = command_menu()
+        await app.bot.set_my_commands(
+            [BotCommand(name, label) for name, label in public]
+        )
+        if rbac.has_owner():
+            await app.bot.set_my_commands(
+                [BotCommand(name, label) for name, label in owner],
+                scope=BotCommandScopeChat(chat_id=rbac.owner_id()),
+            )
+    except Exception:  # noqa: BLE001 - see above: a menu must not stop the bot
+        log.exception("could not publish the command menu")
+        return
+    log.info(
+        "command menu published: public=%d owner=%d",
+        len(public),
+        len(owner),
+    )
 
 
 def _keys_keyboard(rows) -> InlineKeyboardMarkup | None:
@@ -4721,6 +4920,12 @@ async def post_init(app: Application) -> None:
     # depends on it and a failed getMe must be visible in the log rather than
     # discovered as "the bot stopped responding to mentions".
     await load_identity(app)
+    # The command menu, published to Telegram. Without this call the bot's
+    # command list is empty: Telegram has nothing to render, so there is no menu
+    # button and no command list, and every command is reachable only by someone
+    # who already knows it exists. That was a live defect, reported by the owner
+    # as "no button has been set up in the bot".
+    await _publish_command_menu(app)
     # What we can see, asked of Telegram rather than assumed. This is the answer
     # to the brief's "do not assume Telegram delivers every group message": the
     # bot's ability to observe unaddressed administrator messages depends on
@@ -5000,14 +5205,10 @@ def main() -> None:
     # ahead of the assistant's private-chat handler in group 2 — because it
     # raises ``ApplicationHandlerStop`` when it consumes a message and that is
     # the whole of the isolation guarantee: a key typed into the owner's private
-    # chat is never handed to a model. Its filter is the narrowest one that can
-    # work, and the handler itself returns immediately for anyone but the owner
-    # and for any message sent while no prompt is armed.
+    # chat is never handed to a model. The handler itself returns immediately for
+    # anyone but the owner and for any message sent while no prompt is armed.
     app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.ChatType.PRIVATE & ~filters.UpdateType.EDITED_MESSAGE,
-            on_key_message,
-        ),
+        MessageHandler(key_entry_filter(), on_key_message),
         group=0,
     )
 
@@ -5030,8 +5231,10 @@ def main() -> None:
         # person chatting would pause media moderation for the whole group.
         # Non-blocking runs the callback as its own task, so the rest of the bot
         # keeps working while a reply is being written.
-        app.add_handler(CommandHandler("start", on_chat_start))
-        app.add_handler(CommandHandler("reset", on_chat_reset))
+        # From `chat_command_handlers`, the same function the published command
+        # menu reads, so the two cannot drift apart.
+        for command, handler in chat_command_handlers():
+            app.add_handler(CommandHandler(command, handler))
         app.add_handler(
             MessageHandler(group_chat_filter(), on_group_chat, block=False), group=2
         )
@@ -5054,29 +5257,15 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(on_key_callback, pattern=r"^gk:")
     )
-    for command, handler in (
-        ("whoami", cmd_whoami),
-        ("admins", cmd_admins),
-        ("pool", cmd_pool),
-        (config.GEMINI_KEYS_COMMAND, cmd_keys),
-        ("nexus", cmd_nexus),
-        ("agent", cmd_agent),
-        ("promote", cmd_promote),
-        ("demote", cmd_demote),
-        ("ban", cmd_ban),
-        ("unban", cmd_unban),
-        ("mute", cmd_mute),
-        ("unmute", cmd_unmute),
-        ("warn", cmd_warn),
-        ("del", cmd_delete),
-    ):
+    # The list comes from admin_command_handlers() rather than being written out
+    # here, because the command menu published to Telegram is derived from that
+    # same function. Two lists would drift, and the drift is invisible: a menu
+    # entry whose command was never registered looks exactly like a broken bot.
+    for command, handler in admin_command_handlers():
         app.add_handler(CommandHandler(command, handler), group=3)
 
-    if config.TRANSCRIBE_COMMAND:
-        app.add_handler(
-            CommandHandler(config.TRANSCRIBE_COMMAND, on_transcribe_command),
-            group=3,
-        )
+    for command, handler in transcribe_command_handlers():
+        app.add_handler(CommandHandler(command, handler), group=3)
 
     if config.MODERATION_ENABLED and config.MODERATION_TEXT_ENABLED:
         app.add_handler(

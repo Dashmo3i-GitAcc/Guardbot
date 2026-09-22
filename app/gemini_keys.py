@@ -761,6 +761,10 @@ TEXT_ENV_KEY_INFO = (
     "<code>.env</code> روی سرور ویرایش و ربات دوباره راه‌اندازی شود."
 )
 TEXT_DENIED = "این بخش فقط برای مالک است."
+# The one-tap way in. Telegram's command menu already lists /keys, but a menu has
+# to be noticed before it can be used, and this is the same entry point sitting
+# where the owner actually lands.
+TEXT_BUTTON_OPEN = "🔑 کلیدهای Gemini"
 TEXT_STORE_BROKEN = (
     "⚠️ فایل کلیدها خوانده نشد. برای جلوگیری از پاک‌شدن بقیه کلیدها، "
     "هیچ تغییری اعمال نمی‌شود. گزارش سرور لازم است."
