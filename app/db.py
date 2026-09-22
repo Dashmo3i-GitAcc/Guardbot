@@ -406,6 +406,15 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_group_messages_chat "
         "ON group_messages(chat_id, id)"
     )
+    # ``group_purge`` deletes by age across every room, so without this its
+    # ``WHERE at < ?`` is a full scan of the table. The table is small — it is
+    # bounded by ``NEXUS_AWARENESS_MAX_ROWS`` per room and by the retention
+    # window — so this is not the difference between fast and slow; it is the
+    # difference between a scan and a range seek on a statement that runs on a
+    # timer, and it costs one index to keep it that way as rooms accumulate.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_messages_at ON group_messages(at)"
+    )
     # What Nexus currently understands about one room. One row per chat, and
     # every column is bounded: this is a *summary*, not a transcript. It exists
     # so the assistant's understanding survives between passes and across a
@@ -1806,6 +1815,54 @@ def group_window(
         }
         for r in reversed(rows)
     ]
+
+
+def group_capture(
+    chat_id: int,
+    user_id: int,
+    role: str,
+    name: str,
+    text: str,
+    *,
+    keep: int,
+) -> int:
+    """Append one message and trim the room, in **one** transaction.
+
+    The same two statements as ``group_append`` followed by ``group_trim``, and
+    they are together here because the split cost three commits per received
+    message where one will do. Every commit is an fsync, this runs on the
+    message handler's own path, and it runs for every message the bot can see
+    whether or not it will ever be answered — so the per-message cost is paid
+    constantly and had no reason to be three times what it needs to be.
+
+    The trim is not optional and not deferred: a flood that outruns the age
+    bound is what makes the window grow, and the two statements are only safe
+    apart because neither can be seen without the other.
+    """
+    role = role if role in GROUP_ROLES else "member"
+    keep = max(1, int(keep))
+    with _lock:
+        cur = _conn.execute(
+            "INSERT INTO group_messages (chat_id, user_id, role, name, text, at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                int(chat_id),
+                int(user_id),
+                role,
+                (name or "")[:120],
+                (text or "")[:GROUP_MESSAGE_MAX_CHARS],
+                int(time.time()),
+            ),
+        )
+        row_id = int(cur.lastrowid or 0)
+        _conn.execute(
+            "DELETE FROM group_messages WHERE chat_id=? AND id NOT IN "
+            "(SELECT id FROM group_messages WHERE chat_id=? "
+            " ORDER BY id DESC LIMIT ?)",
+            (int(chat_id), int(chat_id), keep),
+        )
+        _conn.commit()
+    return row_id
 
 
 def group_trim(chat_id: int, *, keep: int) -> int:

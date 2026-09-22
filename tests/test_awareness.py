@@ -322,12 +322,40 @@ def test_old_context_is_discarded_by_the_retention_policy():
             "UPDATE group_messages SET at=? WHERE chat_id=?",
             (int(time.time()) - 600, CHAT),
         )
-        # Any later capture prunes, which is how this process tidies up.
+        # The purge runs at most once per purge interval, so make this capture
+        # the one that is due to run it. That interval is the whole reason the
+        # capture path is one transaction instead of three: the age bound is
+        # measured in hours and does not need enforcing once per message.
+        awareness.reset_timers()
         capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "new")
         texts = [m["text"] for m in db.group_window(CHAT, limit=10)]
         assert texts == ["new"]
     finally:
         monkeypatch.undo()
+
+
+def test_the_age_purge_is_not_run_on_every_capture(monkeypatch):
+    """The per-chat trim bounds a burst; the age purge runs on its own clock.
+
+    This is a performance property with a correctness edge: an old row must
+    still go, and it must not cost a table-wide scan per received message.
+    """
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_RETENTION_SECONDS", 60)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS", 3600)
+    awareness.reset_timers()
+    calls: list[int] = []
+    real = db.group_purge
+    monkeypatch.setattr(
+        db, "group_purge", lambda ttl: (calls.append(ttl), real(ttl))[1]
+    )
+
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "one")
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "two")
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "three")
+
+    assert calls == [60], "the purge must not run once per message"
+    # And the per-chat ceiling still ran on every capture.
+    assert len(db.group_window(CHAT, limit=10)) == 3
 
 
 def test_the_window_is_isolated_by_chat():

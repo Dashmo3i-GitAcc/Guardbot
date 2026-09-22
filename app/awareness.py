@@ -51,7 +51,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 from . import config, db, rbac
 
@@ -89,6 +90,38 @@ def capture_enabled() -> bool:
     return bool(config.NEXUS_AWARENESS_ENABLED)
 
 
+# ── When the batch started waiting ────────────────────────────────────────
+# A monotonic stamp per room, taken at capture, of the newest message that is
+# still unread by a human's standards. It is what makes the wait measurable:
+# the row's own ``at`` is wall-clock seconds and is what the *policy* uses, but
+# a duration cannot be computed from a wall clock that may step, and this is
+# in-process state that a restart is allowed to lose (after a restart there is
+# no meaningful "how long has this waited" anyway).
+#
+# Only human messages move it. A message the assistant wrote is not something
+# the assistant has to notice, and letting its own reply start the clock would
+# measure the wait of a batch it is itself the cause of.
+_trigger_at: dict[int, float] = {}
+
+# When the age-based purge last ran, per process. The purge is the only
+# statement in the capture path that is not bounded by ``chat_id``, and the
+# retention window it enforces is measured in hours, so running it on every
+# received message bought nothing but a full-table scan on the hot path.
+_purged_at = 0.0
+
+
+def trigger_at(chat_id: int) -> float:
+    """The monotonic time the newest unread human message arrived. 0 if unknown."""
+    return float(_trigger_at.get(int(chat_id)) or 0.0)
+
+
+def reset_timers() -> None:
+    """Forget the capture clock and the purge clock. For tests and for shutdown."""
+    global _purged_at
+    _trigger_at.clear()
+    _purged_at = 0.0
+
+
 def capture(
     chat_id: int,
     user_id: int,
@@ -106,21 +139,99 @@ def capture(
 
     The row is bounded and then the table is bounded, on the same reasoning the
     conversation history uses: the per-chat trim stops one flood, and the
-    age-based purge stops a room that was simply abandoned.
+    age-based purge stops a room that was simply abandoned. The two bounds run
+    on different clocks — the trim is per room and cheap and runs every time,
+    the purge is table-wide and runs at most once per
+    ``NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS`` — because a bound that is
+    measured in hours does not need to be enforced once per message, and this is
+    the hottest path in the feature.
     """
+    global _purged_at
     if not capture_enabled():
         return False
     body = (text or "").strip()
     if not body:
         return False
+    now = time.monotonic()
     try:
-        db.group_append(chat_id, user_id, role, name, body)
-        db.group_trim(chat_id, keep=max(1, int(config.NEXUS_AWARENESS_MAX_ROWS)))
-        db.group_purge(max(1, int(config.NEXUS_AWARENESS_RETENTION_SECONDS)))
+        db.group_capture(
+            chat_id,
+            user_id,
+            role,
+            name,
+            body,
+            keep=max(1, int(config.NEXUS_AWARENESS_MAX_ROWS)),
+        )
     except Exception:  # noqa: BLE001 - a capture is never worth a crash
         log.exception("could not record a room message")
         return False
+
+    if role != ROLE_NEXUS:
+        # What the next pass has been waiting for. Recorded after the write, so
+        # a failed capture cannot start a clock for a message that is not there.
+        _trigger_at[int(chat_id)] = now
+
+    every = max(0.0, float(config.NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS))
+    if every and (now - _purged_at) >= every:
+        _purged_at = now
+        try:
+            db.group_purge(max(1, int(config.NEXUS_AWARENESS_RETENTION_SECONDS)))
+        except Exception:  # noqa: BLE001 - the trim above already bounded the row
+            log.exception("could not purge the room window")
     return True
+
+
+# ── Measuring one pass ────────────────────────────────────────────────────
+# The brief asks for the whole path to be measurable: when the message arrived,
+# when the batch was assembled, when the model was asked and when it answered,
+# what was decided, and when the reply went out. This is that timeline, and the
+# one property it must have is that it carries **durations and nothing else** —
+# a trace that logged the transcript, the decision or the reply would be a log
+# full of other people's messages, which is exactly what the rest of this module
+# is careful never to write.
+#
+# Monotonic throughout, so a clock step cannot produce a negative duration or a
+# pass that appears to have taken an hour.
+_TRACE_STAGES = ("batch", "request", "response", "decision", "send", "end")
+
+
+@dataclass
+class PassTrace:
+    """The monotonic timeline of one awareness pass. Durations, never content."""
+
+    chat_id: int
+    trigger_at: float = 0.0
+    started_at: float = field(default_factory=time.monotonic)
+    marks: dict[str, float] = field(default_factory=dict)
+
+    def mark(self, stage: str) -> float:
+        """Record one stage boundary and return its monotonic stamp."""
+        now = time.monotonic()
+        self.marks[stage] = now
+        return now
+
+    def _gap(self, a: str, b: str) -> float:
+        first, second = self.marks.get(a), self.marks.get(b)
+        if first is None or second is None:
+            return 0.0
+        return max(0.0, (second - first) * 1000.0)
+
+    def waited_ms(self) -> float:
+        """How long the batch waited before the pass began. 0 if unknown."""
+        if not self.trigger_at:
+            return 0.0
+        return max(0.0, (self.started_at - self.trigger_at) * 1000.0)
+
+    def summary(self) -> str:
+        """One line of millisecond durations. No message, no decision, no reply."""
+        return (
+            f"chat={self.chat_id} waited_ms={self.waited_ms():.0f} "
+            f"batch_ms={self._gap('batch', 'request'):.0f} "
+            f"gemini_ms={self._gap('request', 'response'):.0f} "
+            f"decide_ms={self._gap('response', 'decision'):.0f} "
+            f"send_ms={self._gap('decision', 'send'):.0f} "
+            f"total_ms={self._gap('batch', 'end'):.0f}"
+        )
 
 
 def window(chat_id: int, *, limit: int = 0) -> list[dict]:

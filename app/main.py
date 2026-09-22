@@ -1378,18 +1378,51 @@ def _nexus_observe(room, user, msg, text: str) -> bool:
 # batched, debounced and budgeted. See ``app/awareness.py`` for the policy and
 # ``AgentMD.md`` §35 for the architecture.
 #
-# Four pieces of state, all in this process and all bounded:
+# Five pieces of state, all in this process and all bounded:
 #   * which rooms are being analysed right now, so two ticks cannot overlap on
 #     one room and produce two replies to the same conversation;
 #   * when each room was last analysed, which is the minimum-interval brake;
 #   * which rooms asked to be read promptly, which is the only thing
 #     ``nexus.looks_actionable`` still does — a timing hint, never a verdict;
 #   * whether a sweep is already running, so a slow pass cannot pile up behind
-#     the job queue's next tick.
+#     the job queue's next tick;
+#   * when each room's debounce expires, which is what stops a quiet room from
+#     waiting for the next sweep.
 _awareness_inflight: set[int] = set()
 _awareness_last_pass: dict[int, float] = {}
 _awareness_urgent: set[int] = set()
 _awareness_sweeping = False
+
+# The debounce, as a per-room deadline rather than as something a 15-second tick
+# happens to notice.
+#
+# This is the whole of the latency fix, and it is worth stating in the terms of
+# what it removes. The policy is "read a room once it has been quiet for
+# ``NEXUS_AWARENESS_DEBOUNCE_SECONDS``", and the sweeper is a coarse way to ask
+# whether that has happened: it wakes every ``TICK_SECONDS`` and checks. So a
+# message that made the room due at 8 seconds was read at the next multiple of
+# 15 — 8 to 23 seconds of waiting, median 15.5, of which the policy accounts for
+# 8 and the rest is the tick. That was the reported slowness: not the model, and
+# not the database, but a room that had already gone quiet waiting for a timer
+# that was not about it.
+#
+# A deadline is set when a message is captured and pushed out by each later one,
+# which is the debounce, coalesced by assignment — a burst of twenty messages
+# sets the same key twenty times and costs one wake-up. A fast tick then reads
+# rooms whose deadline has passed and does nothing else. It performs no query
+# and no work while every room is still talking, so the interval can be short
+# without making the bot busy.
+#
+# The sweeper stays, unchanged and still on its 15-second interval, as the
+# ceiling: it is what reads a room that never falls quiet (past
+# ``NEXUS_AWARENESS_MAX_WAIT_SECONDS``), what picks up a room after a restart
+# has emptied this dict, and what makes a lost deadline a delay rather than a
+# silence. The deadline can only make a pass *earlier*; it cannot make one
+# happen that the policy would have refused.
+_awareness_ready_at: dict[int, float] = {}
+# The deadline tick's own interval. One second is below the resolution anybody
+# can perceive as "late" and costs a dictionary scan.
+AWARENESS_DEADLINE_TICK_SECONDS = 1.0
 
 
 def _awareness_capture(room, user, msg, text: str, principal) -> bool:
@@ -1473,7 +1506,30 @@ async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
     Everything here is wrapped: a pass runs in the job queue, and an exception
     escaping it would be a traceback in the log and a stalled room, not a
     failed pass. Failures degrade to "say nothing and try again later".
+
+    The trace is taken here rather than inside ``_awareness_read`` so that it
+    covers the whole pass — including the paths that return early because there
+    was nothing to read. ``waited_ms`` is measured from the capture of the
+    newest unread message, which is the number the owner was complaining about;
+    the rest are the stages after the wait.
     """
+    trace = awareness.PassTrace(
+        chat_id=int(chat_id), trigger_at=awareness.trigger_at(chat_id)
+    )
+    trace.mark("batch")
+    try:
+        await _awareness_read(ctx, chat_id, row, trace)
+    finally:
+        trace.mark("end")
+        # Durations only. See ``awareness.PassTrace``: the transcript, the
+        # decision and the reply are other people's words and are not logged.
+        log.info("awareness timing %s", trace.summary())
+
+
+async def _awareness_read(
+    ctx, chat_id: int, row: dict, trace: awareness.PassTrace
+) -> None:
+    """The body of one pass. See ``_awareness_pass`` for the contract."""
     max_id = int(row.get("max_id") or 0)
     speaker = awareness.speaker(chat_id)
     if speaker is None:
@@ -1491,12 +1547,14 @@ async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
         awareness.skip(chat_id, seen_message_id=max_id)
         return
 
+    trace.mark("request")
     result = await chat.awareness(
         transcript,
         _awareness_context(chat_id) + (context or ""),
         tools=tools,
         on_tool=on_tool,
     )
+    trace.mark("response")
     if not result.answered:
         # A skipped or failed pass leaves the understanding alone and only moves
         # the watermark. The messages stay in the window, so the next pass that
@@ -1511,6 +1569,7 @@ async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
         return
 
     decision = awareness.parse_decision(result.text)
+    trace.mark("decision")
     if decision is None:
         # Unreadable answer. Deliberately not "send the raw text": the one
         # outcome worth losing a pass over is the assistant speaking into a room
@@ -1559,6 +1618,7 @@ async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
         return
     if await _send_chat(ctx, chat_id, message):
         _awareness_note_reply(chat_id, message)
+    trace.mark("send")
 
 
 async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
@@ -1610,6 +1670,10 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
     finally:
         _awareness_inflight.discard(chat_id)
         _awareness_last_pass[chat_id] = time.time()
+        # This room has just been read, so it has no deadline left to meet.
+        # Dropping it here is what stops the deadline tick from waking up for a
+        # room that the sweeper or the urgency hint already handled.
+        _awareness_ready_at.pop(chat_id, None)
     return True
 
 
@@ -1638,6 +1702,76 @@ async def _awareness_promptly(ctx, chat_id: int) -> None:
     if not row:
         return
     await _awareness_run_room(ctx, row, urgent=True)
+
+
+def _awareness_schedule(chat_id: int) -> None:
+    """Ask for this room to be read once it has been quiet for the debounce.
+
+    One assignment, and the assignment *is* the coalescing: a burst sets the
+    same key repeatedly, so twenty messages produce one deadline and one
+    wake-up. Nothing is queued, so there is no queue to grow and no job to
+    cancel, and the room can only be read once because the pass itself refuses
+    to run twice at a time (``_awareness_inflight``).
+
+    The ceiling is deliberately not enforced here. A room that never goes quiet
+    must still be read, and that is the sweeper's job — pushing this deadline
+    out for ever would be the one way this could turn a slow reply into no
+    reply.
+    """
+    if not awareness.enabled() or not _nexus_can_observe(int(chat_id)):
+        # A room Telegram is not delivering ordinary messages for will be
+        # refused by ``_awareness_run_room`` anyway, so arming a deadline for it
+        # would only be a wake-up that is guaranteed to do nothing.
+        return
+    _awareness_ready_at[int(chat_id)] = (
+        time.monotonic()
+        + max(0.0, float(config.NEXUS_AWARENESS_DEBOUNCE_SECONDS))
+    )
+
+
+def _awareness_deadline_passed(now: float) -> list[int]:
+    """Rooms whose debounce has expired, oldest deadline first."""
+    return sorted(
+        (chat_id for chat_id, at in _awareness_ready_at.items() if at <= now),
+        key=lambda chat_id: _awareness_ready_at.get(chat_id, 0.0),
+    )
+
+
+async def _awareness_deadline_tick(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read the rooms whose debounce has expired. The sweeper's fast path.
+
+    A tick that finds nothing does one dictionary iteration and stops, which is
+    why this can run every second while the sweeper runs every fifteen. It does
+    no query of its own: ``_awareness_pending_for`` is only reached for a room
+    whose deadline has actually passed.
+
+    A room that is not read — because a pass is already in flight, or because
+    the minimum interval has not elapsed — has its deadline re-armed at the
+    brake's own deadline rather than being left to the sweeper. That is a
+    bounded wait, not a spin: the pass will run when the interval is up, and the
+    room cannot be re-armed more than once per interval.
+    """
+    if not awareness.enabled():
+        return
+    now = time.monotonic()
+    for chat_id in _awareness_deadline_passed(now):
+        if not nexus.is_online():
+            # Nothing is read while the assistant is off, so nothing needs a
+            # deadline. Dropping them all is the "OFF means off" rule applied to
+            # this timer: no query, no pass, no allowance.
+            _awareness_ready_at.clear()
+            return
+        row = _awareness_pending_for(chat_id)
+        if not row:
+            # Already read, by the urgent path or by the sweeper.
+            _awareness_ready_at.pop(chat_id, None)
+            continue
+        if await _awareness_run_room(ctx, row):
+            _awareness_ready_at.pop(chat_id, None)
+            continue
+        _awareness_ready_at[chat_id] = now + max(
+            1.0, float(config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS)
+        )
 
 
 async def awareness_sweep(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2415,7 +2549,13 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     #     message is understood is still a member who cannot act. The role label
     #     written here comes from `rbac.resolve` above and from nothing the
     #     sender wrote.
-    _awareness_capture(room, user, msg, text, principal)
+    if _awareness_capture(room, user, msg, text, principal):
+        # The room now has something unread, so give it a deadline at the
+        # debounce rather than leaving it to the sweeper's next tick. Coalesced
+        # by assignment: each later message pushes the same deadline out, which
+        # is exactly the debounce, and the sweeper remains the ceiling for a
+        # room that never falls quiet.
+        _awareness_schedule(room.id)
 
     # 2. The owner's spoken state command. Checked first because it is the one
     #    thing that must work when Nexus is already off — the model is not
@@ -3827,10 +3967,22 @@ async def post_init(app: Application) -> None:
     if config.NEXUS_AWARENESS_ENABLED:
         tick = max(5.0, float(config.NEXUS_AWARENESS_TICK_SECONDS))
         app.job_queue.run_repeating(awareness_sweep, interval=tick, first=tick)
+        # The fast path. A room whose debounce has expired is read here, one
+        # second after it expired, instead of waiting for the sweeper's next
+        # 15-second tick — which is where most of the assistant's apparent
+        # slowness was: a room that had already gone quiet, waiting for a timer
+        # that was not about it. It does no query and no work while every room
+        # is still talking, so the interval costs a dictionary scan.
+        app.job_queue.run_repeating(
+            _awareness_deadline_tick,
+            interval=AWARENESS_DEADLINE_TICK_SECONDS,
+            first=AWARENESS_DEADLINE_TICK_SECONDS,
+        )
         log.info(
-            "Nexus awareness: tick=%.0fs debounce=%.0fs max_wait=%.0fs "
-            "min_interval=%.0fs window=%d msgs/%d chars",
+            "Nexus awareness: tick=%.0fs deadline_tick=%.1fs debounce=%.0fs "
+            "max_wait=%.0fs min_interval=%.0fs window=%d msgs/%d chars",
             tick,
+            AWARENESS_DEADLINE_TICK_SECONDS,
             float(config.NEXUS_AWARENESS_DEBOUNCE_SECONDS),
             float(config.NEXUS_AWARENESS_MAX_WAIT_SECONDS),
             float(config.NEXUS_AWARENESS_MIN_INTERVAL_SECONDS),

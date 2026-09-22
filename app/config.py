@@ -849,6 +849,15 @@ NEXUS_AWARENESS_RETENTION_SECONDS = _int("NEXUS_AWARENESS_RETENTION_SECONDS", 36
 # first.
 NEXUS_AWARENESS_MAX_ROWS = _int("NEXUS_AWARENESS_MAX_ROWS", 400)
 
+# How often the age-based purge may run. It is the one capture-path statement
+# that is not scoped to a chat, and the retention window it enforces is measured
+# in hours, so enforcing it once per received message was a full-table scan on
+# the hottest path in the feature. The per-chat row ceiling above still runs on
+# every capture, which is what actually bounds the table within a burst.
+NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS = _float(
+    "NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS", 60.0
+)
+
 # How many chats one tick may analyse. A tick that is still working when the
 # next one arrives would otherwise pile passes on top of each other; this keeps
 # the sweeper's cost bounded and its behaviour predictable.

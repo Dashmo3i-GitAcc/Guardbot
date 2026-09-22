@@ -24,12 +24,19 @@ def fresh_nexus_state():
 
     Clearing the cache is enough: the next read comes from the database, which
     is ``:memory:`` per process and empty unless a test wrote to it.
+
+    ``app/awareness.py`` keeps two clocks the same way — when each room's newest
+    unread message arrived, and when the age purge last ran. Both are in-process
+    and both are read as "how long has it been", so a value left behind by one
+    test would make the next one's wait or purge depend on test order.
     """
-    from app import nexus
+    from app import awareness, nexus
 
     nexus.reset_state()
+    awareness.reset_timers()
     yield
     nexus.reset_state()
+    awareness.reset_timers()
 
 
 def local_only_moderation(monkeypatch, *, threshold: float = 0.45) -> None:
