@@ -38,14 +38,27 @@ lead, and the two must never trigger one another.
 
 The boundary is enforced in two places, and both are needed:
 
-* `main._addressed_to_bot(msg, ctx)` is the **only** way into the assistant. It
-  is true for exactly two things, both unambiguous in Telegram's data — a reply
-  to a message this bot sent, or an `@mention` of this bot's own username. Not
-  the word «ربات», not a question the rules happen to like.
+* `main._nexus_directed(msg, ctx)` is what decides the assistant will answer. Two
+  classes of signal, both server-checked: the Telegram-native ones — a reply to a
+  message this bot sent, an `@mention` of this bot's own username, or an operator
+  alias (`BOT_ALIASES`, empty by default) — and the assistant's **names**
+  (`NEXUS_NAMES`, matched by `addressing.addressed`, which reads the ways a group
+  actually writes them: «نکسی», «نکسوسو»). Not the word «ربات», not a question
+  the rules happen to like.
 * `main.on_group_text` returns before calling `classifier.classify` when the
-  assistant is enabled and the message addresses the bot. Without this the same
-  message would get a chat reply *and* a trial offer, because python-telegram-bot
-  runs every handler group and has no way to stop propagation.
+  message will be answered. Without this the same message would get a chat reply
+  *and* a trial offer, because python-telegram-bot runs every handler group and
+  has no way to stop propagation.
+
+The two sides must ask the **same** question, and they did not. The acquisition
+guard tested the narrower `_addressed_to_bot` while the chat handler tested
+`_nexus_directed`, so a message calling the assistant by name — answered by the
+assistant, but not a native address — fell through the boundary and got both a
+reply and a trial offer. The guard now consults `main._nexus_will_answer`, which
+is the chat handler's own gates: it can answer at all, the sender is one it
+accepts, and the message is aimed at it. The `accepts` condition is what stops
+this over-reaching — while `NEXUS_ACTORS_ONLY` is on, an ordinary member naming
+the assistant gets no reply, so their trial offer still happens.
 
 `on_group_text` binds a local named `chat` (its effective chat), which shadows
 the `chat` module for that whole function. That is why the guard goes through
@@ -141,7 +154,11 @@ would let one long session grow without limit.
 * `db.chat_trim()` runs after every append and keeps the newest N.
 * `db.chat_purge(ttl)` runs opportunistically after a successful reply and
   drops abandoned conversations, which nothing else would ever come back to
-  trim.
+  trim. It ranges over `at` alone, so it needs `idx_chat_messages_at` — the turn
+  index is keyed on `chat_id` first and the sweep has no chat to start from.
+  Without that index every reply paid a full scan of the table, which is why the
+  index is asserted through `EXPLAIN QUERY PLAN` rather than by reading the
+  schema: an index the query cannot use is the same as no index.
 * Isolation is by `(chat_id, user_id)`, so one person's history can never be
   shown to another, and a group conversation is separate from a private one with
   the same person.

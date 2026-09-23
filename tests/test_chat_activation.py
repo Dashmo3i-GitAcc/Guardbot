@@ -96,6 +96,71 @@ def test_the_acquisition_handler_yields_when_the_assistant_is_on(monkeypatch):
     assert main._chat_active() is True
 
 
+# ── The name forms, which the two sides used to disagree about ────────────
+# A group writes an assistant's name the way it is pronounced («نکسی»,
+# «نکسوسو»), and ``nexus.is_named`` accepts those. The acquisition guard used to
+# test only ``_addressed_to_bot`` — the Telegram-native signals — so exactly
+# those messages were answered by the assistant *and* offered a trial by
+# acquisition, which is the double-handling the guard exists to prevent.
+def _accepting(monkeypatch, *, named=True, accepts=True, active=True):
+    monkeypatch.setattr(main.chat, "is_enabled", lambda: active)
+    monkeypatch.setattr(main.nexus, "is_named", lambda text: named)
+    monkeypatch.setattr(main.nexus, "accepts", lambda principal: accepts)
+    monkeypatch.setattr(main.rbac, "resolve", lambda uid: object())
+
+
+def test_a_name_addressed_message_is_one_the_assistant_will_answer(monkeypatch):
+    _accepting(monkeypatch)
+    msg = _msg("نکسی سلام")
+
+    assert main._addressed_to_bot(msg, _ctx()) is False, "not a native address"
+    assert main._nexus_directed(msg, _ctx()) is True
+    assert main._nexus_will_answer(msg, _ctx(), _User()) is True
+
+
+def test_naming_the_assistant_costs_a_member_nothing(monkeypatch):
+    """The wider boundary must not over-reach.
+
+    While ``NEXUS_ACTORS_ONLY`` is on an ordinary member is not accepted, so a
+    member naming the assistant gets no reply — and suppressing their trial
+    offer would be a loss with nothing gained.
+    """
+    _accepting(monkeypatch, accepts=False)
+
+    assert main._nexus_will_answer(_msg("نکسی سلام"), _ctx(), _User()) is False
+
+
+def test_the_assistant_being_off_does_not_suppress_a_name_addressed_lead(
+    monkeypatch,
+):
+    _accepting(monkeypatch, active=False)
+
+    assert main._nexus_will_answer(_msg("نکسی سلام"), _ctx(), _User()) is False
+
+
+def test_an_ordinary_message_is_not_something_the_assistant_will_answer(
+    monkeypatch,
+):
+    _accepting(monkeypatch, named=False)
+
+    assert main._nexus_will_answer(_msg("سلام بچه‌ها"), _ctx(), _User()) is False
+
+
+def test_the_acquisition_guard_asks_the_same_question_as_the_handler():
+    """Pinned on the source, so the two cannot drift apart again.
+
+    A behavioural test would need a full ``Update``; what has to hold is that
+    the acquisition boundary consults ``_nexus_will_answer`` — the chat side's
+    own question — rather than only the narrower ``_addressed_to_bot``.
+    """
+    import inspect
+
+    source = inspect.getsource(main.on_group_text)
+    guard = source.index("_nexus_will_answer(msg, ctx, user)")
+    classify = source.index("classifier.classify")
+    assert guard < classify, "the boundary must come before classifying"
+
+
 def test_the_guard_is_wired_into_the_acquisition_handler():
     """`on_group_text` must consult the guard before classifying.
 

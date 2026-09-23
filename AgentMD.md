@@ -717,7 +717,7 @@ Rules for the report:
 
 ## 17. The conversational assistant
 
-The conversational workload: its boundary against acquisition, the per-project quota fact, the measured model choice, config, bounded memory, failure isolation and output safety. `main._addressed_to_bot` is the only way in, and `on_group_text` must return before `classifier.classify` when the assistant is enabled and addressed, or one message gets both a reply and a trial offer.
+The conversational workload: its boundary against acquisition, the per-project quota fact, the measured model choice, config, bounded memory, failure isolation and output safety. `main._nexus_directed` decides the assistant answers and `main._nexus_will_answer` is the question `on_group_text` must ask before `classifier.classify`, or one message gets both a reply and a trial offer.
 
 Subsections: §17.1 the boundary · §17.2 the quota question · §17.3 configuration · §17.4 conversation memory · §17.5 budgets and failure isolation · §17.6 output safety · §17.7 verifying it · §17.8 known limitations.
 
@@ -1344,8 +1344,15 @@ reference file is stale and this list is the one to fix first.
   becomes `ACTIVE` on load.
 * There must be **no "requests remaining" figure anywhere**; the status prints
   "Not exposed by provider".
-* Retries are bounded on three axes; when pooled the pool owns the retry policy
+* Retries are bounded on four axes; when pooled the pool owns the retry policy
   (`attempts = 1 if pooled`); a `SCOPE_REQUEST` failure stops immediately.
+* `GEMINI_POOL_MAX_ATTEMPTS` is a **total shared across accounts**, not a budget
+  for the first one: each account is capped at
+  `max(1, budget // accounts_remaining)`, so every account gets a turn before any
+  account gets a second round. **Never** spend it depth-first — that made four
+  configured accounts behave as one, and reported `attempt_budget` when the truth
+  was that accounts 2–4 were never asked. **Never** fix a distribution problem by
+  raising the ceiling.
 * Pool events are recorded and **never announced**: the pool must not import
   telegram, `Pool.record()` stays synchronous, and nothing replaces the notices
   — no queue, no digest, no filter.
@@ -1550,10 +1557,12 @@ reference file is stale and this list is the one to fix first.
 
 ### 53.8 The assistant
 
-* `main._addressed_to_bot` is the **only** way into the assistant; the word
-  «ربات» is not an address.
-* `on_group_text` **must** return before `classifier.classify` when the assistant
-  is enabled and addressed.
+* `main._nexus_directed` decides the assistant answers; the word «ربات» is not an
+  address, and the name forms (`addressing.addressed`, e.g. «نکسی») are.
+* `on_group_text` **must** return before `classifier.classify` when the message
+  will be answered — ask `main._nexus_will_answer`, **never** the narrower
+  `_addressed_to_bot`, or a name-addressed message gets both a reply and a trial
+  offer. The two handlers must ask the same question.
 * `on_group_text` binds a local `chat`; use `main._chat_active()`, **never**
   `chat.is_enabled()`.
 * Gemini limits are **per project, not per key**; a separate key buys a separate

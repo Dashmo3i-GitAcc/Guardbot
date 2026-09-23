@@ -36,6 +36,7 @@ from app import config, db, gemini_pool, main
 KEY_A = "AIzaSyFAKE000000000000000000000000000000000A"
 KEY_B = "AIzaSyFAKE000000000000000000000000000000000B"
 KEY_C = "AIzaSyFAKE000000000000000000000000000000000C"
+KEY_D = "AIzaSyFAKE000000000000000000000000000000000D"
 
 TEXT_MODELS = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash"]
 MEDIA_MODELS = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-pro-latest"]
@@ -705,17 +706,73 @@ def test_a_bad_request_stops_immediately_and_spends_nothing_else(provider):
 
 
 def test_the_attempt_budget_is_bounded(provider, monkeypatch):
-    """No infinite loop, and no unbounded spend on one logical request."""
+    """No infinite loop, and no unbounded spend on one logical request.
+
+    The ceiling is a *total*, shared between the accounts rather than spent
+    inside the first one: four attempts across two failing accounts is two
+    each, and when the total runs out the reason is ``attempt_budget``.
+    """
     monkeypatch.setattr(config, "GEMINI_POOL_MAX_ATTEMPTS", 4)
     for model in TEXT_MODELS:
         provider.then(KEY_A, model, overloaded())
-    provider.answers(KEY_B, "b")
+    provider.then(KEY_B, TEXT_MODELS[0], overloaded())
     pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)), retries=3)
 
-    with pytest.raises(gemini_pool.PoolUnavailable):
+    with pytest.raises(gemini_pool.PoolUnavailable) as caught:
         call(pool)
 
+    assert caught.value.kind == "attempt_budget"
     assert provider.total_calls == 4
+    assert len(provider.models_used(KEY_A)) == 2
+    assert len(provider.models_used(KEY_B)) == 2
+
+
+def test_a_degraded_first_account_does_not_spend_the_whole_budget(provider):
+    """Why the share exists: a pool of several accounts must not become one.
+
+    A broadly failing first account used to consume every attempt, so a healthy
+    second account was never contacted and the request failed reporting
+    ``attempt_budget`` — which reads as "we ran out of tries" when the truth was
+    "we never asked". Google's limits are per project, so the second account is
+    the whole point of configuring one.
+    """
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "from the second account")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)), retries=1)
+
+    assert call(pool) == "from the second account"
+    assert provider.models_used(KEY_B)
+
+
+def test_every_account_gets_a_turn_before_the_first_gets_a_second_round(provider):
+    """The production shape of 2026-09-23: three dead accounts, a fourth alive.
+
+    Twelve attempts inside account #1 never reached account #4. With the budget
+    shared, each account gets a turn first and the healthy one answers.
+    """
+    keys = (("1", KEY_A), ("2", KEY_B), ("3", KEY_C), ("4", KEY_D))
+    for key in (KEY_A, KEY_B, KEY_C):
+        for model in TEXT_MODELS:
+            provider.then(key, model, overloaded())
+    provider.answers(KEY_D, "the fourth account")
+
+    pool = make_pool(keys=keys, retries=1)
+
+    assert call(pool) == "the fourth account"
+    for key in (KEY_A, KEY_B, KEY_C):
+        assert provider.models_used(key), f"account {key[-1]} was never contacted"
+
+
+def test_a_healthy_first_account_is_still_the_one_that_answers(provider):
+    """Sharing the budget must not disturb the ordinary case."""
+    provider.answers(KEY_A, "first")
+    provider.answers(KEY_B, "second")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    assert call(pool) == "first"
+    assert provider.models_used(KEY_B) == []
+    assert provider.total_calls == 1
 
 
 def test_retries_are_bounded_per_model(provider):

@@ -248,3 +248,35 @@ def test_the_events_sweep_has_an_index_to_use():
     names = {r[0] for r in rows}
 
     assert "idx_gemini_events_at" in names
+
+
+def test_the_chat_sweep_has_an_index_to_use():
+    """Same rule, and this one is on the *hot* path rather than a sweep.
+
+    ``chat_purge`` is called after every successful reply (``chat.py``), so
+    without an index on ``at`` an ordinary conversation paid a full scan of the
+    table on each turn. The turn index cannot serve it — it is keyed on
+    ``chat_id`` first and the purge has no chat to start from — which is why
+    this is a second index rather than a change to the existing one.
+    """
+    rows = db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chat_messages'"
+    ).fetchall()
+    names = {r[0] for r in rows}
+
+    assert "idx_chat_messages_at" in names
+
+
+def test_the_chat_purge_uses_that_index():
+    """The index exists *and* the planner reaches for it.
+
+    Asserted through ``EXPLAIN QUERY PLAN`` rather than by reading the schema,
+    because an index the query cannot use is the same as no index — which is
+    exactly what the turn index was here.
+    """
+    plan = db._conn.execute(
+        "EXPLAIN QUERY PLAN DELETE FROM chat_messages WHERE at < ?", (0,)
+    ).fetchall()
+    detail = " ".join(str(row[-1]) for row in plan)
+
+    assert "idx_chat_messages_at" in detail, detail

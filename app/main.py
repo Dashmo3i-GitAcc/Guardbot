@@ -936,6 +936,30 @@ def _nexus_directed(msg, ctx) -> bool:
     return nexus.is_named(_message_text(msg))
 
 
+def _nexus_will_answer(msg, ctx, user) -> bool:
+    """Whether the conversational layer will actually answer this message.
+
+    The acquisition pipeline has to know this in order to stand down, and it is
+    stated once so both handlers ask the same question. They did not: the
+    acquisition guard tested ``_addressed_to_bot`` while the chat handler tested
+    ``_nexus_directed``, and the difference is not academic — ``_nexus_directed``
+    also accepts the ways a group writes the assistant's name («نکسی»,
+    «نکسوسو»). A message calling Nexus by name therefore fell through the
+    boundary the guard exists to draw: answered by the assistant *and* offered a
+    trial by acquisition, which is the double-handling that comment forbids.
+
+    The three conditions are the chat handler's own gates rather than a second
+    reading of them — it must be able to answer, the sender must be one it
+    accepts, and the message must be aimed at it. ``accepts`` is what keeps this
+    from over-reaching: an ordinary member is not accepted while
+    ``NEXUS_ACTORS_ONLY`` is on, so naming the assistant costs them nothing and
+    their trial offer still happens.
+    """
+    if not _chat_active() or not _nexus_directed(msg, ctx):
+        return False
+    return nexus.accepts(rbac.resolve(user.id))
+
+
 def _nexus_observe(room, user, msg, text: str) -> bool:
     """Record an unaddressed administrator message as context. Never replies.
 
@@ -5007,7 +5031,15 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # boundary between the two AI policies: the assistant has its own handler in
     # its own group, and returning here is what stops one message from getting
     # both a chat reply and a trial offer.
-    if _chat_active() and _addressed_to_bot(msg, ctx):
+    #
+    # Two tests, because the two signals are not equally strong. The
+    # Telegram-native ones stand down unconditionally, exactly as they always
+    # have. The assistant's *names* are wider and stand down only when the
+    # conversational layer will actually answer — see ``_nexus_will_answer`` for
+    # the messages that used to fall through this line and get both.
+    if _chat_active() and (
+        _addressed_to_bot(msg, ctx) or _nexus_will_answer(msg, ctx, user)
+    ):
         return
 
     # The layered decision: the rule engine first, and Gemini only for the

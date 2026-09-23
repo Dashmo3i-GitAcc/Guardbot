@@ -181,6 +181,9 @@ circumvented by a large enough pool:
 * `retries + 1` attempts per model;
 * `GEMINI_POOL_MAX_ATTEMPTS` provider calls for one logical request — the hard
   ceiling that stops a pathological pool spending a minute on one message;
+* **a fair share of that ceiling per account** (see below) — the ceiling says
+  how much may be spent, this says *where*, and without it the ceiling was spent
+  depth-first inside the first account;
 * a wall-clock ceiling (`Pool.time_budget`), where a workload asks for one:
   `GEMINI_INTENT_TIME_BUDGET_SECONDS` for the classifier, and the loose
   `GEMINI_CHAT_TIME_BUDGET_SECONDS` / `GEMINI_AWARENESS_TIME_BUDGET_SECONDS`
@@ -188,6 +191,24 @@ circumvented by a large enough pool:
 * exponential backoff with jitter (`_backoff`). The jitter is not politeness: the
   four workloads share one process, and without it a rate-limited provider gets
   every workload's retries in lockstep.
+
+#### The attempt budget is shared across accounts, not spent inside the first
+
+`GEMINI_POOL_MAX_ATTEMPTS` alone bounded the *total* and said nothing about
+distribution, so the walk spent all twelve attempts inside account #1 and never
+contacted accounts #2–#4. Verified live on 2026-09-23: every error line for a
+failed call named one account, and the reason reported was `attempt_budget` —
+which reads as "we ran out of tries" when the truth was "we never asked". Google
+enforces limits **per project**, so a single degraded project could fail a
+request while three healthy projects sat untouched; the whole reason to
+configure four accounts is that they are four separate allowances.
+
+Each account is now capped at `max(1, budget // accounts_remaining)`, so every
+account gets a turn before any account gets a second round. The share is
+recomputed per account, so an account that answers early — or uses fewer
+attempts than its share — hands the difference to the ones behind it. The total
+is **unchanged**: this redistributes the same ceiling rather than raising it, and
+raising `GEMINI_POOL_MAX_ATTEMPTS` would still be the wrong fix.
 
 The transient cooldown is part of this arithmetic rather than separate from it:
 because a transient failure is usually a *timeout*, `GEMINI_POOL_TRANSIENT_COOLDOWN`

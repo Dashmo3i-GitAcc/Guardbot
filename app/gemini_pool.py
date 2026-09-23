@@ -1568,11 +1568,28 @@ async def generate(
     # spend a minute of wall clock and dozens of calls on a single message.
     budget = max(1, int(config.GEMINI_POOL_MAX_ATTEMPTS))
 
+    # ...and it is spent *across* the accounts, not depth-first inside the first
+    # one. The ceiling alone said nothing about where the attempts went, so a
+    # pool of four accounts spent all twelve inside account #1 and never
+    # contacted #2-#4 — verified live on 2026-09-23, where all twelve error lines
+    # for a failed call named one account. Google's limits are per project, so
+    # when that one project is degraded the request fails while three healthy
+    # projects sit untouched, and the reason reported is ``attempt_budget``,
+    # which reads as "we ran out of tries" rather than "we never asked".
+    #
+    # Each account is therefore capped at a fair share of what is left, so every
+    # account gets a turn before any account gets a second round. The total is
+    # unchanged: this redistributes the same ceiling rather than raising it. The
+    # share is recomputed per account, so an account that answers early, or uses
+    # fewer attempts than its share, hands the difference to the ones behind it.
+    accounts = pool.ordered_accounts(now)
+    account_count = len(accounts)
+
     last: PoolUnavailable = PoolUnavailable("no_attempt")
     tried_any = False
     out_of_time = False
 
-    for account in pool.ordered_accounts(now):
+    for position, account in enumerate(accounts):
         candidates = pool.models_for(account, now)
         if not candidates:
             account.mark(
@@ -1588,6 +1605,12 @@ async def generate(
             )
             continue
 
+        # At least one attempt, even when the remaining budget is smaller than
+        # the number of accounts left — otherwise a long tail of accounts would
+        # be unreachable by construction.
+        remaining_accounts = max(1, account_count - position)
+        allowance = max(1, budget // remaining_accounts)
+
         account_dead = False
         for model in candidates:
             if not account.model_usable(model, now):
@@ -1601,10 +1624,16 @@ async def generate(
                     out_of_time = True
                     account_dead = True
                     break
-                if budget <= 0:
-                    last = PoolUnavailable("attempt_budget", last.kind)
+                if allowance <= 0 or budget <= 0:
+                    # This account has had its share, or the request has had all
+                    # it is allowed. ``last`` keeps the last real failure unless
+                    # the *global* ceiling is what stopped us, which is the only
+                    # case where ``attempt_budget`` is the honest reason.
+                    if budget <= 0:
+                        last = PoolUnavailable("attempt_budget", last.kind)
                     account_dead = True
                     break
+                allowance -= 1
                 budget -= 1
                 tried_any = True
                 now = time.time()

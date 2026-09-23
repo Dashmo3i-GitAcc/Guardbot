@@ -84,6 +84,17 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_chat_messages_turn "
         "ON chat_messages(chat_id, user_id, id)"
     )
+    # ``chat_purge`` deletes by age alone (``WHERE at < ?``), and it runs after
+    # every successful reply, so without this the hot path of an ordinary
+    # conversation was a full scan of the table. Every other retention sweep in
+    # this file has the index its own predicate needs — ``admin_audit(at)``,
+    # ``admin_requests(at)``, ``gemini_events(at)``, ``group_messages(at)``,
+    # ``seen_updates(at)``, ``people(last_seen)`` — and this table was the one
+    # that did not. The turn index above cannot serve it: it is keyed on
+    # ``chat_id`` first, and the sweep has no chat to start from.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_messages_at ON chat_messages(at)"
+    )
     _conn.execute(
         """CREATE TABLE IF NOT EXISTS chat_usage (
             day TEXT PRIMARY KEY,

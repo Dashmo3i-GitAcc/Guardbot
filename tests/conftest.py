@@ -43,8 +43,16 @@ def fresh_nexus_state():
     later test capturing nothing and passing no rooms, and the failures would
     read as "awareness is broken" rather than "a test forgot to reset".
     """
-    from app import awareness, gemini_keys, main, nexus, web_search
+    from app import awareness, db, gemini_keys, main, nexus, web_search
 
+    # The schema, for every test rather than for whichever test happened to need
+    # it first. ``db._conn`` is a module global, so a test that reaches
+    # ``rbac.resolve`` — which reads the ``admins`` table — passed only because
+    # an earlier test in the same process had initialised the database. Running
+    # one file on its own therefore failed with "'NoneType' object has no
+    # attribute 'execute'", which reads as a broken authorization path rather
+    # than as a test that was never self-sufficient. ``init`` is idempotent.
+    db.init()
     nexus.reset_state()
     awareness.reset_timers()
     awareness.reset_switch()
