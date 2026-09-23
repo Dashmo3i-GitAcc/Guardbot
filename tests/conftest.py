@@ -43,11 +43,16 @@ def fresh_nexus_state():
     later test capturing nothing and passing no rooms, and the failures would
     read as "awareness is broken" rather than "a test forgot to reset".
     """
-    from app import awareness, gemini_keys, main, nexus
+    from app import awareness, gemini_keys, main, nexus, web_search
 
     nexus.reset_state()
     awareness.reset_timers()
     awareness.reset_switch()
+    # The search workload's rate window, breaker and cached client. Left behind,
+    # a test that opened the search circuit would leave every later test's
+    # informational question silently unsearched, and the failure would read as
+    # "search is broken" rather than as a leaked breaker.
+    web_search.reset_state()
     # An armed "send me the key now" prompt is process state with a five-minute
     # life, which is longer than a test run. Left behind, it would make the next
     # test's private message be consumed as a credential.
@@ -68,4 +73,5 @@ def fresh_nexus_state():
     gemini_keys.reset_pending()
     main._nexus_addressed.clear()
     main._bot_rights_cache.clear()
+    web_search.reset_state()
 

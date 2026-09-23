@@ -306,8 +306,13 @@ def test_the_other_workloads_have_no_daily_allowance():
     is capped separately. The workloads that are neither conversation nor
     awareness — intent, moderation, transcription, tts — still have none, and
     that is the property this test exists to hold.
+
+    ``search`` is the third, and it is the one the argument is sharpest for: it
+    runs *inside* a Gemini request, so grounding on the conversation's workload
+    would have made every factual question spend the allowance a reply is waiting
+    on. Giving it an allowance of its own is what keeps the two apart.
     """
-    allowed = {"chat", "awareness", "live_voice"}
+    allowed = {"chat", "awareness", "live_voice", "search"}
     for spec in config.GEMINI_POOLS:
         if spec["workload"] in allowed:
             assert spec["daily_budget"] >= 1

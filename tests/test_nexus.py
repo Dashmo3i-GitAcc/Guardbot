@@ -1473,8 +1473,8 @@ def test_the_acquisition_and_assistant_filters_still_overlap():
 
 
 def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones():
-    """The original five are intact; awareness and live_voice are deliberate
-    additions, each with its own reason.
+    """The original five are intact; awareness, live_voice and search are
+    deliberate additions, each with its own reason.
 
     This test used to assert that Nexus added *no* sixth workload, and that was
     the right invariant while the assistant only ever answered one message at a
@@ -1483,9 +1483,13 @@ def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones()
     able to spend the allowance somebody is waiting on an answer to. Voice Live
     changes it a second time for the same reason: a call holds a stream open for
     minutes, and a live conversation must not be able to spend the allowance a
-    text conversation is waiting on. So there are two additions — and the five
-    that were there before are still there, unrenamed and unmerged, which is the
-    half of this that must never change.
+    text conversation is waiting on. Search changes it a third time, and for the
+    sharpest version of the same reason: grounding runs *inside* a Gemini
+    request, so a search tool switched on for the chat call would silently merge
+    the two allowances, breakers and failure domains — the exact thing this
+    test's original assertion was written to prevent. So there are three
+    additions — and the five that were there before are still there, unrenamed
+    and unmerged, which is the half of this that must never change.
     """
     from app import gemini_pool
 
@@ -1506,6 +1510,7 @@ def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones()
         "tts",
         "awareness",
         "live_voice",
+        "search",
     }
 
 

@@ -27,6 +27,7 @@ from app import (
     gemini_pool,
     mod_policy,
     transcribe,
+    web_search,
 )
 
 WORKLOADS = {
@@ -34,6 +35,12 @@ WORKLOADS = {
     "chat": chat,
     "moderation": ai_moderation,
     "transcribe": transcribe,
+    # The live web, as its own workload. It is in this set because it is the one
+    # whose separation is easiest to get wrong — grounding runs *inside* a Gemini
+    # request, so the shortcut of switching it on for the conversation would have
+    # merged the two allowances, breakers and credentials without a single line
+    # looking wrong.
+    "search": web_search,
 }
 
 # The state every workload must own a copy of.
@@ -735,3 +742,80 @@ def test_a_workload_with_no_credential_reports_itself_rather_than_borrowing():
         assert reply.answered is False
     finally:
         monkeypatch.undo()
+
+
+# ══ THE LIVE WEB: a capability, not a mode of the conversation ════════════
+# Grounding runs inside a Gemini request, so this workload is the one whose
+# boundary a reasonable person would erase: switching the search tool on for the
+# conversation would look like one line and would merge two allowances, two
+# breakers and two failure domains. These assert that it was not erased.
+def test_the_search_workload_reads_only_its_own_counters():
+    """It touches no counter belonging to another workload.
+
+    ``db.ai_day`` is excluded deliberately: it is the shared *clock* every
+    per-account allowance is dated by, not a counter, and the prefix heuristic
+    this helper uses cannot tell the two apart.
+    """
+    touched = _counters_touched(web_search)
+    shared_clock = {"ai_day", "ai_day_seconds_left"}
+    assert not (touched - shared_clock), touched - shared_clock
+
+
+def test_the_search_workload_owns_its_own_pool_and_allowance():
+    search_pool = _pool("search")
+    chat_pool = _pool("chat")
+
+    assert search_pool is not None and chat_pool is not None
+    assert search_pool is not chat_pool
+    assert search_pool.accounts is not chat_pool.accounts
+    assert search_pool.daily_budget == max(1, config.GEMINI_SEARCH_DAILY_LIMIT)
+    assert chat_pool.daily_budget == max(1, config.GEMINI_CHAT_DAILY_LIMIT)
+
+
+def test_spending_the_search_allowance_does_not_spend_the_chat_allowance():
+    search_pool, chat_pool = _pool("search"), _pool("chat")
+    if not search_pool.daily_budget or not chat_pool.daily_budget:
+        pytest.skip("a pool without an allowance has nothing to partition")
+
+    before = chat_pool.daily_remaining()
+    for _ in range(5):
+        db.daily_add("search", "1", db.ai_day())
+    for account in search_pool.accounts:
+        account._daily_day = ""  # drop the per-day cache so it re-reads
+
+    assert chat_pool.daily_remaining() == before, "the conversation's budget moved"
+
+
+def test_opening_the_search_breaker_leaves_the_others_closed(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_SEARCH_API_KEY", "k-search")
+    monkeypatch.setattr(config, "GEMINI_SEARCH_CIRCUIT_FAILURES", 1)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_CIRCUIT_SECONDS", 300.0)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_MAX_RETRIES", 0)
+
+    async def _boom(contents):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(web_search, "_request", _boom)
+    asyncio.run(web_search.research("قیمت دلار چنده"))
+
+    assert web_search._circuit_open_until > 0
+    assert chat._circuit_open_until == 0.0
+    assert ai_intent._circuit_open_until == 0.0
+    assert ai_moderation._circuit_open_until == 0.0
+    assert transcribe._circuit_open_until == 0.0
+
+
+def test_the_search_workload_cannot_execute_a_telegram_action():
+    imported = _imported_names(web_search)
+    assert not {name for name in imported if name.startswith("telegram")}
+    source = inspect.getsource(web_search)
+    for forbidden in (
+        "delete_message", "restrict_chat_member", "ban_chat_member",
+        "promote_chat_member", "send_message", "ctx.bot",
+    ):
+        assert forbidden not in source, forbidden
+
+
+def test_the_search_workload_has_no_route_to_the_authority_model():
+    imported = _imported_names(web_search)
+    assert not ({"rbac", "admin_service", "admin_tools"} & imported)

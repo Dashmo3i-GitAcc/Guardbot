@@ -60,6 +60,7 @@ from . import (
     text_filters,
     transcribe,
     vpnbot,
+    web_search,
 )
 # Nexus Voice Live: the same assistant, reached through a voice chat. Imported
 # as a package because the router needs three things from it and they belong to
@@ -2151,6 +2152,34 @@ async def _send_chat(
     return True
 
 
+async def _send_search_sources(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    finding,
+    reply_to: int | None,
+) -> bool:
+    """Send the attribution footer for a grounded answer.
+
+    Built by the **application** from the search workload's validated grounding
+    metadata, never from the model's prose. That is what keeps the assistant's
+    own reply link-free — the conversation refuses links for a reason — while the
+    sources are still visible, which the requirement asks for.
+
+    Never raises, and never fatal: the answer has already gone out, and a missing
+    footer must not turn a good reply into an error.
+    """
+    if finding is None or not getattr(finding, "sources", ()):
+        return False
+    body = web_search.sources_block(finding.sources)
+    if not body:
+        return False
+    try:
+        return await _send_chat(ctx, chat_id, body, reply_to)
+    except Exception:  # noqa: BLE001 - the answer is already sent
+        log.exception("could not send the search sources")
+        return False
+
+
 async def _download_file(ctx: ContextTypes.DEFAULT_TYPE, file_id: str) -> bytes:
     """Fetch one Telegram file into memory.
 
@@ -2669,6 +2698,30 @@ async def _answer_conversationally(
         room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
     )
 
+    # The live web, as its own workload. Two conditions, and both are the
+    # existing boundary rather than anything new: the question has to *be* an
+    # informational one (``web_search.should_search`` — small talk, commands and
+    # greetings are not), and the assistant has to be able to answer at all, so a
+    # search is never spent on a turn the conversation is going to decline.
+    #
+    # Only the question itself is sent — not the room window. The window is other
+    # people's conversation, and handing it to a search provider would be a
+    # disclosure this feature has no need to make.
+    #
+    # What comes back is *untrusted reference material*, appended to the same
+    # system-instruction context the room block uses, or — when the search was
+    # attempted and did not land — a server-authored note telling the model the
+    # web could not be checked, so it says so instead of inventing a live fact.
+    # A restraint (the search's own rate limit, or its allowance) adds nothing:
+    # that is our choice to make and nobody needs to hear about it.
+    finding = None
+    if chat.is_enabled() and web_search.should_search(text, kind=kind).wanted:
+        finding = await web_search.research(text, now=time.time())
+        if finding.usable:
+            context = context + web_search.untrusted_block(finding)
+        elif finding.attempted:
+            context = context + web_search.failure_block()
+
     result = await chat.reply(
         room.id,
         user.id,
@@ -2698,6 +2751,7 @@ async def _answer_conversationally(
         if result.voice:
             if await _send_voice(ctx, room.id, result.voice, reply_to):
                 _awareness_note_reply(room.id, result.text)
+                await _send_search_sources(ctx, room.id, finding, reply_to)
                 return _timing(True)
             # The upload failed; the text is still the answer and is sent below.
             log.warning("voice reply failed; falling back to text")
@@ -2706,6 +2760,7 @@ async def _answer_conversationally(
             # awareness pass has to understand — otherwise it reads questions
             # and never its own answers, and repeats itself.
             _awareness_note_reply(room.id, result.text)
+            await _send_search_sources(ctx, room.id, finding, reply_to)
             return _timing(True)
         # Telegram refused the send. Nothing was said, so the room is still
         # unanswered and the ambient path is free to try.
@@ -5082,6 +5137,24 @@ async def post_init(app: Application) -> None:
             )
     else:
         log.info("Nexus awareness: off")
+    # Web search. Its own workload, so this reports whether it is *armed* rather
+    # than whether the assistant works: with the switch on and no credential the
+    # assistant answers exactly as it did before this existed, and that is worth
+    # one line at boot rather than being discovered as "it never searches".
+    if not config.GEMINI_SEARCH_ENABLED:
+        log.info("Web search: off")
+    elif web_search.is_enabled():
+        log.info(
+            "Web search: on model=%s results=%d daily=%d/account",
+            config.GEMINI_SEARCH_MODEL,
+            int(config.GEMINI_SEARCH_MAX_RESULTS),
+            int(config.GEMINI_SEARCH_DAILY_LIMIT),
+        )
+    else:
+        log.info(
+            "Web search: on but no credential; the assistant is unchanged. "
+            "Set GEMINI_SEARCH_API_KEY."
+        )
     # The coding-agent bridge. Registered here, and not in the awareness block,
     # because it is deliberately *not* part of the awareness workload: a coding
     # task spends the owner's CodeBuddy credential and must not touch the

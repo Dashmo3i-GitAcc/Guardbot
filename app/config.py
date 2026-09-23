@@ -2291,6 +2291,105 @@ GEMINI_LIVE_SESSION_PATH = os.getenv(
 )
 
 
+# ── Web Search ────────────────────────────────────────────────────────────
+#
+# A workload that answers a question from the live web, using the provider's own
+# Google Search grounding. It is a **separate workload**, and that is the whole
+# design rather than a detail of it.
+#
+# Grounding runs *inside* a Gemini request — ``tools=[Tool(google_search=...)]``
+# — so the obvious shortcut is to switch it on for the conversational call and
+# get search for free. That shortcut is refused, because it would make every
+# grounded answer spend the conversation's credential and the conversation's
+# daily allowance: a busy afternoon of factual questions would exhaust the
+# budget a person is waiting on a reply to, and the two would share one circuit
+# breaker. So the grounding request is made by ``app/web_search.py`` on this
+# workload's own credential, its own allowance, its own breaker and its own
+# timeout, and what crosses back into the conversation is *data* — a bounded,
+# delimited block of findings the assistant is told to treat as untrusted
+# reference material, never as instructions.
+#
+# The switch defaults on, because the point of the feature is that Nexus checks
+# the web by default rather than only when told to. What makes that safe is the
+# credential: with no ``GEMINI_SEARCH_API_KEY`` (and no opt-in to the shared
+# pool) the workload has no account, reports itself inert, and the assistant
+# answers exactly as it did before this existed. Same fail-closed shape as
+# awareness.
+GEMINI_SEARCH_ENABLED = _bool("GEMINI_SEARCH_ENABLED", True)
+
+# Its own credential, and the shared pool is opt-in — the same shape every other
+# workload has. Isolation is the default because grounding is the one workload
+# whose provider-side quota (grounding requests per day) is separate from
+# generateContent, and a shared key would merge the two projects' limits.
+GEMINI_SEARCH_API_KEY = os.getenv("GEMINI_SEARCH_API_KEY", "").strip()
+GEMINI_SEARCH_ALLOW_SHARED_KEY = _bool("GEMINI_SEARCH_ALLOW_SHARED_KEY", False)
+
+# Its own model preference, defaulting to the conversation's family because the
+# job has the same shape (read text, reason, write text) — but a *separate*
+# setting, so it can be moved without touching the assistant. Every model in the
+# default list supports Google Search grounding.
+GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", GEMINI_CHAT_MODEL).strip()
+GEMINI_SEARCH_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_SEARCH_FALLBACK_MODELS", "")
+) or GEMINI_CHAT_FALLBACK_MODELS
+
+# A tighter deadline than the conversation's. Nobody is waiting on the search
+# itself — they are waiting on the *answer*, and a search that runs long has to
+# give the answer its turn. When this expires the reply is written without web
+# findings and says so, which is the honest failure and a bounded one.
+GEMINI_SEARCH_TIMEOUT_SECONDS = _float("GEMINI_SEARCH_TIMEOUT_SECONDS", 15.0)
+GEMINI_SEARCH_MAX_RETRIES = _int("GEMINI_SEARCH_MAX_RETRIES", 1)
+GEMINI_SEARCH_BACKOFF_SECONDS = _float("GEMINI_SEARCH_BACKOFF_SECONDS", 1.5)
+
+# Its own breaker, like every other workload's: a search outage opens the search
+# circuit and nothing else. The conversation keeps answering from what it knows.
+GEMINI_SEARCH_CIRCUIT_FAILURES = _int("GEMINI_SEARCH_CIRCUIT_FAILURES", 5)
+GEMINI_SEARCH_CIRCUIT_SECONDS = _float("GEMINI_SEARCH_CIRCUIT_SECONDS", 300.0)
+
+# Its own sliding window, on top of the pool's provider-side accounting.
+GEMINI_SEARCH_RATE_LIMIT = _int("GEMINI_SEARCH_RATE_LIMIT", 8)
+GEMINI_SEARCH_RATE_WINDOW = _float("GEMINI_SEARCH_RATE_WINDOW", 60.0)
+
+# Per account, like chat's and awareness's, and deliberately its own number: a
+# factual question must not be able to spend the allowance a reply is waiting on
+# — nor the other way round.
+GEMINI_SEARCH_DAILY_LIMIT = _int("GEMINI_SEARCH_DAILY_LIMIT", 150)
+
+# Bounds on what is kept. ``MAX_RESULTS`` caps how many sources are surfaced;
+# ``MAX_CHARS`` caps the findings block that enters the prompt, because the
+# search allowance is rationed in requests and tokens spent on a long synthesis
+# are paid on every grounded reply.
+GEMINI_SEARCH_MAX_RESULTS = _int("GEMINI_SEARCH_MAX_RESULTS", 5)
+GEMINI_SEARCH_MAX_CHARS = _int("GEMINI_SEARCH_MAX_CHARS", 1800)
+# How much of the question is sent. A question longer than this is truncated
+# rather than refused, the same way the conversation truncates its own input.
+GEMINI_SEARCH_QUERY_CHARS = _int("GEMINI_SEARCH_QUERY_CHARS", 600)
+# How much recent conversation is handed to the search call so a follow-up
+# («و قیمتش؟») is searched in context. Deliberately small: it is other people's
+# text, and it is sent to a provider.
+GEMINI_SEARCH_MAX_HISTORY_CHARS = _int("GEMINI_SEARCH_MAX_HISTORY_CHARS", 600)
+
+# The server-authored note that goes into the prompt when a search was warranted
+# and did not return usable results. English because it is an instruction to the
+# model, not a sentence for a person; the model is what says the honest thing to
+# the person, in their language.
+GEMINI_SEARCH_UNAVAILABLE_NOTE = os.getenv(
+    "GEMINI_SEARCH_UNAVAILABLE_NOTE",
+    "A live web search was attempted for this question and returned no usable "
+    "results. Do not claim to have current or live information. If the question "
+    "depends on current information, say plainly that you could not check the "
+    "web just now.",
+).strip()
+
+# What the person sees under a grounded reply. The application writes this from
+# the grounding metadata, never the model — so the model's own text stays
+# link-free (the conversation refuses links for a reason), and the sources are
+# still visible.
+GEMINI_SEARCH_SOURCES_TITLE = os.getenv(
+    "GEMINI_SEARCH_SOURCES_TITLE", "🌐 منابع:"
+).strip()
+
+
 GEMINI_POOLS = [
     {
         "workload": "intent",
@@ -2445,6 +2544,33 @@ GEMINI_POOLS = [
         # credential will start in an API day; how long each may last is bounded
         # by ``GEMINI_LIVE_MAX_SECONDS``.
         "daily_budget": max(1, GEMINI_LIVE_DAILY_LIMIT),
+    },
+    {
+        # The live web, as its own workload. Its own credential, model
+        # preference, timeout, retries, breaker and daily allowance — see the
+        # Web Search section above for why the grounding call is not simply made
+        # on the conversation's workload. ``capabilities`` is text-only: the
+        # search call is a text question in and a grounded text answer out, and
+        # the grounding tool is provider-side, not a modality this table models.
+        "workload": "search",
+        "keys": _pool_key_list(
+            GEMINI_SEARCH_API_KEY,
+            "GEMINI_SEARCH_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_SEARCH_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(GEMINI_SEARCH_MODEL, GEMINI_SEARCH_FALLBACK_MODELS),
+        "capabilities": frozenset({"text"}),
+        "allow_experimental": False,
+        "retries": GEMINI_SEARCH_MAX_RETRIES,
+        "backoff": GEMINI_SEARCH_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_SEARCH_TIMEOUT_SECONDS),
+        # Per account, and its own number, for the same reason awareness's is:
+        # a factual question must not be able to spend the allowance a reply is
+        # waiting on. Deliberately **no** ``time_budget`` — the wall-clock
+        # ceiling is the conversation-handler's and stays exactly one workload's
+        # (see ``test_only_the_intent_workload_has_a_wall_clock_ceiling``).
+        "daily_budget": max(1, GEMINI_SEARCH_DAILY_LIMIT),
     },
 ]
 
