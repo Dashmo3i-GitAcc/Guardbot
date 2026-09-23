@@ -2,7 +2,10 @@
 
 Reference material moved out of `AgentMD.md` (§53 there lists the `must` / `never` rules from these sections in one place).
 
-The text below is verbatim; it was not edited during the move.
+The text below is the original text, moved out of `AgentMD.md` without editing.
+Where a claim in it had drifted from the code, the claim has since been corrected
+in place — `git log -- docs/reference/` records each correction, and §53 of
+`AgentMD.md` is authoritative where the two disagree.
 
 ## Contents
 
@@ -335,9 +338,10 @@ are the truth. The markers are matched only as the whole answer, so a transcript
 containing the word is not swallowed.
 
 **Nothing transcribes a group voice note on arrival.** There is no handler that
-does so; `transcribe` is called from exactly two places — the conversational path
-and the transcription-only command — and a test asserts that count. This is what
-keeps ordinary group voice out of acquisition and moderation.
+does so; `transcribe` is called from exactly three places — the awareness read,
+the conversational path and the transcription-only command — and a test asserts
+that count. This is what keeps ordinary group voice out of acquisition and
+moderation.
 
 ### 24.2 Verified live, as a closed loop
 

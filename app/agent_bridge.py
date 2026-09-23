@@ -15,7 +15,7 @@ The shape of the problem, and why it is not "give the model a shell":
   ``requirements.txt`` and nothing else), so the execution half is a separate
   host process — ``tools/agent_runner.py`` — and the two halves meet over the
   database and a spool directory under ``/data``, which the compose file already
-  bind-mounts. See ``docs`` in ``AgentMD.md`` §36.
+  bind-mounts. See ``docs`` in ``AgentMD.md`` §39.
 
 What this module owns
 ---------------------

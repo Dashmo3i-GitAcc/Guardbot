@@ -2,7 +2,10 @@
 
 Reference material moved out of `AgentMD.md` (§53 there lists the `must` / `never` rules from these sections in one place).
 
-The text below is verbatim; it was not edited during the move.
+The text below is the original text, moved out of `AgentMD.md` without editing.
+Where a claim in it had drifted from the code, the claim has since been corrected
+in place — `git log -- docs/reference/` records each correction, and §53 of
+`AgentMD.md` is authoritative where the two disagree.
 
 ## Contents
 
@@ -440,11 +443,12 @@ future session brings a measurement rather than a hunch.
 
 The chat incident (§29.15) was a per-account daily allowance charged for
 provider attempts that were *refused*. Intent has no per-account allowance at
-all — only `chat` sets `daily_budget` in `GEMINI_POOLS` — so `refund_daily` is a
-no-op for it and there is nothing to over-charge. Intent's own daily cap counts
-**logical requests** (`ai_usage.calls`, incremented once per `classify`), so a
-request that walks twelve provider calls still costs one. Both properties are
-asserted in `tests/test_ai_intent.py`.
+all — `daily_budget` is set for `chat`, `awareness`, `live_voice` and `search`,
+and not for `intent` — so `refund_daily` is a no-op for it and there is nothing
+to over-charge. Intent's own daily cap counts **logical requests**
+(`ai_usage.calls`, incremented once per `classify`), so a request that walks
+twelve provider calls still costs one. Both properties are asserted in
+`tests/test_ai_intent.py`.
 
 #### Verifying it
 

@@ -1218,7 +1218,7 @@ UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS = _float(
 
 
 # ── The coding-agent bridge ───────────────────────────────────────────────
-# See ``app/agent_bridge.py`` for the design and ``AgentMD.md`` §36 for the
+# See ``app/agent_bridge.py`` for the design and ``AgentMD.md`` §39 for the
 # deployment. The short version: the owner asks Nexus for a coding task in the
 # group, Nexus turns it into a *tool call*, the one authority model in
 # ``app/admin_service.py`` decides, and a host process runs CodeBuddy because

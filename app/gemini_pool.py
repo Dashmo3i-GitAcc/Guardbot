@@ -583,7 +583,8 @@ class Account:
         self._persisted = False
 
         # The per-account daily allowance, set by the pool after construction.
-        # 0 means unlimited, which is what every workload except chat uses.
+        # 0 means unlimited. Only chat, awareness, live_voice and search set a
+        # budget; every other workload runs without a per-account ceiling.
         self.daily_budget = 0
         # Cached count for `_daily_day`. Read lazily and refreshed whenever the
         # day turns over, so a long-running process picks up the new day without

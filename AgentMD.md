@@ -585,6 +585,8 @@ This is a small VPS. Disk leaks are production incidents.
 
 How a VPN request in a group becomes a personal deep-link: the GuardBot / VPN-bot boundary, the JSON intent rules and scoring, the SQLite cooldown, the handler, the HMAC client, and the host-networking trap. GuardBot never holds a VPN credential, never talks to the 3x-ui panel, and never puts a subscription URL, UUID, `pbk` or panel client name in a group message; the signing vector is shared with the VPN bot and must change in both repos and both tests together.
 
+Subsections: §13.1 the boundary · §13.2 what counts as an intent · §13.3 the cooldown · §13.4 the handler · §13.5 the VPN bot client · §13.6 deployment and the networking trap · §13.7 testing · §13.8 the AI second opinion.
+
 Full text: [`docs/reference/acquisition.md#s13`](docs/reference/acquisition.md#s13).
 
 ---
@@ -716,6 +718,8 @@ Rules for the report:
 ## 17. The conversational assistant
 
 The conversational workload: its boundary against acquisition, the per-project quota fact, the measured model choice, config, bounded memory, failure isolation and output safety. `main._addressed_to_bot` is the only way in, and `on_group_text` must return before `classifier.classify` when the assistant is enabled and addressed, or one message gets both a reply and a trial offer.
+
+Subsections: §17.1 the boundary · §17.2 the quota question · §17.3 configuration · §17.4 conversation memory · §17.5 budgets and failure isolation · §17.6 output safety · §17.7 verifying it · §17.8 known limitations.
 
 Full text: [`docs/reference/assistant.md#s17`](docs/reference/assistant.md#s17).
 
@@ -929,6 +933,8 @@ it as the current total is exactly how the count drifted before.
 
 The Gemini account pool: one key per account, two levels of failover, capability versus availability, the state machines, retries, selection, events and config. A model failure never disables an account; there is no "requests remaining" figure anywhere; and pool events are recorded and never announced.
 
+Subsections: §28.1 one key per account · §28.2 the two levels of failover · §28.3 capability, not just availability · §28.4 the state machines · §28.5 what the provider does not tell us · §28.6 retries and cooldowns · §28.7 selection · §28.8 pool events · §28.9 configuration · §28.10 what did not change · §28.11 verifying it · §28.12 known limitations · §28.13 the intent failure count.
+
 Full text: [`docs/reference/gemini-pool.md#s28`](docs/reference/gemini-pool.md#s28).
 
 ---
@@ -968,6 +974,8 @@ Full text: [`docs/reference/moderation.md#s32`](docs/reference/moderation.md#s32
 ## 33. One strike ladder
 
 One strike ladder, and the two permission sets it applies. `_apply_strike_ladder` is the only implementation and must never be re-inlined; the order is restrict then notice; and `FULL` must name every field, which is why it is `ChatPermissions.all_permissions()` and a test enumerates every library field.
+
+Subsections: §33.1 the two permission sets, and the unmute that was not one.
 
 Full text: [`docs/reference/moderation.md#s33`](docs/reference/moderation.md#s33).
 

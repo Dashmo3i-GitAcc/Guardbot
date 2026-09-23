@@ -2,7 +2,10 @@
 
 Reference material moved out of `AgentMD.md` (§53 there lists the `must` / `never` rules from these sections in one place).
 
-The text below is verbatim; it was not edited during the move.
+The text below is the original text, moved out of `AgentMD.md` without editing.
+Where a claim in it had drifted from the code, the claim has since been corrected
+in place — `git log -- docs/reference/` records each correction, and §53 of
+`AgentMD.md` is authoritative where the two disagree.
 
 ## Contents
 
@@ -262,10 +265,12 @@ Two additions to the RBAC vocabulary (§25):
   the assistant" is not refused; it cannot be asked for. `OWNER_ONLY_PERMISSIONS`
   records the intent, and the suite asserts that no bundle carries it.
 
-`nexus.control` is appended **last** in `PERMISSIONS` on purpose: that tuple is
-the wire format of the promotion dialog's permission bitmask, and inserting
-anywhere else would renumber every existing bit in a dialog that may already be
-open in somebody's Telegram client.
+The owner-only permissions are **appended** to the end of `PERMISSIONS` on
+purpose, never inserted in the middle, and `nexus.control` was the first of
+them: that tuple is the wire format of the promotion dialog's permission
+bitmask, and inserting anywhere else would renumber every existing bit in a
+dialog that may already be open in somebody's Telegram client. The current tail
+order is `nexus.control`, `agent.request`, `vpn.read`, `vpn.manage`.
 
 ### 34.10 AI resource protection
 
