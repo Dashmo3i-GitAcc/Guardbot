@@ -77,6 +77,32 @@ def load_cases(path: Path = CASES_PATH) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+# The window's age is stated on its own line, and it is *always* in the past —
+# the window started before the pass read it. So the self-consistency check has
+# to look at the message's own sentence and not at the window line, or a future
+# reading with a window behind it would look like a contradiction.
+_WINDOW_MARK = "The window this pass is reading"
+
+
+def _span_contradicts(line: str) -> bool:
+    """Whether the rendered time sentence's two halves point opposite ways.
+
+    The direction is stated in words ("forwards, after now") and the offset in
+    words ("about 1 day(s) ago"), and both come from one reading — so they must
+    agree. Nothing scored the sentence at all before this: ``when_ok`` compares
+    the structured ``kind`` and ``unit``, so «فردا» scored 100% while the line
+    handed to the model read *"points forwards, after now at a scale of days —
+    about 1 day(s) ago"*. Eight of the ninety-four phrases did exactly that, and
+    the benchmark was blind to it because a reading is not a sentence.
+    """
+    head = line.split(_WINDOW_MARK)[0]
+    if "forwards" in head and " ago" in head:
+        return True
+    if "backwards" in head and "from now" in head:
+        return True
+    return False
+
+
 def _row(raw: dict) -> dict:
     """One window row, with every column the resolver, the matcher and the
     discourse reader consult."""
@@ -228,6 +254,8 @@ def evaluate(cases: dict) -> dict:
                 "got_when_unit": when.unit,
                 "when_why": when.why,
                 "when_block_chars": len(when_block),
+                "when_prose": when_block.strip(),
+                "when_prose_contradicts": _span_contradicts(when_block),
                 "expected_edges": expected_edges,
                 "got_edges": sorted((e.source_id, e.target_id) for e in state.edges),
                 "expected_focus": expected_focus,
@@ -480,6 +508,16 @@ def _metrics(detail: list[dict]) -> dict:
         "when_block_chars_max": max(
             (r["when_block_chars"] for r in detail), default=0
         ),
+        # The sentence, scored as a sentence. A reading that is right and a
+        # sentence that contradicts itself is the failure mode a structured
+        # comparison cannot see, so it is counted on its own.
+        "when_prose_cases": sum(1 for r in detail if r["when_prose"]),
+        "when_prose_contradictions": sum(
+            1 for r in detail if r["when_prose_contradicts"]
+        ),
+        "when_prose_chars_max": max(
+            (len(r["when_prose"]) for r in detail), default=0
+        ),
         "state_cases": len(relation_cases),
         "edges_expected": len(edges_expected),
         "edges_exact": sum(1 for r in detail if r["edges_ok"]),
@@ -692,6 +730,9 @@ def report(result: dict, *, verbose: bool = False) -> str:
             if v["total"]
         ),
         f"  block chars max            {m['when_block_chars_max']}",
+        f"  the sentence, scored       {m['when_prose_cases']} rendered; "
+        f"self-contradictions {m['when_prose_contradictions']} "
+        f"(the reading right and the sentence wrong — should be 0)",
         "",
         f"the room's state (reply graph over every case; relation over {m['state_cases']} labelled)",
         f"  edges exact                {m['edges_exact']} / {m['cases']}",
@@ -781,6 +822,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         for r in result["detail"]
         if not r["kind_ok"] or not r["addressed_ok"] or not r["act_ok"]
         or not r["when_ok"] or not r["edges_ok"] or not r["focus_ok"]
+        or r["when_prose_contradicts"]
         or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])

@@ -1,5 +1,5 @@
 {
-  "version": 11,
+  "version": 12,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -2522,7 +2522,7 @@
     {
       "id": "when-tomorrow",
       "category": "temporal",
-      "note": "«فردا» points forwards, at a scale of days.",
+      "note": "«فردا» points forwards, at a scale of days. The reading was always right; the sentence was not — it read «about 1 day(s) ago», so the block stated a direction and then contradicted it in the same line. The four cases below cover the other magnitude branches of the same defect.",
       "window": [],
       "anchor": {
         "user_id": 22,
@@ -2541,6 +2541,118 @@
         "open_questions": [],
         "when": "future",
         "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-after-tomorrow",
+      "category": "temporal",
+      "note": "A future span of two days, so the magnitude is not a constant one. The sentence must say «about 2 day(s) from now»: a magnitude worded as an age is the defect this pins.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "پس فردا جلسه داریم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-next-week",
+      "category": "temporal",
+      "note": "The week branch of the future span, which is a different magnitude band from the day one.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "هفته بعد میبینمت",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "week",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-next-month",
+      "category": "temporal",
+      "note": "The month branch, whose unit span is labelled approximate — «at a scale of months (about)» — so the sentence carries two approximations and must not add a third by calling it an age.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "ماه بعد میام",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "month",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-next-year",
+      "category": "temporal",
+      "note": "The year branch, the largest band. All four are labelled so the harness scores a sentence per magnitude, not one sentence that happens to work for days.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "سال بعد میبینمت",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "year",
         "entities": {
           "newest_media": "",
           "has_link": false

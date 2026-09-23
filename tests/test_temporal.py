@@ -278,6 +278,94 @@ def test_the_stated_span_is_spoken_as_an_approximation():
     assert "minute" in line
 
 
+# ── The sentence must agree with itself ───────────────────────────────────
+# The direction and the offset are two halves of one reading, and they were
+# worded by one function — so a reading that pointed forwards was rendered as
+# "points forwards, after now ... about 1 day(s) ago". The reading was right and
+# the sentence contradicted itself, in eight of the ninety-four phrases. The
+# benchmark could not see it because it compares the structured kind and unit;
+# a reading is not a sentence.
+def _contradicts(line: str) -> bool:
+    """Whether the rendered sentence's two halves point opposite ways.
+
+    The window's age is stated on its own line and is always in the past, so it
+    is excluded — otherwise a future reading with a window behind it would look
+    like a contradiction.
+    """
+    head = line.split("The window this pass is reading")[0]
+    return ("forwards" in head and " ago" in head) or (
+        "backwards" in head and "from now" in head
+    )
+
+
+def test_no_phrase_renders_a_sentence_that_contradicts_itself():
+    """The property, over every phrase the reader knows — not a sample.
+
+    A sample is how this survived: «فردا» was in the corpus and passed, because
+    the corpus scores the reading. The eight phrases that broke were the other
+    future offsets, and a property over the whole table is what makes the class
+    impossible to reintroduce rather than the one phrase impossible to reintroduce.
+    """
+    broken = []
+    for phrase, _kind, _unit, _seconds in T._PHRASES:
+        when = T.read_when(phrase)
+        if not when:
+            continue
+        line = T.render(when, now=1000, window_start=100)
+        if _contradicts(line):
+            broken.append((phrase, line.strip()))
+    assert broken == [], broken
+
+
+def test_a_forward_reading_states_a_forward_offset():
+    """The positive half: the fix is a wording, not a suppression."""
+    line = T.render(T.read_when("فردا"))
+    assert "forwards, after now" in line
+    assert "about 1 day(s) from now" in line
+    assert " ago" not in line.split("The window")[0]
+
+
+def test_a_backward_reading_states_a_backward_offset():
+    line = T.render(T.read_when("دیروز"))
+    assert "backwards, before now" in line
+    assert "about 1 day(s) ago" in line
+    assert "from now" not in line
+
+
+@pytest.mark.parametrize(
+    "phrase,expected",
+    [
+        ("فردا", "about 1 day(s) from now"),
+        ("پس فردا", "about 2 day(s) from now"),
+        ("هفته بعد", "about 1 week(s) from now"),
+        ("ماه بعد", "about 1 month(s) from now"),
+        ("سال بعد", "about 1 year(s) from now"),
+    ],
+)
+def test_every_future_magnitude_is_worded_forwards(phrase, expected):
+    """One case per magnitude band, because the band is a separate branch."""
+    assert expected in T.render(T.read_when(phrase))
+
+
+def test_a_repeat_reading_states_no_offset():
+    """«دوباره» states a repetition, not an age.
+
+    Its span would be a *period* — "about 1 day(s)" of what? — so it renders
+    none, and saying "ago" for it would be a different wrong sentence.
+    """
+    for phrase in ("دوباره", "بازم", "مجدد"):
+        line = T.render(T.read_when(phrase))
+        assert "ago" not in line
+        assert "from now" not in line
+
+
+def test_the_window_age_is_always_worded_backwards():
+    """The window started before the pass read it, whatever the message says."""
+    line = T.render(T.read_when("فردا"), now=1000, window_start=100)
+    assert "starts about 15 minute(s) ago" in line
+    assert "forwards" in line  # the message's own half is untouched
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
 def _imports(tree, *, top_level_only: bool) -> set[str]:
     """The module names a parsed file imports."""

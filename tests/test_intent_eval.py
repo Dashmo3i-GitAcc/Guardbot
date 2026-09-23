@@ -245,6 +245,40 @@ def test_the_time_block_stays_small():
     assert result()["when_block_chars_max"] <= 300
 
 
+def test_the_time_sentence_never_contradicts_itself():
+    """The sentence is the product, and it was the one thing never scored.
+
+    ``when_ok`` compares the structured ``kind`` and ``unit``, so «فردا» scored
+    100% while the line handed to the model said *"points forwards, after now at
+    a scale of days — about 1 day(s) ago"*. The reading was right and the
+    sentence was wrong, and nothing looked at the sentence. This is the check
+    that would have caught it: a direction stated in words and an offset stated
+    in words, both from one reading, must not point opposite ways.
+    """
+    m = result()
+    assert m["when_prose_contradictions"] == 0
+
+
+def test_the_time_sentence_check_is_not_vacuous():
+    """…and the check above has something to check.
+
+    A contradiction count of zero is also what a renderer that says nothing
+    produces, so the future cases — the ones the defect hit — are held to the
+    forward wording directly, and the past cases to the backward one.
+    """
+    m = result()
+    assert m["when_prose_cases"] >= 20
+    future = [r for r in m["detail"] if r["expected_when"] == "future" and r["when_prose"]]
+    assert len(future) >= 4, "no future reading renders a sentence"
+    for r in future:
+        head = r["when_prose"].split("The window this pass is reading")[0]
+        assert "forwards" in head, r["id"]
+    forward = [r for r in future if "from now" in r["when_prose"]]
+    assert len(forward) >= 4, "no future reading states a forward offset"
+    past = [r for r in m["detail"] if r["expected_when"] == "past" and r["when_prose"]]
+    assert any("ago" in r["when_prose"] for r in past)
+
+
 def test_the_time_reader_is_fast_enough_to_run_on_every_pass():
     """The folded table is cached, so a read is a substring scan and no more."""
     assert result()["when_us_mean"] < 1000

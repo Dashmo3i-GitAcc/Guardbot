@@ -23,6 +23,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [49. What does the request act on?](#s49)
 - [50. The person lead the object reading removed](#s50)
 - [51. Talking about Nexus, not to it](#s51)
+- [52. A sentence that contradicted itself](#s52)
 
 ---
 
@@ -2951,3 +2952,124 @@ telling somebody else to go and ask the assistant — so the message is about
 Nexus, and a group that wants the assistant itself says «نکسوس، ...». Anyone who
 disagrees with that reading has one line to change and one case to move, which is
 the point of putting it in the corpus.
+
+---
+
+<a id="s52"></a>
+## 52. A sentence that contradicted itself
+
+### 52.1 The defect, and why nine increments missed it
+
+Every increment so far measured a **reading**. The product the model receives is a
+**sentence**, and nothing had ever scored one. The gap showed up the first time the
+assembled prompt was read rather than the harness:
+
+```
+The message says «فردا», which points forwards, after now at a scale of days
+— about 1 day(s) ago. That is the server's clock, not a reading of the words.
+```
+
+"Points forwards, after now" and "about 1 day(s) ago" are in the same sentence, and
+tomorrow is not in the past. The reading was **right** — `kind="future"`,
+`unit="day"` — and the harness scored 100%, because `when_ok` compares the
+structured fields. The sentence is what the model reads, and it was never compared
+to anything.
+
+The cause was one line: `render` worded the offset with `_ago` whatever the reading
+pointed at, and `_ago` is past-only prose. **8 of the 94 phrases** in the table did
+it — every future phrase that states an offset.
+
+### 52.2 The fix: one magnitude, two tails
+
+```
+_magnitude(seconds)  →  "2 day(s)"          the size, with no direction
+_ago(seconds)        →  "about 2 day(s) ago"
+_ahead(seconds)      →  "about 2 day(s) from now"
+_span(when)          →  _ahead for WHEN_FUTURE, _ago otherwise, "" when seconds <= 0
+```
+
+The two halves of the sentence now share the part they must agree on and differ
+only in the tail that states the direction. A `repeat` reading («دوباره») renders
+**no** offset: its span would be a *period*, not an age, and "about 1 day(s) ago"
+for «هر روز» would be a different wrong sentence.
+
+The window's own age keeps `_ago`, deliberately — it is not the message's
+direction. The window started before the pass read it, always.
+
+### 52.3 The measurement that was missing
+
+`tools/eval_intent.py` now scores the sentence beside the reading:
+
+```
+  the sentence, scored       24 rendered; self-contradictions 0
+```
+
+`_span_contradicts` splits the window's line off first (it is always in the past, so
+a future reading with a window behind it is not a contradiction) and then asks
+whether the message's own sentence states a direction and an offset that point
+opposite ways. A self-contradicting sentence puts its case in `not met`, so a
+regression is reported rather than counted.
+
+**The check was proved non-vacuous by running it against the unfixed renderer**:
+3 contradictions and 3 cases in `not met` — `when-tomorrow`,
+`when-explicit-beats-demonstrative`, and `topic-switch-no-reference`, the last of
+which had not been spotted by reading. It found more than the reading did.
+
+`tests/test_intent_eval.py` holds `when_prose_contradictions == 0` **and**
+`when_prose_cases >= 20`, because zero contradictions is also what a renderer that
+says nothing produces. `tests/test_temporal.py` holds the stronger form: a property
+over **every** phrase in the table, which is what makes the class impossible to
+reintroduce rather than one phrase impossible to reintroduce. Against the unfixed
+renderer, 9 of the new tests fail.
+
+### 52.4 The numbers
+
+`tools/eval_intent.py`, corpus 123 → 127 cases (version 12; four new `temporal`
+cases, one per future magnitude band — day, week, month, year — so the sentence is
+scored per band rather than once):
+
+```
+                                          before   after
+phrases whose sentence contradicts itself   8/94     0/94
+harness self-contradictions (3 cases)          3        0
+harness `not met`                              0        0
+future cases (kind · unit exact)             4/4      8/8
+sentences scored                              20       24
+```
+
+Nothing else moved: expression, addressing, act, open questions, room state,
+entities, the direction, the object reading, the referent columns, and
+`provided_before < provided_after` are all identical to §51's report.
+
+Cost and boundaries:
+
+```
+reading cost                    unchanged (the table scan is untouched)
+rendering cost                  one extra function call per rendered sentence
+context/token overhead          +" from now" (9 chars) on the 8 future phrases;
+                                block chars max 292 → 294
+new sources / budget change     none (anchor_when stays at 300)
+Gemini / provider calls added   0
+database change                 none
+```
+
+The fix eats 9 characters of the block's headroom (292 → 294 against a budget of
+300), and that is left alone rather than bought back with a bigger budget. The
+budget is not what protects the sentence: ``render`` puts the message's own line
+**first** and the window's age last, and ``_clip`` keeps whole lines from the
+front — so if the ceiling ever bites, what is lost is the window's age, which is
+the least important half.
+
+### 52.5 What this says about the method
+
+Nine increments added readers and benchmarked readings, and the benchmark was
+clean. The defect was not in a reader. It was in the **last step** — turning a
+reading into the sentence the model reads — which no test and no metric looked at,
+because a reading and a sentence are different kinds of thing and only one of them
+had a number.
+
+The lesson is recorded rather than generalised into a framework: for every block,
+the sentence is the product, and a property over the *whole* vocabulary is what
+catches a wording that is wrong for a subset. The four new corpus cases exist
+because the magnitude has four branches, and a single case would have proved only
+that the day branch was fixed.

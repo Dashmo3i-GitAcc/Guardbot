@@ -1671,6 +1671,21 @@ reference file is stale and this list is the one to fix first.
 * The `anchor_when` block is a **tier-0 source**, declared **last** among them:
   it is the shortest and the one that renders least often, so it is the cheapest
   thing to lose if the pass-wide ceiling ever bites.
+* **The sentence must agree with the reading it came from.** The direction is
+  stated in words (`_DIRECTION`) and the offset in words (`_ago`/`_ahead`), and
+  both come from one `When` — so they must not point opposite ways. They did:
+  the span was worded by `_ago` whatever the reading pointed at, so «فردا» reached
+  the model as *"points forwards, after now at a scale of days — about 1 day(s)
+  ago"*, and **8 of the 94 phrases** did it. The magnitude is now computed once
+  (`_magnitude`) and only the tail differs (`_ago` / `_ahead`, chosen by
+  `_span`); a `repeat` reading renders **no** offset, because its span would be a
+  period rather than an age. The window's own age keeps `_ago` — it is always in
+  the past. A **property test over every phrase** holds it, not a sample.
+* The benchmark scores the **sentence**, not only the reading:
+  `when_prose_contradictions` must be `0`, and `when_prose_cases` must stay ≥ 20
+  so the check cannot pass by rendering nothing. `when_ok` compares `kind` and
+  `unit`, which is exactly why this defect survived: the reading was right and
+  the sentence was wrong.
 * `app/room_state.py` reads **who is talking to whom** and whether the anchor
   **continues the thread**. The reply graph and the focus are the room's own
   record — a stored `reply_user_id` column and a count over it — while the thread

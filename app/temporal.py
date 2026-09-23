@@ -320,21 +320,67 @@ _UNIT_SPAN = {
 }
 
 
-def _ago(seconds: int) -> str:
-    """A span in words, for the offsets that state one."""
+def _magnitude(seconds: int) -> str:
+    """The size of a span in words, with **no direction** — «2 day(s)».
+
+    The direction and the size are two halves of one reading, and they are
+    computed apart so they cannot disagree. They did disagree: the span was
+    worded by ``_ago`` whatever the reading pointed at, so «فردا» reached the
+    model as *"points forwards, after now at a scale of days — about 1 day(s)
+    ago"*, a sentence whose two halves cancel and which the model can only
+    resolve by ignoring one of them. The magnitude is what the two wordings
+    share; only the tail differs.
+    """
     if seconds <= 0:
         return ""
     if seconds < HOUR:
-        return f"about {max(1, seconds // MINUTE)} minute(s) ago"
+        return f"{max(1, seconds // MINUTE)} minute(s)"
     if seconds < DAY:
-        return f"about {max(1, seconds // HOUR)} hour(s) ago"
+        return f"{max(1, seconds // HOUR)} hour(s)"
     if seconds < WEEK:
-        return f"about {max(1, seconds // DAY)} day(s) ago"
+        return f"{max(1, seconds // DAY)} day(s)"
     if seconds < MONTH:
-        return f"about {max(1, seconds // WEEK)} week(s) ago"
+        return f"{max(1, seconds // WEEK)} week(s)"
     if seconds < YEAR:
-        return f"about {max(1, seconds // MONTH)} month(s) ago"
-    return f"about {max(1, seconds // YEAR)} year(s) ago"
+        return f"{max(1, seconds // MONTH)} month(s)"
+    return f"{max(1, seconds // YEAR)} year(s)"
+
+
+def _ago(seconds: int) -> str:
+    """A span **backwards** from now — «about 2 day(s) ago».
+
+    Used for the offsets that state one and for the window's own age, which is
+    always in the past because the window started before the pass read it.
+    """
+    size = _magnitude(seconds)
+    return f"about {size} ago" if size else ""
+
+
+def _ahead(seconds: int) -> str:
+    """A span **forwards** from now — «about 2 day(s) from now».
+
+    The mirror of ``_ago``, and the reason it exists: a reading that points
+    forwards must not be worded with a word that points backwards.
+    """
+    size = _magnitude(seconds)
+    return f"about {size} from now" if size else ""
+
+
+def _span(when: When) -> str:
+    """The offset in words, worded by the direction the reading points.
+
+    Only a reading that states an offset gets a span at all, and the past and
+    the future are worded separately. A ``repeat`` reading («دوباره») states no
+    offset — no repeat phrase in the table carries one — so it renders none, and
+    it keeps doing so if one is added later: its span would be a *period* rather
+    than an age, and "about 1 day(s) ago" for «هر روز» would be a third kind of
+    wrong sentence.
+    """
+    if when.seconds <= 0:
+        return ""
+    if when.kind == WHEN_FUTURE:
+        return _ahead(when.seconds)
+    return _ago(when.seconds)
 
 
 def render(when: When, *, now: int = 0, window_start: int = 0) -> str:
@@ -350,11 +396,13 @@ def render(when: When, *, now: int = 0, window_start: int = 0) -> str:
     line = f"\nThe message says «{when.surface}», which points {_DIRECTION[when.kind]}"
     if when.unit:
         line += f" {_UNIT_SPAN[when.unit]}"
-    span = _ago(when.seconds)
+    span = _span(when)
     if span:
         line += f" — {span}"
     line += ". That is the server's clock, not a reading of the words.\n"
     if window_start and now and window_start < now:
+        # ``_ago`` and not ``_span``: the window's age is not the message's
+        # direction. The window started before the pass read it, always.
         line += (
             f"The window this pass is reading starts {_ago(now - window_start)}; "
             "work from the server's times, not from your own sense of when this "
