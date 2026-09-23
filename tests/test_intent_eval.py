@@ -50,6 +50,11 @@ def test_the_corpus_is_well_formed():
     for case in cases["cases"]:
         assert "window" in case and "anchor" in case and "expect" in case
         assert "text" in case["anchor"]
+        # Every case carries an act label, including the abstentions — a case
+        # with no label cannot be scored, and a default would hide the ones the
+        # reader is expected to abstain on.
+        assert "act" in case["expect"], case["id"]
+        assert "open_questions" in case["expect"], case["id"]
 
 
 def test_expression_detection_is_exact_on_the_corpus():
@@ -102,6 +107,58 @@ def test_the_addressing_gaps_are_exactly_the_ones_we_know_about():
     detail = result()["detail"]
     misses = {r["id"] for r in detail if not r["addressed_ok"]}
     assert misses == KNOWN_ADDRESSING_GAPS, misses
+
+
+# ── The act ───────────────────────────────────────────────────────────────
+def test_the_act_reader_never_claims_an_act_it_cannot_defend():
+    """The property the precedence and the abstention exist for.
+
+    A wrong act in the prompt is worse than no act, so the floor is on the
+    claimed direction: everything it says, it is right about.
+    """
+    m = result()
+    assert m["act_false_positives"] == 0
+    assert m["act_claimed_precision"] == 1.0
+
+
+def test_the_act_reader_finds_every_labelled_act():
+    m = result()
+    assert m["act_false_negatives"] == 0
+    assert m["act_recall"] == 1.0
+
+
+def test_the_act_reader_still_abstains_rather_than_guessing():
+    """Coverage is high, not total — the difference is the honest part.
+
+    The abstentions are the implicit complaint, the plain statement and the
+    two empty anchors: messages whose act is a matter of meaning. If this ever
+    reaches 100%, something started guessing.
+    """
+    m = result()
+    assert 0 < m["act_abstentions"] < m["cases"]
+    assert m["act_coverage"] >= 0.85
+
+
+def test_every_act_class_is_exercised():
+    """A corpus that only tested instructions would score a constant well."""
+    by_class = result()["act_by_class"]
+    for kind, counts in by_class.items():
+        if kind == "unknown":
+            continue
+        assert counts["total"] >= 2, f"{kind} has only {counts['total']} cases"
+
+
+# ── The room's open questions ─────────────────────────────────────────────
+def test_the_open_questions_are_exact():
+    m = result()
+    assert m["questions_precision"] == 1.0
+    assert m["questions_recall"] == 1.0
+    assert m["questions_exact"] == m["questions_cases"]
+    assert m["questions_cases"] >= 3
+
+
+def test_the_question_block_stays_small():
+    assert result()["questions_block_chars_max"] <= 600
 
 
 def test_the_harness_runs_without_a_database_or_a_key():

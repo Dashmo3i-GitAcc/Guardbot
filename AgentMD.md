@@ -1628,6 +1628,28 @@ reference file is stale and this list is the one to fix first.
   (`wrong_confident == 0`, top-1 and ambiguity recall **and** precision,
   `provided_before < provided_after`). A change to the lexicon moves those
   numbers **on purpose**, by editing the corpus — never by loosening the floor.
+* `app/discourse.py` reads what a message is **doing** (`intent`'s deterministic
+  half) and which questions in the window no reply points at. It is **evidence,
+  never a gate** — nothing branches on it — and it is pure at import time.
+* The act vocabulary is **closed** (`question`, `instruction`, `correction`,
+  `social`, `report`) and the reader **abstains** (`unknown`) when no marker it
+  can defend fires. Abstention is not a failure: a wrong act in the prompt is
+  worse than no act, so the benchmark floors `act_claimed_precision` and
+  `act_false_positives == 0`, and reports `coverage` beside them.
+* Precedence is **`correction > report > instruction > social > question`**, and
+  each step is load-bearing: a correction is a statement *about* the
+  conversation, a report is a quotation (reading «نکسوس گفت اینو بن کن» as an
+  order is the false positive `addressing` already guards), and a greeting
+  outranks the question mark inside it.
+* The imperative lexicons are **explicit token lists**, never a suffix rule. A
+  suffix rule read «نمیکن» as an instruction and bought nothing the lists did
+  not already have; the bare «کن»/«بده» are listed as whole tokens instead.
+* `open_questions` tests the **reply edge and nothing else**, and the block it
+  renders says "no reply pointing at an answer", **never** "unanswered" — a room
+  answers questions without using Telegram's reply as often as with it, and the
+  second phrasing would be a claim about meaning.
+* The act and the open-question block are **tier-0 sources** in
+  `awareness_context.SOURCES`; they read `Ctx`, never the database.
 
 ### 53.8 The assistant
 

@@ -14,6 +14,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [36. The assistant reads a room when its own clock expires](#s36)
 - [41. The allowance is a day's, so it is spent across the day](#s41)
 - [42. Who does «این» mean? The referent resolver](#s42)
+- [43. What is this message doing, and what is unanswered](#s43)
 
 ---
 
@@ -1657,3 +1658,147 @@ The columns are additive and reach production through `_ensure_column` rather
 than `CREATE TABLE`; a row written before them reads as `''`/`0` rather than
 being guessed at. Rollback is reverting the code: the columns stay and are
 ignored.
+
+---
+
+<a id="s43"></a>
+
+## 43. What is this message doing, and what is unanswered
+
+### 43.1 The gap
+
+The awareness pass is handed a transcript and asked to understand it. What it
+was *not* handed is the cheap half of that understanding, which the server can
+read off the text with no model and no key:
+
+* whether a message is **asking**, **instructing**, **correcting**, **greeting**
+  or **reporting** — «چقدره؟» and «بنش کن» are the same length and opposite in
+  force, and a model reading a transcript has to work that out from the sentence
+  on every pass;
+* which questions in the window **no reply points at an answer for** — the one
+  piece of room state a group most reliably loses track of, and the one a server
+  can read exactly, because the reply edge is a stored column rather than a
+  judgement.
+
+Both are things the brief lists as room state: *"which questions remain
+unanswered"*, and the shape of what is being said.
+
+### 43.2 Evidence, and the vocabulary abstains
+
+`app/discourse.py` is **evidence**, in the same sense `app/addressing.py` and
+`app/referents.py` are evidence. It reads text and rows and reports what it
+found, with the reason. Nothing branches on it: the existing invariant is
+unchanged, and relevance, action and speech remain the model's exclusively.
+
+`read_act` reports `unknown` when nothing it can defend fires, and that is the
+design rather than a gap. A classifier that always guesses puts a wrong act in
+the prompt on every ordinary message, and the prompt is where a wrong label does
+its damage. The benchmark therefore scores **precision on the acts it claims**
+and **coverage** — how often it claims at all — rather than accuracy alone,
+because on a corpus where most messages in a moderation room are instructions,
+accuracy is a number a constant would also get.
+
+### 43.3 The precedence, and why each step is load-bearing
+
+`correction > report > instruction > social > question`.
+
+* **A correction is a statement *about* the conversation.** «نه منظورم مهدی بود،
+  اینو بن کن» corrects and happens to instruct; reading it as an instruction
+  loses the correction. So does «نه گفتم مهدی نه سارا» — a first-person
+  recollection opened by «نه» is fixing what the speaker said, and the rule
+  needs both halves, so «قبلاً گفتم که…» stays a reminder and a bare «نه» stays
+  a disagreement.
+* **A report is a quotation.** «نکسوس گفت اینو بن کن» repeats an order rather
+  than giving one, and reading it as an instruction is exactly the false
+  positive `addressing` already guards against with its reporting-verb rule.
+* **A greeting outranks the question mark inside it.** «سلام بچه ها چطوری» is a
+  greeting, not an interrogation.
+
+### 43.4 Two lexicons, and the suffix rule that was removed
+
+The moderation verbs are **borrowed** from `addressing.ACTION_WORDS` rather than
+copied, late and guarded, for the reason the whole codebase reuses the one fold:
+a second copy drifts the first time either changes. The ordinary imperatives are
+an explicit list — «ببین», «بگو», «بفرست», and the bare «کن» and «بده» that
+carry a directive whose verb is in no lexicon («بررسی کن», «درستش کن»).
+
+The first draft also had a **suffix rule**: a token ending in «کن» was an
+imperative. It read «نمیکن» as an instruction, and so did every other word with
+the syllable at the end, and it bought nothing — the moderation lexicon already
+lists the clitic forms a group types («بنش»، «ساکتش»، «محدودش») and `_bare`
+strips one clitic before the lookup. It was removed. «آیا درسته» read as an
+instruction for the same reason: «درسته» strips to «درست», which was in the
+imperative list and is also an ordinary noun. The noun forms were removed too,
+and «درستش کن» is caught by the «کن» that follows it.
+
+### 43.5 The room's unanswered questions
+
+`open_questions` tests the **reply edge and nothing else**: a question is open
+unless some later message carries a `reply_message_id` equal to its own. A room
+answers questions without using Telegram's reply as often as with it, so this
+over-reports — and the block says so. It is labelled *"no reply pointing at an
+answer"*, never "unanswered", because the second phrasing is a claim about
+meaning and the first is a fact about the rows.
+
+Nexus's own questions are included: a question the assistant asked and nobody
+picked up is exactly the thing a room forgets. The list is bounded at three and
+ordered newest first.
+
+### 43.6 The numbers
+
+`tools/eval_intent.py` scores both, over the same fixed corpus. Measured with the
+discourse reader disabled and enabled:
+
+```
+                                before   after
+cases                               55      55
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.2%   98.2%
+
+the act (abstention is 'unknown')
+  claimed precision                  -  100.0%
+  coverage                           -   90.9%
+  recall on labelled cases           -  100.0%
+  false positives / negatives        -    0 / 0
+  abstentions                        -       5
+  per class (correct/total)          -  question 6/6  instruction 35/35
+                                       correction 2/2  social 3/3
+                                       report 4/4  unknown 5/5
+
+the room's open questions (5 cases that have one)
+  exact match                        -    5 / 5
+  precision / recall                 -  100% / 100%
+  block chars max                    -      134
+
+context overhead per pass            -  +208 chars (~52 tokens)
+reading cost per pass                -  ~0.7 ms mean, ~1.5 ms p95
+Gemini calls added                   -        0
+```
+
+The five abstentions are the implicit complaint («یکی اینجا خیلی داره شلوغ
+میکنه»), the plain statement («امروز خیلی شلوغ بود»), the known addressing gap
+(«من با نکسوس کار نکردم»), and two empty anchors («خب», «باشه»). If coverage
+ever reaches 100%, something started guessing.
+
+The corpus is lopsided — 35 of 55 cases are instructions, because that is what a
+moderation room is — which is why the report prints **per class** beside the
+aggregate. A single accuracy figure would be a number a constant could also get.
+
+### 43.7 Two known boundaries, recorded rather than hidden
+
+* **A polite request phrased as a question** («میشه اینو بررسی کنی؟») reads as a
+  question. The mark is the marker that decides, and second-guessing it needs
+  semantics — which is the model's job, not this module's. It is a corpus case,
+  not a bug report.
+* **Implicit intent** — a complaint that asks for nothing in words — abstains.
+  Every rule that caught it would fire on every complaint in the room, which is
+  the trade `addressing` already refused to make for «about Nexus».
+
+### 43.8 Where it reaches the model
+
+Two **tier-0** sources in `awareness_context.SOURCES`: `anchor_act` (one line,
+renders nothing on an abstention) and `open_questions` (empty unless a question
+is open). Both read `Ctx`, never the database, so a pass pays no extra query.
+The measured cost of both, on a four-message batch, is +208 characters and about
+0.7 ms of pure Python — and zero Gemini calls, so the awareness allowance is
+untouched.

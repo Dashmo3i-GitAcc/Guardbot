@@ -45,7 +45,9 @@
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -75,7 +77,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -105,7 +109,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -135,7 +141,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -163,7 +171,9 @@
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -198,7 +208,11 @@
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [
+          "چی شده؟"
+        ]
       }
     },
     {
@@ -233,7 +247,11 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [
+          "چی شده؟"
+        ]
       }
     },
     {
@@ -268,7 +286,9 @@
         "referent": 44,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -303,7 +323,9 @@
         "referent": null,
         "requires_resolution": true,
         "ambiguous": true,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -338,7 +360,9 @@
         "referent": 44,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -393,7 +417,9 @@
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -448,7 +474,9 @@
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -519,7 +547,9 @@
         "referent": null,
         "requires_resolution": true,
         "ambiguous": true,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -561,7 +591,9 @@
         "referent": null,
         "requires_resolution": true,
         "ambiguous": true,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -589,7 +621,9 @@
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -624,7 +658,9 @@
         "referent": null,
         "requires_resolution": true,
         "ambiguous": true,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -654,7 +690,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -682,7 +720,9 @@
         "referent": 44,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -712,7 +752,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -740,7 +782,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "social",
+        "open_questions": []
       }
     },
     {
@@ -768,7 +812,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -788,7 +834,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "question",
+        "open_questions": []
       }
     },
     {
@@ -808,7 +856,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -828,7 +878,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -858,7 +910,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": true
+        "addressed": true,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -878,7 +932,9 @@
         "referent": null,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": true
+        "addressed": true,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -898,7 +954,9 @@
         "referent": null,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": true
+        "addressed": true,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -918,7 +976,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "report",
+        "open_questions": []
       }
     },
     {
@@ -938,7 +998,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "report",
+        "open_questions": []
       }
     },
     {
@@ -958,7 +1020,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": []
       }
     },
     {
@@ -978,7 +1042,9 @@
         "referent": null,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": true
+        "addressed": true,
+        "act": "question",
+        "open_questions": []
       }
     },
     {
@@ -1008,7 +1074,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -1038,7 +1106,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -1068,7 +1138,9 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -1103,7 +1175,9 @@
         "referent": 55,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "correction",
+        "open_questions": []
       }
     },
     {
@@ -1131,7 +1205,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "question",
+        "open_questions": []
       }
     },
     {
@@ -1151,7 +1227,9 @@
         "referent": null,
         "requires_resolution": false,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "report",
+        "open_questions": []
       }
     },
     {
@@ -1199,7 +1277,11 @@
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [
+          "سارا؟"
+        ]
       }
     },
     {
@@ -1229,7 +1311,9 @@
         "referent": 55,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -1259,7 +1343,9 @@
         "referent": 55,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
       }
     },
     {
@@ -1289,7 +1375,383 @@
         "referent": 22,
         "requires_resolution": true,
         "ambiguous": false,
-        "addressed": false
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-question-why",
+      "category": "act",
+      "note": "A plain question with a question mark.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "چرا اینطوری شد؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-question-colloquial",
+      "category": "act",
+      "note": "Colloquial «چخبر؟» — a question with no question word.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "چخبر؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-social-morning",
+      "category": "act",
+      "note": "A greeting, not an instruction.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "سلام صبح بخیر",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-report-third-party",
+      "category": "act",
+      "note": "Reporting what somebody else said — not an order to Nexus.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا گفت که بعداً میاد",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "report",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-correction-plain",
+      "category": "act",
+      "note": "A correction with no question and no directive.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نه گفتم مهدی نه سارا",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "correction",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-instruction-imperative",
+      "category": "act",
+      "note": "An ordinary imperative whose verb is in no lexicon; «کن» carries it.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بررسی کن ببین چی شده",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-instruction-mixed",
+      "category": "act",
+      "note": "A Persian/English directive.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "لطفا check کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-followup-command",
+      "category": "act",
+      "note": "A follow-up directive built on «بده».",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادامه بده",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-implicit-complaint",
+      "category": "act",
+      "note": "IMPLICIT INTENT, left as a known gap: a complaint that asks for nothing in words. No deterministic marker fires, and inventing one would fire on every complaint in the room.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "یکی اینجا خیلی داره شلوغ میکنه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-statement-plain",
+      "category": "act",
+      "note": "An ordinary statement. The server abstains rather than guess.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "امروز خیلی شلوغ بود",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "act-instruction-polite-question",
+      "category": "act",
+      "note": "A polite request phrased as a question. Read as a question, because the mark is the marker that decides and second-guessing it needs semantics — recorded as a boundary, not a bug.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "میشه اینو بررسی کنی؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "questions-answered",
+      "category": "room-state",
+      "note": "A question with a reply pointing at it is not open.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "قیمت چنده؟",
+          "at": 900,
+          "role": "member",
+          "message_id": 5
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "نمیدونم",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_message_id": 5,
+          "reply_name": "رضا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ممنون",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": []
+      }
+    },
+    {
+      "id": "questions-open",
+      "category": "room-state",
+      "note": "A question nothing replies to stays open.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "قیمت چنده؟",
+          "at": 900,
+          "role": "member",
+          "message_id": 5
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "سلام",
+          "at": 920,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "خب",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [
+          "قیمت چنده؟"
+        ]
+      }
+    },
+    {
+      "id": "questions-one-of-two",
+      "category": "room-state",
+      "note": "Two questions, one answered: only the unanswered one is reported.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "کی میاد؟",
+          "at": 900,
+          "role": "member",
+          "message_id": 5
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "نمیدونم",
+          "at": 910,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_message_id": 5,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "چرا دیر کرد؟",
+          "at": 920,
+          "role": "member",
+          "message_id": 7
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باشه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [
+          "چرا دیر کرد؟"
+        ]
       }
     }
   ]

@@ -54,7 +54,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import awareness, config, db, identity, persian_calendar, referents
+from . import (
+    awareness,
+    config,
+    db,
+    discourse,
+    identity,
+    persian_calendar,
+    referents,
+)
 
 log = logging.getLogger("guardbot.awareness.context")
 
@@ -263,6 +271,32 @@ def _render_remembered_people(ctx: Ctx) -> str:
     ]
     lines.extend(f"- {role}: {name} ({user_id})" for role, name, user_id in people)
     return "\n".join(lines) + "\n"
+
+
+# ── The batch's own reading, and what the room left open ──────────────────
+def _render_anchor_act(ctx: Ctx) -> str:
+    """What the message the pass is about is doing. Tier 0.
+
+    One line, and the cheapest signal in this file: the anchor's act, read off
+    its own words. «چقدره؟» and «بنش کن» are the same length and opposite in
+    force, and a model reading a transcript has to work that out from the
+    sentence — which it can, and which this saves it from having to do on every
+    pass. Evidence, never a gate: nothing branches on it.
+    """
+    return discourse.render_act(discourse.read_act((ctx.anchor or {}).get("text")))
+
+
+def _render_open_questions(ctx: Ctx) -> str:
+    """The questions in the window no reply points at an answer for. Tier 0.
+
+    The one piece of room state a group most reliably loses track of, and the
+    one a server can read exactly, because the reply edge is a stored column
+    rather than a judgement. The block is labelled as what it is — "no reply
+    pointing at an answer" — because a room answers questions without using
+    Telegram's reply as often as with it, and claiming "nobody answered" would
+    be a claim about meaning.
+    """
+    return discourse.render_questions(discourse.open_questions(ctx.messages))
 
 
 def _state(chat_id: int) -> dict:
@@ -483,6 +517,14 @@ SOURCES: tuple[Source, ...] = (
     Source("calendar", TIER_ALWAYS, 400, _render_calendar),
     Source("room", TIER_ALWAYS, 200, _render_room),
     Source("remembered_people", TIER_ALWAYS, 400, _render_remembered_people),
+    # What the batch is *doing*, and what the room has left unanswered. Both are
+    # tier 0 because both are cheap — a scan of the window the pass already
+    # read, no query — and because both are room state the model should not have
+    # to re-derive from a transcript on every pass. The act is one line and
+    # renders nothing when the words carry no reading; the question block is
+    # empty unless there is a question no reply points at.
+    Source("anchor_act", TIER_ALWAYS, 200, _render_anchor_act),
+    Source("open_questions", TIER_ALWAYS, 500, _render_open_questions),
     Source(
         "admin_activity",
         TIER_CONDITIONAL,

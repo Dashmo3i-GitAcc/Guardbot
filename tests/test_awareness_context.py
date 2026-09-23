@@ -70,6 +70,8 @@ def _msg(
     reply_name="",
     directed=False,
     actor=False,
+    message_id=0,
+    reply_message_id=0,
 ):
     """One window row, with the columns ``db.group_window`` returns."""
     return {
@@ -78,8 +80,10 @@ def _msg(
         "role": role,
         "name": name,
         "at": int(at or time.time()),
+        "message_id": int(message_id),
         "reply_user_id": int(reply_user_id),
         "reply_name": reply_name,
+        "reply_message_id": int(reply_message_id),
         "directed": bool(directed),
         "actor": bool(actor),
     }
@@ -108,6 +112,19 @@ def _other_blocks(ctx) -> str:
     date = awareness_context._render_calendar(ctx)
     assert date and out.startswith(date), out
     return out[len(date):]
+
+
+def _source_blocks(ctx, name: str) -> str:
+    """One named source's rendering, through the budget machinery.
+
+    Asserting on the concatenation of every tier-0 block would make a test
+    about *one* source's budget fail the day a second source is added — which is
+    what happened. This asks the machinery for one block by name.
+    """
+    for source in awareness_context.SOURCES:
+        if source.name == name:
+            return awareness_context._rendered(source, ctx, source.budget)
+    raise AssertionError(f"no source named {name!r}")
 
 
 def _audit(action="mute", *, actor=ADMIN, target=TARGET, at=None, chat_id=CHAT):
@@ -324,7 +341,7 @@ def test_a_single_source_cannot_exceed_its_own_budget(monkeypatch):
         CHAT, seen_message_id=1, relevant=False, topic="t", summary="s",
         participants=", ".join(f"member:Name{i}:{1000 + i}" for i in range(200)),
     )
-    out = _other_blocks(ctx_of([_msg(MEMBER)]))
+    out = _source_blocks(ctx_of([_msg(MEMBER)]), "remembered_people")
     assert 0 < len(out) <= 400
 
 
@@ -699,3 +716,55 @@ def test_the_referent_block_is_bounded_by_the_pass_ceiling(monkeypatch):
     messages = [_msg(TARGET, "سلام", name="Reza", at=960)]
     out = awareness_context.blocks(_referent_ctx(anchor, messages))
     assert len(out) <= 120
+
+
+# ── The batch's own reading, and the room's open questions ────────────────
+def test_the_anchor_act_is_rendered_for_the_model():
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    out = awareness_context.blocks(_referent_ctx(anchor, []))
+    assert "instruction" in out
+
+
+def test_the_anchor_act_renders_nothing_when_the_words_carry_no_reading():
+    """An abstention is silent, not a line saying «unknown» in the prompt."""
+    anchor = _msg(MEMBER, "امروز خیلی شلوغ بود", name="Someone", at=1000)
+    assert awareness_context._render_anchor_act(_referent_ctx(anchor, [])) == ""
+
+
+def test_the_open_questions_are_rendered():
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "قیمت چنده؟", name="Reza", at=900, message_id=5)]
+    out = awareness_context._render_open_questions(_referent_ctx(anchor, window))
+    assert "قیمت چنده؟" in out
+    assert "no reply pointing at an answer" in out
+
+
+def test_an_answered_question_is_not_rendered():
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [
+        _msg(TARGET, "قیمت چنده؟", name="Reza", at=900, message_id=5),
+        _msg(OTHER, "نمیدونم", name="Sara", at=920, reply_user_id=TARGET,
+             reply_message_id=5),
+    ]
+    assert awareness_context._render_open_questions(_referent_ctx(anchor, window)) == ""
+
+
+def test_the_question_block_reads_the_context_not_the_database():
+    """A hand-made window nothing captured: a query would find nothing."""
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "چرا؟", name="Reza", at=900, message_id=5)]
+    ctx = _referent_ctx(anchor, window)
+    out = awareness_context._render_open_questions(ctx)
+    assert "چرا؟" in out
+
+
+def test_the_new_sources_are_bounded_by_their_own_budget(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_CHARS", 10_000)
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [
+        _msg(TARGET, "سوال " + "ب" * 200 + "؟", name="Reza", at=900 + i, message_id=i + 1)
+        for i in range(6)
+    ]
+    ctx = _referent_ctx(anchor, window)
+    assert len(_source_blocks(ctx, "open_questions")) <= 500
+    assert len(_source_blocks(ctx, "anchor_act")) <= 200
