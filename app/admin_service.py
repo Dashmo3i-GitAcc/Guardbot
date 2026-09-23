@@ -227,6 +227,29 @@ OPERATIONS: dict[str, Operation] = {
         kind=OP_SYSTEM,
         requires_nexus_online=False,
     ),
+    # ── The Web Search switch ─────────────────────────────────────────────
+    # A third switch beside the two above, and separate for the same reason they
+    # are separate from each other: "the assistant may not look anything up" is
+    # its own fact with its own cause, and one audit action covering it and the
+    # others would leave an operator unable to tell which had happened. Held by
+    # ``nexus.control``, which no role bundle carries, so "an administrator
+    # switches search off" is not refused — it is inexpressible.
+    "search_offline": _op(
+        "search_offline",
+        "nexus.control",
+        None,
+        "search.offline",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
+    "search_online": _op(
+        "search_online",
+        "nexus.control",
+        None,
+        "search.online",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
     # ── The coding agent ──────────────────────────────────────────────────
     # Asking the host's coding agent to work on one of this system's own
     # repositories. It is an operation here, rather than a separate front door,
@@ -982,6 +1005,17 @@ async def _apply(
         from . import awareness
 
         awareness.set_running(True, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "search_offline":
+        # Imported here for the same reason the awareness branches above are:
+        # ``app/web_search.py`` is a peer, and a module-scope import would make
+        # "authorise a ban" depend on the search workload being importable.
+        from . import web_search
+
+        web_search.set_running(False, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "search_online":
+        from . import web_search
+
+        web_search.set_running(True, actor_id=request.actor_id, reason=request.interface)
     elif request.operation == "codebuddy_task":
         # Imported here rather than at module scope: the bridge imports this
         # module's peers, and a cycle at import time would make ``admin_service``

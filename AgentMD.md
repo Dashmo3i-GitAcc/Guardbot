@@ -1709,10 +1709,34 @@ reference file is stale and this list is the one to fix first.
   is disabled.
 * Web content is untrusted data in a delimited block appended to the system
   instruction; **no second context system** is built.
-* The model is told **not** to write URLs; the **application** builds the footer
-  from grounding metadata, strips userinfo, dedupes and caps.
+* The model is told **not** to write URLs, and the **application sends no
+  sources at all**. A grounded result's `sources` are internal grounding — used
+  only to judge whether the finding is usable. There is **no footer**, no «منابع»
+  line and no domain list: `sources_block` does not exist and `main` has no
+  `_send_search_sources`. A link reaching the group would mean the grounding
+  leaked into chat.
 * A grounded result with no source is `ungrounded` and gets the "could not
   check" note.
+* Search has a **persistent operator switch** (`search_control`), exactly like
+  the awareness layer: `search_offline` / `search_online`, both gated by the
+  owner-only `nexus.control` permission, both `requires_nexus_online=False`, and
+  the state survives a restart (read from SQLite, cached in `_running`). Turning
+  search **off** makes `research()` return early — **no provider request and no
+  credit** — while the conversation, the assistant and the awareness layer are
+  untouched. The switch is handled **before** the conversational AI, so it never
+  depends on a model being reachable, and `GEMINI_SEARCH_ENABLED=false` still
+  wins over a stored "on".
+* **Not every question searches.** The *shape* of an informational question
+  («چیست/چیه/کیست/کیه/چرا/چگونه/چطور/درباره/توضیح بده/تفاوت/مقایسه/معنی/تعریف/
+  کاربرد») and a bare `?`/`؟` are **not** reasons to search. Only an **explicit
+  request** («سرچ کن», «جستجو کن», «بگرد», «گوگل کن», English equivalents) or a
+  **genuinely time-sensitive** question («الان», «امروز», «آخرین/جدیدترین»,
+  «اخبار», «قیمت/نرخ/وضعیت فعلی», current/latest/today/now/recent news) searches
+  on its own.
+* An **inferred** search — a live subject with no "now" (e.g. «قیمت بیتکوین
+  چنده؟») — is **offered, not performed**: the bot asks «برات سرچ کنم؟» and runs
+  the search only on an affirmative answer, against the **stored** topic. A
+  non-answer clears the offer, so one question can spend at most one search.
 * `GEMINI_SEARCH_ENABLED` is true by default but the workload is **inert without
   a credential**; the search credential is deliberately **not** in
   `GEMINI_KEY_MANAGED_WORKLOADS`.
@@ -1733,3 +1757,8 @@ reference file is stale and this list is the one to fix first.
   backoff. Credit waste is a design concern: `search_depth` is `basic` (1 credit),
   and `include_answer`/`include_raw_content` are off.
 * The **awareness pass does not search**.
+* The trigger reads the **same text for a voice transcript as for typed text** —
+  a spoken question is not a second path to search.
+* `/nexus` status shows the search switch next to awareness, and
+  `agent_data.nexus_diagnostics` reports `search_enabled`; the credential is
+  never shown by either.

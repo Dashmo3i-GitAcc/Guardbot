@@ -35,7 +35,7 @@ import logging
 import re
 import time
 
-from . import awareness, config, db, nexus, rbac
+from . import awareness, config, db, nexus, rbac, web_search
 
 log = logging.getLogger("guardbot.agent.data")
 
@@ -383,6 +383,10 @@ def nexus_diagnostics(chat_id: int = 0) -> dict:
         # switched it off with a message, and the model would then be told the
         # room is being read when it is not.
         "awareness_enabled": awareness.enabled(),
+        # The same rule as the awareness line above: the effective state, so a
+        # diagnostic cannot keep saying "search is on" after the owner switched
+        # it off with a message.
+        "search_enabled": web_search.enabled(),
         "observe_admins": bool(getattr(config, "NEXUS_OBSERVE_ADMINS", False)),
         "actors_only": bool(getattr(config, "NEXUS_ACTORS_ONLY", False)),
         "reasons": [],

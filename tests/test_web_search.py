@@ -123,44 +123,74 @@ def research(text, **kwargs):
 
 
 # ══ THE POLICY: WHEN A QUESTION IS WORTH THE WEB ══════════════════════════
-def test_an_ordinary_informational_question_searches():
-    """The point of the feature: not only «سرچ کن»."""
+def test_an_ordinary_informational_question_does_not_search():
+    """The owner's rule: the *shape* of a knowledge question is not a reason.
+
+    «چیست», «چیه», «چرا», «چگونه», «درباره» and a bare question mark used to
+    force a search, which turned search into the default engine for every
+    question. None of them does now — a knowledge question is answered from the
+    model's own knowledge.
+    """
     for question in (
-        "فلان چیز چیست؟",
+        "شوپنهاور چیه؟",
+        "نکسوس فلسفه شوپنهاور چیه؟",
+        "چرا امپراتوری روم سقوط کرد؟",
+        "چگونه موتور بخار کار می‌کند؟",
         "درباره فلان شرکت بگو",
-        "فلان اتفاق چرا افتاد؟",
-        "وضعیت فلان موضوع چطور است؟",
-        "الان درباره فلان موضوع چه می‌دانیم؟",
+        "تفاوت این دو چیه؟",
+        "معنی این کلمه چیه؟",
+        "توضیح بده چطور کار می‌کنه",
+        "یه سوال معمولی دارم؟",
     ):
         decision = web_search.should_search(question)
-        assert decision.wanted is True, (question, decision)
+        assert decision.wanted is False, (question, decision)
+        assert decision.ask is False, (question, decision)
 
 
 def test_an_explicit_request_searches():
-    decision = web_search.should_search("سرچ کن ببین چی شده")
-    assert decision.wanted is True
-    assert decision.reason == "explicit"
+    for text in (
+        "سرچ کن ببین چی شده",
+        "جستجو کن درباره فلان",
+        "بگرد برام",
+        "search for it",
+    ):
+        decision = web_search.should_search(text)
+        assert decision.wanted is True, text
+        assert decision.reason == "explicit", text
 
 
-def test_a_current_or_latest_question_always_searches():
+def test_a_current_or_latest_question_searches():
     for question in (
         "آخرین وضعیت فلان پروژه چیست؟",
         "اخبار امروز چیه",
         "قیمت دلار الان چنده",
+        "قیمت بیت‌کوین الان چنده؟",
+        "آخرین اخبار هوش مصنوعی چیه؟",
         "latest news about the project",
     ):
         decision = web_search.should_search(question)
         assert decision.wanted is True, (question, decision)
-        assert decision.reason in ("fresh", "informational", "explicit")
+        assert decision.reason == "live", (question, decision)
 
 
-def test_a_news_question_searches():
-    assert web_search.should_search("چه خبر از فلان موضوع").wanted is True
+def test_a_live_subject_without_now_is_offered_not_searched():
+    """The confirmation gate: a price/rate/status question asks before spending.
+
+    The person did not ask for a lookup and did not say "now", so the bot offers
+    instead of searching.
+    """
+    for question in ("وضعیت سرویس فلان چطوره", "قیمت بیت‌کوین چنده؟", "نرخ دلار چنده"):
+        decision = web_search.should_search(question)
+        assert decision.wanted is False, question
+        assert decision.ask is True, question
+        assert decision.reason == "inferred", question
 
 
-def test_a_question_that_may_have_changed_searches():
-    for question in ("وضعیت سرویس فلان چطوره", "قیمت فلان محصول چقدره"):
-        assert web_search.should_search(question).wanted is True, question
+def test_a_question_mark_alone_is_not_a_reason():
+    for text in ("باشه؟", "یه سوال معمولی دارم؟", "این درسته؟"):
+        decision = web_search.should_search(text)
+        assert decision.wanted is False, text
+        assert decision.ask is False, text
 
 
 def test_small_talk_does_not_search():
@@ -168,6 +198,7 @@ def test_small_talk_does_not_search():
     for message in ("سلام، خوبی؟", "ممنون", "چطوری؟", "باشه", "خوبم مرسی", "😂"):
         decision = web_search.should_search(message)
         assert decision.wanted is False, (message, decision)
+        assert decision.ask is False, (message, decision)
 
 
 def test_a_slash_command_does_not_search():
@@ -179,10 +210,6 @@ def test_an_administrative_instruction_does_not_search():
     assert web_search.should_search("بنش کن").wanted is False
 
 
-def test_a_short_question_mark_is_not_enough():
-    assert web_search.should_search("باشه؟").wanted is False
-
-
 def test_a_word_inside_another_word_is_not_a_match():
     """«چرا» must not fire inside «چراغ»."""
     assert web_search.should_search("چراغ رو روشن کن").wanted is False
@@ -190,13 +217,14 @@ def test_a_word_inside_another_word_is_not_a_match():
 
 def test_the_switch_turns_the_policy_off(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_SEARCH_ENABLED", False)
-    decision = web_search.should_search("قیمت دلار چنده")
+    decision = web_search.should_search("قیمت دلار الان چنده")
     assert decision.wanted is False
+    assert decision.ask is False
     assert decision.reason == "disabled"
 
 
-def test_a_voice_transcript_is_searched_like_text():
-    assert web_search.should_search("قیمت دلار چنده", kind="voice").wanted is True
+def test_a_voice_transcript_is_treated_like_text():
+    assert web_search.should_search("قیمت دلار الان چنده", kind="voice").wanted is True
 
 
 # ══ THE SEARCH CALL ═══════════════════════════════════════════════════════
@@ -280,7 +308,7 @@ def test_a_url_with_a_credential_is_stripped(monkeypatch):
     finding = research("چیست؟")
 
     assert finding.sources[0].url == "https://example.com/page"
-    assert "secret" not in web_search.sources_block(finding.sources)
+    assert "secret" not in web_search.untrusted_block(finding)
 
 
 def test_a_non_http_source_is_dropped(monkeypatch):
@@ -404,16 +432,21 @@ def test_a_non_usable_finding_has_no_untrusted_block():
     assert web_search.untrusted_block(web_search._failed("timeout")) == ""
 
 
-def test_the_sources_block_names_every_source(monkeypatch):
+def test_sources_never_become_a_telegram_footer(monkeypatch):
+    """There is no attribution footer any more: sources stay internal.
+
+    The links are reference material for the model, and the only thing built for
+    the conversation is the brief inside the untrusted block. A URL must not
+    appear in it, and there is no function that turns sources into a message.
+    """
+    assert not hasattr(web_search, "sources_block")
     install(monkeypatch, GOOD)
-    finding = research("قیمت دلار چنده")
+    finding = research("قیمت دلار الان چنده")
 
-    block = web_search.sources_block(finding.sources)
+    block = web_search.untrusted_block(finding)
 
-    assert config.GEMINI_SEARCH_SOURCES_TITLE in block
-    assert "https://example.com/a" in block
-    assert "https://news.example.org/b" in block
-    assert "Example report" in block
+    assert "https://example.com/a" not in block
+    assert "https://news.example.org/b" not in block
 
 
 # ══ PROMPT INJECTION: A PAGE CANNOT BECOME A COMMAND ══════════════════════
@@ -682,15 +715,15 @@ _FINDING = web_search.Finding(
 )
 
 
-def test_an_informational_question_reaches_the_model_with_findings(monkeypatch):
-    bot, seen, calls = _run_turn(monkeypatch, "قیمت دلار چنده؟")
+def test_a_live_question_reaches_the_model_with_findings(monkeypatch):
+    bot, seen, calls = _run_turn(monkeypatch, "قیمت دلار الان چنده؟")
 
-    assert calls and calls[0]["question"] == "قیمت دلار چنده؟"
+    assert calls and calls[0]["question"] == "قیمت دلار الان چنده؟"
     assert seen, "the conversation must have been asked"
     assert "<<<WEB_RESULTS>>>" in seen[0]
     assert "The price rose" in seen[0]
-    # And the sources are attached, by the application, after the reply.
-    assert any("https://example.com/a" in message for message in bot.messages)
+    # The sources are internal now: nothing link-shaped is sent to the group.
+    assert not any("http" in message for message in bot.messages)
 
 
 def test_small_talk_does_not_search(monkeypatch):
@@ -718,7 +751,7 @@ def test_a_failed_search_tells_the_model_not_to_pretend(monkeypatch):
     monkeypatch.setattr(main.chat, "reply", _reply)
     monkeypatch.setattr(main.web_search, "research", _failed)
 
-    asyncio.run(main._answer_conversationally(_update("قیمت دلار چنده؟"), ctx))
+    asyncio.run(main._answer_conversationally(_update("قیمت دلار الان چنده؟"), ctx))
 
     assert seen
     assert "web search" in seen[0].lower()
@@ -743,7 +776,7 @@ def test_a_restraint_does_not_add_a_note(monkeypatch):
     monkeypatch.setattr(main.chat, "reply", _reply)
     monkeypatch.setattr(main.web_search, "research", _skipped)
 
-    asyncio.run(main._answer_conversationally(_update("قیمت دلار چنده؟"), ctx))
+    asyncio.run(main._answer_conversationally(_update("قیمت دلار الان چنده؟"), ctx))
 
     assert seen
     assert "web search" not in seen[0].lower()
@@ -762,14 +795,14 @@ def test_the_gate_consults_the_assistant_before_spending_a_search(monkeypatch):
     monkeypatch.setattr(main.chat, "is_enabled", lambda: False)
     monkeypatch.setattr(main.web_search, "research", _research)
 
-    asyncio.run(main._answer_conversationally(_update("قیمت دلار چنده؟"), ctx))
+    asyncio.run(main._answer_conversationally(_update("قیمت دلار الان چنده؟"), ctx))
 
     assert calls == []
 
 
 # ══ TAVILY: A SECOND PROVIDER FOR THE SAME CAPABILITY ═════════════════════
 # Tavily is a *provider*, not a second implementation. The policy, the brakes,
-# the untrusted frame and the attribution footer are the ones asserted above;
+# the switch and the untrusted frame are the ones asserted above;
 # only the transport and the response shape change. These tests replace the
 # Tavily seam (`web_search._tavily_request`) exactly the way the tests above
 # replace the Gemini seam (`web_search._request`), so nothing here touches the
@@ -902,7 +935,7 @@ def test_tavily_strips_a_credential_from_a_url(monkeypatch):
     finding = research("چیست؟")
 
     assert finding.sources[0].url == "https://example.com/page"
-    assert "secret" not in web_search.sources_block(finding.sources)
+    assert "secret" not in web_search.untrusted_block(finding)
 
 
 def test_tavily_drops_a_non_http_result(monkeypatch):
@@ -919,17 +952,18 @@ def test_tavily_drops_a_non_http_result(monkeypatch):
     assert finding.error == "empty_results"
 
 
-def test_tavily_sources_build_the_attribution_footer(monkeypatch):
+def test_tavily_sources_are_internal_not_a_footer(monkeypatch):
+    """The Tavily results ground the reply; they are never sent as a footer."""
+    assert not hasattr(web_search, "sources_block")
     use_tavily(monkeypatch)
     install_tavily(monkeypatch, TAVILY_GOOD)
 
-    finding = research("قیمت دلار چنده")
-    block = web_search.sources_block(finding.sources)
+    finding = research("قیمت دلار الان چنده")
+    block = web_search.untrusted_block(finding)
 
-    assert config.GEMINI_SEARCH_SOURCES_TITLE in block
-    assert "https://example.com/a" in block
-    assert "https://news.example.org/b" in block
-    assert "Example report" in block
+    assert finding.sources
+    assert "https://example.com/a" not in block
+    assert "https://news.example.org/b" not in block
 
 
 # ── Failure behaviour, one kind at a time ─────────────────────────────────
@@ -1303,12 +1337,13 @@ def test_the_conversational_path_really_uses_a_tavily_result(monkeypatch):
     monkeypatch.setattr(main.chat, "is_enabled", lambda: True)
     monkeypatch.setattr(main.chat, "reply", _reply)
 
-    asyncio.run(main._answer_conversationally(_update("قیمت دلار چنده؟"), ctx))
+    asyncio.run(main._answer_conversationally(_update("قیمت دلار الان چنده؟"), ctx))
 
     assert seen, "the conversation must have been asked"
     assert "<<<WEB_RESULTS>>>" in seen[0]
     assert "The price rose" in seen[0]
-    assert any("https://example.com/a" in message for message in bot.messages)
+    # Sources stay internal: no link or footer reaches the group.
+    assert not any("http" in message for message in bot.messages)
 
 
 def test_one_question_spends_one_tavily_request(monkeypatch):
@@ -1330,7 +1365,7 @@ def test_one_question_spends_one_tavily_request(monkeypatch):
     monkeypatch.setattr(main.chat, "is_enabled", lambda: True)
     monkeypatch.setattr(main.chat, "reply", _reply)
 
-    asyncio.run(main._answer_conversationally(_update("قیمت دلار چنده؟"), ctx))
+    asyncio.run(main._answer_conversationally(_update("قیمت دلار الان چنده؟"), ctx))
 
     assert recorder.count == 1
 
@@ -1360,7 +1395,7 @@ def test_a_hostile_result_cannot_lift_the_price_policy(monkeypatch):
     monkeypatch.setattr(main.chat, "is_enabled", lambda: True)
     monkeypatch.setattr(main.chat, "reply", _reply)
 
-    asyncio.run(main._answer_conversationally(_update("قیمت دلار چنده؟"), ctx))
+    asyncio.run(main._answer_conversationally(_update("قیمت دلار الان چنده؟"), ctx))
 
     assert seen
     block = seen[0]

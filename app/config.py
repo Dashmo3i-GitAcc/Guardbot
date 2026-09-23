@@ -827,6 +827,20 @@ NEXUS_AWARENESS_NAMES = _str_list(
     os.getenv("NEXUS_AWARENESS_NAMES", "awareness,اورنس,آگاهی,اگاهی,پایش")
 )
 
+# The names the Web Search switch is called by, when the owner turns it off or
+# on out loud. It is a third switch beside Nexus and awareness, and it is
+# matched the same way: whole words, case-insensitively, and only to decide
+# *which* switch a spoken command is about. It grants nothing — the speaker is
+# still checked against the owner id, and the transition goes through
+# ``app/admin_service.py``.
+#
+# «سرچ» is the word the owner actually types; «جستجو» is the formal Persian for
+# it, and the two ZWNJ spellings are both here because Persian writes the word
+# both ways and a whole-word match would otherwise miss one of them.
+NEXUS_SEARCH_NAMES = _str_list(
+    os.getenv("NEXUS_SEARCH_NAMES", "search,سرچ,جستجو,جست‌وجو")
+)
+
 # Whether Nexus records what an authorized administrator says when they are not
 # talking to it.
 #
@@ -1670,6 +1684,7 @@ NEXUS_STATUS_TEXT = os.getenv(
     "پایش پیام‌های مدیرها: {observe}\n"
     "پاسخ‌دهی به: {actors_only}\n"
     "درک گفتگوی گروه: {awareness}\n"
+    "سرچ وب: {search}\n"
     "{mode}",
 )
 NEXUS_STATE_ONLINE_LABEL = os.getenv("NEXUS_STATE_ONLINE_LABEL", "روشن (ONLINE)")
@@ -1724,6 +1739,47 @@ NEXUS_AWARENESS_CONFIG_OFF_TEXT = os.getenv(
     "⚠️ آگاهی توی تنظیمات این ربات خاموش شده، پس با پیام روشن نمی‌شه. "
     "برای روشن کردنش باید NEXUS_AWARENESS_ENABLED=true باشه و ربات ری‌استارت بشه.",
 )
+
+# The Web Search switch, reported for the same reason the awareness line is:
+# "Nexus did not look that up" and "Nexus is not allowed to search at all" look
+# identical from inside a group, and only one of them is a bug. The switch is
+# the owner's, it is persisted, and it survives a restart.
+NEXUS_SEARCH_ON_LABEL = os.getenv("NEXUS_SEARCH_ON_LABEL", "فعال")
+NEXUS_SEARCH_OFF_LABEL = os.getenv("NEXUS_SEARCH_OFF_LABEL", "غیرفعال")
+# Separate sentences for the two directions, and neither says Nexus is off: an
+# owner who read a bare «خاموش شد» after switching search off would reasonably
+# conclude the assistant had stopped answering, which is the one thing this
+# switch must never do. The wording names the layer and says chat keeps working.
+NEXUS_SEARCH_OFF_DONE_TEXT = os.getenv(
+    "NEXUS_SEARCH_OFF_DONE_TEXT",
+    "🔎 سرچ خاموش شد. از این به بعد از اینترنت چیزی نمی‌گیرم و جواب‌ها بر اساس "
+    "دانش خودم می‌مونه. چت و آگاهی دست‌نخورده‌اند.",
+)
+NEXUS_SEARCH_ON_DONE_TEXT = os.getenv(
+    "NEXUS_SEARCH_ON_DONE_TEXT",
+    "🔎 سرچ روشن شد. از این به بعد برای اطلاعات زنده می‌تونم از اینترنت چک کنم.",
+)
+NEXUS_SEARCH_ALREADY_TEXT = os.getenv(
+    "NEXUS_SEARCH_ALREADY_TEXT", "سرچ از قبل {state} بود."
+)
+# Said when the owner asks for search back and the *deployment* has it off. The
+# spoken switch and the deploy-time setting are two halves of one answer, and
+# «سرچ روشن» can only move one of them — the row is stored, the workload still
+# does not run, and the fix is a restart only the operator can do.
+NEXUS_SEARCH_CONFIG_OFF_TEXT = os.getenv(
+    "NEXUS_SEARCH_CONFIG_OFF_TEXT",
+    "⚠️ سرچ توی تنظیمات این ربات خاموش شده، پس با پیام روشن نمی‌شه. "
+    "برای روشن کردنش باید GEMINI_SEARCH_ENABLED=true باشه و ربات ری‌استارت بشه.",
+)
+# Asked before an *inferred* search. The bot believes a live lookup would help
+# but the person did not ask for one, so it asks instead of spending a request —
+# and the topic is remembered so the answer to this question is what runs the
+# search, not a second guess.
+NEXUS_SEARCH_CONFIRM_TEXT = os.getenv(
+    "NEXUS_SEARCH_CONFIRM_TEXT",
+    "می‌خوای برات از اینترنت سرچ کنم؟ اگه آره بگو «آره».",
+)
+NEXUS_SEARCH_NEVER_CHANGED_TEXT = os.getenv("NEXUS_SEARCH_NEVER_CHANGED_TEXT", "—")
 NEXUS_NEVER_CHANGED_TEXT = os.getenv("NEXUS_NEVER_CHANGED_TEXT", "—")
 NEXUS_STATUS_HINT = os.getenv(
     "NEXUS_STATUS_HINT",
@@ -2393,14 +2449,6 @@ GEMINI_SEARCH_UNAVAILABLE_NOTE = os.getenv(
     "results. Do not claim to have current or live information. If the question "
     "depends on current information, say plainly that you could not check the "
     "web just now.",
-).strip()
-
-# What the person sees under a grounded reply. The application writes this from
-# the grounding metadata, never the model — so the model's own text stays
-# link-free (the conversation refuses links for a reason), and the sources are
-# still visible.
-GEMINI_SEARCH_SOURCES_TITLE = os.getenv(
-    "GEMINI_SEARCH_SOURCES_TITLE", "🌐 منابع:"
 ).strip()
 
 

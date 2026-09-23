@@ -1693,7 +1693,8 @@ async def _owner_state_command(
     if not actor.is_owner:
         return False
     about_awareness = awareness.named(text)
-    names_a_layer = nexus.is_named(text) or about_awareness
+    about_search = web_search.named(text)
+    names_a_layer = nexus.is_named(text) or about_awareness or about_search
     if not (names_a_layer or _addressed_to_bot(msg, ctx)):
         return False
     # ``names_a_layer`` is passed rather than recomputed because it is exactly
@@ -1709,7 +1710,16 @@ async def _owner_state_command(
     # instruction, and getting it wrong silences the assistant instead of the
     # layer the owner was talking about.
     wants_on = wanted == nexus.ONLINE
-    if about_awareness:
+    if about_search:
+        operation = "search_online" if wants_on else "search_offline"
+        done = (
+            config.NEXUS_SEARCH_ON_DONE_TEXT
+            if wants_on
+            else config.NEXUS_SEARCH_OFF_DONE_TEXT
+        )
+        already = config.NEXUS_SEARCH_ALREADY_TEXT
+        was_on = web_search.running()
+    elif about_awareness:
         operation = "awareness_online" if wants_on else "awareness_offline"
         done = (
             config.NEXUS_AWARENESS_ON_DONE_TEXT
@@ -1761,6 +1771,14 @@ async def _owner_state_command(
             reply_to=msg.message_id,
         )
         return True
+    if about_search and wants_on and not web_search.configured():
+        await _reply_in_group(
+            ctx,
+            room.id,
+            config.NEXUS_SEARCH_CONFIG_OFF_TEXT,
+            reply_to=msg.message_id,
+        )
+        return True
     # "Nothing changed" and "it changed" are different facts and the owner
     # acted in order to change something. A bare confirmation for a no-op is the
     # sentence that makes an owner say "it doesn't work" about a switch that is
@@ -1772,7 +1790,13 @@ async def _owner_state_command(
         # report a state the switch is not actually in: ``nexus.state_label()``
         # describes the persisted Nexus state, and the awareness labels are the
         # pair ``/nexus status`` prints.
-        if about_awareness:
+        if about_search:
+            state_label = (
+                config.NEXUS_SEARCH_ON_LABEL
+                if wants_on
+                else config.NEXUS_SEARCH_OFF_LABEL
+            )
+        elif about_awareness:
             state_label = (
                 config.NEXUS_AWARENESS_ON_LABEL
                 if wants_on
@@ -1972,6 +1996,10 @@ def _nexus_status_text() -> str:
                 if awareness.enabled()
                 else config.NEXUS_AWARENESS_OFF_LABEL
             ),
+            # Read from the live gate, so the line and the workload can never
+            # disagree: "Nexus did not look that up" and "Nexus is not allowed to
+            # search at all" look identical from inside a group.
+            search=web_search.state_label(),
             mode=admin_service.mode_line(),
         )
     ]
@@ -2150,34 +2178,6 @@ async def _send_chat(
         log.warning("chat reply failed: %s", exc)
         return False
     return True
-
-
-async def _send_search_sources(
-    ctx: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    finding,
-    reply_to: int | None,
-) -> bool:
-    """Send the attribution footer for a grounded answer.
-
-    Built by the **application** from the search workload's validated grounding
-    metadata, never from the model's prose. That is what keeps the assistant's
-    own reply link-free — the conversation refuses links for a reason — while the
-    sources are still visible, which the requirement asks for.
-
-    Never raises, and never fatal: the answer has already gone out, and a missing
-    footer must not turn a good reply into an error.
-    """
-    if finding is None or not getattr(finding, "sources", ()):
-        return False
-    body = web_search.sources_block(finding.sources)
-    if not body:
-        return False
-    try:
-        return await _send_chat(ctx, chat_id, body, reply_to)
-    except Exception:  # noqa: BLE001 - the answer is already sent
-        log.exception("could not send the search sources")
-        return False
 
 
 async def _download_file(ctx: ContextTypes.DEFAULT_TYPE, file_id: str) -> bytes:
@@ -2698,11 +2698,13 @@ async def _answer_conversationally(
         room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
     )
 
-    # The live web, as its own workload. Two conditions, and both are the
-    # existing boundary rather than anything new: the question has to *be* an
-    # informational one (``web_search.should_search`` — small talk, commands and
-    # greetings are not), and the assistant has to be able to answer at all, so a
-    # search is never spent on a turn the conversation is going to decline.
+    # The live web, as its own workload, and only when it is actually wanted.
+    # Three outcomes, not two: an explicit request or an explicitly *current*
+    # question is searched; a question about a live subject that did not ask for
+    # a lookup is **offered**, not performed, and the stored topic is what runs
+    # the search when the person agrees. A knowledge question is answered from
+    # the model's own knowledge and nothing is spent. When the switch is off the
+    # whole block is skipped, so no request is made and no credit is spent.
     #
     # Only the question itself is sent — not the room window. The window is other
     # people's conversation, and handing it to a search provider would be a
@@ -2714,18 +2716,59 @@ async def _answer_conversationally(
     # web could not be checked, so it says so instead of inventing a live fact.
     # A restraint (the search's own rate limit, or its allowance) adds nothing:
     # that is our choice to make and nobody needs to hear about it.
+    #
+    # The sources stay internal. Nothing here ever sends a link or a footer to
+    # the group: the findings ground the reply, and the reply is the only thing
+    # the person sees.
     finding = None
-    if chat.is_enabled() and web_search.should_search(text, kind=kind).wanted:
-        finding = await web_search.research(text, now=time.time())
-        if finding.usable:
-            context = context + web_search.untrusted_block(finding)
-        elif finding.attempted:
-            context = context + web_search.failure_block()
+    answer_text = text
+    if chat.is_enabled() and web_search.enabled():
+        now = time.time()
+        pending = web_search.pending_offer(room.id, user.id, now=now)
+        if pending:
+            # The bot asked about a topic on the previous turn and this message
+            # is the answer. The stored topic is taken rather than re-guessed,
+            # so one question spends at most one search.
+            if web_search.is_affirmative(text) or web_search.should_search(
+                text, kind=kind
+            ).wanted:
+                topic = web_search.take_offer(room.id, user.id, now=now) or pending
+                finding = await web_search.research(topic, now=now)
+                # The reply is an answer to the original question, so the model
+                # is given that question rather than the bare «آره».
+                answer_text = topic
+            else:
+                # A decline — or anything that is not an answer — clears the
+                # offer and is handled normally below. The bot does not keep
+                # asking.
+                web_search.clear_offer(room.id, user.id)
+        if finding is None:
+            decision = web_search.should_search(text, kind=kind)
+            if decision.wanted:
+                finding = await web_search.research(text, now=now)
+            elif decision.ask:
+                web_search.offer(room.id, user.id, text, now=now)
+                web_search.note_asked()
+                log.info(
+                    "search offer user=%s chat=%s reason=%s",
+                    user.id,
+                    room.id,
+                    decision.reason,
+                )
+                await _send_chat(
+                    ctx, room.id, config.NEXUS_SEARCH_CONFIRM_TEXT, reply_to
+                )
+                return _timing(True)
+        if finding is not None:
+            if finding.usable:
+                context = context + web_search.untrusted_block(finding)
+            elif finding.attempted:
+                context = context + web_search.failure_block()
 
     result = await chat.reply(
         room.id,
         user.id,
-        text,
+        answer_text,
         parts=parts,
         kind=kind,
         want_voice=want_voice,
@@ -2751,7 +2794,6 @@ async def _answer_conversationally(
         if result.voice:
             if await _send_voice(ctx, room.id, result.voice, reply_to):
                 _awareness_note_reply(room.id, result.text)
-                await _send_search_sources(ctx, room.id, finding, reply_to)
                 return _timing(True)
             # The upload failed; the text is still the answer and is sent below.
             log.warning("voice reply failed; falling back to text")
@@ -2760,7 +2802,6 @@ async def _answer_conversationally(
             # awareness pass has to understand — otherwise it reads questions
             # and never its own answers, and repeats itself.
             _awareness_note_reply(room.id, result.text)
-            await _send_search_sources(ctx, room.id, finding, reply_to)
             return _timing(True)
         # Telegram refused the send. Nothing was said, so the room is still
         # unanswered and the ambient path is free to try.
@@ -5142,7 +5183,9 @@ async def post_init(app: Application) -> None:
     # assistant answers exactly as it did before this existed, and that is worth
     # one line at boot rather than being discovered as "it never searches".
     if not config.GEMINI_SEARCH_ENABLED:
-        log.info("Web search: off")
+        log.info("Web search: off (configuration)")
+    elif not web_search.running():
+        log.info("Web search: off (owner switch)")
     elif web_search.is_enabled():
         prov = web_search.provider()
         log.info(

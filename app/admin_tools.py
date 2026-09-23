@@ -275,6 +275,38 @@ TOOLS: dict[str, ToolSpec] = {
         permission="nexus.control",
         operation="awareness_online",
     ),
+    # -- the web-search layer: owner only, and its own switch -----------------
+    # A third pair, separate from both above for the same reason the awareness
+    # pair is separate from the Nexus pair: "the assistant may not look anything
+    # up" changes neither whether it answers nor whether it reads the room. The
+    # descriptions name the layer explicitly and say what does *not* happen,
+    # because the mistake being prevented is a model reaching for the wrong
+    # switch when the owner says «سرچ خاموش».
+    "search_offline": ToolSpec(
+        name="search_offline",
+        description=(
+            "Switch off only web search: the assistant keeps answering chat and "
+            "keeps reading the room, but stops looking anything up on the "
+            "internet. It does NOT switch the assistant or the awareness layer "
+            "off. Use it when the owner asks to turn search off, such as "
+            "'سرچ خاموش' or 'search off'. Owner only."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="search_offline",
+    ),
+    "search_online": ToolSpec(
+        name="search_online",
+        description=(
+            "Switch web search back on, so the assistant may look things up on "
+            "the internet again. It does NOT switch the assistant or the "
+            "awareness layer on. Use it when the owner asks for search back, "
+            "such as 'سرچ روشن' or 'search on'. Owner only."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="search_online",
+    ),
     # -- the coding agent: owner only, like the assistant's own switch --------
     # One tool that asks for work, two that act on a request already recorded,
     # and one that answers a question about them. The split is the brief's: the
