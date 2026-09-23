@@ -1226,12 +1226,15 @@ docker compose logs | grep -i "Conversational AI"
 
 ### 17.8 Known limitations
 
-* **Runs on the classifier's key on this deployment.** `GEMINI_CHAT_API_KEY` is
-  empty here and `GEMINI_CHAT_ALLOW_SHARED_KEY=1`, so the two workloads draw on
+* **Has its own key on this deployment now.** `GEMINI_CHAT_API_KEY` is set in
+  the host `.env`, so the conversation no longer draws on the classifier's
+  allowance. The property worth preserving is the general one rather than this
+  deployment's current state: if a deployment leaves `GEMINI_CHAT_API_KEY`
+  empty and sets `GEMINI_CHAT_ALLOW_SHARED_KEY=1`, the two workloads draw on
   **one Google allowance** even though this application's counters, windows and
-  breakers are separate. The startup log says so once, as a warning. Supplying a
-  key from a second Google Cloud project is the one thing that makes the quotas
-  genuinely independent, and it is the only outstanding item for this feature.
+  breakers stay separate, and the startup log says so once, as a warning. A key
+  from a second Google Cloud project is the only thing that makes the quotas
+  genuinely independent.
 * **The live behaviour is verified; the quota ceilings are not.** Real calls
   answer (§17.2.1, §23.4, §24.2) and the assistant has replied in the production
   group, but the project's actual RPM/RPD numbers have to be read from AI Studio
@@ -1887,6 +1890,14 @@ That does not change this rule — it is built on it. Every pooled key is treate
 as its own account with its own state, and a key that reaches two workloads is
 reported at boot as one shared allowance, because that is what it is.
 
+**The four above are the original four, not the current total.** Later stages
+added more pool workloads, and this section deliberately does not enumerate
+them: the authoritative list is `config.GEMINI_POOLS`, and §28.10's *Later
+additions* note names each one and says whether it is a mode of the
+conversation or an independent capability. Read the count there, never from
+this heading — the heading is a statement about these four budgets, and reading
+it as the current total is exactly how the count drifted before.
+
 ---
 
 ## 27. Gotchas learned the hard way
@@ -2256,9 +2267,14 @@ decision for them.
   pool workload of their own — `tts` and `awareness` — and both are deliberate
   *modes of the conversation feature* rather than independent capabilities, so
   `shared_credentials()` excludes them from the shared-pool rule and both may
-  legitimately run on the chat credential. What is separate where it matters is
+  legitimately run on the chat credential. §51's voice interface added
+  `live_voice`, which is **not** a mode and is reported like any other workload,
+  and §52's web search added `search`. What is separate where it matters is
   unchanged: each has its own allowance, breaker, counters and model. The four
-  budgets of §26 are still four; the pool now carries six entries.
+  budgets of §26 are still four; the pool now carries **eight** entries —
+  `intent`, `chat`, `moderation`, `transcribe`, `tts`, `awareness`, `live_voice`
+  and `search`. The authoritative list is `config.GEMINI_POOLS`; this note names
+  the count so it cannot drift silently.
 * **Voice-to-text is still not a conversation.** Transcription reaches the pool
   through `transcribe._request` only, with `audio_in` required of every model.
 * **Moderation is still fail-safe.** A pool failure produces `decided=False`,
@@ -4930,9 +4946,13 @@ It does **not** take the executable or its arguments from the request. Which
 binary runs is the host's decision, set in the runner's own environment where
 the owner can see it; a container that could name an executable could name one
 that is not a coding agent. It also strips this session's `CODEBUDDY_*`
-identity variables from the child's environment and gives each run its own
-`HOME`, because the CLI writes a loopback-port file into `HOME` and refuses to
-start if the port it recorded is already held by another session.
+identity variables from the child's environment. It does **not** give each run
+its own `HOME`: the authentication lives in `$HOME/.codebuddy`, and a child
+given a fresh `HOME` does not fail — it *succeeds*, with an "Authentication
+required" answer, which is classified as a failure rather than relayed
+(§39.15). A fresh `HOME` per request was the original design and it is wrong
+here. `AGENT_RUNNER_HOME` still overrides the real `HOME` for a deployment that
+keeps its own profile.
 
 The timeout is enforced by a watchdog thread rather than by the read loop,
 because the read loop is exactly what a hung child stops doing. A CLI that
@@ -5392,13 +5412,16 @@ workload keeps its own counters. Use a key from a different project for each
 workload to keep them independent.
 ```
 
-The remaining action is an operator's: set `GEMINI_AWARENESS_API_KEY` from a
-separate Google project. Until then the warning stands, and awareness does not
-run — the fallback to the chat key was removed rather than left in place, so the
-condition is a missing capability rather than a silent sharing arrangement. That
-is the fail-closed direction and it is reported at boot. Pacing also cuts the
-instantaneous competition for a shared project by roughly twenty times, because
-the same 200 requests are spread over a day instead of an hour.
+That action has been taken on this deployment: `GEMINI_AWARENESS_API_KEY` is set
+in the host `.env`, from a separate Google project, so the warning above no
+longer appears and awareness runs on its own allowance. The property worth
+preserving is the fail-closed one rather than this deployment's current state:
+if the variable is absent, awareness does not run — the fallback to the chat key
+was removed rather than left in place, so a missing credential is a missing
+capability rather than a silent sharing arrangement, and it is reported at boot.
+Pacing also cuts the instantaneous competition for a shared project by roughly
+twenty times, because the same 200 requests are spread over a day instead of an
+hour.
 
 ### 41.4 Tests
 
