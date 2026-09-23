@@ -165,4 +165,44 @@ def test_nexus_delegates_to_the_matcher():
     # The weak grade is not a second implementation either: the trigger keeps
     # only the strong reading, and the room renderer asks the matcher itself.
     assert addressing.mentioned("نکسوس گفت که") is True
-    assert addressing.addressed("نکسوس گفت که") is True
+    assert addressing.addressed("نکسی") is True
+
+
+# ── Quotation ─────────────────────────────────────────────────────────────
+# «نکسوس گفت که...» repeats what the assistant said. It is the clearest case
+# there is of a message that is *about* Nexus rather than *to* it, and the
+# strong grade must not fire on it — the assistant answering a quotation is
+# exactly the false positive the two grades exist to prevent.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "نکسوس گفت که فلانی رو ساکت کنه",
+        "نکسوس گفت اینو بن کن",
+        "نکسوس میگه بیا",
+        "نکسوس گفته بود",
+        "نکسی گفت که",
+        "nexus said that",
+    ],
+)
+def test_a_quotation_is_a_mention_not_a_call(text):
+    reading = addressing.detect(text)
+    assert reading.found is True
+    assert reading.addressed is False, text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The rule is one token wide, and these are what that protects.
+        "نکسوس",
+        "نکسوس جان",
+        "هی نکسوس",
+        "نکسوس بگو سلام",
+        "نکسوس اینو بررسی کن",
+        "میشه نکسوس اینو بررسی کنی؟",
+        "سلام نکسوس",
+        "نکسوسو ساکتش کن",
+    ],
+)
+def test_a_call_with_the_name_in_any_position_is_still_a_call(text):
+    assert addressing.addressed(text) is True, text

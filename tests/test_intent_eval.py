@@ -7,9 +7,11 @@ deliberate change to the lexicon or the resolver is expected to move them, and
 the right response is to update the corpus on purpose rather than to loosen the
 floor by reflex.
 
-The three addressing cases listed as gaps are asserted as gaps. They are real
-misses — a quotation about Nexus read as a call to it — and pinning them here
-means the day they are fixed, this test fails and says so.
+The one addressing case left as a gap is asserted as a gap. It is a real miss —
+an exact name mid-sentence in a message that is talking *about* Nexus — and it is
+left because every deterministic rule that catches it also demotes a real
+request with the name in the same position. Pinning it here means the day it is
+fixed, this test fails and says so.
 """
 import importlib.util
 import sys
@@ -25,11 +27,13 @@ eval_intent = importlib.util.module_from_spec(_spec)
 sys.modules["eval_intent"] = eval_intent
 _spec.loader.exec_module(eval_intent)
 
-# The addressing cases the matcher gets wrong today. An exact name is always
-# read as a call, so a message that merely talks about Nexus is treated as one.
+# The addressing case the matcher gets wrong today: an exact name in the middle
+# of a sentence that is talking *about* Nexus rather than to it — «من با نکسوس
+# کار نکردم». It is left alone on purpose. Every deterministic rule that catches
+# it also demotes a real request with the name in the same position («میشه نکسوس
+# اینو بررسی کنی؟»), and missing a call is the worse of the two mistakes; the
+# weak grade already marks the line "⋯ about you" for the model to read.
 KNOWN_ADDRESSING_GAPS = {
-    "quotation-not-addressed",
-    "quotation-reporting-verb",
     "about-nexus-mid-sentence",
 }
 

@@ -1599,6 +1599,10 @@ reference file is stale and this list is the one to fix first.
 
 * `main._nexus_directed` decides the assistant answers; the word «ربات» is not an
   address, and the name forms (`addressing.addressed`, e.g. «نکسی») are.
+* A name that is the **subject of a reporting verb** is a mention, not a call:
+  `addressing._quoted` demotes «نکسوس گفت که...» to the weak grade. The rule is
+  **one token wide** — the verb must come immediately after the name — so
+  «نکسوس بگو...», «نکسوس جان» and «میشه نکسوس اینو بررسی کنی؟» stay calls.
 * `on_group_text` **must** return before `classifier.classify` when the message
   will be answered — ask `main._nexus_will_answer`, **never** the narrower
   `_addressed_to_bot`, or a name-addressed message gets both a reply and a trial

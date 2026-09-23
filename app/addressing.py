@@ -19,7 +19,10 @@ opposite costs when they are wrong:
   which is the more annoying of the two mistakes, so it demands real evidence:
   the token is the name, or the name plus a clitic, or one edit away from it, or
   a vowel-skeleton match that the surrounding words show is a *call* rather than
-  a mention.
+  a mention. The one thing an exact name does **not** survive is being the
+  subject of a reporting verb — «نکسوس گفت که...» is somebody quoting the
+  assistant, and a quotation is the clearest case there is of a message that is
+  *about* it rather than *to* it. See ``_quoted``.
 * **``mentioned``** is the weak signal, and it is context rather than a trigger.
   It is what the awareness pass is told — "your name came up here" — so the
   model can judge whether the conversation concerns it. A false positive costs
@@ -133,6 +136,26 @@ _VOCATIVES = ("جان", "جون", "عزیز", "گرامی", "خان", "خانم"
 # Separate words a group puts *before* the name when calling somebody. A message
 # that opens with one of these and then the name is a call.
 _CALLERS = ("ای", "هی", "یا", "الا", "سلام", "درود")
+
+# The verbs that make a name its *subject* rather than its addressee. «نکسوس
+# گفت که...» is somebody repeating what the assistant said; the assistant is
+# being talked about, not spoken to, and answering it directly is the false
+# positive this whole module is careful about.
+#
+# The rule is deliberately one token wide — the verb must come *immediately*
+# after the name — and that narrowness is the safety. «نکسوس بگو...» is an
+# imperative (a call), «نکسوس جان» is a vocative (a call), and «میشه نکسوس اینو
+# بررسی کنی؟» is a request to the assistant with the name in the middle; none of
+# them has a reporting verb in that position, so none of them is demoted. A
+# wider rule — any reporting verb anywhere in the message — would silence
+# exactly the requests this bot exists to answer.
+_REPORTING_VERBS = frozenset(
+    {
+        "گفت", "گفته", "گفتش", "گفتن", "گفتند", "میگه", "میگن", "میگفت",
+        "فرمود", "فرموده", "پرسید", "پرسیده", "پرسیدن", "نوشت", "نوشته",
+        "said", "says", "asked", "told",
+    }
+)
 
 # The moderation verbs, used only to tell a *call* from a *mention*: «نکسوس
 # ساکتش کن» is addressed, «نکسوس گفت که ساکتش کنه» is being talked about.
@@ -341,6 +364,17 @@ def detect(text: str, *, name_list: tuple[str, ...] | None = None) -> Address:
     return best
 
 
+def _quoted(tokens: list[str], index: int) -> bool:
+    """Whether the name is the subject of a reporting verb — a quotation.
+
+    One token wide, and that is the design: the reporting verb has to come
+    immediately after the name. «نکسوس گفت که...» is a quotation; «نکسوس بگو...»
+    is an imperative and «میشه نکسوس اینو بررسی کنی؟» is a request, and neither
+    has a reporting verb in that position.
+    """
+    return index + 1 < len(tokens) and tokens[index + 1] in _REPORTING_VERBS
+
+
 def _match(token: str, name: str, tokens: list[str], index: int) -> Address:
     """One token against one configured name. Returns the strongest reading."""
     bare = _letters(token)
@@ -348,13 +382,19 @@ def _match(token: str, name: str, tokens: list[str], index: int) -> Address:
         return Address()
 
     if bare == name:
+        if _quoted(tokens, index):
+            return Address(MENTION, token, name, "quoted")
         return Address(ADDRESSED, token, name, "exact")
 
     stripped = _strip_clitic(bare)
     if stripped and stripped != bare and stripped == name:
+        if _quoted(tokens, index):
+            return Address(MENTION, token, name, "quoted")
         return Address(ADDRESSED, token, name, "clitic")
 
     if len(name) >= 4 and _distance(bare, name, 1) <= 1:
+        if _quoted(tokens, index):
+            return Address(MENTION, token, name, "quoted")
         return Address(ADDRESSED, token, name, "typo")
 
     # The skeleton comparison, last because it is the weakest evidence.
@@ -372,7 +412,7 @@ def _match(token: str, name: str, tokens: list[str], index: int) -> Address:
     # to share its consonants".
     if _distance(bare, name, 2) > 2:
         return Address()
-    if _addressing_intent(tokens, index):
+    if _addressing_intent(tokens, index) and not _quoted(tokens, index):
         return Address(ADDRESSED, token, name, "skeleton")
     return Address(MENTION, token, name, "skeleton")
 

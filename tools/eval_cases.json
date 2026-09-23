@@ -778,7 +778,7 @@
     {
       "id": "quotation-not-addressed",
       "category": "addressing",
-      "note": "A quotation about Nexus is not a call to Nexus. KNOWN GAP: the matcher reads a name-first message as a call.",
+      "note": "A quotation about Nexus is a mention, not a call: the name is the subject of a reporting verb.",
       "window": [],
       "anchor": {
         "user_id": 11,
@@ -798,7 +798,7 @@
     {
       "id": "quotation-reporting-verb",
       "category": "addressing",
-      "note": "Same KNOWN GAP, shorter form.",
+      "note": "A quotation about Nexus is a mention, not a call: the name is the subject of a reporting verb.",
       "window": [],
       "anchor": {
         "user_id": 11,
@@ -818,7 +818,7 @@
     {
       "id": "about-nexus-mid-sentence",
       "category": "addressing",
-      "note": "Talking about Nexus mid-sentence. KNOWN GAP: an exact name match is always a call.",
+      "note": "Talking about Nexus mid-sentence. KNOWN GAP, left on purpose: every deterministic rule that catches it also demotes a real request.",
       "window": [],
       "anchor": {
         "user_id": 11,
