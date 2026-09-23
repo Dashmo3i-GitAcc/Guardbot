@@ -419,3 +419,18 @@ later message is not misread as an answer. Because the offer is consumed by
 `take_offer`, one question can spend at most one search. The explicit and clearly
 live cases bypass the gate entirely — the person already said to search, or the
 question already says "now".
+
+### 52.14 Dating a finding
+
+A Tavily brief is a list of page titles and snippets, and it is full of dates
+**pages** wrote — a YouTube description from a year ago, a news index from today,
+a column header. Tavily itself is sent only the question (§52.12), so the brief
+carries no date of its own. The model can therefore only tell which finding is
+current if the *conversation* tells it what today is.
+
+That is `main._today_block`, appended to the conversational context beside the
+room block (§53.8): the server's own reading, in Gregorian and Jalali, from
+Tehran, and explicitly above any date in a message or a result. Without it the
+model treats the newest claim it read as today, which is how a live search once
+came back dated a year early. This is also why the context must actually reach
+the model on the plain path — see §23.5 of `assistant.md` for that defect.

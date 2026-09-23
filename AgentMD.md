@@ -1587,6 +1587,21 @@ reference file is stale and this list is the one to fix first.
   room; it cannot be planted, and it is **context, never authority**.
 * `TOOL_AMENDMENT` is appended **after** the persona for a turn that holds
   tools; `TOOL_AMENDMENT` stays in `chat.__all__`.
+* The trusted context (`context`) **must** reach the model on **every**
+  conversational path — the tool-aware one *and* the plain one. `chat._request`
+  and `chat._pooled_request` therefore take `context`/`instruction` and pass them
+  to `_generation_config`; a path that builds its config with the defaults drops
+  the room window, the search findings and the date on the floor and the model
+  answers as if the room and the web did not exist. This was a real bug: the
+  plain path called `_request(contents)`, so only actors holding admin tools ever
+  saw the context.
+* The conversational system instruction **states the server's own date**, in both
+  calendars, from Tehran (`main._today_block`). Without it the model treats the
+  newest date it read — in the room or in a web brief — as today, and answers
+  "امروز چندمه" from its training. Awareness has always done this for its pass;
+  the direct answer path must too.
+* A regression test asserts the context reaches `_request`; another asserts the
+  date block is in the context the conversational path builds.
 
 ### 53.9 The coding-agent bridge
 
@@ -1709,6 +1724,10 @@ reference file is stale and this list is the one to fix first.
   is disabled.
 * Web content is untrusted data in a delimited block appended to the system
   instruction; **no second context system** is built.
+* A search brief is full of dates **pages** wrote, and Tavily is sent only the
+  question — it has no date of its own. The model can date a finding only because
+  the conversational context states the server's date (§53.8); without it the
+  brief's oldest claim reads as the newest news.
 * The model is told **not** to write URLs, and the **application sends no
   sources at all**. A grounded result's `sources` are internal grounding — used
   only to judge whether the finding is usable. There is **no footer**, no «منابع»

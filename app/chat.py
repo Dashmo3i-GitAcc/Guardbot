@@ -667,25 +667,37 @@ def _generation_config(types, *, tools=None, context: str = "", instruction: str
     )
 
 
-async def _pooled_request(pool, contents: list) -> str:
+async def _pooled_request(
+    pool, contents: list, *, context: str = "", instruction: str = ""
+) -> str:
     """One conversational call, through the pool.
 
     ``text`` is the workload's declared capability — the weakest of the four
     requirements, which keeps the largest set of models eligible to write a
     reply.
+
+    ``context`` is the trusted-context block (the room window, the search
+    findings, the server date). It is a parameter here for the same reason it is
+    on ``_request_full``: a path that builds the config without it silently drops
+    everything the caller attached, and the model then answers as if the room and
+    the web did not exist.
     """
     try:
         raw = await gemini_pool.generate(
             pool,
             build_contents=lambda types: _wire(contents),
-            build_config=_generation_config,
+            build_config=lambda types: _generation_config(
+                types, context=context, instruction=instruction
+            ),
         )
     except gemini_pool.PoolUnavailable as exc:
         raise ChatUnavailable(exc.kind, exc.detail) from exc
     return raw or ""
 
 
-async def _request(contents: list) -> str:
+async def _request(
+    contents: list, *, context: str = "", instruction: str = ""
+) -> str:
     """The single network seam. Tests replace exactly this.
 
     Everything above it is policy — what we spend, when we give up, what we do
@@ -695,15 +707,23 @@ async def _request(contents: list) -> str:
     Each turn is a list of parts, and a part is either ``{"text": ...}`` or a
     ``{"mime_type", "data"}`` dict produced by ``app/media.py``. The conversion
     to the SDK's own types lives in ``_wire``, which is tested directly.
+
+    ``context`` and ``instruction`` are the trusted-context block and the base
+    instruction. They are passed rather than read from a module global so that
+    the plain conversation carries the same room window, search findings and
+    server date the tool-aware path does: without this the plain path built its
+    config with the defaults and the context was dropped on the floor.
     """
     pool = gemini_pool.pool_for("chat")
     if pool is not None and pool.enabled:
-        return await _pooled_request(pool, contents)
+        return await _pooled_request(
+            pool, contents, context=context, instruction=instruction
+        )
 
     from google.genai import types
 
     client = _client_or_raise()
-    config_ = _generation_config(types)
+    config_ = _generation_config(types, context=context, instruction=instruction)
     wire = _wire(contents)
 
     async def _call():
@@ -1328,7 +1348,7 @@ async def reply(
                     contents, tools=tools, context=context, on_tool=on_tool
                 )
             else:
-                raw = await _request(contents)
+                raw = await _request(contents, context=context)
         except asyncio.CancelledError:
             raise
         except ChatUnavailable as exc:
@@ -1370,7 +1390,13 @@ async def reply(
             if not nudged and _is_repetitive(body, previous):
                 nudged = True
                 retry = await _nudged_attempt(
-                    chat_id, user_id, history, payload, parts=parts, kind=kind
+                    chat_id,
+                    user_id,
+                    history,
+                    payload,
+                    parts=parts,
+                    kind=kind,
+                    context=context,
                 )
                 if retry:
                     body = retry
@@ -1436,6 +1462,7 @@ async def _nudged_attempt(
     *,
     parts: list | None,
     kind: str,
+    context: str = "",
 ) -> str:
     """One re-ask after a repetition, with an explicit instruction not to repeat.
 
@@ -1445,13 +1472,19 @@ async def _nudged_attempt(
     The call is counted in both rate windows and in the daily counter, because
     it is a real request against a real quota; pretending a retry is free is how
     a quota gets spent twice as fast as the counter says.
+
+    ``context`` is carried through from the first attempt: the re-ask answers the
+    same question in the same room, so it needs the same room window, search
+    findings and server date. Dropping it here would make the retry a different
+    conversation from the answer it replaces.
     """
     stamp = time.monotonic()
     _recent_calls.append(stamp)
     _user_calls.setdefault((chat_id, user_id), []).append(stamp)
     try:
         raw = await _request(
-            _contents(history, payload, parts=parts, kind=kind, nudge=REPETITION_NUDGE)
+            _contents(history, payload, parts=parts, kind=kind, nudge=REPETITION_NUDGE),
+            context=context,
         )
     except asyncio.CancelledError:
         raise

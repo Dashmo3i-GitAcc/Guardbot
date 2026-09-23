@@ -328,7 +328,7 @@ def test_a_chat_failure_does_not_touch_the_classifier(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_CHAT_CIRCUIT_FAILURES", 1)
     monkeypatch.setattr(config, "GEMINI_CHAT_MAX_RETRIES", 0)
 
-    async def _boom(contents):
+    async def _boom(contents, *, context="", instruction=""):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(chat, "_request", _boom)

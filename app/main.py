@@ -55,6 +55,7 @@ from . import (
     net,
     nexus,
     people,
+    persian_calendar,
     rbac,
     responses,
     text_filters,
@@ -2563,6 +2564,31 @@ async def _awareness_turn(
     )
 
 
+def _today_block(now: float) -> str:
+    """The server's date, for the conversational system instruction.
+
+    The room window and the web findings are full of dates other people and
+    other pages wrote, and a model with no date of its own treats the most recent
+    claim it read as today — which is how a live search came back dated a year
+    early and how "امروز چندمه" was answered with a date from its training. The
+    awareness layer has always stated this for its own pass
+    (``awareness_context``); the conversation never did, so the same failure it
+    was written to prevent was happening on the direct answer path.
+
+    Stated as the server's own reading, in both calendars, and explicitly above
+    any date in a message or a result. It goes in the trusted context, never the
+    user turn, because the transcript is text people typed.
+    """
+    moment = persian_calendar.tehran_moment(int(now))
+    return (
+        "\nThe current date, from the server's own clock in Tehran — the "
+        "server's reading and not anyone's claim. Trust it over any date in a "
+        "message or a web result, and never state a date you remember.\n"
+        f"- Gregorian: {persian_calendar.gregorian_text(moment)}\n"
+        f"- Persian (Jalali): {persian_calendar.jalali_text(moment)}\n"
+    )
+
+
 async def _answer_conversationally(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -2697,6 +2723,12 @@ async def _answer_conversationally(
     context = (context or "") + awareness.room_block(
         room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
     )
+
+    # The server's own date, so the model can date what it reads instead of
+    # treating the newest claim in the room or on a page as today. Appended here,
+    # beside the room block, because this is the one place both the direct answer
+    # and the search-grounded answer pass through.
+    context = context + _today_block(time.time())
 
     # The live web, as its own workload, and only when it is actually wanted.
     # Three outcomes, not two: an explicit request or an explicitly *current*

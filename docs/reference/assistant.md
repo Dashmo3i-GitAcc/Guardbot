@@ -314,6 +314,38 @@ directly, and `tests/test_conversation_media.py` now asserts the typed shape for
 text turns, media turns and multi-turn order. The lesson is the one §13.8
 already records: a seam that everything replaces is a seam nothing tests.
 
+### 23.5 The context that never reached the model
+
+The same lesson, a second time, and this one reached production.
+
+`reply()` takes a `context` block — the trusted context, the room window, the web
+search findings, and (now) the server's date — and appends it to the system
+instruction. The **tool-aware** path passed it through `_request_full`. The
+**plain** path called `_request(contents)`, whose signature had no `context` at
+all, so `_generation_config` was built with the default empty context and
+everything the caller had attached was dropped. The tool-free path is the one
+every actor without administrative tools takes — that is, every ordinary member —
+so their answers were generated as if the room and the web did not exist.
+
+The unit suite could not see it for the same reason as §23.4: **every test
+replaces `chat._request`**, and the seam it replaced was the one being called
+with the context missing. `tests/test_web_search.py`'s integration tests replace
+`main.chat.reply` wholesale, so they proved the findings were *assembled*, never
+that they were *delivered*. Two regression tests now assert the context reaches
+`_request` on both the plain path and the nudged retry.
+
+**The missing date, found alongside it.** The web brief is built from page titles
+and snippets and is full of dates other pages wrote; Tavily is sent only the
+question, so it carries no date of its own; and the conversational prompt had
+none either. A model with no date of its own treats the newest date it read as
+today. That is why a live search came back dated a year early and «امروز چندمه؟»
+was answered «۱۴ آذر ۱۴۰۳» from training. The awareness layer has always stated
+the server's date for its own pass (`awareness_context`) precisely to stop this;
+the direct answer path never did. `main._today_block` now appends it to the
+conversational context, in both calendars, from Tehran. Verified live through the
+context-aware transport: without the block the model answered a date from 1403;
+with it, «چهارشنبه ۱ مهر ۱۴۰۵».
+
 ---
 
 <a id="s24"></a>

@@ -126,7 +126,7 @@ def install_chat(monkeypatch, *responses):
     """Replace chat._request and return the recorded payloads."""
     calls = []
 
-    async def _request(contents):
+    async def _request(contents, *, context="", instruction=""):
         calls.append(contents)
         if not responses:
             raise AssertionError("more chat calls than responses")

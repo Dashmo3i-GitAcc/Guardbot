@@ -77,7 +77,7 @@ class Recorder:
         self.answer = answer
         self.calls = []
 
-    async def __call__(self, contents):
+    async def __call__(self, contents, *, context="", instruction=""):
         self.calls.append(contents)
         return self.answer
 

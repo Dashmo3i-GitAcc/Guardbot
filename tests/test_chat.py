@@ -48,9 +48,11 @@ class Recorder:
     def __init__(self, *responses):
         self.responses = list(responses) or ["سلام! در چه موردی می‌خوای حرف بزنیم؟"]
         self.calls = []
+        self.contexts = []
 
-    async def __call__(self, contents):
+    async def __call__(self, contents, *, context="", instruction=""):
         self.calls.append(contents)
+        self.contexts.append(context)
         item = self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
         if isinstance(item, BaseException):
             raise item
@@ -73,6 +75,42 @@ def install(monkeypatch, *responses) -> Recorder:
 
 def ask(text, chat_id=-100, user_id=7):
     return asyncio.run(chat.reply(chat_id, user_id, text))
+
+
+# ── The trusted context reaches the model on *every* path ─────────────────
+def test_the_context_reaches_the_plain_path(monkeypatch):
+    """A regression: the tool-free path used to drop the context on the floor.
+
+    ``reply`` accepts a ``context`` block carrying the room window, the search
+    findings and the server date. The tool-aware path passed it; the plain path
+    called ``_request(contents)``, which built its config with the default empty
+    context — so every ordinary member's answer was generated as if the room and
+    the web did not exist.
+    """
+    recorder = install(monkeypatch, "باشه.")
+
+    asyncio.run(chat.reply(-100, 7, "سلام", context="\nROOM-BLOCK-MARKER\n"))
+
+    assert recorder.contexts == ["\nROOM-BLOCK-MARKER\n"]
+
+
+def test_the_context_reaches_the_nudged_retry(monkeypatch):
+    """The re-ask answers the same question, so it needs the same context."""
+    recorder = install(monkeypatch, "باشه، این بار یه چیز دیگه.")
+
+    asyncio.run(
+        chat._nudged_attempt(
+            -100,
+            7,
+            [],
+            "سلام",
+            parts=None,
+            kind="text",
+            context="\nROOM-BLOCK-MARKER\n",
+        )
+    )
+
+    assert recorder.contexts == ["\nROOM-BLOCK-MARKER\n"]
 
 
 # ── Enablement, and the key ───────────────────────────────────────────────

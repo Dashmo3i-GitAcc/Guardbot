@@ -471,3 +471,31 @@ def test_an_injected_link_never_reaches_the_group(monkeypatch):
 def test_there_is_no_sources_block_any_more():
     assert not hasattr(web_search, "sources_block")
     assert not hasattr(main, "_send_search_sources")
+
+
+# ══ 8. The server's date reaches the conversation ═════════════════════════
+def test_the_conversational_context_carries_the_server_date(monkeypatch):
+    """A regression: without a date the model dated a live answer from memory.
+
+    A search brief is full of dates other pages wrote, and the room window is
+    full of dates other people wrote. With no date of its own the model treats
+    the newest claim it read as today — which is how a live search came back
+    dated a year early and "امروز چندمه" was answered from training data.
+    """
+    _, seen, _ = turn(monkeypatch, "نکسوس فلسفه شوپنهاور چیه؟")
+
+    assert seen, "the model is consulted for a knowledge question"
+    assert "server's own clock in Tehran" in seen[0]
+    assert "Gregorian:" in seen[0] and "Persian (Jalali):" in seen[0]
+
+
+def test_the_date_block_matches_the_server_clock():
+    from app import persian_calendar
+
+    now = time.time()
+    block = main._today_block(now)
+    moment = persian_calendar.tehran_moment(int(now))
+
+    assert persian_calendar.gregorian_text(moment) in block
+    assert persian_calendar.jalali_text(moment) in block
+    assert "never state a date you remember" in block
