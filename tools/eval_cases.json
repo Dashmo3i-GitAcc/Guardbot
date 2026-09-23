@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 6,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -27,7 +27,18 @@
     "  .edges                the reply edges [[source_id, target_id]], oldest first",
     "  .focus                the target the replies converge on (0 when none)",
     "  .relation             '' / continues / shifts / unclear — scored only where",
-    "                        labelled, because it is a reading rather than a record"
+    "                        labelled, because it is a reading rather than a record",
+    "",
+    "expect.entities         the things a demonstrative may point at:",
+    "  .newest_media         the kind of the newest media row ('' when none)",
+    "  .has_link             whether a URL is in the window",
+    "  .named                the class the message names ('' / media / link /",
+    "                        message) — scored only where labelled",
+    "",
+    "Every case carries expect.entities, so a window with no media and no link says",
+    "so explicitly rather than leaving the fact to a default — the same rule",
+    "expect.when follows. A window row with media or a link but no label would",
+    "otherwise read in the report as a false positive in the reader."
   ],
   "cases": [
     {
@@ -70,6 +81,10 @@
             ]
           ],
           "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -113,6 +128,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -156,6 +175,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -199,6 +222,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -231,7 +258,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -272,7 +303,11 @@
           "چی شده؟"
         ],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -313,7 +348,11 @@
           "چی شده؟"
         ],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -352,7 +391,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -391,7 +434,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -430,7 +477,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -506,6 +557,10 @@
             ]
           ],
           "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -582,6 +637,10 @@
             ]
           ],
           "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -678,6 +737,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -724,7 +787,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -756,7 +823,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -795,7 +866,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -838,6 +913,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -870,7 +949,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -913,6 +996,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -945,7 +1032,11 @@
         "act": "social",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -977,7 +1068,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1001,7 +1096,11 @@
         "act": "question",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1025,7 +1124,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1049,7 +1152,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1092,6 +1199,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1116,7 +1227,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1140,7 +1255,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1164,7 +1283,11 @@
         "act": "report",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1188,7 +1311,11 @@
         "act": "report",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1212,7 +1339,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1236,7 +1367,11 @@
         "act": "question",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1279,6 +1414,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1322,6 +1461,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1365,6 +1508,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1404,7 +1551,11 @@
         "act": "correction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1436,7 +1587,11 @@
         "act": "question",
         "open_questions": [],
         "when": "future",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1460,7 +1615,11 @@
         "act": "report",
         "open_questions": [],
         "when": "past",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1531,6 +1690,10 @@
             ]
           ],
           "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1574,6 +1737,10 @@
             ]
           ],
           "focus": 55
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1617,6 +1784,10 @@
             ]
           ],
           "focus": 55
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1660,6 +1831,10 @@
             ]
           ],
           "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -1684,7 +1859,11 @@
         "act": "question",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1708,7 +1887,11 @@
         "act": "question",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1732,7 +1915,11 @@
         "act": "social",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1756,7 +1943,11 @@
         "act": "report",
         "open_questions": [],
         "when": "future",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1780,7 +1971,11 @@
         "act": "correction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1804,7 +1999,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1828,7 +2027,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1852,7 +2055,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1876,7 +2083,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1900,7 +2111,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "now",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1924,7 +2139,11 @@
         "act": "question",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -1976,6 +2195,10 @@
             ]
           ],
           "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2018,7 +2241,11 @@
           "قیمت چنده؟"
         ],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2080,6 +2307,10 @@
             ]
           ],
           "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2104,7 +2335,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "now",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2136,7 +2371,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "past",
-        "when_unit": "minute"
+        "when_unit": "minute",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2160,7 +2399,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "now",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2184,7 +2427,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "future",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2216,7 +2463,11 @@
         "act": "question",
         "open_questions": [],
         "when": "past",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2240,7 +2491,11 @@
         "act": "question",
         "open_questions": [],
         "when": "past",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2264,7 +2519,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "now",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2288,7 +2547,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "repeat",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2312,7 +2575,11 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2336,7 +2603,11 @@
         "act": "question",
         "open_questions": [],
         "when": "past",
-        "when_unit": "week"
+        "when_unit": "week",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2360,7 +2631,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "past",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2384,7 +2659,11 @@
         "act": "question",
         "open_questions": [],
         "when": "past",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2408,7 +2687,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "future",
-        "when_unit": "day"
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2432,7 +2715,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "now",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2456,7 +2743,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "past",
-        "when_unit": ""
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2480,7 +2771,11 @@
         "act": "unknown",
         "open_questions": [],
         "when": "past",
-        "when_unit": "hour"
+        "when_unit": "hour",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
       }
     },
     {
@@ -2548,6 +2843,10 @@
           ],
           "focus": 11,
           "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2603,6 +2902,10 @@
           ],
           "focus": 11,
           "relation": "unclear"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2653,6 +2956,10 @@
           "edges": [],
           "focus": 0,
           "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2694,6 +3001,10 @@
           "edges": [],
           "focus": 0,
           "relation": "shifts"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2735,6 +3046,10 @@
           "edges": [],
           "focus": 0,
           "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2794,6 +3109,10 @@
           ],
           "focus": 44,
           "relation": "unclear"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2830,6 +3149,10 @@
           ],
           "focus": 11,
           "relation": ""
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2871,6 +3194,10 @@
           "edges": [],
           "focus": 0,
           "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2912,6 +3239,10 @@
           "edges": [],
           "focus": 0,
           "relation": "unclear"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -2967,6 +3298,10 @@
           ],
           "focus": 11,
           "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     },
@@ -3022,6 +3357,392 @@
           ],
           "focus": 11,
           "relation": "shifts"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "entity-media-newest",
+      "category": "entity",
+      "note": "Two things posted; the newest is the one a demonstrative prefers. The anchor names no class, so the person resolver is also scored: two people spoke equally recently and neither is the reply target, so «اینو» is honestly ambiguous *as a person* — and saying so is the point, because it is what makes the model act on the thing instead of guessing a member.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "اینم",
+          "at": 940,
+          "role": "member",
+          "message_id": 2,
+          "kind": "video",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "video",
+          "has_link": false,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-media-single",
+      "category": "entity",
+      "note": "A photo was posted and the anchor points at it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین این چیه",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-link-named",
+      "category": "entity",
+      "note": "The message names the class, and the link is in the window.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "این لینک رو ببین https://example.com/page",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این لینک چیه",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": "link"
+        }
+      }
+    },
+    {
+      "id": "entity-media-named",
+      "category": "entity",
+      "note": "«فایل» names the media class.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این فایل رو بفرست",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": "media"
+        }
+      }
+    },
+    {
+      "id": "entity-message-named",
+      "category": "entity",
+      "note": "«پیام» names a message, so the reply target is stated.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این پیام رو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 1
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": "message"
+        }
+      }
+    },
+    {
+      "id": "entity-none",
+      "category": "entity",
+      "note": "A demonstrative and nothing to point at: the block renders nothing.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-link-unnamed",
+      "category": "entity",
+      "note": "A link with no class named.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "www.example.org/x",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-media-and-link",
+      "category": "entity",
+      "note": "A link is not a media row: the newest media is still the photo. As in entity-media-newest, the bare «اینو» leaves the person resolver with two tied speakers, so it reports ambiguity rather than picking.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "لینک https://example.com",
+          "at": 940,
+          "role": "member",
+          "message_id": 2,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": true,
+          "named": ""
         }
       }
     }

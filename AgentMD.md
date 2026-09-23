@@ -1695,6 +1695,37 @@ reference file is stale and this list is the one to fix first.
   database. Each calls `read_state` itself rather than sharing a cached one: a
   source that raises must cost only its own block, and the scan it repeats is a
   pass over rows already in memory.
+* `app/entities.py` answers the question `referents` cannot: what a demonstrative
+  points at when it points at **a thing** — the media row, the link, the message
+  it replies to. It is evidence, never a gate, pure at import time (no `db`, no
+  `config`, no `pool`, no `rbac`, and **not** `media`), and `awareness_context`
+  stays the only importer.
+* A media row is read from its **stored `kind` column** first and the `[kind]`
+  text prefix only as a fallback: the same fact is written in both places, and
+  the column can be empty on a row captured before it existed. A link is a URL
+  and only a URL — the scheme form or a bare `www.` host — because a rule that
+  guessed at bare domains would match ordinary Persian words with a dot in them.
+* The reply target is stated **only when the anchor names a message** («این پیام
+  رو پاک کن»). A reply edge always has a target, so pointing at it unconditionally
+  would print the transcript's own text back to the model on every reply.
+* `thing_kind` is the **single-token** form of the noun lookup, exported so
+  `referents` can ask about one position without re-tokenizing or keeping a second
+  copy of the list. The table holds **stems**, and exactly **one** clitic is
+  stripped — accepted only when the stripped form is a known noun, so «فایده»,
+  «عکاس» and «پیامدش» are not invented into things.
+* `referents` will **not** read a demonstrative immediately followed by a thing
+  word as a person pointer («این لینک», «اون عکس», «همین پیام»), exactly as it
+  already refuses a time word. The check reads the **raw** token: this module's
+  stripper turns «پیام» into «پی», so a stripped token would never reach
+  `thing_kind`.
+* The entity block is a **tier-0 source** (`entities`, budget 600) that reads
+  `Ctx`, never the database, and renders **nothing** when there is nothing to
+  point at and nothing named — a block saying "no things found" would spend
+  tokens to tell the model what the transcript already shows.
+* The entity block states the things and then says **"not about a person"**: it
+  is the correction the resolver's person-candidates need, because acting on a
+  person when the message was about a photograph is the worst mistake available
+  here.
 
 ### 53.8 The assistant
 

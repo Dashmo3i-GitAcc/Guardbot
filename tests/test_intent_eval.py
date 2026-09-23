@@ -17,7 +17,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from app import room_state, temporal
+from app import entities, room_state, temporal
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -68,6 +68,13 @@ def test_the_corpus_is_well_formed():
             keys = set(case["expect"]["state"])
             assert {"edges", "focus"} <= keys, case["id"]
             assert keys <= {"edges", "focus", "relation"}, case["id"]
+        # An entities label must carry the two facts read off the rows; `named`
+        # is optional, because the class the words name is a reading and only
+        # the cases that judge it should be scored on it.
+        assert "entities" in case["expect"], case["id"]
+        ent_keys = set(case["expect"]["entities"])
+        assert {"newest_media", "has_link"} <= ent_keys, case["id"]
+        assert ent_keys <= {"newest_media", "has_link", "named"}, case["id"]
 
 
 def test_expression_detection_is_exact_on_the_corpus():
@@ -276,6 +283,57 @@ def test_the_corpus_labels_every_reply_row_it_contains():
         if has_reply:
             assert "state" in case["expect"], case["id"]
             assert case["expect"]["state"]["edges"], case["id"]
+
+
+# ── The things a demonstrative may point at ───────────────────────────────
+def test_the_newest_media_and_the_link_are_read_exactly():
+    """Both are facts — a stored column and a regex over the text."""
+    m = result()
+    assert m["media_exact"] == m["cases"]
+    assert m["link_exact"] == m["cases"]
+
+
+def test_every_named_thing_class_is_read():
+    m = result()
+    assert m["named_cases"] >= 8
+    assert m["named_correct"] == m["named_cases"]
+    assert m["named_accuracy"] == 1.0
+
+
+def test_every_thing_kind_is_exercised():
+    """A class with no case is a class the reader was never tested on."""
+    labelled = {
+        case["expect"]["entities"]["named"]
+        for case in eval_intent.load_cases()["cases"]
+        if "named" in case["expect"]["entities"]
+    }
+    for kind in entities.KINDS:
+        assert kind in labelled, f"{kind} has no case"
+
+
+def test_the_entity_block_stays_small():
+    assert result()["entity_block_chars_max"] <= 600
+
+
+def test_the_entity_reader_is_fast_enough_to_run_on_every_pass():
+    """It walks the window once and folds a handful of tokens — no query."""
+    assert result()["entity_us_mean"] < 1000
+
+
+def test_the_corpus_labels_every_media_or_link_row_it_contains():
+    """The mirror of the reply-row test, for the same reason.
+
+    A media row or a link in the window without an entities label reads in the
+    report as a false positive in the reader rather than as a missing label.
+    Only the *window* is checked, because that is what the reader reads: the
+    thing a demonstrative points at is what the room already has, so a link in
+    the anchor itself is deliberately not an entity.
+    """
+    for case in eval_intent.load_cases()["cases"]:
+        for row in case.get("window") or []:
+            labelled = case["expect"]["entities"]
+            if str(row.get("kind") or "").strip() or "http" in str(row.get("text") or ""):
+                assert labelled["newest_media"] or labelled["has_link"], case["id"]
 
 
 def test_the_harness_runs_without_a_database_or_a_key():

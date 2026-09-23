@@ -447,6 +447,86 @@ def test_the_time_lexicon_is_borrowed_lazily_and_guarded():
         R._temporal_nouns = original
 
 
+# ── A thing word is not a person ──────────────────────────────────────────
+def test_a_demonstrative_before_a_thing_word_is_not_a_person_reference():
+    """«این لینک» is a link, «اون عکس» a photo, «همین پیام» a message.
+
+    Offering the room's members as the people «این» may mean is a wrong lead,
+    and a wrong-person moderation action is the worst mistake available here.
+    The things themselves are the entity reader's block.
+    """
+    for text in ("این لینک چیه", "اون عکس رو پاک کن", "همین پیام رو پاک کن",
+                 "این فایل رو بفرست", "اون ویس رو گوش کن", "این کامنت رو حذف کن",
+                 "این ویدیو رو ببین", "همون پست رو پاک کن", "این استیکر چیه"):
+        assert R.find_expression(text).kind == "", text
+
+
+def test_the_thing_guard_reads_the_raw_token_not_the_clitic_stripped_one():
+    """«پیام» would strip to «پی», so the guard must look before stripping.
+
+    The same trap the time guard documents, and it caught this one too: with
+    ``bare`` the noun never reached ``entities.thing_kind``.
+    """
+    assert R._bare("پیام") == "پی"
+    assert R.find_expression("این پیام رو پاک کن").kind == ""
+
+
+def test_a_clitic_thing_word_is_still_a_thing():
+    """«لینکشو» is «لینک» + the object marker, and it is still a link.
+
+    This module's stripper does not remove a bare «و» (it is also an ordinary
+    letter), so the strip that makes this work is the entity reader's own.
+    """
+    assert R._bare("لینکشو") == "لینکشو"
+    assert R.find_expression("این لینکشو ببین").kind == ""
+    assert R.find_expression("اون عکسشو پاک کن").kind == ""
+
+
+def test_the_thing_guard_does_not_swallow_a_real_person_reference():
+    """Only the word *immediately after* the demonstrative is checked."""
+    assert R.find_expression("این کاربر").kind == R.KIND_PERSON
+    assert R.find_expression("اینو پاک کن").kind == R.KIND_DEICTIC
+    assert R.find_expression("لینک این کاربر رو بده").kind == R.KIND_PERSON
+    assert R.find_expression("ساکتش کن").kind == R.KIND_CLITIC
+
+
+def test_an_ordinary_word_that_starts_like_a_thing_is_not_a_thing():
+    """The lookup is on the whole token, never a prefix.
+
+    «عکاس» is a photographer, «پیامدش» is a consequence, «فایده» is a use — and
+    each of them begins with a word that names a thing. The borrow only accepts
+    a hit on the *whole* token, so none of them is swallowed.
+    """
+    for text in ("این عکاس کیه", "این پیامدش چیه", "این فایده داره",
+                 "این متنفرم", "این صدامو شنیدی"):
+        assert R.find_expression(text).kind == R.KIND_DEICTIC, text
+
+
+def test_the_thing_lexicon_is_borrowed_lazily_and_guarded():
+    """The third cross-module reach, held to the same rule as the first two.
+
+    It must be inside a function — so importing this module never pulls in
+    ``entities`` — and it must be wrapped, so a host without the list falls back
+    to the reading this module gave before the entity reader existed rather than
+    failing to import.
+    """
+    import inspect
+
+    tree = __import__("ast").parse(inspect.getsource(R))
+    lazy = _imports(tree, top_level_only=False) - _imports(tree, top_level_only=True)
+    assert "entities" in lazy
+    assert "entities" not in _module_level_imports(R)
+    source = inspect.getsource(R._thing_named)
+    assert "try:" in source and "except Exception" in source
+    # With no list at all, the old behaviour returns: the bare demonstrative.
+    original = R._thing_named
+    try:
+        R._thing_named = lambda token: False
+        assert R.find_expression("این لینک چیه").kind == R.KIND_DEICTIC
+    finally:
+        R._thing_named = original
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
 def _imports(tree, *, top_level_only: bool) -> set[str]:
     """The module names a parsed file imports.

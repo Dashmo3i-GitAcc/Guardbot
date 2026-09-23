@@ -59,6 +59,7 @@ from . import (
     config,
     db,
     discourse,
+    entities,
     identity,
     persian_calendar,
     referents,
@@ -327,6 +328,19 @@ def _render_thread(ctx: Ctx) -> str:
     return room_state.render_thread(room_state.read_state(ctx.messages, ctx.anchor))
 
 
+def _render_entities(ctx: Ctx) -> str:
+    """The things the anchor may point at, when they are not people. Tier 0.
+
+    The correction this block exists to make: ``referent_candidates`` offers the
+    room's *members* for a demonstrative, and when the demonstrative means the
+    photograph somebody just posted, that is a wrong lead. The server knows the
+    things exactly — the media kind is a stored column, a link is a regular
+    expression away — so this says so, and says that they are things rather than
+    people, and lets the model decide.
+    """
+    return entities.render(entities.read_entities(ctx.messages, ctx.anchor))
+
+
 def _render_anchor_when(ctx: Ctx) -> str:
     """Where the message's own time words point, from the server's clock. Tier 0.
 
@@ -582,6 +596,11 @@ SOURCES: tuple[Source, ...] = (
     # short to judge.
     Source("reply_graph", TIER_ALWAYS, 600, _render_reply_graph),
     Source("thread", TIER_ALWAYS, 500, _render_thread),
+    # What the anchor may point at when it is not a person — the photo, the link,
+    # the message it replies to. Tier 0: a scan of the window the pass already
+    # read. It goes after the reply graph because the two are read together, and
+    # before ``anchor_when`` so the shortest block stays the cheapest to lose.
+    Source("entities", TIER_ALWAYS, 600, _render_entities),
     # Where the anchor's own time words point, from the server's clock. Last of
     # the tier-0 sources on purpose: it is the shortest block and the one that
     # renders least often (only when the message carries a time word), so if the

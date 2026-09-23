@@ -17,6 +17,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [43. What is this message doing, and what is unanswered](#s43)
 - [44. When does «الان» mean? The server's clock, not the model's](#s44)
 - [45. Who is talking to whom, and is this still the same thread](#s45)
+- [46. What does «این» point at when it is not a person](#s46)
 
 ---
 
@@ -2087,3 +2088,151 @@ sharing one cached call, and that is deliberate: a source that raises must cost
 only its own block, and the scan it repeats is a pass over rows already in memory
 — about 0.17 ms for the pair, against a pass that waits on a model. Zero Gemini
 calls, so the awareness allowance is untouched.
+
+<a id="s46"></a>
+## 46. What does «این» point at when it is not a person
+
+### 46.1 The gap, and the mistake it prevents
+
+§42 gave the server a ranked list of **people** a pronoun may mean. But a
+demonstrative in a group very often points at a **thing** — the photograph
+somebody just posted, the link, the file. When an administrator replies «اینو پاک
+کن» to a photograph, the resolver's honest answer is that it found no person it
+could be, and the block it renders offers the room's members as the things «اینو»
+might mean.
+
+That is a wrong lead, and a wrong-person moderation action is the worst mistake
+available here. So the increment has two halves, and both matter:
+
+* the server now reads the **things** a demonstrative may point at, and says so;
+* the person resolver **stops offering a person** when the word after the
+  demonstrative names a thing — «این لینک» is a link, and the room's members are
+  not candidates for it.
+
+### 46.2 Two records and one reading
+
+* **media** — the row's stored `kind` column (`photo`, `video`, `voice` …), which
+  the capture path wrote from `media.describe`. A stored fact, not an inference.
+  The same fact is also written into the text as a `[kind]` prefix, and that is
+  the fallback when the column is empty — a row captured before the column
+  existed.
+* **links** — a URL in a message is a regular expression away. Deliberately
+  narrow: the scheme form, or a bare `www.` host. A rule that guessed at bare
+  domains would match ordinary Persian words with a dot in them.
+* **the message it replies to** — `reply_message_id` is a stored column, so when
+  the anchor *names* a message («این پیام رو پاک کن») the server can point at the
+  exact row. This is the one reading: it is added **only** when the anchor names
+  a message, because a reply edge always has a target and pointing at it
+  unconditionally would print the transcript's own text back to the model on
+  every reply.
+
+Media and links come from the messages **before** the anchor — the thing a
+demonstrative points at is what the room already has — newest first, bounded.
+
+### 46.3 The restraint is the design
+
+* **A thing is not a person, and the block says so.** The rendered block is
+  headed "things, not people" and, when nothing is named, closes with *"do not act
+  on a person unless the message names one."* It is the correction the resolver's
+  person-candidates need. The sentence is evidence framing, not an instruction —
+  the model still decides.
+* **Nothing to point at renders nothing.** A block saying "no things found" would
+  spend tokens telling the model what the transcript already shows.
+* **The noun table holds stems, and exactly one clitic is stripped** — accepted
+  only when the stripped form is a known noun. «لینکشو» is «لینک» + the object
+  marker and is a link; «فایده», «عکاس» and «پیامدش» are not the nouns they begin
+  with, and are not invented into things. The first draft listed clitic forms
+  instead and missed three of ten.
+
+### 46.4 The bug the guard found, twice
+
+The guard in the person resolver — *do not read a demonstrative before a thing
+word as a person pointer* — is the same shape as the time guard of §44.4, and it
+walked into the same trap. The first version checked the **clitic-stripped** token,
+and `referents`' own stripper had already turned «پیام» into «پی» (`ـام` is in its
+clitic list), so «این پیام رو پاک کن» still read as a person reference. The check
+now reads the **raw** token and lets the entity reader do the one strip that is
+safe — the identical lesson «هفته» taught the time guard.
+
+Two of the eight new cases also turned up a labelling error rather than a reader
+error. `entity-media-newest` and `entity-media-and-link` use a bare «اینو» with
+two people who spoke equally recently and no reply edge. The resolver reports
+**ambiguous** there — two candidates at the same score, a margin of zero — and
+that is the module's documented behaviour: *"when two candidates are genuinely
+close, the honest answer is 'the server could not tell these apart'"*. The cases
+had been labelled `ambiguous: false`, which was the mistake; they now say `true`,
+and the note in the corpus records why. The reading never changed — only the
+label.
+
+### 46.5 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 90 cases — the 82 from §45 plus 8
+entity ones), with the entity reader disabled and enabled:
+
+```
+                                before   after
+cases                               82      90
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.8%   98.9%
+
+the act (abstention is 'unknown')
+  claimed precision              100.0%  100.0%
+  coverage                        78.0%   80.0%
+  recall on labelled cases       100.0%  100.0%
+  false positives / negatives      0 / 0   0 / 0
+
+the things a demonstrative may point at
+  media exact                        -   90 / 90
+  link exact                         -   90 / 90
+  named class exact                  -     8 / 8
+  named class accuracy               -  100.0%
+  block chars max                    -      302
+
+referent resolution
+  needs resolution                  34      39
+  answerable (has an answer)        24      24
+  top-1 accuracy                 100.0%  100.0%
+  ambiguity recall               100.0%  100.0%
+  ambiguity precision            100.0%  100.0%
+  wrong-but-confident                0       0
+
+context overhead per pass        132 chars mean  136 chars mean
+                                  527 max         527 max
+                                 -  +0 chars when there is nothing to point at
+                                 -  +224 mean / +302 max when a block renders
+reading cost per pass                -  ~0.06 ms mean / ~0.10 ms p95
+Gemini calls added                   -        0
+```
+
+Three things in that table are worth saying plainly.
+
+**The entity block costs nothing on the messages that do not need it.** It renders
+on 11 of the 90 cases; the other 79 pay zero characters. The corpus-wide mean
+moves by 3.7 characters, and the maximum block is unchanged at 527 — well inside
+the source's own 600-character budget and the pass-wide ceiling.
+
+**`answerable` did not move; `needs resolution` did.** The eight new cases add
+five whose bare «اینو» leaves the referent open, but none of them has a
+determinate *person* answer — they are about things. So top-1 accuracy is still
+scored over the same 24 cases and still 100%, and the ambiguity precision stayed
+at 100% only after the two labels of §46.4 were corrected.
+
+**Act coverage rose from 78.0% to 80.0%, and that is the corpus, not the reader.**
+The new cases are mostly instructions («این لینک چیه», «این فایل رو بفرست») and the
+act reader gets them right. The floors that matter are unmoved: claimed precision
+100%, false positives 0.
+
+### 46.6 Where it reaches the model
+
+One **tier-0** source in `awareness_context.SOURCES`:
+
+* `entities` — the things the anchor may point at, the class it named, and the
+  "not about a person" correction, or nothing at all when there is neither.
+
+It reads `Ctx`, never the database, and it is pure at import time — no `db`, no
+`config`, no `pool`, no `rbac`, and not even `media`, whose kind table it declines
+to duplicate. `entities` is the only module `awareness_context` imports that
+`referents` also imports, and `referents` reaches it **late and guarded**, the same
+rule every cross-module borrow here follows: a host without the list falls back to
+the reading the resolver gave before the entity reader existed, never to an import
+error. Zero Gemini calls, so the awareness allowance is untouched.

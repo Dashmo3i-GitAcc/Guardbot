@@ -7,9 +7,9 @@ The brief for this stage is explicit that no claim of "smarter" may be made
 without a number, and that the number must be reproducible. This is where the
 numbers come from. It runs the *deterministic* layers — the name matcher, the
 deictic expression finder, the referent resolver, the act reader, the open-question
-reader, the time-word reader and the room-state reader — over a labelled corpus
-and reports accuracy, ambiguity behaviour, the cost in microseconds, and the size
-of the block the model would be shown.
+reader, the time-word reader, the room-state reader and the entity reader — over a
+labelled corpus and reports accuracy, ambiguity behaviour, the cost in microseconds,
+and the size of the block the model would be shown.
 
 What it can and cannot measure
 ------------------------------
@@ -57,6 +57,7 @@ from app import (  # noqa: E402
     addressing,
     config,
     discourse,
+    entities,
     referents,
     room_state,
     temporal,
@@ -89,7 +90,7 @@ def _row(raw: dict) -> dict:
         "reply_message_id": int(raw.get("reply_message_id") or 0),
         "directed": bool(raw.get("directed") or False),
         "actor": bool(raw.get("actor") or False),
-        "kind": "",
+        "kind": str(raw.get("kind") or ""),
     }
 
 
@@ -128,6 +129,15 @@ def evaluate(cases: dict) -> dict:
         graph_block = room_state.render_graph(state)
         thread_block = room_state.render_thread(state)
 
+        # Timed apart, for the same reason the time reader is: the entity reader
+        # walks the window, and its cost must not be hidden inside the resolver's.
+        entity_started = time.perf_counter()
+        ent = entities.read_entities(window, anchor)
+        entity_block = entities.render(ent)
+        entity_us = (time.perf_counter() - entity_started) * 1_000_000
+        media = ent.of_kind(entities.KIND_MEDIA)
+        newest_media = media[0].detail if media else ""
+
         top = resolution.top()
         top_id = top.user_id if top else None
 
@@ -146,6 +156,14 @@ def evaluate(cases: dict) -> dict:
         expected_focus = int(expected_state.get("focus") or 0)
         has_relation_label = "relation" in expected_state
         expected_relation = str(expected_state.get("relation") or "")
+        # The newest media kind and whether a link is present are read off the
+        # row's stored kind and its text, so they are facts and are scored over
+        # every case. The class the message *names* is scored only where labelled.
+        expected_entities = expect.get("entities") or {}
+        expected_newest_media = str(expected_entities.get("newest_media") or "")
+        expected_has_link = bool(expected_entities.get("has_link") or False)
+        has_named_label = "named" in expected_entities
+        expected_named = str(expected_entities.get("named") or "")
 
         detail.append(
             {
@@ -184,9 +202,18 @@ def evaluate(cases: dict) -> dict:
                 "got_relation": state.relation,
                 "graph_chars": len(graph_block),
                 "thread_chars": len(thread_block),
+                "expected_newest_media": expected_newest_media,
+                "got_newest_media": newest_media,
+                "expected_has_link": expected_has_link,
+                "got_has_link": bool(ent.of_kind(entities.KIND_LINK)),
+                "has_named_label": has_named_label,
+                "expected_named": expected_named,
+                "got_named": ent.named,
+                "entity_chars": len(entity_block),
                 "block_chars": len(block),
                 "us": elapsed_us,
                 "when_us": when_us,
+                "entity_us": entity_us,
                 "kind_ok": expression.kind == expect["expression_kind"],
                 "addressed_ok": bool(addressed) == bool(expect["addressed"]),
                 "act_ok": act.kind == expect.get("act", discourse.ACT_UNKNOWN),
@@ -195,6 +222,9 @@ def evaluate(cases: dict) -> dict:
                 == expected_edges,
                 "focus_ok": state.focus_id == expected_focus,
                 "relation_ok": state.relation == expected_relation,
+                "media_ok": newest_media == expected_newest_media,
+                "link_ok": bool(ent.of_kind(entities.KIND_LINK)) == expected_has_link,
+                "named_ok": ent.named == expected_named,
             }
         )
 
@@ -277,6 +307,12 @@ def _metrics(detail: list[dict]) -> dict:
     relation_cases = [r for r in detail if r["has_relation_label"]]
     edges_expected = [r for r in detail if r["expected_edges"]]
     edges_claimed = [r for r in detail if r["got_edges"]]
+
+    # ── The things the anchor may point at ────────────────────────────────
+    # The newest media kind and whether a link is present are read off the row, so
+    # they are scored over every case. The class the message names is a reading of
+    # the words, so it is scored only where it was labelled.
+    named_cases = [r for r in detail if r["has_named_label"]]
 
     return {
         "cases": len(detail),
@@ -368,6 +404,12 @@ def _metrics(detail: list[dict]) -> dict:
         },
         "graph_chars_max": max((r["graph_chars"] for r in detail), default=0),
         "thread_chars_max": max((r["thread_chars"] for r in detail), default=0),
+        "media_exact": sum(1 for r in detail if r["media_ok"]),
+        "link_exact": sum(1 for r in detail if r["link_ok"]),
+        "named_cases": len(named_cases),
+        "named_correct": sum(1 for r in named_cases if r["named_ok"]),
+        "named_accuracy": rate(named_cases, lambda r: r["named_ok"]),
+        "entity_block_chars_max": max((r["entity_chars"] for r in detail), default=0),
         "needs_resolution": len(needs),
         "answerable": len(answerable),
         "resolution_top1_accuracy": rate(
@@ -395,6 +437,16 @@ def _metrics(detail: list[dict]) -> dict:
         "when_us_mean": statistics.fmean([r["when_us"] for r in detail]) if detail else 0.0,
         "when_us_p95": (
             sorted(r["when_us"] for r in detail)[
+                min(len(detail) - 1, int(len(detail) * 0.95))
+            ]
+            if detail
+            else 0.0
+        ),
+        "entity_us_mean": (
+            statistics.fmean([r["entity_us"] for r in detail]) if detail else 0.0
+        ),
+        "entity_us_p95": (
+            sorted(r["entity_us"] for r in detail)[
                 min(len(detail) - 1, int(len(detail) * 0.95))
             ]
             if detail
@@ -468,6 +520,13 @@ def report(result: dict, *, verbose: bool = False) -> str:
         ),
         f"  graph / thread chars max   {m['graph_chars_max']} / {m['thread_chars_max']}",
         "",
+        f"the things a demonstrative may point at (class over {m['named_cases']} labelled)",
+        f"  media exact                {m['media_exact']} / {m['cases']}",
+        f"  link exact                 {m['link_exact']} / {m['cases']}",
+        f"  named class exact          {m['named_correct']} / {m['named_cases']}",
+        f"  named class accuracy       {_pct(m['named_accuracy'])}",
+        f"  block chars max            {m['entity_block_chars_max']}",
+        "",
         f"referent resolution ({m['answerable']} answerable of {m['needs_resolution']} open)",
         f"  top-1 accuracy             {_pct(m['resolution_top1_accuracy'])}",
         f"  ambiguity recall           {_pct(m['ambiguity_recall'])}",
@@ -483,6 +542,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  block chars mean / max     {m['block_chars_mean']:.0f} / {m['block_chars_max']}",
         f"  resolver us mean / p95     {m['us_mean']:.0f} / {m['us_p95']:.0f}",
         f"  time-word us mean / p95    {m['when_us_mean']:.0f} / {m['when_us_p95']:.0f}",
+        f"  entity us mean / p95       {m['entity_us_mean']:.0f} / {m['entity_us_p95']:.0f}",
         "",
     ]
     failures = [
@@ -490,7 +550,9 @@ def report(result: dict, *, verbose: bool = False) -> str:
         for r in result["detail"]
         if not r["kind_ok"] or not r["addressed_ok"] or not r["act_ok"]
         or not r["when_ok"] or not r["edges_ok"] or not r["focus_ok"]
+        or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
+        or (r["has_named_label"] and not r["named_ok"])
         or (r["requires_resolution"] and r["expected_referent"] is not None
             and r["got_referent"] != r["expected_referent"])
         or (r["expected_ambiguous"] and not r["got_ambiguous"])
@@ -511,6 +573,9 @@ def report(result: dict, *, verbose: bool = False) -> str:
                 f"edges {r['got_edges']}/{r['expected_edges']} "
                 f"focus {r['got_focus']}/{r['expected_focus']} "
                 f"rel {r['got_relation']!r}/{r['expected_relation']!r} "
+                f"media {r['got_newest_media']!r}/{r['expected_newest_media']!r} "
+                f"link {r['got_has_link']}/{r['expected_has_link']} "
+                f"named {r['got_named']!r}/{r['expected_named']!r} "
                 f"q {r['got_questions']}/{r['expected_questions']}"
             )
             if verbose and r["note"]:

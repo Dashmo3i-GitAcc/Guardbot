@@ -90,7 +90,10 @@ def _fold(text: str) -> str:
 #   candidates are offered with that warning attached rather than suppressed.
 # * ``deictic`` — the bare «این», «اون», «همون». The weakest about personhood:
 #   it may point at a message, a config or a link. Reported, but the block that
-#   renders it says so.
+#   renders it says so. A demonstrative immediately followed by a word that
+#   names a thing or a time is not reported at all — see ``_thing_named`` and
+#   ``_temporal_nouns``: «این لینک» is a link and «همین الان» is a moment, and
+#   neither is a person the server should offer as a candidate.
 KIND_PERSON = "person"
 KIND_ROLE = "role"
 KIND_PRIOR = "prior"
@@ -187,6 +190,28 @@ def _temporal_nouns() -> frozenset[str]:
         return frozenset(temporal.TEMPORAL_NOUNS)
     except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
         return frozenset()
+
+
+def _thing_named(token: str) -> bool:
+    """Whether the word right after a demonstrative names a *thing*.
+
+    «این لینک», «اون عکس», «همین پیام» point at a link, a file, a message — not
+    at a person — and the reader that knows which Persian nouns name things
+    already exists: ``app/entities.py``'s ``thing_kind``. This borrows it rather
+    than keeping a second list, for the reason every borrow in this module
+    exists: two lists drift, and the drift shows up as a wrong-person mistake.
+
+    Late and guarded, exactly as ``_action_words`` and ``_temporal_nouns`` are.
+    A missing lexicon degrades to "no thing word known", which is precisely the
+    reading this module gave before the entity reader existed — never an import
+    error, and never a lost referent.
+    """
+    try:
+        from . import entities
+
+        return bool(entities.thing_kind(token))
+    except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
+        return False
 
 
 def _clitic_person(token: str) -> bool:
@@ -315,13 +340,25 @@ def find_expression(text: str | None) -> Expression:
 
     # The bare demonstratives, last because they are the weakest about
     # personhood. A separated object marker is folded into the surface so the
-    # rendered block reads the way the message did. A demonstrative directly
-    # before a time word is a *time*, not a person — «همین الان», «این هفته»,
-    # «اون موقع» — and is skipped here; the check reads the raw token, because
-    # the clitic stripper would have turned «هفته» into «هفت».
+    # rendered block reads the way the message did. Two words make a
+    # demonstrative *not* a person pointer, and both are skipped here:
+    #
+    # * a time word — «همین الان», «این هفته», «اون موقع». The check reads the
+    #   raw token, because the clitic stripper would have turned «هفته» into
+    #   «هفت».
+    # * a thing word — «این لینک», «اون عکس», «همین پیام». «این لینک چیه» asks
+    #   about a link; offering the room's members as the people «این» might mean
+    #   is a wrong lead, and a wrong-person moderation action is the worst
+    #   mistake available here. The entity reader renders the things instead.
+    #   This check reads the raw token too, and for the same reason as the time
+    #   check: this module's stripper turns «پیام» into «پی», so the noun would
+    #   never be recognized. ``entities.thing_kind`` does its own single strip,
+    #   which is the one that is safe.
     for index, token in enumerate(bare):
         if _deictic(token):
             if index + 1 < len(tokens) and tokens[index + 1] in _temporal_nouns():
+                continue
+            if index + 1 < len(tokens) and _thing_named(tokens[index + 1]):
                 continue
             extra = 0
             if index + 1 < len(bare) and bare[index + 1] in _OBJECT_MARKERS:
