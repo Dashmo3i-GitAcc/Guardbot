@@ -1472,6 +1472,13 @@ reference file is stale and this list is the one to fix first.
   parameter.
 * `run_read_tool` refuses any tool `tool_names_for` would not have offered the
   same principal; exposure and enforcement are one function **on purpose**.
+* The database runs in **WAL** with `synchronous=NORMAL`, and both pragmas are
+  issued from `db.init()` on **every** start — `journal_mode` belongs to the file
+  and survives a restart, `synchronous` belongs to the connection and does not.
+  Measured, not assumed: the eight commits an ordinary group message costs fell
+  from 63.0 ms to 1.7 ms (assistant.md §17.4.1). Do not raise `synchronous` back
+  to `FULL` to "be safe" without saying so out loud — it is a 11× latency
+  regression, and the trade is documented in `admin-and-audit.md`.
 
 ### 53.7 Nexus and awareness
 

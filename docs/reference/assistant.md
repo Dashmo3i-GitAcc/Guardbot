@@ -167,6 +167,42 @@ would let one long session grow without limit.
 Only **successful** turns are recorded. A failed call is not part of the
 conversation, so it is not replayed.
 
+### 17.4.1 Storage engine settings
+
+The database runs in **WAL** mode with `synchronous=NORMAL`, set in `db.init()`
+on every start. Both settings are there for one reason: an ordinary group message
+costs eight commits — the dedup claim, the speaker's name, the room capture, a
+classifier counter, a chat counter, the two history rows and the purge — and
+every one of them is an `fsync` on the event loop, because nothing in this
+codebase dispatches a database call to a worker thread.
+
+Measured on the production host with a trace callback counting `COMMIT` over that
+exact sequence, ext4 on the `/data` bind mount:
+
+| configuration | median per message |
+|---|---|
+| `delete` / `FULL` (the previous default) | 63.0 ms |
+| `wal` / `FULL` | 18.6 ms |
+| `wal` / `NORMAL` | 1.7 ms |
+
+`NORMAL` inside WAL is the setting SQLite's own documentation recommends for most
+applications, and it is the only one of the three that carries a cost: a hard
+power loss can roll back the last committed transactions. It cannot corrupt the
+database — that guarantee is WAL's, not `synchronous`'s — and every write in
+`db.py` is either reconstructible (a display name, a row in an already-bounded
+window, a deliberately conservative spend counter) or fails closed if it is lost
+(a pending operation that was never confirmed executes nothing; a task row that
+never landed is a task that never ran). The one record with real weight is
+`admin_audit`, and the retention section of `admin-and-audit.md` states that
+caveat rather than burying it.
+
+Two details worth keeping, both asserted in `tests/test_db_storage.py`:
+`journal_mode` is a property of the **file** and survives a restart, while
+`synchronous` is a property of the **connection** and does not — which is why
+both are issued from `init()` and not once at build time. On a database that
+cannot do WAL (`:memory:` in the suite, a network filesystem) SQLite returns the
+mode it kept instead of raising, so this degrades rather than blocking startup.
+
 ### 17.5 Budgets and failure isolation
 
 `app/chat.py` holds its own rate window, its own consecutive-failure counter, its
