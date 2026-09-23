@@ -527,6 +527,37 @@ def test_the_thing_lexicon_is_borrowed_lazily_and_guarded():
         R._thing_named = original
 
 
+# ── The Arabic block's punctuation is not part of the word ────────────────
+# «؟» «،» «؛» live inside \u0600-\u06ff, so they stayed glued to the word before
+# them. Two failures followed from that: a name at the end of a question was
+# never matched, and a thing noun at the end of a question was never recognized,
+# so the resolver offered the room's members for a message about a link.
+def test_a_name_at_the_end_of_a_question_is_still_a_name():
+    people = {11: {"name": "سارا", "at": 900}}
+    assert R._name_hits("بن کن سارا؟", people) == {11: "سارا"}
+    assert R._name_hits("بن کن سارا،", people) == {11: "سارا"}
+    assert R._name_hits("بن کن سارا", people) == {11: "سارا"}
+
+
+def test_a_stated_id_at_the_end_of_a_question_is_still_an_id():
+    people = {22: {"name": "رضا", "at": 900}}
+    assert R._stated_id("بنش کن 22؟", people) == 22
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["این لینک؟", "این لینکو ببین،", "این پیام؟", "این فایل!", "این عکس؛"],
+)
+def test_a_thing_word_before_a_mark_is_still_not_a_person(text):
+    assert R.find_expression(text).kind == ""
+
+
+def test_a_bare_demonstrative_with_a_mark_is_still_a_person_pointer():
+    """The mark is stripped from the token, not from the message's meaning."""
+    assert R.find_expression("اینو بن کن؟").kind == R.KIND_DEICTIC
+    assert R.find_expression("اونو پاک کن!").kind == R.KIND_DEICTIC
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
 def _imports(tree, *, top_level_only: bool) -> set[str]:
     """The module names a parsed file imports.

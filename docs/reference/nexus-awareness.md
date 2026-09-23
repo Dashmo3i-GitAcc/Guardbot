@@ -18,6 +18,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [44. When does «الان» mean? The server's clock, not the model's](#s44)
 - [45. Who is talking to whom, and is this still the same thread](#s45)
 - [46. What does «این» point at when it is not a person](#s46)
+- [47. The question mark was part of the word](#s47)
 
 ---
 
@@ -2196,20 +2197,25 @@ referent resolution
   ambiguity precision            100.0%  100.0%
   wrong-but-confident                0       0
 
-context overhead per pass        132 chars mean  136 chars mean
-                                  527 max         527 max
-                                 -  +0 chars when there is nothing to point at
-                                 -  +224 mean / +302 max when a block renders
+referent block, mean / max       132 / 527      131 / 527
+the entity source
+  cases it renders on                  -       11 / 90
+  chars it adds when it does           -  +224 mean / +302 max
+  chars it adds when it does not       -              0
 reading cost per pass                -  ~0.06 ms mean / ~0.10 ms p95
 Gemini calls added                   -        0
 ```
 
+The harness's ``block_chars`` is the **referent candidates** block and nothing
+else — each other reader reports its own size beside its own metrics — and the
+report line now says so. It is quoted here as the referent block, not as "the
+context".
+
 Three things in that table are worth saying plainly.
 
 **The entity block costs nothing on the messages that do not need it.** It renders
-on 11 of the 90 cases; the other 79 pay zero characters. The corpus-wide mean
-moves by 3.7 characters, and the maximum block is unchanged at 527 — well inside
-the source's own 600-character budget and the pass-wide ceiling.
+on 11 of the 90 cases; the other 79 pay zero characters, and the largest block it
+ever renders is 302 — well inside the source's own 600-character budget.
 
 **`answerable` did not move; `needs resolution` did.** The eight new cases add
 five whose bare «اینو» leaves the referent open, but none of them has a
@@ -2236,3 +2242,111 @@ to duplicate. `entities` is the only module `awareness_context` imports that
 rule every cross-module borrow here follows: a host without the list falls back to
 the reading the resolver gave before the entity reader existed, never to an import
 error. Zero Gemini calls, so the awareness allowance is untouched.
+
+<a id="s47"></a>
+## 47. The question mark was part of the word
+
+### 47.1 The bug, in one line
+
+Every reader in this stage splits a message into tokens with the same idea: a
+token is a run of characters that are not separators, where a separator is
+"anything that is not a word character and not in the Persian block". The
+character class is written `[^\w\u0600-\u06ff]`.
+
+The Persian block, `\u0600-\u06ff`, **contains the punctuation**. «؟» is
+U+061F, «،» is U+060C, «؛» is U+061B — all inside the range. So the class meant
+to *end* a word kept the mark *inside* it, and `این لینک؟` tokenized as
+`["این", "لینک؟"]`.
+
+A trailing question mark is one of the most common things in this room. Every
+lexicon lookup on the last word of a message was failing because of it, and each
+failure landed in the direction that matters here:
+
+* **`entities` named no thing.** `این لینک؟` did not contain the noun «لینک», so
+  the block that says "these are things, not people" was silent.
+* **`referents` offered people instead.** With no thing recognized, the guard
+  added in §46 never fired, and the resolver offered the room's members as the
+  people «این» might mean — the exact wrong lead §46 exists to prevent, defeated
+  by a question mark.
+* **`referents` lost names and ids.** `بن کن سارا؟` did not contain the name
+  «سارا», so a named person was invisible when the name was the last word.
+* **`discourse` lost acts.** `ممنون؟` was not the greeting «ممنون» and
+  `اشتباه؟` was not the correction «اشتباه», so both fell through to the
+  question the mark alone makes — and both *outrank* a question.
+* **`room_state` lost the thread.** `چی شده؟` carried the token «شده؟», which is
+  not the stopword «شده», so two messages that differed only by a question mark
+  shared no content word.
+
+### 47.2 The fix, and why it is five copies
+
+The punctuation of the Arabic block is now named explicitly in the class, so it
+separates like every other separator.
+
+The pattern is **copied** into each reader rather than imported from a shared
+helper, and that is a deliberate trade. Each reader is pure at import — `re`,
+`unicodedata`, `dataclasses` and nothing else — and that property is asserted by
+a test in each file. Importing a shared tokenizer would either break the property
+or add an edge to the import graph that those tests exist to keep small. So the
+five copies stay, and `tests/test_awareness_context.py` **pins them together**:
+one test asserts the five patterns are identical and that each one splits the
+punctuation off. A sixth reader, or an edit to one copy, fails that test.
+
+`addressing` is not touched. It filters each token through `_letters`, which
+keeps only alphanumerics, so «نکسوس؟» was already read as the name — the module
+was immune by construction, and the fix would have been a change with no
+behaviour behind it.
+
+### 47.3 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 96 cases — the 90 from §46 plus 6
+`punctuation` ones), with the old pattern restored and with the fix:
+
+```
+                                 old pattern     fixed
+cases                                     96        96
+expression accuracy                    97.9%    100.0%
+act accuracy                           97.9%    100.0%
+act claimed precision                  97.4%    100.0%
+act recall                             97.4%    100.0%
+act false positives / negatives          0 / 0     0 / 0
+  per class, social                     3 / 4     4 / 4
+  per class, correction                 2 / 3     3 / 3
+relation exact                          11 / 12   12 / 12
+named class exact                        8 / 10   10 / 10
+ambiguity precision                    85.7%    100.0%
+referent top-1 accuracy, answerable    96.0%    100.0%
+referent block chars mean / max      137 / 527 131 / 527
+Gemini calls added                          -         0
+```
+
+Every new case failed before the fix and passes after, and **no existing case
+changed its reading** — the fix is additive on this corpus, which is the shape a
+correctness fix should have:
+
+```
+punctuation-case            before            after
+punctuation-thing-question  kind deictic,     no expression, link named
+                            named ''
+punctuation-message-question kind deictic,    no expression, message named
+                            named ''
+punctuation-name-at-end     referent 22       referent 11 (the named person)
+punctuation-greeting-mark   act question      act social
+punctuation-correction-mark act question      act correction
+punctuation-thread-mark     relation shifts   relation continues
+```
+
+The referent block **shrank** by 240 and 297 characters on the two cases where it
+was offering the wrong lead — the fix removes context the model should never have
+been given, which is why the mean moves down rather than up. Nothing else in the
+context changed size: the other readers' blocks are unchanged, and no source was
+added.
+
+### 47.4 A known boundary this exposed
+
+The fix makes one pre-existing gap visible without causing it: a **multi-word**
+social phrase is not in the lexicon. `_SOCIAL_WORDS` lists «خستهنباشید» as one
+token, so «خسته نباشید» (two words) reads as `unknown`, and with a question mark
+it reads as a question. That is a lexicon-and-segmentation question, not a
+punctuation one — it reads `unknown` with and without the mark — and it is
+recorded here rather than fixed, because fixing it means deciding how multi-word
+phrases enter a token-level lexicon, which is its own change.

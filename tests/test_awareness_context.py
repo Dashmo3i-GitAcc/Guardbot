@@ -573,6 +573,42 @@ def test_a_clock_reading_of_zero_renders_no_date_rather_than_todays():
 
 
 # ── Wiring, and the boundary that does not move ───────────────────────────
+def test_every_reader_splits_tokens_the_same_way():
+    """Five readers, one tokenizer — pinned together so it cannot drift.
+
+    «؟» «،» «؛» live inside ``\\u0600-\\u06ff``, so a "split on anything that is
+    not a Persian letter" class keeps them glued to the word before it. Every
+    lexicon lookup on the last word of a message then fails: «این لینک؟» names no
+    thing, «سارا؟» names nobody, «ممنون؟» is not a greeting, and «چی شده؟» is not
+    the sentence «چی شده».
+
+    The pattern is copied into each reader rather than imported, because each one
+    is pure at import and importing a shared helper would be a new edge in a graph
+    that is asserted elsewhere. The copies are therefore pinned here: if a sixth
+    reader is added, or one of these is edited, the test says so.
+    """
+    import app.discourse as discourse
+    import app.entities as entities
+    import app.referents as referents
+    import app.room_state as room_state
+
+    readers = {
+        "discourse": discourse,
+        "entities": entities,
+        "referents": referents,
+        "room_state": room_state,
+    }
+    patterns = {name: module._TOKEN_SPLIT.pattern for name, module in readers.items()}
+    assert len(set(patterns.values())) == 1, patterns
+
+    # …and the one pattern splits the Arabic block's punctuation off the word.
+    for name, module in readers.items():
+        assert module._TOKEN_SPLIT.split("این لینک؟") == ["این", "لینک", ""], name
+        assert module._TOKEN_SPLIT.split("سارا؟") == ["سارا", ""], name
+        assert module._TOKEN_SPLIT.split("بود،") == ["بود", ""], name
+        assert module._TOKEN_SPLIT.split("اینو بن کن؛") == ["اینو", "بن", "کن", ""], name
+
+
 def test_the_pass_context_carries_the_roster_and_the_staged_blocks():
     awareness_context.note_room(CHAT, "Guard Group", "supergroup")
     db.awareness_set(

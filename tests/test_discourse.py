@@ -79,6 +79,56 @@ def test_the_vocabulary_is_closed_and_the_abstention_is_not_in_it():
     }
 
 
+# ── The Arabic block's punctuation is not part of the word ────────────────
+# «؟» «،» «؛» live inside \u0600-\u06ff, so a "split on anything that is not a
+# Persian letter" class kept them glued to the word before them. A trailing
+# question mark is one of the most common things in a room, and every lexicon
+# lookup on the last word of a message was failing because of it.
+@pytest.mark.parametrize(
+    "text,tokens",
+    [
+        ("این لینک؟", ["این", "لینک"]),
+        ("سارا؟", ["سارا"]),
+        ("بود،", ["بود"]),
+        ("چی شده؟", ["چی", "شده"]),
+        ("سلام؛", ["سلام"]),
+        ("اینو بن کن،", ["اینو", "بن", "کن"]),
+        ("چه خبر!", ["چه", "خبر"]),
+    ],
+)
+def test_punctuation_is_a_separator_not_part_of_a_word(text, tokens):
+    assert D._tokens(text) == tokens
+
+
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        # A greeting or a correction with a question mark is still a greeting or
+        # a correction — and both outrank the question the mark alone would make.
+        ("ممنون؟", D.ACT_SOCIAL),
+        ("ممنون،", D.ACT_SOCIAL),
+        ("سلام؟", D.ACT_SOCIAL),
+        ("خداحافظ؟", D.ACT_SOCIAL),
+        ("اشتباه؟", D.ACT_CORRECTION),
+        ("اشتباه،", D.ACT_CORRECTION),
+        ("نه گفتم مهدی نه سارا؟", D.ACT_CORRECTION),
+        # …and a directive keeps its directive when the mark follows it.
+        ("اینو بن کن؟", D.ACT_INSTRUCTION),
+        ("ساکتش کن!", D.ACT_INSTRUCTION),
+        ("بررسی کن، ببین چی شده", D.ACT_INSTRUCTION),
+    ],
+)
+def test_the_act_survives_a_trailing_mark(text, kind):
+    assert D.read_act(text).kind == kind
+
+
+def test_a_question_mark_on_its_own_still_makes_a_question():
+    """The fix must not swallow the mark as an act signal."""
+    assert D.read_act("قیمت دلار چنده؟").kind == D.ACT_QUESTION
+    assert D.read_act("کی میاد؟").kind == D.ACT_QUESTION
+
+
+
 def test_a_correction_outranks_the_instruction_it_carries():
     """«نه منظورم مهدی بود، اینو بن کن» is fixing, and it happens to instruct."""
     act = D.read_act("نه منظورم مهدی بود، اینو بن کن")

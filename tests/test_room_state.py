@@ -286,6 +286,40 @@ def test_nothing_is_rendered_for_an_empty_room():
     assert R.render_thread(R.RoomState()) == ""
 
 
+# ── The Arabic block's punctuation is not part of the word ────────────────
+# «؟» «،» «؛» live inside \u0600-\u06ff, so «شده؟» was not the stopword «شده» and
+# two messages that differed only by a question mark shared no content word.
+@pytest.mark.parametrize(
+    "with_mark,without",
+    [
+        ("چی شده؟", "چی شده"),
+        ("قیمت چنده؟", "قیمت چنده"),
+        ("نتیجه چیه،", "نتیجه چیه"),
+        ("فایل رو دیدی؛", "فایل رو دیدی"),
+    ],
+)
+def test_a_mark_does_not_change_the_content_words(with_mark, without):
+    assert R.content_tokens(with_mark) == R.content_tokens(without)
+
+
+def test_a_marked_word_still_continues_the_thread():
+    """The one shared content word carries the question mark.
+
+    Before the fix «چنده؟» was not «چنده», the two messages shared nothing, and
+    the thread read as a topic shift.
+    """
+    window = [row(11, "قیمت چنده", 900, mid=1, name="سارا")]
+    anchor = row(22, "چنده؟ گرون شده", 1000, mid=2, name="رضا")
+    state = R.read_state(window, anchor)
+    assert state.relation == R.RELATION_CONTINUES
+    assert "چنده" in state.shared
+
+
+def test_a_thing_word_with_a_mark_is_still_content():
+    """And the mark does not turn a thing noun into a different word."""
+    assert R.content_tokens("این لینک؟") == R.content_tokens("این لینک")
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
 def _imports(tree, *, top_level_only: bool) -> set[str]:
     import ast

@@ -232,7 +232,14 @@ def _clitic_person(token: str) -> bool:
     stem = token[:-1]
     return len(stem) >= 2 and stem in words
 
-_TOKEN_SPLIT = re.compile(r"[^\w\u0600-\u06ff]|_")
+# The Arabic block's punctuation — «؟» «،» «؛» — lives *inside* ``\u0600-\u06ff``,
+# so it has to be excluded by name or it stays glued to the word before it:
+# «سارا؟» would not contain the name «سارا», and «این لینک؟» would not contain the
+# noun «لینک» — which is how a message about a link ended up offering the room's
+# members as the people «این» might mean.
+_TOKEN_SPLIT = re.compile(
+    r"[^\w\u0600-\u06ff]|[\u060c\u061b\u061e\u061f\u066a\u066b\u066c\u066d\u06d4]|_"
+)
 
 
 def _tokens(text: str) -> list[str]:

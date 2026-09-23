@@ -131,7 +131,14 @@ def _fold(text: str | None) -> str:
     return " ".join(folded.split())
 
 
-_TOKEN_SPLIT = re.compile(r"[^\w\u0600-\u06ff]|_")
+# The Arabic block's punctuation — «؟» «،» «؛» — lives *inside* ``\u0600-\u06ff``,
+# so it has to be excluded by name or it stays glued to the word before it:
+# «این لینک؟» would not contain the noun «لینک», and this module would report no
+# thing while the person resolver offered the room's members for a message about
+# a link. A trailing question mark is one of the most common things in a room.
+_TOKEN_SPLIT = re.compile(
+    r"[^\w\u0600-\u06ff]|[\u060c\u061b\u061e\u061f\u066a\u066b\u066c\u066d\u06d4]|_"
+)
 
 
 def _tokens(text: str | None) -> list[str]:

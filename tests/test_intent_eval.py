@@ -336,6 +336,35 @@ def test_the_corpus_labels_every_media_or_link_row_it_contains():
                 assert labelled["newest_media"] or labelled["has_link"], case["id"]
 
 
+# ── The Arabic block's punctuation ────────────────────────────────────────
+def test_a_trailing_mark_never_changes_a_reading():
+    """«؟» «،» «؛» are separators, not part of the word before them.
+
+    Each of these cases was wrong before the tokenizer fix, and in the direction
+    that matters: a thing noun at the end of a question went unrecognized, so the
+    person resolver offered the room's members for a message about a link.
+    """
+    m = result()
+    detail = {r["id"]: r for r in m["detail"]}
+    ids = sorted(
+        c["id"]
+        for c in eval_intent.load_cases()["cases"]
+        if c.get("category") == "punctuation"
+    )
+    assert len(ids) >= 6, ids
+    for case_id in ids:
+        r = detail[case_id]
+        assert r["kind_ok"], case_id
+        assert r["act_ok"], case_id
+        assert r["edges_ok"] and r["focus_ok"], case_id
+        assert r["media_ok"] and r["link_ok"], case_id
+        assert r["when_ok"], case_id
+        if r["has_named_label"]:
+            assert r["named_ok"], case_id
+        if r["has_relation_label"]:
+            assert r["relation_ok"], case_id
+
+
 def test_the_harness_runs_without_a_database_or_a_key():
     """It scores text, so it must work on a bare checkout."""
     assert eval_intent.load_cases()["cases"]

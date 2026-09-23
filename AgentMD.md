@@ -1726,6 +1726,20 @@ reference file is stale and this list is the one to fix first.
   is the correction the resolver's person-candidates need, because acting on a
   person when the message was about a photograph is the worst mistake available
   here.
+* The Arabic block's **punctuation is a separator, not part of a word**: «؟»
+  «،» «؛» sit *inside* `\u0600-\u06ff`, so a "split on anything that is not a
+  Persian letter" class keeps them glued to the word before it. Every reader that
+  looks a word up in a lexicon must exclude them by name, or «این لینک؟» names no
+  thing, «سارا؟» names nobody, «ممنون؟» is not a greeting, and «چی شده؟» is not
+  the sentence «چی شده». The pattern is **copied** into each reader (they are
+  pure at import, and a shared helper would be a new edge in the graph) and
+  `tests/test_awareness_context.py` pins the copies together so they cannot
+  drift. `addressing` is immune by construction — `_letters` keeps only
+  alphanumerics — and is deliberately left alone.
+* A **trailing mark never changes a reading**: `discourse`'s act, `referents`'s
+  name/id matching and thing guard, `entities`'s noun lookup and `room_state`'s
+  content words all hold with the mark attached. `tools/eval_intent.py` has a
+  `punctuation` category and a floor that fails if any of those regress.
 
 ### 53.8 The assistant
 

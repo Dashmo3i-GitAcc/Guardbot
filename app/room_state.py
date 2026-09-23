@@ -128,7 +128,13 @@ def _fold(text: str | None) -> str:
     return " ".join(folded.split())
 
 
-_TOKEN_SPLIT = re.compile(r"[^\w\u0600-\u06ff]|_")
+# The Arabic block's punctuation — «؟» «،» «؛» — lives *inside* ``\u0600-\u06ff``,
+# so it has to be excluded by name or it stays glued to the word before it:
+# «چی شده؟» would carry the token «شده؟», which is not the stopword «شده», and
+# two messages that differ only by a question mark would share no content word.
+_TOKEN_SPLIT = re.compile(
+    r"[^\w\u0600-\u06ff]|[\u060c\u061b\u061e\u061f\u066a\u066b\u066c\u066d\u06d4]|_"
+)
 
 
 def _tokens(text: str | None) -> list[str]:

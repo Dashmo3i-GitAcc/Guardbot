@@ -251,7 +251,16 @@ _CLITICS = ("رو", "را", "ها", "های", "یه", "یی", "ای", "ام", "�
 
 # ``_`` is a separator as well as punctuation: a Telegram username is
 # ``@nexus_bot``, and ``\w`` would keep the whole thing as one token.
-_TOKEN_SPLIT = re.compile(r"[^\w\u0600-\u06ff]|_")
+#
+# The Arabic block's **punctuation** is named explicitly, and that is a fix
+# rather than a flourish. «؟» «،» «؛» live *inside* ``\u0600-\u06ff``, so a
+# "split on anything that is not a Persian letter" class keeps them glued to the
+# word before them: «این لینک؟» did not contain the word «لینک», «سارا؟» did not
+# contain the name «سارا», and «ممنون؟» did not contain the greeting «ممنون».
+# A trailing question mark is one of the most common things in this room.
+_TOKEN_SPLIT = re.compile(
+    r"[^\w\u0600-\u06ff]|[\u060c\u061b\u061e\u061f\u066a\u066b\u066c\u066d\u06d4]|_"
+)
 
 _QUESTION_MARKS = ("?", "؟", "؟؟", "??")
 

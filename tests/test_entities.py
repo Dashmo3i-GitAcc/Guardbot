@@ -95,6 +95,31 @@ def test_an_ordinary_word_that_ends_like_a_clitic_is_not_a_thing(text):
     assert E.named_kind(text) == ("", "")
 
 
+# ── The Arabic block's punctuation is not part of the word ────────────────
+# «؟» «،» «؛» live inside \u0600-\u06ff, so the noun at the end of a question
+# was never looked up: «این لینک؟» named no thing, and the person resolver
+# offered the room's members for a message about a link.
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("این لینک؟", E.KIND_LINK),
+        ("این لینکو ببین،", E.KIND_LINK),
+        ("این پیام؟", E.KIND_MESSAGE),
+        ("این فایل؟", E.KIND_MEDIA),
+        ("این عکس،", E.KIND_MEDIA),
+        ("این کامنت؟", E.KIND_MESSAGE),
+    ],
+)
+def test_a_thing_noun_survives_a_trailing_mark(text, kind):
+    assert E.named_kind(text)[0] == kind
+
+
+def test_the_mark_is_not_swallowed_and_the_noun_is_not_invented():
+    """The other direction: a word that is not a noun is still not a noun."""
+    assert E.named_kind("این عکاس؟") == ("", "")
+    assert E.named_kind("این فایده،") == ("", "")
+
+
 # ── The single-token form, which another module borrows ───────────────────
 @pytest.mark.parametrize(
     "token,kind",

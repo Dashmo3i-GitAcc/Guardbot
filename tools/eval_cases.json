@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -3743,6 +3743,275 @@
           "newest_media": "photo",
           "has_link": true,
           "named": ""
+        }
+      }
+    },
+    {
+      "id": "punctuation-thing-question",
+      "category": "punctuation",
+      "note": "A question mark after a thing noun. Before the tokenizer fix «لینک؟» was one token, so the noun was missed and the person resolver offered the room's members for a message about a link.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "این لینک رو ببین https://example.com/page",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این لینک؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": "link"
+        }
+      }
+    },
+    {
+      "id": "punctuation-message-question",
+      "category": "punctuation",
+      "note": "«پیام؟» names a message, so the reply target is stated — the same reading «پیام» gives without the mark.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این پیام؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 11,
+        "reply_message_id": 1
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": "message"
+        },
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        }
+      }
+    },
+    {
+      "id": "punctuation-name-at-end",
+      "category": "punctuation",
+      "note": "A name at the very end of the message, with the question mark attached. Before the fix «سارا؟» was one token, the name was never matched, and the resolver returned the more recent speaker instead.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "سارا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 990,
+          "role": "member",
+          "message_id": 2,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن سارا؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "punctuation-greeting-mark",
+      "category": "punctuation",
+      "note": "A greeting with a question mark is still a greeting. Before the fix «ممنون؟» was one token, so the greeting lexicon missed it and the mark alone made it a question.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ممنون؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 1,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "punctuation-correction-mark",
+      "category": "punctuation",
+      "note": "A correction with a question mark is still a correction — and correction outranks question, so the precedence only sees it once the token is clean.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اشتباه؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 1,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "correction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "punctuation-thread-mark",
+      "category": "punctuation",
+      "note": "The one shared content word carries the question mark. Before the fix «چنده؟» was not «چنده», the two messages shared nothing, and the thread read as a topic shift.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "سارا",
+          "text": "قیمت چنده",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "رضا",
+        "text": "چنده؟ گرون شده",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [
+          "قیمت چنده"
+        ],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
         }
       }
     }

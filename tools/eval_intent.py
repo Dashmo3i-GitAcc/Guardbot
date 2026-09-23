@@ -539,7 +539,11 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  confident and correct              {_pct(m['confident_and_correct'])}",
         "",
         "cost",
-        f"  block chars mean / max     {m['block_chars_mean']:.0f} / {m['block_chars_max']}",
+        # ``block_chars`` is the **referent candidates** block and nothing else —
+        # the other readers report their own sizes beside their own metrics. The
+        # label says so, because "block chars" read as "the whole context" once,
+        # in a report, and that is a claim the harness does not measure.
+        f"  referent block chars mean / max  {m['block_chars_mean']:.0f} / {m['block_chars_max']}",
         f"  resolver us mean / p95     {m['us_mean']:.0f} / {m['us_p95']:.0f}",
         f"  time-word us mean / p95    {m['when_us_mean']:.0f} / {m['when_us_p95']:.0f}",
         f"  entity us mean / p95       {m['entity_us_mean']:.0f} / {m['entity_us_p95']:.0f}",
