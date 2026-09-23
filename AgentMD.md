@@ -1557,6 +1557,17 @@ reference file is stale and this list is the one to fix first.
   `respond` **or** a write that actually ran.
 * `parse_decision` returning `None` means **say nothing** — never send the raw
   text; `respond: true` with an empty message becomes `false`.
+* The decision carries a **structured understanding** — `intent`, clamped to
+  `awareness.INTENTS`, and `about`, a claimed user id. Both are **recorded, never
+  obeyed**: nothing gates a reply, an action or a permission on them. An unknown
+  intent normalises to `other`, and a claimed id is dropped to 0 unless
+  `awareness.about_in_window` finds it in the window — a model that names
+  somebody the room never mentioned has not read the room. The row's
+  `about_user_id` is rendered back as "About then: …" in `memory_block`, read out
+  of the stored participants rather than looked up again.
+* `awareness_state.intent`/`about_user_id` were added **after** the first deploy
+  and reach production through `_ensure_column`, not `CREATE TABLE`; they are
+  additive and a row from before them reads as `''`/`0`.
 * `db.group_pending` must exclude `role = 'nexus'` — the watermark is a
   **conversation** watermark.
 * The owner is identified only by `OWNER_USER_ID`; the roster is stated by the

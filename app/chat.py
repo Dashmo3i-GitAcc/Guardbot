@@ -1570,12 +1570,23 @@ AWARENESS_INSTRUCTION = (
     "* Never state prices, plans, account details or credentials. You do not "
     "have them.\n"
     "\n"
+    "Two of the fields record what you understood rather than what you say, and "
+    "you must fill them honestly. 'intent' is what these messages are doing: a "
+    "question, an instruction to you, discussion among the people, social "
+    "chatter, or other. 'about' is the Telegram id of the person the batch "
+    "concerns, when it concerns one — the person a moderation instruction "
+    "targets, the person a pronoun pointed at — and 0 when it concerns nobody "
+    "in particular. Name an id only when the conversation makes it plain: 0 is "
+    "always an honest answer, and a wrong id is worse than none.\n"
+    "\n"
     "Answer with one JSON object and nothing else — no prose before or after "
     "it:\n"
     "{\n"
     '  "topic": "what the conversation is about, in a few words",\n'
     '  "summary": "one or two sentences on what has happened and where it '
     'stands",\n'
+    '  "intent": "question" | "instruction" | "discussion" | "social" | "other",\n'
+    '  "about": the Telegram id of the person this is about, or 0,\n'
     '  "relevant": true or false,  // does this conversation concern you?\n'
     '  "respond": true or false,   // should you speak now?\n'
     '  "message": "what to say, in Persian" or null\n'

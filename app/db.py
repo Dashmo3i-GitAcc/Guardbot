@@ -581,6 +581,14 @@ def init() -> None:
             summary TEXT NOT NULL DEFAULT '',
             participants TEXT NOT NULL DEFAULT '')"""
     )
+    # The structured half of the understanding, added after the first deploy.
+    # Additive and therefore rollback-safe: code from before these columns
+    # existed never reads them, and code after them defaults to "the model did
+    # not say". ``intent`` is one of ``awareness.INTENTS`` or empty; ``about``
+    # is the id the pass judged the room to be about, or 0. Neither is ever a
+    # permission, an authorisation or a gate.
+    _ensure_column("awareness_state", "intent", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column("awareness_state", "about_user_id", "INTEGER NOT NULL DEFAULT 0")
     # One coding-agent task. The row is the *index*: it is written by the
     # container, which is the only writer, and read by the host runner, which
     # executes the agent. Everything the runner needs is here, and everything
@@ -2965,7 +2973,8 @@ def awareness_get(chat_id: int) -> dict | None:
     with _lock:
         row = _conn.execute(
             "SELECT chat_id, updated_at, seen_message_id, passes, relevant, "
-            "topic, summary, participants FROM awareness_state WHERE chat_id=?",
+            "topic, summary, participants, intent, about_user_id "
+            "FROM awareness_state WHERE chat_id=?",
             (int(chat_id),),
         ).fetchone()
     if row is None:
@@ -2979,6 +2988,8 @@ def awareness_get(chat_id: int) -> dict | None:
         "topic": str(row[5] or ""),
         "summary": str(row[6] or ""),
         "participants": str(row[7] or ""),
+        "intent": str(row[8] or ""),
+        "about_user_id": int(row[9] or 0),
     }
 
 
@@ -2989,6 +3000,8 @@ def awareness_set(
     relevant: bool = False,
     topic: str = "",
     summary: str = "",
+    intent: str = "",
+    about_user_id: int = 0,
     participants: str = "",
 ) -> dict:
     """Record what a completed pass understood about one room.
@@ -3002,7 +3015,8 @@ def awareness_set(
         _conn.execute(
             "INSERT INTO awareness_state "
             "(chat_id, updated_at, seen_message_id, passes, relevant, topic, "
-            " summary, participants) VALUES (?,?,?,?,?,?,?,?) "
+            " summary, participants, intent, about_user_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(chat_id) DO UPDATE SET "
             "updated_at=excluded.updated_at, "
             # Monotonic: a pass over an older window must never move the
@@ -3014,7 +3028,9 @@ def awareness_set(
             "relevant=excluded.relevant, "
             "topic=excluded.topic, "
             "summary=excluded.summary, "
-            "participants=excluded.participants",
+            "participants=excluded.participants, "
+            "intent=excluded.intent, "
+            "about_user_id=excluded.about_user_id",
             (
                 int(chat_id),
                 now,
@@ -3024,6 +3040,8 @@ def awareness_set(
                 (topic or "")[:400],
                 (summary or "")[:1200],
                 (participants or "")[:400],
+                (intent or "")[:24],
+                max(0, int(about_user_id or 0)),
             ),
         )
         _conn.commit()
@@ -3079,7 +3097,8 @@ def awareness_summary() -> dict:
     """
     with _lock:
         row = _conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(passes),0), COALESCE(SUM(relevant),0) "
+            "SELECT COUNT(*), COALESCE(SUM(passes),0), COALESCE(SUM(relevant),0), "
+            "COALESCE(SUM(about_user_id != 0),0) "
             "FROM awareness_state"
         ).fetchone()
         replies = _conn.execute(
@@ -3089,6 +3108,12 @@ def awareness_summary() -> dict:
         "rooms": int(row[0] or 0),
         "passes": int(row[1] or 0),
         "relevant": int(row[2] or 0),
+        # How many rooms' last completed pass judged the conversation to be
+        # *about* a particular person. A number near zero on a busy deployment
+        # says the pass is reading the room as chatter; a number near ``rooms``
+        # says it is reading it as one long conversation about somebody, which
+        # is the shape a moderation room takes and a shape worth knowing.
+        "about_rooms": int(row[3] or 0),
         "replies": int(replies[0] or 0),
     }
 

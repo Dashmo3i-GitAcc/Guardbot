@@ -1340,13 +1340,25 @@ async def _awareness_read(
         awareness.skip(chat_id, seen_message_id=max_id)
         return
 
+    # The model's claim about *who* the batch concerns is checked against the
+    # window before it is stored: a model that names somebody the room never
+    # mentioned has not understood the room, and recording its guess would let
+    # the next pass inherit the mistake. This is validation, not authority —
+    # nothing acts on the result.
+    decision["about"] = awareness.about_in_window(
+        decision.get("about") or 0, messages
+    )
+
     awareness.record(chat_id, seen_message_id=max_id, decision=decision)
     log.info(
-        "awareness chat=%s relevant=%s respond=%s writes=%d topic=%r",
+        "awareness chat=%s relevant=%s respond=%s writes=%d intent=%s about=%s "
+        "topic=%r",
         chat_id,
         decision.get("relevant"),
         decision.get("respond"),
         counters.get("writes", 0),
+        decision.get("intent") or "-",
+        decision.get("about") or 0,
         (decision.get("topic") or "")[:60],
     )
 

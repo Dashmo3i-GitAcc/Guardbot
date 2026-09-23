@@ -256,3 +256,70 @@ def test_the_awareness_state_round_trips(pre_nexus_db):
         -100, seen_message_id=43, relevant=False, topic="t2", summary="s2", participants=""
     )
     assert db.awareness_get(-100)["seen_message_id"] == 43
+
+
+# ── The structured understanding columns ──────────────────────────────────
+# The production database already had ``awareness_state`` when ``intent`` and
+# ``about_user_id`` were added, so this is the ``_ensure_column`` path rather
+# than the ``CREATE TABLE`` one — and the row already there must keep reading.
+_OLD_AWARENESS_STATE = """
+CREATE TABLE awareness_state (
+    chat_id INTEGER PRIMARY KEY,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    seen_message_id INTEGER NOT NULL DEFAULT 0,
+    passes INTEGER NOT NULL DEFAULT 0,
+    relevant INTEGER NOT NULL DEFAULT 0,
+    topic TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    participants TEXT NOT NULL DEFAULT '')
+"""
+
+
+@pytest.fixture
+def pre_understanding_db(tmp_path, monkeypatch):
+    """A database whose awareness rows predate the understanding columns."""
+    path = str(tmp_path / "pre_understanding.db")
+    conn = sqlite3.connect(path)
+    conn.execute(_OLD_AWARENESS_STATE)
+    conn.execute(
+        "INSERT INTO awareness_state "
+        "(chat_id, updated_at, seen_message_id, passes, relevant, topic, summary, "
+        " participants) VALUES (-100, 1, 7, 3, 1, 'old topic', 'old summary', 'p')"
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(config, "DB_PATH", path)
+    db.init()
+    return path
+
+
+def _awareness_columns(path: str) -> list[str]:
+    conn = sqlite3.connect(path)
+    try:
+        return [r[1] for r in conn.execute("PRAGMA table_info(awareness_state)")]
+    finally:
+        conn.close()
+
+
+def test_the_understanding_columns_are_added_to_an_existing_table(pre_understanding_db):
+    columns = _awareness_columns(pre_understanding_db)
+    assert "intent" in columns
+    assert "about_user_id" in columns
+
+
+def test_a_row_written_before_the_understanding_columns_still_reads(pre_understanding_db):
+    row = db.awareness_get(-100)
+    assert row["topic"] == "old topic"
+    assert row["passes"] == 3
+    # Defaulted, not NULL and not missing: the old pass recorded no intent and
+    # named nobody, and inventing either on read would be the record lying.
+    assert row["intent"] == ""
+    assert row["about_user_id"] == 0
+
+
+def test_the_understanding_columns_round_trip(pre_understanding_db):
+    db.awareness_set(-100, seen_message_id=9, intent="question", about_user_id=42)
+    row = db.awareness_get(-100)
+    assert row["intent"] == "question"
+    assert row["about_user_id"] == 42

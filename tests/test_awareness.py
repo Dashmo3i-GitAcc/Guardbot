@@ -1229,6 +1229,108 @@ def test_garbage_is_not_a_decision():
     assert awareness.parse_decision("[1, 2, 3]") is None
 
 
+# ── The structured understanding in the decision ──────────────────────────
+def test_the_intent_is_clamped_to_the_vocabulary():
+    """A classification nobody can enumerate is not a classification."""
+    for text, expected in [
+        ('{"intent": "question"}', "question"),
+        ('{"intent": "Question"}', "question"),
+        ('{"intent": " instruction "}', "instruction"),
+        ('{"intent": "banana"}', "other"),
+        ('{"intent": 5}', "other"),
+        ('{"intent": null}', "other"),
+        ("{}", "other"),
+    ]:
+        assert awareness.parse_decision(text)["intent"] == expected, text
+
+
+def test_the_about_field_is_normalised_to_a_positive_id_or_zero():
+    for text, expected in [
+        ('{"about": 42}', 42),
+        ('{"about": "42"}', 42),
+        ('{"about": 0}', 0),
+        ('{"about": -7}', 0),
+        ('{"about": "reza"}', 0),
+        ('{"about": null}', 0),
+        ("{}", 0),
+    ]:
+        assert awareness.parse_decision(text)["about"] == expected, text
+
+
+def test_a_claimed_person_must_be_in_the_window():
+    """A model that names somebody the room never mentioned has not read it."""
+    window = [{"user_id": 42}, {"user_id": 999}]
+    assert awareness.about_in_window(42, window) == 42
+    assert awareness.about_in_window(7, window) == 0
+    assert awareness.about_in_window(0, window) == 0
+    assert awareness.about_in_window(42, []) == 0
+
+
+def test_the_structured_fields_do_not_gate_anything():
+    """Understanding is recorded, never obeyed — the boundary does not move."""
+    decision = awareness.parse_decision(
+        '{"intent": "instruction", "about": 42, "relevant": true, '
+        '"respond": true, "message": "باشه"}'
+    )
+    assert decision["respond"] is True
+    # …and an empty message still vetoes the turn, whatever the understanding.
+    vetoed = awareness.parse_decision(
+        '{"intent": "instruction", "about": 42, "respond": true, "message": ""}'
+    )
+    assert vetoed["respond"] is False
+
+
+def test_the_understanding_is_stored_and_read_back():
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    awareness.record(
+        CHAT,
+        seen_message_id=1,
+        decision={"topic": "t", "summary": "s", "intent": "instruction", "about": MEMBER},
+    )
+    stored = db.awareness_get(CHAT)
+    assert stored["intent"] == "instruction"
+    assert stored["about_user_id"] == MEMBER
+
+
+def test_the_store_clamps_what_it_is_handed():
+    """The store is a boundary too: an arbitrary decision dict cannot widen it."""
+    awareness.record(
+        CHAT,
+        seen_message_id=1,
+        decision={"intent": "not-a-word", "about": "nobody"},
+    )
+    stored = db.awareness_get(CHAT)
+    assert stored["intent"] == "other"
+    assert stored["about_user_id"] == 0
+
+
+def test_the_summary_counts_rooms_that_are_about_somebody():
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    awareness.record(CHAT, seen_message_id=1, decision={"about": MEMBER})
+    assert db.awareness_summary()["about_rooms"] == 1
+    awareness.record(CHAT, seen_message_id=1, decision={"about": 0})
+    assert db.awareness_summary()["about_rooms"] == 0
+
+
+def test_who_the_room_was_about_becomes_continuity():
+    """The understanding a pass records is what the next pass is handed."""
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    awareness.record(
+        CHAT,
+        seen_message_id=1,
+        decision={"summary": "s", "about": MEMBER},
+    )
+    block = awareness.memory_block(CHAT)
+    assert "About then: reza" in block
+
+
+def test_a_forgotten_person_is_not_named_in_the_continuity_block():
+    """An id the stored roster cannot name is left out, not printed as a number."""
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    awareness.record(CHAT, seen_message_id=1, decision={"summary": "s", "about": 0})
+    assert "About then:" not in awareness.memory_block(CHAT)
+
+
 # ══ 11. The direct answer path also sees the room ═════════════════════════
 def test_an_addressed_answer_is_given_the_room_context(monkeypatch):
     """Being answered *informed* is the difference awareness makes."""
@@ -1381,6 +1483,17 @@ def test_the_instruction_says_silence_is_the_default():
 
 def test_the_instruction_says_nexus_may_be_discussed_without_being_named():
     assert "without being named" in chat.AWARENESS_INSTRUCTION
+
+
+def test_the_instruction_asks_for_the_structured_understanding():
+    """The schema and the vocabulary are stated where the model can see them."""
+    text = chat.AWARENESS_INSTRUCTION
+    assert '"intent"' in text
+    assert '"about"' in text
+    for word in awareness.INTENTS:
+        assert f'"{word}"' in text
+    # And the fail-safe direction: 0 is always honest, a wrong id is not.
+    assert "a wrong id is worse than none" in text
 
 
 def test_the_instruction_names_the_owner_as_the_creator_and_developer():
