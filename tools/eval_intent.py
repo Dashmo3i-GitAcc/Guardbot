@@ -6,9 +6,10 @@ Why this exists
 The brief for this stage is explicit that no claim of "smarter" may be made
 without a number, and that the number must be reproducible. This is where the
 numbers come from. It runs the *deterministic* layers — the name matcher, the
-deictic expression finder and the referent resolver — over a labelled corpus and
-reports accuracy, ambiguity behaviour, the cost in microseconds, and the size of
-the block the model would be shown.
+deictic expression finder, the referent resolver, the act reader, the open-question
+reader, the time-word reader and the room-state reader — over a labelled corpus
+and reports accuracy, ambiguity behaviour, the cost in microseconds, and the size
+of the block the model would be shown.
 
 What it can and cannot measure
 ------------------------------
@@ -52,7 +53,14 @@ os.environ.setdefault("GEMINI_KEY_STORE_PATH", "/tmp/guardbot-eval/gemini_keys.j
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import addressing, config, discourse, referents, temporal  # noqa: E402
+from app import (  # noqa: E402
+    addressing,
+    config,
+    discourse,
+    referents,
+    room_state,
+    temporal,
+)
 
 CASES_PATH = Path(__file__).resolve().parent / "eval_cases.json"
 
@@ -116,12 +124,28 @@ def evaluate(cases: dict) -> dict:
         when_block = temporal.render(when, now=anchor["at"], window_start=window_start)
         when_us = (time.perf_counter() - when_started) * 1_000_000
 
+        state = room_state.read_state(window, anchor)
+        graph_block = room_state.render_graph(state)
+        thread_block = room_state.render_thread(state)
+
         top = resolution.top()
         top_id = top.user_id if top else None
 
         expected_questions = [str(q) for q in (expect.get("open_questions") or ())]
         expected_when = str(expect.get("when") or "")
         expected_when_unit = str(expect.get("when_unit") or "")
+        # The reply graph and the focus are facts read off a stored column, so
+        # every case can be scored on them — a case with no reply row legitimately
+        # expects no edge. The relation is a reading of meaning, so it is scored
+        # only where it was labelled; an unlabelled case is not evidence of
+        # anything.
+        expected_state = expect.get("state") or {}
+        expected_edges = sorted(
+            (int(pair[0]), int(pair[1])) for pair in (expected_state.get("edges") or ())
+        )
+        expected_focus = int(expected_state.get("focus") or 0)
+        has_relation_label = "relation" in expected_state
+        expected_relation = str(expected_state.get("relation") or "")
 
         detail.append(
             {
@@ -151,6 +175,15 @@ def evaluate(cases: dict) -> dict:
                 "got_when_unit": when.unit,
                 "when_why": when.why,
                 "when_block_chars": len(when_block),
+                "expected_edges": expected_edges,
+                "got_edges": sorted((e.source_id, e.target_id) for e in state.edges),
+                "expected_focus": expected_focus,
+                "got_focus": state.focus_id,
+                "has_relation_label": has_relation_label,
+                "expected_relation": expected_relation,
+                "got_relation": state.relation,
+                "graph_chars": len(graph_block),
+                "thread_chars": len(thread_block),
                 "block_chars": len(block),
                 "us": elapsed_us,
                 "when_us": when_us,
@@ -158,6 +191,10 @@ def evaluate(cases: dict) -> dict:
                 "addressed_ok": bool(addressed) == bool(expect["addressed"]),
                 "act_ok": act.kind == expect.get("act", discourse.ACT_UNKNOWN),
                 "when_ok": when.kind == expected_when and when.unit == expected_when_unit,
+                "edges_ok": sorted((e.source_id, e.target_id) for e in state.edges)
+                == expected_edges,
+                "focus_ok": state.focus_id == expected_focus,
+                "relation_ok": state.relation == expected_relation,
             }
         )
 
@@ -233,6 +270,14 @@ def _metrics(detail: list[dict]) -> dict:
         r for r in when_labelled if not r["got_when"]
     ]
 
+    # ── The room's state ──────────────────────────────────────────────────
+    # The reply graph and the focus are facts off a stored column, so they are
+    # scored over every case. The relation is a reading, so it is scored only
+    # where it was labelled.
+    relation_cases = [r for r in detail if r["has_relation_label"]]
+    edges_expected = [r for r in detail if r["expected_edges"]]
+    edges_claimed = [r for r in detail if r["got_edges"]]
+
     return {
         "cases": len(detail),
         "expression_accuracy": rate(detail, lambda r: r["kind_ok"]),
@@ -289,6 +334,40 @@ def _metrics(detail: list[dict]) -> dict:
         "when_block_chars_max": max(
             (r["when_block_chars"] for r in detail), default=0
         ),
+        "state_cases": len(relation_cases),
+        "edges_expected": len(edges_expected),
+        "edges_exact": sum(1 for r in detail if r["edges_ok"]),
+        # Of the cases where an edge was claimed, the fraction where every
+        # claimed edge was one the corpus knows about.
+        "edges_precision": rate(
+            edges_claimed, lambda r: set(r["got_edges"]) <= set(r["expected_edges"])
+        ),
+        # …and of the cases where one is expected, the fraction it found.
+        "edges_recall": rate(
+            edges_expected, lambda r: set(r["expected_edges"]) <= set(r["got_edges"])
+        ),
+        "edges_false_positives": sum(
+            1 for r in edges_claimed if not r["expected_edges"]
+        ),
+        "edges_false_negatives": sum(
+            1 for r in edges_expected if not r["got_edges"]
+        ),
+        "focus_accuracy": rate(detail, lambda r: r["focus_ok"]),
+        "relation_correct": sum(1 for r in relation_cases if r["relation_ok"]),
+        "relation_accuracy": rate(relation_cases, lambda r: r["relation_ok"]),
+        "relation_by_kind": {
+            kind: {
+                "total": sum(1 for r in relation_cases if r["expected_relation"] == kind),
+                "correct": sum(
+                    1
+                    for r in relation_cases
+                    if r["expected_relation"] == kind and r["relation_ok"]
+                ),
+            }
+            for kind in ("",) + room_state.RELATIONS
+        },
+        "graph_chars_max": max((r["graph_chars"] for r in detail), default=0),
+        "thread_chars_max": max((r["thread_chars"] for r in detail), default=0),
         "needs_resolution": len(needs),
         "answerable": len(answerable),
         "resolution_top1_accuracy": rate(
@@ -373,6 +452,22 @@ def report(result: dict, *, verbose: bool = False) -> str:
         ),
         f"  block chars max            {m['when_block_chars_max']}",
         "",
+        f"the room's state (reply graph over every case; relation over {m['state_cases']} labelled)",
+        f"  edges exact                {m['edges_exact']} / {m['cases']}",
+        f"  edges precision            {_pct(m['edges_precision'])}",
+        f"  edges recall               {_pct(m['edges_recall'])}",
+        f"  edges false positives/neg  {m['edges_false_positives']} / {m['edges_false_negatives']}",
+        f"  focus accuracy             {_pct(m['focus_accuracy'])}",
+        f"  relation exact             {m['relation_correct']} / {m['state_cases']}",
+        f"  relation accuracy          {_pct(m['relation_accuracy'])}",
+        "  per relation (correct/total)  "
+        + "  ".join(
+            f"{kind or 'none'} {v['correct']}/{v['total']}"
+            for kind, v in m["relation_by_kind"].items()
+            if v["total"]
+        ),
+        f"  graph / thread chars max   {m['graph_chars_max']} / {m['thread_chars_max']}",
+        "",
         f"referent resolution ({m['answerable']} answerable of {m['needs_resolution']} open)",
         f"  top-1 accuracy             {_pct(m['resolution_top1_accuracy'])}",
         f"  ambiguity recall           {_pct(m['ambiguity_recall'])}",
@@ -394,7 +489,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
         r
         for r in result["detail"]
         if not r["kind_ok"] or not r["addressed_ok"] or not r["act_ok"]
-        or not r["when_ok"]
+        or not r["when_ok"] or not r["edges_ok"] or not r["focus_ok"]
+        or (r["has_relation_label"] and not r["relation_ok"])
         or (r["requires_resolution"] and r["expected_referent"] is not None
             and r["got_referent"] != r["expected_referent"])
         or (r["expected_ambiguous"] and not r["got_ambiguous"])
@@ -412,6 +508,9 @@ def report(result: dict, *, verbose: bool = False) -> str:
                 f"act {r['got_act']}/{r['expected_act']} "
                 f"when {r['got_when']}/{r['expected_when']}"
                 f"·{r['got_when_unit']}/{r['expected_when_unit']} "
+                f"edges {r['got_edges']}/{r['expected_edges']} "
+                f"focus {r['got_focus']}/{r['expected_focus']} "
+                f"rel {r['got_relation']!r}/{r['expected_relation']!r} "
                 f"q {r['got_questions']}/{r['expected_questions']}"
             )
             if verbose and r["note"]:

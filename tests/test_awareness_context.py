@@ -301,7 +301,10 @@ def test_the_referenced_people_are_bounded_by_their_own_count(monkeypatch):
         _msg(MEMBER, "c", reply_user_id=TARGET, reply_name="Sara",
              at=time.time() - 10),
     ]
-    out = _other_blocks(ctx_of(messages, anchor=messages[2]))
+    # One source by name: counting every "- " line in the concatenation would
+    # make this test fail the day another source renders a list, which is what
+    # happened when the reply graph was added.
+    out = _source_blocks(ctx_of(messages, anchor=messages[2]), "referenced_people")
     described = [line for line in out.splitlines() if line.startswith("- ")]
     assert len(described) == 1
 
@@ -769,6 +772,47 @@ def test_the_new_sources_are_bounded_by_their_own_budget(monkeypatch):
     assert len(_source_blocks(ctx, "open_questions")) <= 500
     assert len(_source_blocks(ctx, "anchor_act")) <= 200
     assert len(_source_blocks(ctx, "anchor_when")) <= 300
+    assert len(_source_blocks(ctx, "reply_graph")) <= 600
+    assert len(_source_blocks(ctx, "thread")) <= 500
+
+
+# ── Who is talking to whom, and whether this is still the same thread ─────
+def test_the_reply_graph_is_rendered_for_the_model():
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [
+        _msg(TARGET, "فایل رو فرستادم", name="Reza", at=900, message_id=1),
+        _msg(OTHER, "فایل رو دیدم", name="Sara", at=920, message_id=2,
+             reply_user_id=TARGET),
+        _msg(MEMBER, "فایل مشکل داره", name="Nima", at=940, message_id=3,
+             reply_user_id=TARGET),
+    ]
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert f"{OTHER} → {TARGET}" in out
+    assert f"converged on {TARGET} (2 of 2)" in out
+
+
+def test_the_thread_is_rendered_for_the_model():
+    anchor = _msg(ADMIN, "فایل رو دوباره چک کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "فایل مشکل داره", name="Reza", at=900, message_id=1)]
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "continues the thread" in out
+    assert "«فایل»" in out
+
+
+def test_the_thread_renders_nothing_when_it_cannot_be_judged():
+    """An abstention is silent, not a line saying "unclear"."""
+    anchor = _msg(ADMIN, "باشه", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "فایل مشکل داره", name="Reza", at=900, message_id=1)]
+    assert awareness_context._render_thread(_referent_ctx(anchor, window)) == ""
+
+
+def test_the_room_state_reads_the_context_not_the_database():
+    """A hand-made window nothing captured: a query would find nothing."""
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "فایل مشکل داره", name="Reza", at=900, message_id=1,
+                   reply_user_id=OTHER)]
+    ctx = _referent_ctx(anchor, window)
+    assert f"{TARGET} → {OTHER}" in awareness_context._render_reply_graph(ctx)
 
 
 # ── When the anchor's own words point, from the server's clock ────────────

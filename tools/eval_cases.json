@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -21,7 +21,13 @@
     "expect.when_unit        its granularity ('' or minute/hour/day/week/month/year)",
     "",
     "expect.when is '' for a message with no time word, and a claimed reading",
-    "there is a false positive: the server would be placing a time nobody stated."
+    "there is a false positive: the server would be placing a time nobody stated.",
+    "",
+    "expect.state            the room-state reading:",
+    "  .edges                the reply edges [[source_id, target_id]], oldest first",
+    "  .focus                the target the replies converge on (0 when none)",
+    "  .relation             '' / continues / shifts / unclear — scored only where",
+    "                        labelled, because it is a reading rather than a record"
   ],
   "cases": [
     {
@@ -55,7 +61,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        }
       }
     },
     {
@@ -89,7 +104,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -123,7 +147,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -157,7 +190,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -447,7 +489,24 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ],
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        }
       }
     },
     {
@@ -506,7 +565,24 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ],
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        }
       }
     },
     {
@@ -581,7 +657,28 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ],
+            [
+              33,
+              11
+            ],
+            [
+              55,
+              22
+            ],
+            [
+              55,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -732,7 +829,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -798,7 +904,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -968,7 +1083,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -1146,7 +1270,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -1180,7 +1313,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -1214,7 +1356,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -1363,7 +1514,24 @@
           "سارا؟"
         ],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              11,
+              22
+            ],
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        }
       }
     },
     {
@@ -1397,7 +1565,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              55
+            ]
+          ],
+          "focus": 55
+        }
       }
     },
     {
@@ -1431,7 +1608,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              44,
+              55
+            ]
+          ],
+          "focus": 55
+        }
       }
     },
     {
@@ -1465,7 +1651,16 @@
         "act": "instruction",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
       }
     },
     {
@@ -1772,7 +1967,16 @@
         "act": "social",
         "open_questions": [],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11
+        }
       }
     },
     {
@@ -1867,7 +2071,16 @@
           "چرا دیر کرد؟"
         ],
         "when": "",
-        "when_unit": ""
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11
+        }
       }
     },
     {
@@ -2268,6 +2481,548 @@
         "open_questions": [],
         "when": "past",
         "when_unit": "hour"
+      }
+    },
+    {
+      "id": "state-converge",
+      "category": "room-state",
+      "note": "Two people reply to the same person: that is a convergence, and the anchor continues the file thread.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رو دیدم",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "فایل مشکل داره",
+          "at": 940,
+          "role": "member",
+          "message_id": 3,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو دوباره چک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 4,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "repeat",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "continues"
+        }
+      }
+    },
+    {
+      "id": "state-one-reply",
+      "category": "room-state",
+      "note": "One reply edge is reported but is not called a convergence.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "دیدمش",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باشه",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "unclear"
+        }
+      }
+    },
+    {
+      "id": "state-no-replies",
+      "category": "room-state",
+      "note": "No reply edges at all, and the anchor still continues the thread.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بله",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو چک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
+        }
+      }
+    },
+    {
+      "id": "state-topic-shift",
+      "category": "room-state",
+      "note": "A substantive message that shares no content word: a change of subject.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "قیمت دلار چنده",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "shifts"
+        }
+      }
+    },
+    {
+      "id": "state-thread-continues",
+      "category": "room-state",
+      "note": "A shared noun is the evidence, and it is reported.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "گزارش رو نوشتم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "گزارش رو بفرست",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
+        }
+      }
+    },
+    {
+      "id": "state-split-replies",
+      "category": "room-state",
+      "note": "Replies split between two people: the focus is the more recent, and the short anchor is not judged.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "الف",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 11
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ب",
+          "at": 940,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 44
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باشه",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              44
+            ]
+          ],
+          "focus": 44,
+          "relation": "unclear"
+        }
+      }
+    },
+    {
+      "id": "state-anchor-is-reply",
+      "category": "room-state",
+      "note": "The anchor's own reply edge is in the graph even with no window, and there is nothing before it to continue.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 9,
+        "reply_user_id": 11
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": ""
+        }
+      }
+    },
+    {
+      "id": "state-continues-two-words",
+      "category": "room-state",
+      "note": "Two shared content words, both reported.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "مشکل فایل جدیه",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "فایل و مشکل رو بگو",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
+        }
+      }
+    },
+    {
+      "id": "state-short-anchor",
+      "category": "room-state",
+      "note": "A two-word message shares nothing with anything and is not judged.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "باشه",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "unclear"
+        }
+      }
+    },
+    {
+      "id": "state-reply-chain-continues",
+      "category": "room-state",
+      "note": "A reply chain, and the anchor continues the thread it belongs to.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رسید",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو تایید کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "continues"
+        }
+      }
+    },
+    {
+      "id": "state-shift-with-graph",
+      "category": "room-state",
+      "note": "A graph is present and the anchor still changes the subject.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رو دیدم",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "قیمت دلار چنده",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "shifts"
+        }
       }
     }
   ]

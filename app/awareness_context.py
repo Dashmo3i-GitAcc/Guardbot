@@ -62,6 +62,7 @@ from . import (
     identity,
     persian_calendar,
     referents,
+    room_state,
     temporal,
 )
 
@@ -298,6 +299,32 @@ def _render_open_questions(ctx: Ctx) -> str:
     be a claim about meaning.
     """
     return discourse.render_questions(discourse.open_questions(ctx.messages))
+
+
+def _render_reply_graph(ctx: Ctx) -> str:
+    """Who replied to whom, and who the room converged on. Tier 0.
+
+    The reply edge is a stored column, so this is the room's own record rather
+    than a reading of meaning: who answered whom, and — when more than one reply
+    points at the same person — who the room has converged on. It reads the
+    window the pass already read, so it costs no query.
+
+    ``read_state`` is called here rather than in the builder, and again by the
+    thread source beside it. That is deliberate: each source is independent, so
+    one failing costs its own block and no other, and the scan it repeats is a
+    pass over rows already in memory.
+    """
+    return room_state.render_graph(room_state.read_state(ctx.messages, ctx.anchor))
+
+
+def _render_thread(ctx: Ctx) -> str:
+    """Whether the anchor continues the thread, with the words that decided it. Tier 0.
+
+    The one reading in this pair rather than a record, and it says so: the shared
+    words are rendered as its reason, because the model is the one that should
+    weigh a heuristic. An abstention renders nothing.
+    """
+    return room_state.render_thread(room_state.read_state(ctx.messages, ctx.anchor))
 
 
 def _render_anchor_when(ctx: Ctx) -> str:
@@ -548,6 +575,13 @@ SOURCES: tuple[Source, ...] = (
     # empty unless there is a question no reply points at.
     Source("anchor_act", TIER_ALWAYS, 200, _render_anchor_act),
     Source("open_questions", TIER_ALWAYS, 500, _render_open_questions),
+    # Who is talking to whom, and whether this message is still the same thread.
+    # Tier 0: both are a pass over the window the pass already read. The graph is
+    # the room's own record (a stored reply column); the thread is a heuristic
+    # with its evidence attached, and it renders nothing when the anchor is too
+    # short to judge.
+    Source("reply_graph", TIER_ALWAYS, 600, _render_reply_graph),
+    Source("thread", TIER_ALWAYS, 500, _render_thread),
     # Where the anchor's own time words point, from the server's clock. Last of
     # the tier-0 sources on purpose: it is the shortest block and the one that
     # renders least often (only when the message carries a time word), so if the

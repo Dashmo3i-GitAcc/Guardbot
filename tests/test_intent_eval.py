@@ -17,7 +17,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from app import temporal
+from app import room_state, temporal
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -61,6 +61,13 @@ def test_the_corpus_is_well_formed():
         # "no time word here" indistinguishable from "not yet labelled".
         assert "when" in case["expect"], case["id"]
         assert "when_unit" in case["expect"], case["id"]
+        # A state label must carry the graph; `relation` is optional, because a
+        # case that only records a reply row is not a case about the thread, and
+        # labelling one it did not judge would score a guess.
+        if "state" in case["expect"]:
+            keys = set(case["expect"]["state"])
+            assert {"edges", "focus"} <= keys, case["id"]
+            assert keys <= {"edges", "focus", "relation"}, case["id"]
 
 
 def test_expression_detection_is_exact_on_the_corpus():
@@ -214,6 +221,61 @@ def test_the_time_block_stays_small():
 def test_the_time_reader_is_fast_enough_to_run_on_every_pass():
     """The folded table is cached, so a read is a substring scan and no more."""
     assert result()["when_us_mean"] < 1000
+
+
+# ── The room's state ──────────────────────────────────────────────────────
+def test_every_reply_edge_is_read_exactly():
+    """The graph is a stored column, so the reading must be exact, not close."""
+    m = result()
+    assert m["edges_exact"] == m["cases"]
+    assert m["edges_precision"] == 1.0
+    assert m["edges_recall"] == 1.0
+    assert m["edges_false_positives"] == 0
+    assert m["edges_false_negatives"] == 0
+
+
+def test_the_focus_is_always_right():
+    assert result()["focus_accuracy"] == 1.0
+
+
+def test_the_thread_reading_is_exact_on_the_labelled_cases():
+    m = result()
+    assert m["state_cases"] >= 10
+    assert m["relation_correct"] == m["state_cases"]
+    assert m["relation_accuracy"] == 1.0
+
+
+def test_every_relation_kind_is_exercised():
+    """Including the empty reading: a window with nothing before the anchor."""
+    by_kind = result()["relation_by_kind"]
+    for kind in room_state.RELATIONS:
+        assert by_kind[kind]["total"] >= 1, f"{kind} has no cases"
+    assert by_kind[""]["total"] >= 1
+
+
+def test_the_room_state_blocks_stay_small():
+    m = result()
+    assert m["graph_chars_max"] <= 600
+    assert m["thread_chars_max"] <= 500
+
+
+def test_the_corpus_labels_every_reply_row_it_contains():
+    """A case whose rows carry a reply id must carry a graph label.
+
+    The graph is a fact read off a stored column, so an unlabelled reply row
+    shows up in the report as a false positive and reads as a bug in the reader.
+    This makes the gap fail as the labelling gap it actually is.
+    """
+    for case in eval_intent.load_cases()["cases"]:
+        rows = list(case.get("window") or []) + [case["anchor"]]
+        has_reply = any(
+            int(r.get("reply_user_id") or 0)
+            and int(r.get("reply_user_id") or 0) != int(r.get("user_id") or 0)
+            for r in rows
+        )
+        if has_reply:
+            assert "state" in case["expect"], case["id"]
+            assert case["expect"]["state"]["edges"], case["id"]
 
 
 def test_the_harness_runs_without_a_database_or_a_key():

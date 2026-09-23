@@ -16,6 +16,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [42. Who does «این» mean? The referent resolver](#s42)
 - [43. What is this message doing, and what is unanswered](#s43)
 - [44. When does «الان» mean? The server's clock, not the model's](#s44)
+- [45. Who is talking to whom, and is this still the same thread](#s45)
 
 ---
 
@@ -1959,3 +1960,130 @@ ever bites. It reads `Ctx` — the anchor text, `ctx.now` and `ctx.oldest_at()` 
 it costs no query. Measured: 118–164 characters for a bare time word, 252–298 with
 the window-age line, and **zero** when the message states no time; about 0.05 ms of
 pure Python; and zero Gemini calls, so the awareness allowance is untouched.
+
+<a id="s45"></a>
+
+## 45. Who is talking to whom, and is this still the same thread
+
+### 45.1 The gap
+
+A person in a group knows, without thinking, three things a transcript does not
+say: **who is answering whom**, **who the room has converged on**, and **whether
+the message in front of them is a continuation of what came before or the start of
+something else**. The model reading the transcript has to reconstruct all three
+from the order of the messages, every pass, and it has no reliable way to know
+that two replies were aimed at the same person rather than at two.
+
+Two of those three the server can read exactly, and one it can read well enough to
+be useful with its evidence attached. That is the whole shape of this increment.
+
+### 45.2 Two records and one reading
+
+* **The reply graph.** Every reply is a stored column — `reply_user_id` on the row.
+  Who replied to whom is not an inference. It is the same fact
+  `awareness.instruction_block` already states for one message, generalised to the
+  window. The assistant's own replies are included: "the assistant answered X" is
+  part of who is talking to whom.
+* **The focus.** The target with the most incoming reply edges; a tie is broken by
+  the most recent edge, which is the only ordering a window can justify. A count,
+  not a judgement.
+* **The thread.** This one *is* a reading: whether the anchor's content words
+  overlap the words of the messages before it. The shared words are the evidence,
+  and they are rendered as the reason rather than hidden behind the verdict.
+
+### 45.3 The restraint is the design
+
+Three rules keep the reading from becoming a guess, and each is asserted by a test:
+
+* **One reply edge is not a convergence.** `converged()` needs more than one reply
+  aimed at the same person. The single-edge case still reports the edge — it is a
+  fact — and says *"that is not a convergence"* rather than borrowing the stronger
+  word.
+* **A short message is not judged.** «باشه» shares no content word with anything,
+  and reading that as "the topic changed" would fire on half the traffic in a
+  moderation room. The thread reading abstains unless the anchor carries at least
+  `MIN_TOPIC_TOKENS` content words, and an abstention renders **nothing** — a line
+  saying "unclear" would spend tokens telling the model what it can already see.
+* **Overlap is only evidence if the words mean something.** «این», «که», «رو»,
+  «میشه» appear in almost every Persian sentence and would make every message
+  continue every other one. The stopword list is explicit and readable rather than
+  derived.
+
+### 45.4 The anchor's own row, and the bug that taught us
+
+The anchor is usually one of the window's own rows — `awareness.anchor` picks it
+from there — so it must be taken **out** of "what came before" before the overlap
+is computed. Left in, its own words overlap themselves and every message looks like
+a continuation of itself.
+
+The exclusion is by `message_id` when the row has one, and by the
+`(user_id, at, text)` triple when it does not — an anchor the pass built by hand.
+A message that arrived **after** the anchor is not prior either, which is what the
+timestamp test is for.
+
+The stopword list carries a second lesson. The first draft had a length floor of
+three characters as a crude proxy for "not a function word". It dropped «چک» —
+two characters, and exactly what a message about a file is about — so
+«فایل رو چک کن» read as too short to judge. The floor is now two, a single
+character is never a topic, and the stopword list does the real work.
+
+### 45.5 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 82 cases — the 71 from §44 plus 11
+room-state ones), with the room-state reader disabled and enabled:
+
+```
+                                before   after
+cases                               71      82
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.6%   98.8%
+
+the act (abstention is 'unknown')
+  claimed precision              100.0%  100.0%
+  coverage                        78.9%   78.0%
+  recall on labelled cases       100.0%  100.0%
+  false positives / negatives      0 / 0   0 / 0
+
+the room's state
+  edges exact                        -   82 / 82
+  edges precision / recall           -  100% / 100%
+  edges false positives / negatives  -    0 / 0
+  focus accuracy                     -  100.0%
+  relation exact                     -   11 / 11
+  per relation (correct/total)       -  none 1/1  continues 5/5
+                                          shifts 2/2  unclear 3/3
+  graph / thread chars max           -      239 / 151
+
+context overhead per pass            -  +169…221 chars (graph)
+                                       +0…143 chars (thread, only when judged)
+reading cost per pass                -  ~0.17 ms mean
+Gemini calls added                   -        0
+```
+
+Two things in that table are worth saying plainly.
+
+**The graph is exact over the whole corpus, not just its own cases.** The reply
+edges are scored on all 82 cases — 19 of them already carried a reply row — and
+the reading is right on every one. The relation is scored only on the 11 cases
+where it was labelled, because it is a reading rather than a record; labelling a
+case it did not judge would be scoring a guess.
+
+**The act coverage moved from 78.9% to 78.0% and the reason is the corpus.** Three
+of the eleven room-state cases are short acknowledgements whose act is a matter of
+meaning. The floors that matter did not move: claimed precision is still 100% and
+the false-positive count is still 0.
+
+### 45.6 Where it reaches the model
+
+Two **tier-0** sources in `awareness_context.SOURCES`:
+
+* `reply_graph` — the edges, the focus (or the explicit "that is not a
+  convergence"), and who spoke, newest first.
+* `thread` — the continuation reading with its shared words, or nothing at all when
+  it abstains.
+
+Both read `Ctx`, never the database. Each calls `read_state` itself rather than
+sharing one cached call, and that is deliberate: a source that raises must cost
+only its own block, and the scan it repeats is a pass over rows already in memory
+— about 0.17 ms for the pair, against a pass that waits on a model. Zero Gemini
+calls, so the awareness allowance is untouched.

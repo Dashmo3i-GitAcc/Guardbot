@@ -1671,6 +1671,30 @@ reference file is stale and this list is the one to fix first.
 * The `anchor_when` block is a **tier-0 source**, declared **last** among them:
   it is the shortest and the one that renders least often, so it is the cheapest
   thing to lose if the pass-wide ceiling ever bites.
+* `app/room_state.py` reads **who is talking to whom** and whether the anchor
+  **continues the thread**. The reply graph and the focus are the room's own
+  record — a stored `reply_user_id` column and a count over it — while the thread
+  is a reading of meaning (content-word overlap) and carries its evidence. It is
+  evidence, never a gate, pure at import time, and `awareness_context` stays the
+  only importer.
+* **One reply edge is not a convergence.** `RoomState.converged()` needs **more
+  than one** reply aimed at the same person; the single-edge case reports the
+  edge and says "that is not a convergence" rather than borrowing the word.
+* The thread reading **abstains** unless the anchor carries at least
+  `MIN_TOPIC_TOKENS` content words. «باشه» shares nothing with anything, and
+  reading that as "the topic changed" would fire on half the traffic in a room.
+* The **stopword list, not a length cutoff**, removes function words. A length
+  floor of three dropped «چک» — two characters, and exactly what a message about
+  a file is about — and made «فایل رو چک کن» too short to judge. The floor is now
+  two, and a single character is never a topic.
+* The anchor's **own row is excluded** from "what came before", by `message_id`
+  when it has one and by the `(user_id, at, text)` triple when it does not — or
+  its own words would overlap themselves and every message would look like a
+  continuation. A message that arrived **after** the anchor is not prior either.
+* `reply_graph` and `thread` are **tier-0 sources**; they read `Ctx`, never the
+  database. Each calls `read_state` itself rather than sharing a cached one: a
+  source that raises must cost only its own block, and the scan it repeats is a
+  pass over rows already in memory.
 
 ### 53.8 The assistant
 
