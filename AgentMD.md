@@ -1650,6 +1650,27 @@ reference file is stale and this list is the one to fix first.
   second phrasing would be a claim about meaning.
 * The act and the open-question block are **tier-0 sources** in
   `awareness_context.SOURCES`; they read `Ctx`, never the database.
+* `app/temporal.py` reads what a message's **time words** point at, and it
+  reports the **direction and the granularity**, never a date. `seconds` is the
+  offset the words *state* and is 0 when they state none: «چند دقیقه پیش» points
+  back at a scale of minutes and contains no count, and turning it into one would
+  be a claim. It is pure at import time, evidence only, and `now` is **passed in**
+  by the caller — there is exactly one clock in a pass, the server's.
+* The phrase table is scanned **in order and the first hit wins**, so the longer
+  phrase must come first («نیم ساعت پیش» before «ساعت پیش») and the words that
+  **state** a direction must come before the demonstrative forms that inherit it
+  («فردا اون موقع» is the future, not the past). Both are asserted by tests.
+* `TEMPORAL_NOUNS` is the **shared** fact between three readers: `temporal` builds
+  its demonstrative phrases from it, `referents` will not read a demonstrative
+  before a time noun as a person, and `discourse` will not read a question word
+  before a time noun as a question («چند دقیقه پیش» is a duration, not "how
+  many"). Each borrows it late and guarded, as every cross-module reach here does.
+* The folded phrase table is **cached lazily** on first use — not at import, so
+  it is folded under the same environment the reads happen in. Folding 88 phrases
+  per call cost ~0.9 ms; the cache makes a read a substring scan (~0.1 ms).
+* The `anchor_when` block is a **tier-0 source**, declared **last** among them:
+  it is the shortest and the one that renders least often, so it is the cheapest
+  thing to lose if the pass-wide ceiling ever bites.
 
 ### 53.8 The assistant
 

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -15,7 +15,13 @@
     "A note on `ambiguous` and an empty room: with no window there is nothing to",
     "be ambiguous *between*, so the flag is false and the render says the server",
     "found no candidate. That is a different reading from 'these two are too",
-    "close', and the corpus keeps them distinct on purpose."
+    "close', and the corpus keeps them distinct on purpose.",
+    "",
+    "expect.when             the time word's direction ('', past, now, future, repeat)",
+    "expect.when_unit        its granularity ('' or minute/hour/day/week/month/year)",
+    "",
+    "expect.when is '' for a message with no time word, and a claimed reading",
+    "there is a false positive: the server would be placing a time nobody stated."
   ],
   "cases": [
     {
@@ -47,7 +53,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -79,7 +87,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -111,7 +121,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -143,7 +155,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -173,7 +187,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -212,7 +228,9 @@
         "act": "instruction",
         "open_questions": [
           "چی شده؟"
-        ]
+        ],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -251,7 +269,9 @@
         "act": "instruction",
         "open_questions": [
           "چی شده؟"
-        ]
+        ],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -288,7 +308,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -325,7 +347,9 @@
         "ambiguous": true,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -362,7 +386,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -419,7 +445,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -476,7 +504,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -549,7 +579,9 @@
         "ambiguous": true,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -593,7 +625,9 @@
         "ambiguous": true,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -623,7 +657,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -660,7 +696,9 @@
         "ambiguous": true,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -692,7 +730,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -722,7 +762,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -754,7 +796,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -784,7 +828,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "social",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -814,7 +860,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -836,7 +884,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "question",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -858,7 +908,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -880,7 +932,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -912,7 +966,9 @@
         "ambiguous": false,
         "addressed": true,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -934,7 +990,9 @@
         "ambiguous": false,
         "addressed": true,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -956,7 +1014,9 @@
         "ambiguous": false,
         "addressed": true,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -978,7 +1038,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "report",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1000,7 +1062,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "report",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1022,7 +1086,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "unknown",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1044,7 +1110,9 @@
         "ambiguous": false,
         "addressed": true,
         "act": "question",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1076,7 +1144,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1108,7 +1178,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1140,7 +1212,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1177,7 +1251,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "correction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1207,7 +1283,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "question",
-        "open_questions": []
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day"
       }
     },
     {
@@ -1229,7 +1307,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "report",
-        "open_questions": []
+        "open_questions": [],
+        "when": "past",
+        "when_unit": ""
       }
     },
     {
@@ -1281,7 +1361,9 @@
         "act": "instruction",
         "open_questions": [
           "سارا؟"
-        ]
+        ],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1313,7 +1395,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1345,7 +1429,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1377,7 +1463,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1399,7 +1487,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "question",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1421,7 +1511,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "question",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1443,7 +1535,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "social",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1465,7 +1559,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "report",
-        "open_questions": []
+        "open_questions": [],
+        "when": "future",
+        "when_unit": ""
       }
     },
     {
@@ -1487,7 +1583,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "correction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1509,7 +1607,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1531,7 +1631,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1553,7 +1655,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "instruction",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1575,7 +1679,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "unknown",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1597,7 +1703,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "unknown",
-        "open_questions": []
+        "open_questions": [],
+        "when": "now",
+        "when_unit": "day"
       }
     },
     {
@@ -1619,7 +1727,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "question",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1660,7 +1770,9 @@
         "ambiguous": false,
         "addressed": false,
         "act": "social",
-        "open_questions": []
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1700,7 +1812,9 @@
         "act": "unknown",
         "open_questions": [
           "قیمت چنده؟"
-        ]
+        ],
+        "when": "",
+        "when_unit": ""
       }
     },
     {
@@ -1751,7 +1865,409 @@
         "act": "unknown",
         "open_questions": [
           "چرا دیر کرد؟"
-        ]
+        ],
+        "when": "",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-present",
+      "category": "temporal",
+      "note": "«همین الان» is the present moment, read from the server's clock.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "همین الان دارم میام",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-past-minutes",
+      "category": "temporal",
+      "note": "«چند دقیقه پیش» points back at a scale of minutes and states no count.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 940,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "چند دقیقه پیش فرستادم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "minute"
+      }
+    },
+    {
+      "id": "when-today",
+      "category": "temporal",
+      "note": "«امروز» is the present, at a scale of days.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "امروز هوا خیلی گرمه",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": "day"
+      }
+    },
+    {
+      "id": "when-tomorrow",
+      "category": "temporal",
+      "note": "«فردا» points forwards, at a scale of days.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "فردا میبینمت",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day"
+      }
+    },
+    {
+      "id": "when-yesterday-question",
+      "category": "temporal",
+      "note": "A question whose time word points back a day.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 700,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دیروز چرا اینکارو کردی",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "day"
+      }
+    },
+    {
+      "id": "when-that-time",
+      "category": "temporal",
+      "note": "«اون موقع» points back at a time the room established; no scale stated.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "اون موقع کجا بودی",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-still",
+      "category": "temporal",
+      "note": "«هنوز» is about the present state — \"still has not\".",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "هنوز جواب نداده",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-repeat",
+      "category": "temporal",
+      "note": "«دوباره» says this has happened before; a direction the words state.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دوباره امتحان کن",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "repeat",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-absent",
+      "category": "temporal",
+      "note": "No time word at all: the reading is empty, not wrong.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-last-week",
+      "category": "temporal",
+      "note": "«هفته پیش» points back a week.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "هفته پیش چی شد؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "week"
+      }
+    },
+    {
+      "id": "when-mixed",
+      "category": "temporal",
+      "note": "A time word in a Persian/English mixed sentence.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دیروز یه issue داشتیم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "day"
+      }
+    },
+    {
+      "id": "when-colloquial",
+      "category": "temporal",
+      "note": "A colloquial question whose time word is «دیشب».",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دیشب چخبر بود؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "day"
+      }
+    },
+    {
+      "id": "when-explicit-beats-demonstrative",
+      "category": "temporal",
+      "note": "«فردا اون موقع» is the future: the word that states a direction decides.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "فردا اون موقع میام",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day"
+      }
+    },
+    {
+      "id": "when-zwnj",
+      "category": "temporal",
+      "note": "«همین‌الان» with the ZWNJ is the same present moment.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "همین‌الان فرستادم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-a-while-ago",
+      "category": "temporal",
+      "note": "«چند وقت پیش» is \"a while ago\": a direction and no scale.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "چند وقت پیش بود",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": ""
+      }
+    },
+    {
+      "id": "when-duration-not-question",
+      "category": "temporal",
+      "note": "«چند ساعت پیش» is a duration, not a question — the noun after «چند» decides.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "چند ساعت پیش دیدمش",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "hour"
       }
     }
   ]

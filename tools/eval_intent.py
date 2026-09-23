@@ -52,7 +52,7 @@ os.environ.setdefault("GEMINI_KEY_STORE_PATH", "/tmp/guardbot-eval/gemini_keys.j
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import addressing, config, discourse, referents  # noqa: E402
+from app import addressing, config, discourse, referents, temporal  # noqa: E402
 
 CASES_PATH = Path(__file__).resolve().parent / "eval_cases.json"
 
@@ -106,10 +106,22 @@ def evaluate(cases: dict) -> dict:
         questions = discourse.open_questions(window)
         questions_block = discourse.render_questions(questions)
 
+        # Timed apart from the resolver: the report quotes each layer's own
+        # cost, and folding two layers into one number would hide which one grew.
+        when_started = time.perf_counter()
+        when = temporal.read_when(anchor["text"])
+        window_start = min(
+            (int(row["at"]) for row in window if int(row.get("at") or 0)), default=0
+        )
+        when_block = temporal.render(when, now=anchor["at"], window_start=window_start)
+        when_us = (time.perf_counter() - when_started) * 1_000_000
+
         top = resolution.top()
         top_id = top.user_id if top else None
 
         expected_questions = [str(q) for q in (expect.get("open_questions") or ())]
+        expected_when = str(expect.get("when") or "")
+        expected_when_unit = str(expect.get("when_unit") or "")
 
         detail.append(
             {
@@ -133,11 +145,19 @@ def evaluate(cases: dict) -> dict:
                 "expected_questions": expected_questions,
                 "got_questions": [q.text for q in questions],
                 "questions_block_chars": len(questions_block),
+                "expected_when": expected_when,
+                "got_when": when.kind,
+                "expected_when_unit": expected_when_unit,
+                "got_when_unit": when.unit,
+                "when_why": when.why,
+                "when_block_chars": len(when_block),
                 "block_chars": len(block),
                 "us": elapsed_us,
+                "when_us": when_us,
                 "kind_ok": expression.kind == expect["expression_kind"],
                 "addressed_ok": bool(addressed) == bool(expect["addressed"]),
                 "act_ok": act.kind == expect.get("act", discourse.ACT_UNKNOWN),
+                "when_ok": when.kind == expected_when and when.unit == expected_when_unit,
             }
         )
 
@@ -198,6 +218,21 @@ def _metrics(detail: list[dict]) -> dict:
         1 for r in question_cases if set(r["got_questions"]) == set(r["expected_questions"])
     )
 
+    # ── The time words ────────────────────────────────────────────────────
+    # Scored the same way the act is, and for the same reason: a reading of ""
+    # is an abstention, not a wrong answer, so accuracy alone would let a
+    # constant win. A claimed reading that should have been empty is the
+    # dangerous direction — it puts a wrong time in the prompt — and it is
+    # counted separately.
+    when_claimed = [r for r in detail if r["got_when"]]
+    when_labelled = [r for r in detail if r["expected_when"]]
+    when_false_positive = [
+        r for r in when_claimed if not r["expected_when"]
+    ]
+    when_false_negative = [
+        r for r in when_labelled if not r["got_when"]
+    ]
+
     return {
         "cases": len(detail),
         "expression_accuracy": rate(detail, lambda r: r["kind_ok"]),
@@ -236,6 +271,24 @@ def _metrics(detail: list[dict]) -> dict:
         "questions_block_chars_max": max(
             (r["questions_block_chars"] for r in detail), default=0
         ),
+        "when_accuracy": rate(detail, lambda r: r["when_ok"]),
+        "when_claimed_precision": rate(when_claimed, lambda r: r["when_ok"]),
+        "when_coverage": len(when_claimed) / n,
+        "when_recall": rate(when_labelled, lambda r: r["when_ok"]),
+        "when_false_positives": len(when_false_positive),
+        "when_false_negatives": len(when_false_negative),
+        "when_by_kind": {
+            kind: {
+                "total": sum(1 for r in detail if r["expected_when"] == kind),
+                "correct": sum(
+                    1 for r in detail if r["expected_when"] == kind and r["when_ok"]
+                ),
+            }
+            for kind in ("",) + temporal.WHENS
+        },
+        "when_block_chars_max": max(
+            (r["when_block_chars"] for r in detail), default=0
+        ),
         "needs_resolution": len(needs),
         "answerable": len(answerable),
         "resolution_top1_accuracy": rate(
@@ -257,6 +310,14 @@ def _metrics(detail: list[dict]) -> dict:
         "us_mean": statistics.fmean([r["us"] for r in detail]) if detail else 0.0,
         "us_p95": (
             sorted(r["us"] for r in detail)[min(len(detail) - 1, int(len(detail) * 0.95))]
+            if detail
+            else 0.0
+        ),
+        "when_us_mean": statistics.fmean([r["when_us"] for r in detail]) if detail else 0.0,
+        "when_us_p95": (
+            sorted(r["when_us"] for r in detail)[
+                min(len(detail) - 1, int(len(detail) * 0.95))
+            ]
             if detail
             else 0.0
         ),
@@ -299,6 +360,19 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  recall                     {_pct(m['questions_recall'])}",
         f"  block chars max            {m['questions_block_chars_max']}",
         "",
+        "time words (an empty reading is an abstention, not a failure)",
+        f"  claimed precision          {_pct(m['when_claimed_precision'])}",
+        f"  coverage                   {_pct(m['when_coverage'])}",
+        f"  recall on labelled cases   {_pct(m['when_recall'])}",
+        f"  false positives/negatives  {m['when_false_positives']} / {m['when_false_negatives']}",
+        "  per kind (correct/total)   "
+        + "  ".join(
+            f"{kind or 'none'} {v['correct']}/{v['total']}"
+            for kind, v in m["when_by_kind"].items()
+            if v["total"]
+        ),
+        f"  block chars max            {m['when_block_chars_max']}",
+        "",
         f"referent resolution ({m['answerable']} answerable of {m['needs_resolution']} open)",
         f"  top-1 accuracy             {_pct(m['resolution_top1_accuracy'])}",
         f"  ambiguity recall           {_pct(m['ambiguity_recall'])}",
@@ -313,12 +387,14 @@ def report(result: dict, *, verbose: bool = False) -> str:
         "cost",
         f"  block chars mean / max     {m['block_chars_mean']:.0f} / {m['block_chars_max']}",
         f"  resolver us mean / p95     {m['us_mean']:.0f} / {m['us_p95']:.0f}",
+        f"  time-word us mean / p95    {m['when_us_mean']:.0f} / {m['when_us_p95']:.0f}",
         "",
     ]
     failures = [
         r
         for r in result["detail"]
         if not r["kind_ok"] or not r["addressed_ok"] or not r["act_ok"]
+        or not r["when_ok"]
         or (r["requires_resolution"] and r["expected_referent"] is not None
             and r["got_referent"] != r["expected_referent"])
         or (r["expected_ambiguous"] and not r["got_ambiguous"])
@@ -334,6 +410,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
                 f"amb {r['got_ambiguous']}/{r['expected_ambiguous']} "
                 f"addr {r['got_addressed']}/{r['expected_addressed']} "
                 f"act {r['got_act']}/{r['expected_act']} "
+                f"when {r['got_when']}/{r['expected_when']}"
+                f"·{r['got_when_unit']}/{r['expected_when_unit']} "
                 f"q {r['got_questions']}/{r['expected_questions']}"
             )
             if verbose and r["note"]:

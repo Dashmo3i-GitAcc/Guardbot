@@ -114,6 +114,43 @@ def _action_words() -> frozenset[str]:
         return frozenset()
 
 
+def _temporal_nouns() -> frozenset[str]:
+    """The time nouns that turn a question word into a duration.
+
+    «چند» asks "how many"; «چند دقیقه پیش» says "a few minutes ago". The word is
+    the same and the reading is opposite, and what separates them is the noun
+    after it — which is why this borrows ``app/temporal.py``'s ``TEMPORAL_NOUNS``
+    rather than keeping a list of durations that would drift. Late and guarded,
+    as every cross-module reach here is: a missing list degrades to the reading
+    this module gave before, never to an import error.
+    """
+    try:
+        from . import temporal
+
+        return frozenset(temporal.TEMPORAL_NOUNS)
+    except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
+        return frozenset()
+
+
+def _question_hits(tokens) -> list[str]:
+    """The question words that are actually asking.
+
+    A question word directly before a time noun is a duration, not a question:
+    «چند دقیقه پیش»، «چند ساعت پیش»، «چند وقت پیش». The question *mark* is not
+    consulted here — it is the stronger signal and is checked on its own — so a
+    sentence that really asks still reads as a question when it carries one.
+    """
+    nouns = _temporal_nouns()
+    hits: list[str] = []
+    for index, token in enumerate(tokens):
+        if token not in _QUESTION_WORDS and _bare(token) not in _QUESTION_WORDS:
+            continue
+        if index + 1 < len(tokens) and tokens[index + 1] in nouns:
+            continue
+        hits.append(token)
+    return hits
+
+
 # The imperative endings a Persian directive ends with — kept only as
 # documentation of what the explicit lexicons already cover, and deliberately
 # **not** used as a suffix rule.
@@ -291,7 +328,7 @@ def read_act(text: str | None) -> Act:
     if social:
         found[ACT_SOCIAL] = (f"the greeting «{social[0]}»",)
 
-    question = _hits(tokens, _QUESTION_WORDS)
+    question = _question_hits(tokens)
     if question:
         found[ACT_QUESTION] = (f"the question word «{question[0]}»",)
     elif any(mark in folded for mark in _QUESTION_MARKS):

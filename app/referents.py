@@ -170,6 +170,25 @@ def _action_words() -> frozenset[str]:
         return frozenset()
 
 
+def _temporal_nouns() -> frozenset[str]:
+    """The time words a demonstrative may point at instead of a person.
+
+    «همین الان» and «این هفته» are times, and «همین»/«این» are also the near
+    demonstratives this module reads as person pointers. The list that knows
+    which words are times already exists — ``app/temporal.py``'s
+    ``TEMPORAL_NOUNS`` — and this borrows it rather than keeping a second copy
+    that drifts. Late and guarded, exactly as ``_action_words`` is: a missing
+    lexicon degrades to "no time word known", which only means the reading this
+    module gave before the temporal reader existed, never an import error.
+    """
+    try:
+        from . import temporal
+
+        return frozenset(temporal.TEMPORAL_NOUNS)
+    except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
+        return frozenset()
+
+
 def _clitic_person(token: str) -> bool:
     """Whether a token is an action verb with the 3rd-person object clitic.
 
@@ -296,9 +315,14 @@ def find_expression(text: str | None) -> Expression:
 
     # The bare demonstratives, last because they are the weakest about
     # personhood. A separated object marker is folded into the surface so the
-    # rendered block reads the way the message did.
+    # rendered block reads the way the message did. A demonstrative directly
+    # before a time word is a *time*, not a person — «همین الان», «این هفته»,
+    # «اون موقع» — and is skipped here; the check reads the raw token, because
+    # the clitic stripper would have turned «هفته» into «هفت».
     for index, token in enumerate(bare):
         if _deictic(token):
+            if index + 1 < len(tokens) and tokens[index + 1] in _temporal_nouns():
+                continue
             extra = 0
             if index + 1 < len(bare) and bare[index + 1] in _OBJECT_MARKERS:
                 extra = 1

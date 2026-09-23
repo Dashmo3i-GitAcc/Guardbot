@@ -768,3 +768,53 @@ def test_the_new_sources_are_bounded_by_their_own_budget(monkeypatch):
     ctx = _referent_ctx(anchor, window)
     assert len(_source_blocks(ctx, "open_questions")) <= 500
     assert len(_source_blocks(ctx, "anchor_act")) <= 200
+    assert len(_source_blocks(ctx, "anchor_when")) <= 300
+
+
+# ── When the anchor's own words point, from the server's clock ────────────
+def test_the_anchor_when_is_rendered_for_the_model():
+    """«دیروز» is placed by the server's clock, not the model's sense of time."""
+    anchor = _msg(MEMBER, "دیروز چرا اینکارو کردی", name="Someone", at=1000)
+    out = awareness_context.blocks(_referent_ctx(anchor, []))
+    assert "دیروز" in out
+    assert "backwards, before now" in out
+    assert "server's clock" in out
+
+
+def test_the_anchor_when_renders_nothing_without_a_time_word():
+    """A message that says nothing about time contributes nothing."""
+    anchor = _msg(MEMBER, "اینو بن کن", name="Someone", at=1000)
+    assert awareness_context._render_anchor_when(_referent_ctx(anchor, [])) == ""
+
+
+def test_the_anchor_when_states_how_old_the_window_is():
+    """«قبلاً» needs something to be earlier *than* — the window's own age."""
+    window = [_msg(TARGET, "سلام", name="Reza", at=700)]
+    anchor = _msg(MEMBER, "قبلاً گفتم اینکارو نکن", name="Someone", at=1000)
+    out = awareness_context._render_anchor_when(_referent_ctx(anchor, window))
+    assert "starts" in out
+
+
+def test_the_anchor_when_reads_the_context_not_the_database():
+    """A hand-made window nothing captured: a query would find nothing."""
+    anchor = _msg(MEMBER, "همین الان بنش کن", name="Someone", at=1000)
+    ctx = _referent_ctx(anchor, [])
+    out = awareness_context._render_anchor_when(ctx)
+    assert "همین الان" in out
+    assert "at the present moment" in out
+
+
+def test_a_time_word_is_not_rendered_as_a_person_reference():
+    """The two readers share the fact: «همین الان» is a time, not somebody.
+
+    The anchor is an administrator's, so the referent source *is* asked — and the
+    assertion is that it has nothing to offer, while the when-block places the
+    time. A message like «همین الان ساعت چنده» names no person, and the temporal
+    noun is what keeps the near demonstrative from being read as one.
+    """
+    anchor = _msg(ADMIN, "همین الان ساعت چنده", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "سلام", name="Reza", at=900)]
+    ctx = _referent_ctx(anchor, window)
+    assert awareness_context._wants_referents(ctx) is True
+    assert awareness_context._render_referent_candidates(ctx) == ""
+    assert "at the present moment" in awareness_context._render_anchor_when(ctx)

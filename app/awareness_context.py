@@ -62,6 +62,7 @@ from . import (
     identity,
     persian_calendar,
     referents,
+    temporal,
 )
 
 log = logging.getLogger("guardbot.awareness.context")
@@ -299,6 +300,28 @@ def _render_open_questions(ctx: Ctx) -> str:
     return discourse.render_questions(discourse.open_questions(ctx.messages))
 
 
+def _render_anchor_when(ctx: Ctx) -> str:
+    """Where the message's own time words point, from the server's clock. Tier 0.
+
+    A Persian sentence places itself in time with a word rather than a date —
+    «الان»، «قبلاً»، «چند دقیقه پیش»، «دیروز»، «فردا» — and a model reading a
+    transcript has no clock, so it supplies one and reads «قبلاً» as whenever it
+    imagines the conversation to be. This block is the server's clock doing that
+    arithmetic instead: the direction and the granularity the words state, plus
+    how old the window the pass is reading is, so «قبلاً» has something to be
+    earlier *than*.
+
+    It renders nothing when the message carries no time word — the block is
+    about what the words say, and a message that says nothing about time has
+    nothing here. It states the server's reading and never a date, because
+    «چند دقیقه پیش» does not contain one; see ``app/temporal.py``.
+    """
+    when = temporal.read_when((ctx.anchor or {}).get("text"))
+    if not when:
+        return ""
+    return temporal.render(when, now=ctx.now, window_start=ctx.oldest_at())
+
+
 def _state(chat_id: int) -> dict:
     try:
         return db.awareness_get(chat_id) or {}
@@ -525,6 +548,14 @@ SOURCES: tuple[Source, ...] = (
     # empty unless there is a question no reply points at.
     Source("anchor_act", TIER_ALWAYS, 200, _render_anchor_act),
     Source("open_questions", TIER_ALWAYS, 500, _render_open_questions),
+    # Where the anchor's own time words point, from the server's clock. Last of
+    # the tier-0 sources on purpose: it is the shortest block and the one that
+    # renders least often (only when the message carries a time word), so if the
+    # pass-wide ceiling ever bites it is the cheapest thing to lose. It is a
+    # *reading of the anchor*, like ``anchor_act``, but it goes after the
+    # window-wide question block so that block — the larger piece of room state
+    # — is never the one dropped.
+    Source("anchor_when", TIER_ALWAYS, 300, _render_anchor_when),
     Source(
         "admin_activity",
         TIER_CONDITIONAL,

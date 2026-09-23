@@ -15,6 +15,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [41. The allowance is a day's, so it is spent across the day](#s41)
 - [42. Who does «این» mean? The referent resolver](#s42)
 - [43. What is this message doing, and what is unanswered](#s43)
+- [44. When does «الان» mean? The server's clock, not the model's](#s44)
 
 ---
 
@@ -1802,3 +1803,159 @@ is open). Both read `Ctx`, never the database, so a pass pays no extra query.
 The measured cost of both, on a four-message batch, is +208 characters and about
 0.7 ms of pure Python — and zero Gemini calls, so the awareness allowance is
 untouched.
+
+<a id="s44"></a>
+
+## 44. When does «الان» mean? The server's clock, not the model's
+
+### 44.1 The gap, stated in the room's own language
+
+A Persian sentence places itself in time with a word rather than a date: «الان»,
+«همین الان», «قبلاً», «چند دقیقه پیش»، «دیروز»، «فردا»، «هفته پیش»، «بعداً»,
+«دوباره»، «هنوز». A model reading a transcript has no clock. Asked what «قبلاً»
+means, it supplies one — from the date of the last message it read, or from its
+own training. The brief names the failure exactly: **do not extract dates from
+model guessing; use the server clock and real timestamps.**
+
+The server already hands the pass the *absolute* date (§35's calendar block, read
+from `ctx.now`). What it did not hand over was the *relative* reading: that «دیروز»
+points backwards a day, that «چند دقیقه پیش» points backwards at a scale of
+minutes, that «فردا اون موقع» points forwards because «فردا» is the word that
+knows. That is arithmetic on the server's own clock, and it belongs on the server.
+
+### 44.2 It reports a direction and a granularity, never a date
+
+`app/temporal.py` reads the words and returns four things: the **direction**
+(`past` / `now` / `future` / `repeat`), the **granularity** (`minute` … `year`, or
+none), the **offset the words state** (0 for most — «چند دقیقه پیش» states no
+count, «دیروز» states a day), and the **surface** the message actually used.
+
+It deliberately does **not** produce a date. «چند دقیقه پیش» does not contain one,
+and a module that computed one would be inventing the thing the brief forbids. The
+rendered line says so: *"That is the server's clock, not a reading of the words."*
+
+`now` is **passed in** by the caller — the same value the pass already read — so
+there is exactly one notion of "now" in a pass. A second clock is a second answer.
+
+### 44.3 The table, and why its order is the whole argument
+
+The phrases are a tuple scanned **in order, first hit wins**, matched on token
+boundaries against the shared fold. Two orderings are load-bearing and both are
+asserted by tests:
+
+* **Longer before shorter.** «نیم ساعت پیش» must be tried before «ساعت پیش»: the
+  two differ only in `seconds`, so a kind-only assertion would not notice the
+  shorter one winning.
+* **Explicit before demonstrative.** «این هفته» is the present week and «اون
+  موقع» points back at a time the room established — but «فردا اون موقع» is the
+  future, because «فردا» is the word that states a direction. The demonstrative
+  forms are generated from a cross product and placed **last**, so a sentence that
+  carries both reads by the word that knows.
+
+The demonstrative forms are the same near/far split `referents` reads for people,
+applied to time: near is the present, far is the past.
+
+### 44.4 One list, three readers
+
+`TEMPORAL_NOUNS` is the time nouns — «الان»، «هفته»، «موقع»، «مدت» — and it is
+shared rather than copied. Three readers consult it, each borrowing it late and
+guarded as every cross-module reach in this feature does:
+
+* `temporal` builds its demonstrative phrases from it;
+* `referents` will not read a demonstrative before a time noun as a person:
+  «این هفته» is a week, not somebody. The check reads the **raw** token, because
+  the clitic stripper would have turned «هفته» into «هفت»;
+* `discourse` will not read a question word before a time noun as a question:
+  «چند» asks "how many", but «چند دقیقه پیش» says "a few minutes ago". This was a
+  real false positive the temporal work exposed — the act reader called
+  «چند دقیقه پیش فرستادم» a question — and the noun after «چند» is what separates
+  the two readings. The question *mark* is still checked on its own, so a sentence
+  that really asks («چند دقیقه پیش فرستادی؟») still reads as a question.
+
+### 44.5 The numbers
+
+`tools/eval_intent.py`, over the same corpus (now 71 cases — the 55 from §43 plus
+16 temporal ones), with the time reader disabled and enabled:
+
+```
+                                before   after
+cases                               55      71
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.2%   98.6%
+
+the act (abstention is 'unknown')
+  claimed precision              100.0%  100.0%
+  coverage                        90.9%   78.9%
+  recall on labelled cases       100.0%  100.0%
+  false positives / negatives      0 / 0   0 / 0
+  abstentions                         5      15
+  per class (correct/total)  question 6/6  question 10/10  instruction 37/37
+                            instruction 35/35  correction 2/2  social 3/3
+                            correction 2/2  report 4/4  unknown 15/15
+                            social 3/3
+                            report 4/4
+                            unknown 5/5
+
+the room's open questions (5 cases that have one)
+  exact match                        -    5 / 5
+  precision / recall                 -  100% / 100%
+
+time words
+  claimed precision                  -  100.0%
+  coverage                           -   26.8%
+  recall on labelled cases           -  100.0%
+  false positives / negatives        -    0 / 0
+  per kind (correct/total)           -  none 52/52  past 9/9  now 5/5
+                                          future 4/4  repeat 1/1
+  block chars max                    -      292
+
+context overhead per pass            -  +292 chars (~73 tokens), when a time word is present
+reading cost per pass                -  ~0.1 ms mean, ~0.1 ms p95
+Gemini calls added                   -        0
+```
+
+Three things in that table need saying plainly.
+
+**The act coverage fell from 90.9% to 78.9%, and it is a fact about the corpus,
+not the reader.** Sixteen temporal cases were added and nine of them are plain
+statements that place themselves in time («امروز هوا خیلی گرمه», «فردا اون موقع
+میام»), whose act *is* a matter of meaning — exactly the kind of message the act
+reader is built to abstain on. The load-bearing floors did not move: claimed
+precision is still 100% and the false-positive count is still 0. The coverage
+floor in `tests/test_intent_eval.py` was lowered from 0.85 to 0.75 **on purpose**,
+with the reason written beside it.
+
+**The act reader changed too, and the change is a fix.** «چند دقیقه پیش فرستادم»
+used to read as a `question`, because «چند» is a question word. It is now an
+abstention, which is correct: it is a statement with a duration in it. This is the
+only behaviour change to §43's module in this increment, and it is a false positive
+removed rather than a feature added.
+
+**The reading cost fell by ~8× while the reader grew.** The first draft folded all
+88 phrases on every call (~0.9 ms mean, ~1.7 ms p95). The folded table is now built
+once, lazily, on first use — lazily rather than at import so it is folded under the
+same environment the reads happen in. A read is now a substring scan: ~0.1 ms mean
+and p95.
+
+### 44.6 Two known boundaries, recorded rather than hidden
+
+* **«اون موقع» reads as the past on its own.** It points at a time the room
+  established, and that antecedent is usually behind us — but «فردا اون موقع» is
+  the future, and the table handles that because «فردا» is tried first. A sentence
+  with no explicit direction word and an *antecedent that is future* would read as
+  the past. Resolving it properly means reading the antecedent, which is the
+  referent resolver's problem, not this one's.
+* **«چک کردم» still reads as an instruction.** `discourse` lists «check» as an
+  English imperative, and it cannot yet tell «check کن» (an order) from «check
+  کردم» (past tense). This is not temporal and was not fixed here; it is recorded
+  so the next increment that touches the act reader knows to look.
+
+### 44.7 Where it reaches the model
+
+One **tier-0** source, `anchor_when`, declared **last** among the tier-0 sources:
+it is the shortest block and the one that renders least often (only when the anchor
+carries a time word), so it is the cheapest thing to lose if the pass-wide ceiling
+ever bites. It reads `Ctx` — the anchor text, `ctx.now` and `ctx.oldest_at()` — so
+it costs no query. Measured: 118–164 characters for a bare time word, 252–298 with
+the window-age line, and **zero** when the message states no time; about 0.05 ms of
+pure Python; and zero Gemini calls, so the awareness allowance is untouched.

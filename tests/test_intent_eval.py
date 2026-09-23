@@ -17,6 +17,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from app import temporal
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # The harness lives in tools/ and is a script, not a package module.
@@ -55,6 +57,10 @@ def test_the_corpus_is_well_formed():
         # reader is expected to abstain on.
         assert "act" in case["expect"], case["id"]
         assert "open_questions" in case["expect"], case["id"]
+        # …and a time label, for the same reason: an absent field would make
+        # "no time word here" indistinguishable from "not yet labelled".
+        assert "when" in case["expect"], case["id"]
+        assert "when_unit" in case["expect"], case["id"]
 
 
 def test_expression_detection_is_exact_on_the_corpus():
@@ -133,10 +139,18 @@ def test_the_act_reader_still_abstains_rather_than_guessing():
     The abstentions are the implicit complaint, the plain statement and the
     two empty anchors: messages whose act is a matter of meaning. If this ever
     reaches 100%, something started guessing.
+
+    The floor moved from 0.85 to 0.75 when the temporal slice was added, and the
+    move is a statement about the corpus rather than about the reader: sixteen
+    messages were added, and nine of them are plain statements that place
+    themselves in time («امروز هوا خیلی گرمه») — whose act *is* a matter of
+    meaning, exactly the kind of message this reader is built to abstain on. The
+    load-bearing floors are untouched: claimed precision is still 1.0 and the
+    false-positive count is still 0.
     """
     m = result()
     assert 0 < m["act_abstentions"] < m["cases"]
-    assert m["act_coverage"] >= 0.85
+    assert m["act_coverage"] >= 0.75
 
 
 def test_every_act_class_is_exercised():
@@ -159,6 +173,47 @@ def test_the_open_questions_are_exact():
 
 def test_the_question_block_stays_small():
     assert result()["questions_block_chars_max"] <= 600
+
+
+# ── The time words ────────────────────────────────────────────────────────
+def test_the_time_reader_never_claims_a_time_nobody_stated():
+    """The dangerous direction: a time placed in the prompt from words that
+    are not there. Everything it claims, it is right about."""
+    m = result()
+    assert m["when_false_positives"] == 0
+    assert m["when_claimed_precision"] == 1.0
+
+
+def test_the_time_reader_finds_every_labelled_time_word():
+    m = result()
+    assert m["when_false_negatives"] == 0
+    assert m["when_recall"] == 1.0
+
+
+def test_the_time_reader_abstains_when_there_is_no_time_word():
+    """An empty reading is the common case and the cheap one.
+
+    If coverage ever reaches 100% the reader is claiming a time on messages that
+    state none, which is the false-positive direction above.
+    """
+    m = result()
+    assert 0 < m["when_coverage"] < 1.0
+    assert m["when_by_kind"][""]["total"] >= 40
+
+
+def test_every_time_kind_is_exercised():
+    by_kind = result()["when_by_kind"]
+    for kind in temporal.WHENS:
+        assert by_kind[kind]["total"] >= 1, f"{kind} has no cases"
+
+
+def test_the_time_block_stays_small():
+    assert result()["when_block_chars_max"] <= 300
+
+
+def test_the_time_reader_is_fast_enough_to_run_on_every_pass():
+    """The folded table is cached, so a read is a substring scan and no more."""
+    assert result()["when_us_mean"] < 1000
 
 
 def test_the_harness_runs_without_a_database_or_a_key():

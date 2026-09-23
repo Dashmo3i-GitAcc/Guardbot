@@ -393,6 +393,60 @@ def test_a_person_noun_beats_a_clitic():
     assert R.find_expression("این کاربر رو ساکتش کن").kind == R.KIND_PERSON
 
 
+# ── A time word is not a person ───────────────────────────────────────────
+def test_a_demonstrative_before_a_time_word_is_not_a_person_reference():
+    """«این هفته» is a week, not somebody. The near demonstratives are the
+    weakest person pointers already; before a time noun they point at nothing
+    at all, and the resolver must not offer the room's people for them.
+    """
+    for text in ("همین الان", "این هفته", "اون موقع", "همون روز", "این ماه",
+                 "اون سال", "این شب", "همین وقت"):
+        assert R.find_expression(text).kind == "", text
+
+
+def test_the_time_guard_reads_the_raw_token_not_the_clitic_stripped_one():
+    """«هفته» would strip to «هفت», so the guard must look before stripping.
+
+    This is the whole reason the check reads ``tokens`` and not ``bare``: the
+    generic clitic stripper takes the «ه» off «هفته» and the time noun would no
+    longer match the list.
+    """
+    assert R._bare("هفته") == "هفت"
+    assert R.find_expression("این هفته").kind == ""
+    assert R.find_expression("همون هفته").kind == ""
+
+
+def test_the_time_guard_does_not_swallow_a_real_person_reference():
+    assert R.find_expression("این کاربر").kind == R.KIND_PERSON
+    assert R.find_expression("دیروز این کاربر اذیتم کرد").kind == R.KIND_PERSON
+    assert R.find_expression("ساکتش کن").kind == R.KIND_CLITIC
+
+
+def test_the_time_lexicon_is_borrowed_lazily_and_guarded():
+    """The second cross-module reach, held to the same rule as the first.
+
+    It must be inside a function — so importing this module never pulls in
+    ``temporal`` — and it must be wrapped, so a host without the list falls back
+    to the reading this module gave before the temporal reader existed rather
+    than failing to import.
+    """
+    import inspect
+
+    tree = __import__("ast").parse(inspect.getsource(R))
+    lazy = _imports(tree, top_level_only=False) - _imports(tree, top_level_only=True)
+    assert "temporal" in lazy
+    assert "temporal" not in _module_level_imports(R)
+    source = inspect.getsource(R._temporal_nouns)
+    assert "try:" in source and "except Exception" in source
+    # With no list at all, the old behaviour returns: the bare demonstrative.
+    original = R._temporal_nouns
+    try:
+        R._temporal_nouns = lambda: frozenset()
+        assert R.find_expression("این هفته").kind == R.KIND_DEICTIC
+    finally:
+        R._temporal_nouns = original
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
 def _imports(tree, *, top_level_only: bool) -> set[str]:
     """The module names a parsed file imports.

@@ -119,6 +119,48 @@ def test_a_negated_verb_is_not_an_imperative():
     assert D.read_act("میکنم").kind == D.ACT_UNKNOWN
 
 
+# ── A duration is not a question ──────────────────────────────────────────
+@pytest.mark.parametrize(
+    "text",
+    [
+        "چند دقیقه پیش فرستادم",
+        "چند لحظه پیش دیدمش",
+        "چند ساعت پیش اومد",
+        "چند روز پیش فرستادم",
+        "چند هفته پیش بود",
+        "چند ماه پیش دیدم",
+        "چند سال پیش رفت",
+        "چند وقت پیش بود",
+    ],
+)
+def test_a_question_word_before_a_time_noun_is_a_duration(text):
+    """«چند» asks "how many"; «چند دقیقه پیش» says "a few minutes ago".
+
+    The word is the same and the reading is opposite. The noun after it is what
+    separates them, and it is read from the same list the temporal reader uses.
+    """
+    assert D.read_act(text).kind != D.ACT_QUESTION
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "چند تا میخوای",
+        "چند نفر؟",
+        "کدومش",
+        "قیمت چنده؟",
+        "چند دقیقه پیش فرستادی؟",   # the mark makes it a question again
+    ],
+)
+def test_a_question_word_that_is_not_a_duration_still_asks(text):
+    assert D.read_act(text).kind == D.ACT_QUESTION
+
+
+def test_a_duration_beside_a_directive_is_an_instruction():
+    """«چند دقیقه صبر کن» asks nothing — it is an order, with a duration in it."""
+    assert D.read_act("چند دقیقه صبر کن").kind == D.ACT_INSTRUCTION
+
+
 def test_the_reading_carries_the_word_that_decided_it():
     act = D.read_act("اینو بن کن")
     assert act.why and "بن" in act.why[0]
@@ -301,4 +343,17 @@ def test_the_lexicons_are_borrowed_lazily_and_guarded():
     assert lazy, "the borrow must exist for this test to mean anything"
     assert "addressing" in lazy
     assert "people" in lazy
+    assert "temporal" in lazy
     assert lazy & top == set()
+
+
+def test_without_the_time_nouns_the_duration_guard_degrades_to_the_old_reading():
+    """A host missing the list loses the guard, not the module."""
+    original = D._temporal_nouns
+    try:
+        D._temporal_nouns = lambda: frozenset()
+        assert D.read_act("چند دقیقه پیش فرستادم").kind == D.ACT_QUESTION
+        # …and the ordinary question is unchanged either way.
+        assert D.read_act("قیمت چنده؟").kind == D.ACT_QUESTION
+    finally:
+        D._temporal_nouns = original
