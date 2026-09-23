@@ -14,3 +14,25 @@ Pillow>=10.0
 # import is lazy: with the package missing the bot still runs, each workload
 # just reports itself as unavailable.
 google-genai>=2,<3
+# The real Telegram voice-chat transport for Nexus Voice Live
+# (app/voice_live/telegram_voice.py): py-tgcalls over ntgcalls, driving a
+# Telethon MTProto user session. Installed unconditionally rather than behind a
+# build arg, because the point of adding them is that the image *can* hold a
+# call — the feature is switched off by the GEMINI_LIVE_ENABLED setting, not by
+# whether the library is present. The transport still degrades honestly if they
+# are ever removed: it reports `library_missing` and the bot runs normally.
+#
+# py-tgcalls is pure Python and requires >=3.10, which this image satisfies.
+py-tgcalls>=2.3,<3
+# Declared directly because telegram_voice.py imports it directly — py-tgcalls
+# offers Telethon only as an *extra* (`py-tgcalls[telethon]`), so it is not
+# pulled in by the line above, and a transport that imported a module nothing
+# declared would fail at the first join rather than at build time. Same
+# reasoning as httpx above: a direct import deserves a direct declaration.
+telethon>=1.45,<2
+# Transitive (py-tgcalls requires ntgcalls>=2.2.4,<3.0.0) but pinned explicitly,
+# because it is the one native component here: the wheel tag is what decides
+# whether this image can run at all, and ntgcalls 2.2.5 is the version whose
+# cp312-cp312-manylinux_2_28_x86_64 wheel this deployment was verified against.
+# Leaving it floating would let a resolver pick a build this image cannot load.
+ntgcalls>=2.2.5,<3

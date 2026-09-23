@@ -6750,3 +6750,90 @@ assumption is the difference between an engineer and a brochure:
   Persian TTS → continuous feed → transcript → answer → audio, at 1.12–1.21 s;
   and a spoken ban end to end, from the utterance through the tool call, the
   action bridge and `admin_service.execute` to `ok=True`.
+
+### 51.16 The dependency, and how the image gets it
+
+`requirements.txt` declares three packages for the real transport:
+
+| package | pin | why |
+|---|---|---|
+| `py-tgcalls` | `>=2.3,<3` | the transport itself. Pure Python, `Requires-Python: >=3.10` |
+| `telethon` | `>=1.45,<2` | **declared directly**, see below |
+| `ntgcalls` | `>=2.2.5,<3` | transitive, pinned because it is the one native component |
+
+The Telethon line is the one worth reading twice. `py-tgcalls`'s metadata lists
+it as `telethon>=1.24.0; extra == "telethon"` — an *extra*, not a base
+dependency. So the obvious declaration, `pip install py-tgcalls`, produces an
+image in which `telegram_voice.py`'s own `import telethon` fails. It would fail
+at the first join rather than at build time, which is the worst possible moment
+for it, and it is exactly the kind of gap that a "the library is installed"
+check misses. Declaring it directly is the fix; `test_voice_live_transport.py`
+asserts both that it is declared and that the extra is not being relied on.
+
+`ntgcalls` is pinned explicitly even though `py-tgcalls` already constrains it
+(`>=2.2.4,<3.0.0`), because it is the only native wheel here and its tag is what
+decides whether this image can hold a call at all. The version verified for this
+deployment is 2.2.5, whose `cp312-cp312-manylinux_2_28_x86_64` wheel is what
+makes Python 3.12 viable — the fact §51.3 corrects. Leaving it floating would let
+a resolver choose a build this interpreter cannot load.
+
+They are installed **unconditionally**, not behind a build arg. The point of
+adding them is that the image *can* hold a call; what keeps the feature off is
+`GEMINI_LIVE_ENABLED`, not the absence of a library. The graceful degradation
+survives: with the packages removed the transport reports `library_missing`, the
+bot boots, and nothing else changes — and that path is asserted, not assumed.
+
+The `Dockerfile` copies `tools/` as well as `app/`, because the bootstrap below
+has to run *inside* the container: it writes to `/data`, which is the mounted
+volume. Only source is copied. The session file is never in the image — it is
+created at runtime under `/data`, and both `.gitignore` and the Dockerfile's
+explicit `COPY` paths keep it out. A credential baked into a layer would be
+readable by anyone who can pull the image and would survive every rotation.
+
+### 51.17 Creating the MTProto session (once, by hand)
+
+The last thing between this feature and a real call is a logged-in user session.
+It cannot be created by the bot: Telegram sends a code to a phone, and a bot
+process that stopped to ask for one would be a bot process that had stopped
+moderating. So it is created once, by hand, with a tool that does nothing else:
+
+```
+docker compose run --rm guardbot python -m tools.voice_live_session
+```
+
+It asks three questions — the phone number, the code Telegram sends, and, only
+when the account has two-step verification, the password. The code and the
+password are read with `getpass`, so they are not echoed and do not reach the
+shell history.
+
+**What it writes.** One file: `/data/voice_live.session`
+(`GEMINI_LIVE_SESSION_PATH`), mode `0600`, inside the mounted data volume, with
+its directory at `0700`. The permissions are set after the file exists rather
+than left to the process umask, because a umask is a property of whoever ran the
+command and not of what the file is.
+
+**What it refuses.** It will not replace a session without being told to. If one
+is already there and already authorised it says so and exits without touching
+it; if one is there but does not work it asks first, and `--force` is the
+non-interactive way to answer yes. With no terminal it refuses outright rather
+than assuming an answer. A failed attempt removes the file it created, so no
+half-made credential is left looking like a session — but it never removes one
+it did not create.
+
+**What it never prints.** Not the phone number, not the code, not the password,
+not the `api_hash`, and not any part of the session. A failure is reported by the
+exception's *type*, never its message, because the message is where the phone
+number ends up. Telethon's own logging is turned down for the same reason: it
+logs connection detail at INFO and, on some paths, the number it is sending a
+code to.
+
+**Required environment.** `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from
+my.telegram.org, plus the bot's own `BOT_TOKEN` and `GROUP_IDS`, which is why the
+documented invocation goes through `docker compose run` — that loads `.env` for
+you. A missing variable is reported by name and never by value.
+
+The session file is a credential and is treated as one everywhere: it is in
+`data/`, which is ignored by Git; it is not in the image; and it must never
+appear in a document, a log, a test fixture or a Telegram message. Rotating it
+means running the command again with `--force`, or deleting the file and
+re-running — the account's own Telegram session list can revoke it.
