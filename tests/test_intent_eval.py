@@ -102,7 +102,14 @@ def test_referent_resolution_finds_the_right_person_every_time():
 
 
 def test_it_never_guesses_when_the_room_is_ambiguous():
-    """The property the whole design rests on: no wrong-person certainty."""
+    """The property the whole design rests on: no wrong-person certainty.
+
+    The labelled ambiguity set is all person-directed requests — a role two
+    people hold, a split room, three recent speakers, «قبلیش». A request that
+    acts on a *thing* is deliberately not in it: there is no person question
+    there, so a tied pair of speakers is not an ambiguity to report. Those cases
+    carry ``ambiguous: false`` and are held by the object floors below.
+    """
     m = result()
     assert m["wrong_confident"] == 0
     assert m["ambiguity_recall"] == 1.0
@@ -516,19 +523,23 @@ def test_the_person_reading_is_never_lost():
     assert m["object_person_recall"] == 1.0
 
 
-def test_the_residual_person_lead_is_counted_and_pinned():
-    """The number the next increment exists to drive to zero.
+def test_the_residual_person_lead_is_driven_to_zero():
+    """The number the previous increment existed to drive to zero — and it is zero.
 
-    ``referents`` still offers a person for a request whose object is a thing —
-    the clitic on a content verb, and the bare demonstrative with one. The object
-    line corrects it in words, which is why the prompt is not wrong; but the lead
-    is still *in* the prompt, and hiding that would be the opposite of what this
-    harness is for. It is pinned here so the increment that removes it fails this
-    test and says so, exactly as ``KNOWN_ADDRESSING_GAPS`` does.
+    ``referents`` used to offer a person for a request whose object is a thing:
+    the clitic on a content verb («پاکش کن»), and the bare demonstrative with one
+    («اینو پاک کن»). The guard scopes the guessing away, so the lead is gone and
+    this pins the result. The floor is stated as a floor as well, so a change that
+    made the labelled set shrink — rather than the lead disappear — fails here
+    instead of reading as a win.
+
+    The three corpus-wide leads that *remain* are all explicit: a name, a stated
+    id and a reply edge identify the thing's author and must survive, which
+    ``tests/test_referents.py`` asserts directly.
     """
     m = result()
-    assert m["object_thing_cases"] >= 10
-    assert m["object_person_offered_for_a_thing"] == 5
+    assert m["object_thing_cases"] >= 8
+    assert m["object_person_offered_for_a_thing"] == 0
 
 
 def test_the_object_block_stays_small():

@@ -558,6 +558,118 @@ def test_a_bare_demonstrative_with_a_mark_is_still_a_person_pointer():
     assert R.find_expression("اونو پاک کن!").kind == R.KIND_DEICTIC
 
 
+# ── A request that acts on a thing is not about a person ──────────────────
+# «پاکش کن» and «بنش کن» are the same shape — a directive carrying the object
+# clitic «ـش» — and one acts on a file while the other acts on a person. The
+# surface cannot tell them apart and only the verb can, which is why the split
+# lives in ``discourse`` beside the lexicon it splits. Before this guard both
+# produced a list of the room's members, and a person lead for a request about a
+# file is the worst mistake available here: it was measured at 5 of 10.
+def _tied_room():
+    """Two people who spoke equally recently, neither of them replied to."""
+    return [row(11, "رضا", "ببین", at=900), row(22, "سارا", "اینم", at=940)]
+
+
+def test_a_request_that_acts_on_a_thing_offers_no_person():
+    """The clitic points at the file, so there is no person question to report.
+
+    This is the difference between "the server looked and found nobody" and
+    "the question does not apply". The first invites the model to ask which
+    person; the second must not, and renders nothing at all.
+    """
+    for text in ("اینو پاک کن", "پاکش کن", "حذفش کن", "اینو پاکش کن"):
+        resolution = R.resolve(anchor(text), messages=_tied_room())
+        assert resolution.acts_on_a_thing, text
+        assert resolution.candidates == (), text
+        assert not resolution.ambiguous, text
+        assert not resolution.confident, text
+        assert R.render(resolution) == "", text
+
+
+def test_the_verb_decides_the_side_not_the_shape_of_the_clitic():
+    """One shape, two readings — and the person reading is not lost with it."""
+    room = _tied_room()
+    thing = R.resolve(anchor("پاکش کن"), messages=room)
+    person = R.resolve(anchor("ساکتش کن"), messages=room)
+    assert thing.acts_on_a_thing and thing.candidates == ()
+    assert not person.acts_on_a_thing and len(person.candidates) == 2
+
+
+def test_a_message_that_asks_for_both_keeps_every_source():
+    """Losing a ban target is worse than a lead the object line corrects.
+
+    The guard is one-directional: it fires only when *no* directive acts on a
+    person. «پاکش کن، بنش کن» asks for a file to go *and* for somebody to be
+    banned, so the room is still offered.
+    """
+    resolution = R.resolve(anchor("پاکش کن، بنش کن"), messages=_tied_room())
+    assert not resolution.acts_on_a_thing
+    assert len(resolution.candidates) == 2
+
+
+@pytest.mark.parametrize("text", ["این چیه", "خب این چیه", "برای اینم همین کارو بکن", "اینو بگو"])
+def test_the_guard_needs_a_directive_with_a_known_side(text):
+    """An unknown side is unknown, not a thing — the reading is what it was.
+
+    «بکن» is in neither half of the split, and a message with no directive has
+    nothing to act on at all. Neither is a thing-object request, so the guard
+    stays out of the way and the room is offered as it always was.
+    """
+    resolution = R.resolve(anchor(text), messages=_tied_room())
+    assert not resolution.acts_on_a_thing, text
+    assert resolution.candidates, text
+
+
+def test_an_explicit_source_still_identifies_the_author_of_a_thing():
+    """A name, a stated id and a reply edge are facts, not guesses.
+
+    «اینو از گروه حذف کن» as a reply to مهدی is about مهدی's message, so the
+    reply edge is still the answer even though the request acts on a thing.
+    What the guard scopes is the guessing, not the facts.
+    """
+    room = _tied_room()
+    reply = R.resolve(anchor("اینو از گروه حذف کن", reply=11), messages=room)
+    assert reply.acts_on_a_thing and reply.confident
+    assert [c.user_id for c in reply.candidates] == [11]
+    stated = R.resolve(anchor("اینو حذف کن 22"), messages=room)
+    assert stated.acts_on_a_thing and stated.top().user_id == 22
+    named = R.resolve(anchor("رضا اینو ببین"), messages=room)
+    assert named.acts_on_a_thing and named.top().user_id == 11
+
+
+def test_the_scoping_is_stated_on_the_resolution():
+    """Evidence carries its reason, so a log can say why the block is empty."""
+    resolution = R.resolve(anchor("پاکش کن"), messages=_tied_room())
+    assert resolution.acts_on_a_thing
+    assert any("acts on a thing" in reason for reason in resolution.why)
+
+
+def test_the_verb_split_is_borrowed_lazily_and_guarded():
+    """The fourth cross-module reach, held to the same rule as the other three.
+
+    It must be inside a function — so importing this module never pulls in
+    ``discourse`` — and it must be wrapped, so a host without the split falls
+    back to the reading this module gave before the object reader existed
+    rather than failing to import.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(R))
+    lazy = _imports(tree, top_level_only=False) - _imports(tree, top_level_only=True)
+    assert "discourse" in lazy
+    assert "discourse" not in _module_level_imports(R)
+    source = inspect.getsource(R._acts_on_a_thing)
+    assert "try:" in source and "except Exception" in source
+    # With no split at all, the person reading returns.
+    original = R._acts_on_a_thing
+    try:
+        R._acts_on_a_thing = lambda text: False
+        assert R.resolve(anchor("پاکش کن"), messages=_tied_room()).candidates
+    finally:
+        R._acts_on_a_thing = original
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
 def _imports(tree, *, top_level_only: bool) -> set[str]:
     """The module names a parsed file imports.

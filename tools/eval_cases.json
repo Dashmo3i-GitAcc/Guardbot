@@ -1,5 +1,5 @@
 {
-  "version": 9,
+  "version": 10,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -3396,7 +3396,7 @@
     {
       "id": "entity-media-newest",
       "category": "entity",
-      "note": "Two things posted; the newest is the one a demonstrative prefers. The anchor names no class, so the person resolver is also scored: two people spoke equally recently and neither is the reply target, so «اینو» is honestly ambiguous *as a person* — and saying so is the point, because it is what makes the model act on the thing instead of guessing a member.",
+      "note": "Two things posted; the newest is the one a demonstrative prefers. The anchor names no class, so the person resolver is also scored: «اینو» points at the media, and the request acts on it, so the resolver reports no person at all — not even an ambiguous one. An ambiguous pair here would be a person lead for a request about a file, which is the mistake the object reading exists to remove; entity-media-single already reads the same words with no ambiguity, and this is now the same reading for the same reason.",
       "window": [
         {
           "user_id": 11,
@@ -3436,7 +3436,7 @@
         "expression_kind": "deictic",
         "referent": null,
         "requires_resolution": true,
-        "ambiguous": true,
+        "ambiguous": false,
         "addressed": false,
         "act": "instruction",
         "open_questions": [],
@@ -3727,7 +3727,7 @@
     {
       "id": "entity-media-and-link",
       "category": "entity",
-      "note": "A link is not a media row: the newest media is still the photo. As in entity-media-newest, the bare «اینو» leaves the person resolver with two tied speakers, so it reports ambiguity rather than picking.",
+      "note": "A link is not a media row: the newest media is still the photo. As in entity-media-newest, the bare «اینو» points at the thing the request acts on, so the person resolver offers nobody rather than a tied pair — two speakers in the window no longer make a person question out of a request about a thing.",
       "window": [
         {
           "user_id": 11,
@@ -3767,7 +3767,7 @@
         "expression_kind": "deictic",
         "referent": null,
         "requires_resolution": true,
-        "ambiguous": true,
+        "ambiguous": false,
         "addressed": false,
         "act": "instruction",
         "open_questions": [],

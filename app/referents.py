@@ -44,6 +44,21 @@ reported as ``confident`` outright, and no other candidate can make it
 ambiguous. This is the same reading ``awareness.instruction_block`` already
 states as fact; this module generalises it rather than replacing it.
 
+What it will not offer
+----------------------
+A request that acts on a *thing* is not about a person, and the expression is what
+points at the thing. «پاکش کن» and «بنش کن» are the same shape — a directive
+carrying the object clitic «ـش» — and one acts on a file while the other acts on a
+person, so only the verb can say which. When every directive in the message acts
+on a thing, the three **heuristic** sources are scoped away: the recent-speaker
+baseline, the room's reply convergence, and the anaphoric reading of the clitic.
+They were what turned «پاکش کن» into a list of the room's members, and it was
+measured at 13 of 27 thing-object requests in the corpus, 5 of 10 on the labelled
+set. The **explicit** sources still run — a named person, a stated id, and the
+reply edge are facts and they identify the thing's author. A message that carries
+both sides («پاکش کن، بنش کن») keeps every source, because losing a ban target is
+worse than a lead the object line corrects.
+
 What it deliberately is not
 ---------------------------
 No database, no model, no config, no authority. It takes a window of message
@@ -210,6 +225,57 @@ def _thing_named(token: str) -> bool:
         from . import entities
 
         return bool(entities.thing_kind(token))
+    except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
+        return False
+
+
+def _acts_on_a_thing(text: str | None) -> bool:
+    """Whether every directive in the message acts on a thing, not a person.
+
+    The last guard of this kind, and the one the object reader made expressible.
+    «پاکش کن», «حذفش کن», «فایل رو پاکش کن» and «اینو حذف کن» all carry an
+    expression this module reads as a person pointer — the object clitic «ـش», or
+    a bare demonstrative — and the directive they hang off is a *content* verb.
+    Deleting a file is not about anybody, so the person candidates those words
+    produce are a wrong lead, and it was measured: five of ten thing-object
+    requests handed the model a person as the target.
+
+    What this scopes is the **heuristic** half of the reading, not the explicit
+    half, and the difference is the whole design. A person the message *names*
+    («رضا اینو ببین»), an id it *states* («اینو ببین 22»), and the reply edge are
+    facts about the message and the room; they identify the author of the thing
+    even when the request acts on the thing — «اینو از گروه حذف کن» as a reply to
+    مهدی is about مهدی's message, and the reply edge is still the answer. What
+    this suppresses is the guessing: the recent-speaker baseline, the room's reply
+    convergence, and the anaphoric reading of the clitic. Those are the sources
+    that turn «پاکش کن» into a list of the room's members.
+
+    The rule is one-directional and deliberately cautious. It fires only when the
+    message has at least one directive, **none** of them acts on a person, and at
+    least one acts on a thing. A message that carries both — «پاکش کن، بنش کن» asks
+    for a file to go *and* for somebody to be banned — keeps every source, because
+    losing a ban target is worse than offering a lead the object line corrects.
+
+    ``discourse.acts_on`` is borrowed rather than re-derived: the split lives beside
+    the lexicon it splits, and it answers ``""`` for a verb nobody has classified.
+    An unknown side is not a thing — it is unknown — so this returns ``False`` and
+    the reading is what it was before.
+
+    Late and guarded, exactly as ``_action_words``, ``_temporal_nouns`` and
+    ``_thing_named`` are: a missing lexicon degrades to the reading this module gave
+    before the object reader existed, never an import error and never a lost
+    referent.
+    """
+    try:
+        from . import discourse
+
+        found = discourse.directives(text)
+        if not found:
+            return False
+        sides = [discourse.acts_on(word) for _index, word in found]
+        if any(side == discourse.ACTS_ON_PERSON for side in sides):
+            return False
+        return any(side == discourse.ACTS_ON_THING for side in sides)
     except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
         return False
 
@@ -433,6 +499,14 @@ class Resolution:
     candidates: tuple[Candidate, ...] = ()
     confident: bool = False
     ambiguous: bool = False
+    # The reading that there is no person here at all: the expression is what
+    # points at the *thing* the request acts on. It is a separate flag rather than
+    # "no candidates", because "the server looked and found nobody" and "the
+    # question does not apply" are different answers and the block says so
+    # differently — the first invites the model to ask which person, the second
+    # must not.
+    acts_on_a_thing: bool = False
+    why: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.expression) and bool(self.candidates)
@@ -568,14 +642,30 @@ def resolve(
     ambiguous because some other person was also named would be worse than
     useless. The candidates are still all returned, so the model can see the
     alternatives — only the ``confident``/``ambiguous`` reading is settled.
+
+    The one scoping that comes before the guessing: a request that acts on a thing
+    is not about a person, and the expression is what points at the thing. The
+    **explicit** sources still run — a named person, a stated id, the reply edge are
+    facts and they identify the thing's author — but the recent-speaker baseline,
+    the room's reply convergence and the anaphoric reading of the clitic do not,
+    because they are what turns «پاکش کن» into a list of the room's members.
     """
     expression = find_expression((anchor or {}).get("text"))
     if not expression:
         return Resolution(expression)
 
+    text = str((anchor or {}).get("text") or "")
+    thing = _acts_on_a_thing(text)
+    scope_why = (
+        (
+            f"the request acts on a thing, so «{expression.surface}» is not a "
+            "person pointer"
+        ),
+    ) if thing else ()
+
     people = _speakers(messages)
     if not people:
-        return Resolution(expression)
+        return Resolution(expression, acts_on_a_thing=thing, why=scope_why)
 
     roles = dict(roles or {})
     evidence: dict[int, list[tuple[float, str]]] = {}
@@ -588,13 +678,11 @@ def resolve(
     if reply:
         add(reply, SCORE_REPLY, "the message is a reply to them")
 
-    stated = _stated_id(str((anchor or {}).get("text") or ""), people)
+    stated = _stated_id(text, people)
     if stated:
         add(stated, SCORE_STATED_ID, "the message states their id")
 
-    for user_id, name in _name_hits(
-        str((anchor or {}).get("text") or ""), people
-    ).items():
+    for user_id, name in _name_hits(text, people).items():
         add(user_id, SCORE_NAMED, f"named in the message ({name})")
 
     if expression.kind == KIND_ROLE:
@@ -603,25 +691,29 @@ def resolve(
             if role in ("owner", "admin"):
                 add(user_id, SCORE_ROLE, f"holds the role {role}")
 
-    for user_id, score in _about_scores(messages).items():
-        add(user_id, score, "the room's recent replies have been aimed at them")
+    # The guessing, and only the guessing, is what a thing-object request scopes
+    # away: these three are what turn «پاکش کن» into a list of the room's members.
+    # The explicit sources above are facts and they run either way.
+    if not thing:
+        for user_id, score in _about_scores(messages).items():
+            add(user_id, score, "the room's recent replies have been aimed at them")
 
-    # An anaphoric expression — «همون»/«اون», or the object clitic — points back
-    # at the person the room has been about. When that person is unambiguous —
-    # every reply in the window aimed at them — the pointer is settled by the
-    # word itself, not merely hinted at.
-    if expression.anaphoric():
-        focus = _about_focus(messages)
-        if focus:
-            add(
-                focus,
-                SCORE_ABOUT_FOCUS,
-                f"the room's replies have all been aimed at them, and "
-                f"«{expression.surface}» points back at them",
-            )
+        # An anaphoric expression — «همون»/«اون», or the object clitic — points
+        # back at the person the room has been about. When that person is
+        # unambiguous — every reply in the window aimed at them — the pointer is
+        # settled by the word itself, not merely hinted at.
+        if expression.anaphoric():
+            focus = _about_focus(messages)
+            if focus:
+                add(
+                    focus,
+                    SCORE_ABOUT_FOCUS,
+                    f"the room's replies have all been aimed at them, and "
+                    f"«{expression.surface}» points back at them",
+                )
 
-    for user_id, score in _recent_scores(anchor, people).items():
-        add(user_id, score, "they spoke shortly before this message")
+        for user_id, score in _recent_scores(anchor, people).items():
+            add(user_id, score, "they spoke shortly before this message")
 
     scored: list[Candidate] = []
     for user_id, findings in evidence.items():
@@ -637,7 +729,7 @@ def resolve(
             )
         )
     if not scored:
-        return Resolution(expression)
+        return Resolution(expression, acts_on_a_thing=thing, why=scope_why)
 
     # Strongest first; a tie is broken by who spoke most recently, which is the
     # only ordering the window can justify.
@@ -645,7 +737,14 @@ def resolve(
     candidates = tuple(scored[: max(1, int(limit))])
 
     if reply:
-        return Resolution(expression, candidates, confident=True, ambiguous=False)
+        return Resolution(
+            expression,
+            candidates,
+            confident=True,
+            ambiguous=False,
+            acts_on_a_thing=thing,
+            why=scope_why,
+        )
 
     top = candidates[0]
     second = candidates[1] if len(candidates) > 1 else None
@@ -657,7 +756,14 @@ def resolve(
         and second.score >= AMBIGUOUS_MIN
         and (top.score - second.score) < MARGIN
     )
-    return Resolution(expression, candidates, confident=confident, ambiguous=ambiguous)
+    return Resolution(
+        expression,
+        candidates,
+        confident=confident,
+        ambiguous=ambiguous,
+        acts_on_a_thing=thing,
+        why=scope_why,
+    )
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────
@@ -668,8 +774,21 @@ def render(resolution: Resolution, *, cap: int = 900) -> str:
     reading, an ambiguous one, and a found-but-unresolvable one. The ambiguous
     case is the one worth the words — it is the server telling the model that it
     could not tell two people apart, which is the honest input to "should I ask".
+
+    A fourth case renders **nothing**: the expression points at the thing the
+    request acts on, and no explicit source found a person either. That block
+    would otherwise say "found no person it could be — if it needs a person, ask
+    which", and asking which person a file is would be worse than silence. The
+    object line in the act block already says what the request acts on, so there
+    is nothing left for this one to add.
+
+    When the request acts on a thing *and* an explicit source did find somebody —
+    the reply edge, a stated id, a name — the block renders, because that reading
+    is about the thing's author and it is true and useful.
     """
     if not resolution.expression:
+        return ""
+    if resolution.acts_on_a_thing and not resolution.candidates:
         return ""
     if not resolution.candidates:
         return (

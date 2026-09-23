@@ -405,10 +405,19 @@ def _metrics(detail: list[dict]) -> dict:
     # server read the target right. The *residual lead* says whether the prompt
     # still contains the wrong one: a request whose object is a thing, with the
     # resolver still offering a person as who it might mean. The object line
-    # corrects that in words; the next increment removes the lead.
+    # corrects that in words; the resolver's own guard is what removes the lead,
+    # and this number is what says whether it did.
     object_cases = [r for r in detail if r["has_object_label"]]
+    # "A thing" is the labelled classes, and the abstention is deliberately not
+    # one of them: a case whose expected class is "" asserts that the server has
+    # *no* reading of what the request acts on, so a person offered there is the
+    # resolver doing its ordinary job — not a thing-lead. Counting it would make
+    # the metric's name false in the direction that flatters the guard.
     object_thing = [
-        r for r in object_cases if r["expected_object_kind"] != objects.CLASS_PERSON
+        r
+        for r in object_cases
+        if r["expected_object_kind"] in objects.CLASSES
+        and r["expected_object_kind"] != objects.CLASS_PERSON
     ]
     object_person = [
         r for r in object_cases if r["expected_object_kind"] == objects.CLASS_PERSON
@@ -739,7 +748,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"{_pct(m['object_person_recall'])} read as a person",
         f"  a person still offered for a thing-object request  "
         f"{m['object_person_offered_for_a_thing']} / {m['object_thing_cases']} "
-        "(the object line corrects it; removing the lead is its own change)",
+        "(the resolver's guard scopes the guessing; an explicit name, id or "
+        "reply edge still identifies the thing's author)",
         f"  block chars max            {m['object_chars_max']}",
         "",
         f"referent resolution ({m['answerable']} answerable of {m['needs_resolution']} open)",

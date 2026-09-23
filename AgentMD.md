@@ -1803,7 +1803,8 @@ reference file is stale and this list is the one to fix first.
   *points* — a clitic or a demonstrative — borrows a kind from the window.
 * The split of the directive lexicon by **what each verb acts on** lives in
   `app/discourse.py`, beside the lexicon it splits, and is borrowed by
-  `objects` (and by `referents` in the next increment). Two tests hold it: it must
+  `objects` and by `referents` (which scopes its guessing with it). Two tests
+  hold it: it must
   **cover** `addressing.ACTION_WORDS`, and no word may be on both sides — so a
   word added to the moderation lexicon fails the suite until somebody decides its
   side.
@@ -1820,9 +1821,33 @@ reference file is stale and this list is the one to fix first.
   the claim it warns about.
 * `tools/eval_intent.py` reports **`object_person_offered_for_a_thing`** — the
   residual wrong lead, a thing-object request for which `referents` still lists a
-  person — rather than hiding it, and `tests/test_intent_eval.py` **pins** it at 5
-  so the increment that removes it fails the test and says so. Removing it is a
-  change to `referents`, with its own baseline.
+  person — rather than hiding it, and `tests/test_intent_eval.py` **pins** it at 0
+  after the resolver guard below drove it from 5. "A thing" there is the labelled
+  classes, and the **abstention is not one of them**: a case whose expected class
+  is `""` says the server has no reading of what the request acts on, so a person
+  offered there is the resolver doing its ordinary job, not a thing-lead.
+* `referents` **scopes its guessing** with `_acts_on_a_thing`: when the message
+  carries at least one directive, **none** of them acts on a person, and at least
+  one acts on a thing, the three heuristic sources (`_about_scores`, the
+  anaphoric `_about_focus`, `_recent_scores`) do not run. They are what turned
+  «پاکش کن» into a list of the room's members. The rule is
+  **one-directional**: a message that carries both — «پاکش کن، بنش کن» — keeps
+  every source, because losing a ban target is worse than a lead the object line
+  corrects.
+* The scoping is of the **guessing, never of the facts**. A person the message
+  *names*, an id it *states*, and the **reply edge** still run and still identify
+  the author of the thing — «اینو از گروه حذف کن» as a reply to مهدی is about
+  مهدی's message. A verb nobody classified answers `""` from `discourse.acts_on`,
+  and **an unknown side is unknown, not a thing**, so the guard stays out of the
+  way rather than guessing.
+* When the guard fires and no explicit source found anybody, the resolution
+  carries **no candidates** and `render` returns **nothing at all**. "The server
+  looked and found nobody" invites the model to ask which person; "the question
+  does not apply" must not, and the object line in the act block already says
+  what the request acts on. A corpus case that expects an **ambiguous person** for
+  a thing-object request is a wrong lead by construction: `entity-media-newest`
+  and `entity-media-and-link` carry `ambiguous: false`, the same reading
+  `entity-media-single` already gets for the same words.
 
 ### 53.8 The assistant
 

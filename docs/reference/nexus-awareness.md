@@ -21,6 +21,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [47. The question mark was part of the word](#s47)
 - [48. «بنش کن» and «بنش نکن» were the same message](#s48)
 - [49. What does the request act on?](#s49)
+- [50. The person lead the object reading removed](#s50)
 
 ---
 
@@ -2673,3 +2674,158 @@ Gemini calls added                      0       0
 The direction's labelled set grew 16 → 29 because the 13 new cases carry a `request`
 label too — the same messages read by two readers, which is what makes the corpus a
 cross-check rather than two disjoint sets.
+
+---
+
+<a id="s50"></a>
+## 50. The person lead the object reading removed
+
+### 50.1 The number §49 pinned, and what it was
+
+§49 ended with a number it deliberately did not fix:
+
+```
+a person still offered for a thing-object request   5 / 10
+```
+
+Those five were the object clitic on a content verb — «پاکش کن», «حذفش کن» — and the
+bare demonstrative with one — «اینو پاک کن». The object reader had just learned to say
+*"the directive «پاک» acts on media"*; `referents` was still saying *"who «اینو» may
+mean: رضا 0.50, سارا 0.50 — the server could not tell them apart, ask which"*. The
+object line corrected it in words, but the wrong lead was still **in** the prompt, and
+the increment that removed it got its own baseline, as §49 said it would.
+
+### 50.2 The rule, and the half it deliberately does not touch
+
+The split that answers *what a verb acts on* already existed in `app/discourse.py`
+(§49.2). `referents` now borrows it, late and guarded exactly as it borrows
+`addressing`, `temporal` and `entities`:
+
+```python
+def _acts_on_a_thing(text):        # fires only when it is unambiguous
+    found = discourse.directives(text)
+    if not found:
+        return False
+    sides = [discourse.acts_on(word) for _index, word in found]
+    if any(side == discourse.ACTS_ON_PERSON for side in sides):
+        return False
+    return any(side == discourse.ACTS_ON_THING for side in sides)
+```
+
+and the resolver wraps **only the heuristic sources** in `if not thing:`.
+
+That "only" is the whole design. The resolver has two kinds of evidence, and they are
+not the same kind of thing:
+
+* **facts about the message and the room** — a person it *names* («رضا اینو ببین»), an
+  id it *states* («اینو حذف کن 22»), and the **reply edge**. These identify the *author
+  of the thing*, and they are true whether or not the request acts on a thing. «اینو از
+  گروه حذف کن» as a reply to مهدی is about مهدی's message, and the reply edge is still
+  the answer.
+* **guesses from the window** — the recent-speaker baseline (`_recent_scores`), the
+  room's reply convergence (`_about_scores`, the anaphoric `_about_focus`), and the
+  anaphoric reading of the clitic. These are what turned «پاکش کن» into a list of the
+  room's members.
+
+The guard scopes the second kind and leaves the first alone. And it is
+**one-directional**: a message that carries both sides — «پاکش کن، بنش کن» asks for a
+file to go *and* for somebody to be banned — keeps every source, because losing a ban
+target is worse than a lead the object line corrects.
+
+### 50.3 The silence, and why it is not an abstention
+
+When the guard fires and no explicit source found anybody, `render` returns **nothing
+at all** — not the "found no person it could be, if it needs a person, ask which"
+block. Those are different answers and the difference is load-bearing:
+
+* *"the server looked and found nobody"* invites the model to ask which person;
+* *"the question does not apply"* must not — asking which person a file is would be
+  worse than saying nothing, and the object line in the act block already states what
+  the request acts on.
+
+### 50.4 Two corpus labels that had to move
+
+Two cases failed the moment the guard landed, and both were the *labels*:
+
+```
+entity-media-newest    «اینو پاک کن»  with two tied speakers   expected ambiguous: true
+entity-media-and-link  «اینو ببین»    with two tied speakers   expected ambiguous: true
+```
+
+Both labels were written in §46's increment, **before the object reader existed**, and
+their note argued the ambiguity was what steered the model to the thing. The object
+line does that directly and authoritatively; an ambiguous *person* pair for a request
+about a file is the wrong lead this increment exists to remove. The corpus already held
+the correct reading for the same shape: `entity-media-single` is the same text
+(«اینو پاک کن») with one speaker and carries `ambiguous: false`. The labels moved, the
+reader did not. That takes the labelled ambiguity set from 6 cases to 4 — and the
+remaining four are all genuinely person-directed (a role two people hold, a split room,
+three recent speakers, «قبلیش»).
+
+### 50.5 The numbers
+
+`tools/eval_intent.py`, over the corpus (120 cases, version 10), before and after:
+
+```
+                                        before   after
+labelled object cases                       13      13
+exact (class · source)                   13/13   13/13
+referent top-1 accuracy                 100.0%  100.0%
+ambiguity recall                         100.0%  100.0%
+ambiguity precision                      100.0%  100.0%
+wrong-but-confident                          0       0
+referent block chars mean / max        146 / 527  118 / 527
+```
+
+and the line §49 pinned:
+
+```
+a person still offered for a thing-object request    5 / 10  →  0 / 8
+```
+
+The denominator is 8 rather than 10 because "a thing" is now the labelled classes, and
+the **abstention is deliberately not one of them**: a case whose expected class is `""`
+asserts the server has *no* reading of what the request acts on, so a person offered
+there is the resolver doing its ordinary job. Counting it would have made the metric's
+name false in the direction that flatters the guard.
+
+The labelled set is only 13 cases, so the harness's own counter is a small sample. The
+corpus-wide count is the stronger statement — every case whose object is a known thing,
+whether or not it carries an object label:
+
+```
+thing-object requests in the corpus   27
+  a person lead, before               13
+  a person lead, after                 3
+```
+
+and all three survivors are **explicit** — `named-in-text` (the message names رضا),
+`stated-id` (the message states 22), `owner-anchor-deictic` (the message is a reply to
+55). Ten of the thirteen were the recency heuristic alone, and that is exactly what the
+guard removes.
+
+Cost and boundaries:
+
+```
+guard cost                      ~42 µs per message (~24% of the resolver's ~173 µs)
+context/token overhead          the referent block shrinks; max 527 chars unchanged
+new sources / budget change     none (anchor_act stays at 420)
+Gemini / provider calls added   0
+database change                 none
+```
+
+Nothing else moved: expression, addressing, act, open questions, time, room state,
+entities, the direction, the object reading, and `provided_before < provided_after`
+are all identical to §49's report.
+
+### 50.6 What it does not do
+
+* It does not decide anything. It is evidence: it removes candidates from a *list*; the
+  model still chooses, and the chosen id is re-authorised from the actor's Telegram id
+  like every other request.
+* It does not remove the person lead when the lead is a fact. A named person, a stated
+  id and the reply edge survive by design — `tests/test_referents.py` asserts each.
+* It does not fire on a verb nobody classified. `discourse.acts_on` answers `""` for a
+  word in neither half of the split, and **an unknown side is unknown, not a thing**, so
+  «برای اینم همین کارو بکن» keeps its reading. Guessing a side is the mistake the split
+  exists to prevent.
