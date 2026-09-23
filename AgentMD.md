@@ -1459,7 +1459,7 @@ reference file is stale and this list is the one to fix first.
   column **never** holds a message body.
 * Retention is enforced on the administrative path; `ADMIN_IDEMPOTENCY_RETENTION`
   is floored at the replay window in config. `admin_service.prune()` applies
-  **three** windows — `admin_audit`, `admin_request_ids` and `admin_pending_ops`
+  **three** windows — `admin_audit`, `admin_requests` and `admin_pending_ops`
   — and the audit trail is **windowed, never truncated**.
 * The model's judgement is **not** a security control; prompt injection is
   defanged, not solved; a refusal is only a refusal if **nothing reached
