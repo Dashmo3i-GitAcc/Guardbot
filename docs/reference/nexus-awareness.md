@@ -2927,12 +2927,20 @@ grew 120 → 123; both are the new cases, not a reading that changed.
 Cost and boundaries:
 
 ```
-addressing cost                 one set-membership test per candidate match
+addressing cost                 +10.2 us/message (346.7 vs 336.5, in-process A/B
+                                with the rule disabled); _complement alone is
+                                ~316 ns/call — a set membership over the closed
+                                class, no extra tokenization
 context/token overhead          none (addressing is a trigger, not a block)
 new sources / budget change     none
 Gemini / provider calls added   0
 database change                 none
 ```
+
+The 10 µs is real and measured rather than waved at: it is one extra call plus a
+set test per candidate match, on a `detect` that already costs ~340 µs because
+the shared fold re-imports ``people`` on every call. Addressing runs once per
+group message, not once per pass.
 
 ### 51.6 The boundary, stated rather than hidden
 
