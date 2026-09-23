@@ -175,15 +175,26 @@ Three consequences, and they are deliberate rather than gaps:
 
 ### 28.6 Retries, cooldowns and the attempt budget
 
-Retries are bounded on three axes, because any one of them alone can be
+Retries are bounded on four axes, because any one of them alone can be
 circumvented by a large enough pool:
 
 * `retries + 1` attempts per model;
 * `GEMINI_POOL_MAX_ATTEMPTS` provider calls for one logical request — the hard
   ceiling that stops a pathological pool spending a minute on one message;
+* a wall-clock ceiling (`Pool.time_budget`), where a workload asks for one:
+  `GEMINI_INTENT_TIME_BUDGET_SECONDS` for the classifier, and the loose
+  `GEMINI_CHAT_TIME_BUDGET_SECONDS` / `GEMINI_AWARENESS_TIME_BUDGET_SECONDS`
+  safety nets for the two long-walk workloads;
 * exponential backoff with jitter (`_backoff`). The jitter is not politeness: the
   four workloads share one process, and without it a rate-limited provider gets
   every workload's retries in lockstep.
+
+The transient cooldown is part of this arithmetic rather than separate from it:
+because a transient failure is usually a *timeout*, `GEMINI_POOL_TRANSIENT_COOLDOWN`
+must exceed the longest per-attempt deadline, or the next request re-walks a model
+that has not finished failing yet. It was 15s against a 25s chat deadline until
+2026-09-23, which is what spent the attempt budget before the walk reached the one
+healthy model.
 
 When the pool is in use it **owns** the retry policy, and the per-workload retry
 loops run exactly once (`attempts = 1 if pooled else ...`). Two loops would
@@ -261,7 +272,7 @@ GEMINI_MOD_API_KEY_2=...  # ..._2 through ..._20
 GEMINI_MODEL_DISCOVERY_ENABLED=true
 GEMINI_POOL_MODEL_COOLDOWN=120
 GEMINI_POOL_QUOTA_COOLDOWN=900
-GEMINI_POOL_TRANSIENT_COOLDOWN=15
+GEMINI_POOL_TRANSIENT_COOLDOWN=60
 GEMINI_POOL_EVENT_COOLDOWN=900
 GEMINI_POOL_MAX_ATTEMPTS=12
 ```
@@ -421,8 +432,16 @@ future session brings a measurement rather than a hunch.
    `Pool.time_budget` and `GEMINI_INTENT_TIME_BUDGET_SECONDS` fix: an opt-in
    ceiling, checked *before* each attempt, so it covers the whole failover walk.
    It raises `PoolUnavailable("time_budget", …)` with the last real failure folded
-   into the detail and records a `time_budget` event. Every other workload keeps
-   `0`, which is "no ceiling" — the behaviour it always had.
+   into the detail and records a `time_budget` event. The workloads that keep `0`
+   have no ceiling, which is the behaviour they always had.
+
+   `chat` and `awareness` were given ceilings on 2026-09-23, for the opposite
+   reason to `intent`'s: theirs are loose safety nets, not tight budgets. Their
+   walk can legitimately run for minutes when the provider is slow rather than
+   down, so the defaults sit *above* the measured worst case (chat max 383.7s →
+   480s, awareness max 138.5s → 180s) and fire only on a walk that is already
+   pathological. A ceiling near the healthy path would have cut replies that were
+   going to succeed, turning "the model was slow" into "the bot said nothing".
 2. **The workload had one account.** Every 429 was terminal and every hung
    project was hit by every request. Four more credentials were added as
    `GEMINI_API_KEY_2..5`, giving the intent pool five independent projects; the

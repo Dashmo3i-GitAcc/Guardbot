@@ -1847,7 +1847,25 @@ GEMINI_POOL_DISCOVERY_TTL = _int("GEMINI_MODEL_DISCOVERY_TTL", 21600)
 # wobble almost immediately.
 GEMINI_POOL_MODEL_COOLDOWN = _int("GEMINI_POOL_MODEL_COOLDOWN", 120)
 GEMINI_POOL_QUOTA_COOLDOWN = _int("GEMINI_POOL_QUOTA_COOLDOWN", 900)
-GEMINI_POOL_TRANSIENT_COOLDOWN = _int("GEMINI_POOL_TRANSIENT_COOLDOWN", 15)
+
+# The transient one has a floor it must not go below, and the reason is
+# arithmetic rather than taste. A transient failure is usually a *timeout*: the
+# attempt ran the full per-attempt deadline (25s for chat and transcribe, 20s
+# for awareness and moderation) before being abandoned. The cooldown is stamped
+# when that failure is recorded, so if it is shorter than the deadline the model
+# is usable again before the call that just failed could even have finished —
+# and the next request walks straight back into it, paying the full timeout
+# again. That is exactly what happened on 2026-09-23: with the value at 15s and
+# the chat deadline at 25s, every request re-burned the same dead models, the
+# attempt budget was spent before the walk reached the one model that answered,
+# and six of fourteen replies were dropped with ``reason=attempt_budget``.
+#
+# 60s is comfortably above the longest deadline any retryable workload has
+# (25s), so a model that just timed out stays benched for at least as long as
+# the call that failed, and usually for two of them. It stays far below
+# ``GEMINI_POOL_MODEL_COOLDOWN`` (120s), because a transient wobble still says
+# nothing about the model itself.
+GEMINI_POOL_TRANSIENT_COOLDOWN = _int("GEMINI_POOL_TRANSIENT_COOLDOWN", 60)
 
 # Pool events are deduplicated per (workload, event, account, model) against
 # this window, so a hundred consecutive 429s produce one row rather than a
@@ -1887,6 +1905,39 @@ GEMINI_DAILY_RETENTION_DAYS = _int("GEMINI_DAILY_RETENTION_DAYS", 90)
 # A hard ceiling on provider calls for one logical request. Without it a large
 # pool with retries could spend a minute of wall clock on a single message.
 GEMINI_POOL_MAX_ATTEMPTS = _int("GEMINI_POOL_MAX_ATTEMPTS", 12)
+
+# A wall-clock ceiling on one logical request for the two text workloads that
+# ran without one. ``intent`` got the first ceiling because its caller is a
+# group-message handler that must answer in bounded time; these two get one for
+# the opposite reason. Their failover walk can legitimately take minutes — the
+# provider is *slow* rather than down, so each dead model costs a full timeout
+# before the walk moves on — which means the ceiling here is a **safety net
+# above the observed worst case**, not a target to trim towards.
+#
+# The numbers are measurements, not guesses. On 2026-09-23, during the provider
+# slowness that left one of eight preferred models answering, one window of the
+# live log gave:
+#
+#   awareness  gemini_ms  n=14  min 11.1s  p50  95.8s  p90 113.6s  max 138.5s
+#   chat       gemini_ms  n=20  min  9.1s  p50 121.5s  p90 317.0s  max 383.7s
+#
+# A ceiling set anywhere near the healthy path (a first-model answer is 9-12s)
+# would have cut replies that were going to succeed, and that is a worse outcome
+# than a slow reply: it turns "the model was slow" into "the bot said nothing".
+# So the defaults sit above the measured maximum with room to spare — 180s for
+# awareness and 480s for chat — and they fire only on a walk that is already
+# pathological. What they buy is a bound that is explicit and configurable,
+# instead of one implied by ``GEMINI_POOL_MAX_ATTEMPTS`` times the per-attempt
+# timeout, which moves whenever either of those is changed.
+#
+# ``0`` still means "no ceiling", so a deployment that wants the old behaviour
+# sets it and gets it.
+GEMINI_CHAT_TIME_BUDGET_SECONDS = _float(
+    "GEMINI_CHAT_TIME_BUDGET_SECONDS", 480.0
+)
+GEMINI_AWARENESS_TIME_BUDGET_SECONDS = _float(
+    "GEMINI_AWARENESS_TIME_BUDGET_SECONDS", 180.0
+)
 
 # The model preference order. The primary is tried first and the rest only when
 # it is unavailable, which is why normal operation is unchanged by the pool.
@@ -2493,6 +2544,10 @@ GEMINI_POOLS = [
         # stopping. The floor of 1 preserves the old meaning of 0, which used to
         # mean "one request, then stop".
         "daily_budget": max(1, GEMINI_CHAT_DAILY_LIMIT),
+        # A safety net, not a target: a person is waiting on this reply, and a
+        # reply that arrives slowly still beats one that never arrives. See
+        # ``GEMINI_CHAT_TIME_BUDGET_SECONDS`` for why the number is where it is.
+        "time_budget": GEMINI_CHAT_TIME_BUDGET_SECONDS,
     },
     {
         "workload": "moderation",
@@ -2572,6 +2627,11 @@ GEMINI_POOLS = [
         # observant Nexus must not be able to spend the allowance a person is
         # waiting on an answer to.
         "daily_budget": max(1, NEXUS_AWARENESS_DAILY_LIMIT),
+        # The sweep awaits this, so an unbounded walk holds the whole sweep. The
+        # ceiling is still above the measured worst case rather than below it —
+        # cutting a pass short would lose the observation, not just the time.
+        # See ``GEMINI_AWARENESS_TIME_BUDGET_SECONDS``.
+        "time_budget": GEMINI_AWARENESS_TIME_BUDGET_SECONDS,
     },
     {
         # The live voice call. Its own workload, for the same reason awareness

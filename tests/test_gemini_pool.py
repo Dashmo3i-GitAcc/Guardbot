@@ -858,22 +858,108 @@ def test_the_counters_add_up_when_the_budget_stops_a_request(provider, monkeypat
     assert account.successes == 0
 
 
-def test_only_the_intent_workload_has_a_wall_clock_ceiling():
-    """The ceiling is opt-in per workload, and exactly one workload opts in."""
+def test_only_the_workloads_that_need_a_ceiling_have_one():
+    """The ceiling is opt-in per workload, and the set that opts in is fixed.
+
+    ``intent`` needs one because its caller is a group-message handler that must
+    answer in bounded time. ``chat`` and ``awareness`` need one because their
+    failover walk can legitimately run for minutes, so without a bound a slow
+    provider holds the reply path or the sweep indefinitely. The rest are
+    bounded by their own attempt counts and are left alone.
+    """
     specs = {spec["workload"]: spec for spec in config.GEMINI_POOLS}
 
-    assert specs["intent"]["time_budget"] > 0
-    for name in ("chat", "moderation", "transcribe", "tts", "awareness"):
-        assert specs[name].get("time_budget", 0) == 0
+    with_ceiling = {
+        name for name, spec in specs.items() if spec.get("time_budget", 0) > 0
+    }
+    assert with_ceiling == {"intent", "chat", "awareness"}
 
 
 def test_the_built_pools_carry_the_ceiling_only_where_it_was_asked_for():
     built = gemini_pool.build_pools()
 
-    assert built["intent"].time_budget > 0
-    for name, pool in built.items():
-        if name != "intent":
-            assert pool.time_budget == 0
+    with_ceiling = {name for name, pool in built.items() if pool.time_budget > 0}
+    assert with_ceiling == {"intent", "chat", "awareness"}
+
+
+def test_the_transient_cooldown_outlasts_the_longest_deadline_it_can_be_stamped_by():
+    """A transient failure is usually a timeout, so the bench must outlast one.
+
+    The cooldown is stamped when the failure is recorded. If it is shorter than
+    the per-attempt deadline, the model is usable again before the call that
+    just failed could have finished, and the next request pays the same timeout
+    again. That is the 2026-09-23 defect — the cooldown was 15s against a 25s
+    chat deadline — and this test is what stops it coming back.
+    """
+    deadlines = [
+        spec["timeout"]
+        for spec in config.GEMINI_POOLS
+        if spec.get("retries", 0) > 0
+    ]
+
+    assert deadlines, "no retryable workload to compare against"
+    assert config.GEMINI_POOL_TRANSIENT_COOLDOWN >= max(deadlines)
+    # And it must stay below the rate-limit cooldown, because a transient wobble
+    # still says nothing about the model itself.
+    assert config.GEMINI_POOL_TRANSIENT_COOLDOWN <= config.GEMINI_POOL_MODEL_COOLDOWN
+
+
+def test_a_transient_failure_keeps_the_model_out_of_the_walk_past_its_deadline(
+    provider,
+):
+    """The config invariant above, exercised through the walk it actually guards.
+
+    ``models_for`` is what decides which models a request spends its attempt
+    budget on, so this is the property that matters: a model benched by a
+    timeout must not be handed back to the walk until that timeout could have
+    elapsed. With the bench at 15s against a 25s deadline it was, which is how
+    the attempt budget was spent before the walk reached a model that answered.
+    """
+    pool = make_pool(retries=1)
+    account = pool.accounts[0]
+    now = time.time()
+    model = pool.models_for(account, now)[0]
+
+    failure = gemini_pool.Failure(
+        "timeout", gemini_pool.SCOPE_TRANSIENT, retryable=True
+    )
+    account.model(model).note_failure(failure, now)
+
+    longest = max(
+        spec["timeout"]
+        for spec in config.GEMINI_POOLS
+        if spec.get("retries", 0) > 0
+    )
+
+    assert model not in pool.models_for(account, now)
+    assert model not in pool.models_for(account, now + longest), (
+        "a model benched by a timeout must not return before that timeout "
+        "could have elapsed"
+    )
+    assert model in pool.models_for(
+        account, now + config.GEMINI_POOL_TRANSIENT_COOLDOWN + 1
+    )
+
+
+def test_a_workloads_ceiling_always_covers_at_least_one_full_attempt():
+    """A ceiling below one deadline would abort every request by construction."""
+    specs = {spec["workload"]: spec for spec in config.GEMINI_POOLS}
+
+    for name in ("intent", "chat", "awareness"):
+        spec = specs[name]
+        assert spec["time_budget"] > spec["timeout"]
+
+
+def test_the_chat_and_awareness_ceilings_sit_above_the_measured_worst_case():
+    """The ceilings are safety nets, not targets — see the config comment.
+
+    The numbers are the 2026-09-23 measurements the defaults were chosen from
+    (chat max 383.7s, awareness max 138.5s). A session that lowers a ceiling
+    under them is removing the headroom on purpose and should say so here, with
+    a measurement, rather than quietly turning slow replies into no reply.
+    """
+    assert config.GEMINI_CHAT_TIME_BUDGET_SECONDS > 384.0
+    assert config.GEMINI_AWARENESS_TIME_BUDGET_SECONDS > 139.0
 
 
 def test_backoff_is_exponential_and_jittered():
