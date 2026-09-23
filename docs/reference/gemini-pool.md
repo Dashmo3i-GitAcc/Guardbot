@@ -397,6 +397,15 @@ counts.
 | `provider_error` | `503` | the backend was briefly unavailable |
 | `rate_limited` | `generate_content_free_tier` | a free-tier 429, per model |
 
+A `timeout` — our own per-attempt deadline expiring, which the call raises as
+`PoolUnavailable("timeout")` — is logged in the same shape, with the deadline as
+its detail (`no response within 25s`), because there is no provider text to
+quote. It was the one kind that produced **no line at all** until 2026-09-23,
+and it is the most expensive one: it burns the whole deadline where a 503 costs
+about a second. Leaving it silent made a slow reply look unexplained — a 52.7s
+chat turn had six seconds of 503s in the log and the rest was two timeouts
+nobody could see.
+
 The intent account carried **0 rate limits** on its primary model and 83
 failures, so its failures were provider-side slowness and unavailability, not
 quota. The fallback models were worse on this credential — `gemini-3.5-flash-lite`

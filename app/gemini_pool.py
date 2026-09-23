@@ -1626,6 +1626,27 @@ async def generate(
                     last = PoolUnavailable(failure.kind, failure.detail)
                     account.note_failure(failure, now)
                     state.note_failure(failure, now)
+                    # Logged like every other failure, and it was the one that
+                    # was not. A timeout is the *most expensive* way an attempt
+                    # can fail — it burns the whole per-attempt deadline, where
+                    # a 503 costs a second — so a silent one made the pool look
+                    # cheaper than it was: on 2026-09-23 a 52.7s reply had six
+                    # seconds of 503s in the log and the rest was two timeouts
+                    # nobody could see. The detail is the deadline that expired,
+                    # because a timeout has no provider text of its own; the
+                    # ``Failure`` above is left untouched so what callers and
+                    # the events table see is unchanged.
+                    log.warning(
+                        "[pool] error workload=%s account=%s model=%s kind=%s "
+                        "scope=%s detail=%s failures=%d",
+                        pool.workload,
+                        account.masked,
+                        model,
+                        failure.kind,
+                        failure.scope,
+                        failure.detail or f"no response within {pool.timeout:g}s",
+                        account.failures,
+                    )
                     if attempt + 1 < attempts_per_model:
                         await asyncio.sleep(_backoff(pool, attempt))
                         continue

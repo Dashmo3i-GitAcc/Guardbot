@@ -1112,6 +1112,42 @@ def test_a_transient_failure_logs_what_the_provider_said(provider, caplog):
     assert "detail=503" in caplog.text
 
 
+def test_a_timeout_logs_the_deadline_that_expired(provider, monkeypatch, caplog):
+    """The one failure kind that used to produce no line at all.
+
+    A timeout is the most expensive way an attempt can fail — it burns the whole
+    per-attempt deadline, where a 503 costs about a second — so leaving it
+    unlogged made the pool look cheaper than it was. On 2026-09-23 a 52.7s reply
+    had six seconds of 503s in the log and the rest was timeouts nobody could
+    see. There is no provider text to quote for a timeout, so the line carries
+    the deadline instead.
+    """
+    class TimingOut:
+        async def generate_content(self, *, model, contents, config):  # noqa: A002
+            raise asyncio.TimeoutError
+
+    class TimingOutClient:
+        def __init__(self):
+            self.aio = type("Aio", (), {"models": TimingOut()})()
+
+    monkeypatch.setattr(
+        gemini_pool, "_client_for", lambda key, timeout=None: TimingOutClient()
+    )
+    pool = make_pool()
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(gemini_pool.PoolUnavailable) as caught:
+            call(pool)
+
+    assert caught.value.kind == "timeout"
+    assert "kind=timeout" in caplog.text
+    assert "scope=transient" in caplog.text
+    # ``make_pool`` sets a 5s deadline; the line names it rather than nothing.
+    assert "no response within 5s" in caplog.text
+    # And the credential still does not reach the line.
+    assert KEY_A not in caplog.text
+
+
 def test_a_key_never_reaches_a_recorded_event(provider):
     """The events table is read by operators, so it is a place a key must not be.
 
