@@ -728,6 +728,21 @@ ADMIN_IDEMPOTENCY_RETENTION = max(
 # this process has no scheduler.
 ADMIN_ACTIVITY_RETENTION = _int("ADMIN_ACTIVITY_RETENTION", 90 * 86400)
 
+# How long an action the assistant proposed stays confirmable.
+#
+# Short, and shorter than the VPN confirmation's 900s would be too long: what is
+# waiting is a decision the owner has just been asked about, in a conversation
+# that is still open. A confirmation arriving an hour later is a different
+# intention from the one that was recorded — the room has moved on, and the
+# model may be acting on a sentence about something else.
+ADMIN_CONFIRMATION_TTL_SECONDS = _int("ADMIN_CONFIRMATION_TTL_SECONDS", 600)
+
+# How long a settled proposal stays in ``admin_pending_ops`` afterwards. Same
+# shape and same reasoning as ``VPN_PENDING_RETENTION_SECONDS``: the window is
+# measured from the proposal's own expiry, so it can never cut short an action
+# that is still confirmable.
+ADMIN_PENDING_RETENTION_SECONDS = _int("ADMIN_PENDING_RETENTION_SECONDS", 86400)
+
 # How many recent administrative events the assistant may be shown when it asks
 # for context, and over what window. Both bounds exist: the count keeps a busy
 # room from filling the prompt, the window keeps an old incident from being
@@ -1574,6 +1589,24 @@ ADMIN_DUPLICATE_TEXT = os.getenv(
 ADMIN_STALE_TEXT = os.getenv(
     "ADMIN_STALE_TEXT",
     "⌛️ این درخواست قدیمی بود و اجرا نشد. لطفاً دوباره بگو.",
+)
+# Sent when the assistant proposed a privileged action and recorded it instead
+# of doing it. It has to say three things and in this order: what was recorded,
+# that nothing happened yet, and what the next step is. A sentence that only
+# said "are you sure?" would leave the owner unable to tell whether the action
+# was pending or already done.
+ADMIN_AWAITING_CONFIRMATION_TEXT = os.getenv(
+    "ADMIN_AWAITING_CONFIRMATION_TEXT",
+    "🔐 این کار هنوز اجرا نشده و ثبت شد تا خودت تأییدش کنی. "
+    "اگه می‌خوای انجام بشه بگو «تأیید می‌کنم».",
+)
+# Sent when a confirmation is refused — the wrong person asked, nothing was
+# waiting, or the reference did not resolve to a waiting action. Four causes,
+# one sentence, because the Persian wording is the same for all of them: the
+# answer to "why" is the English gloss the model gets, not this line.
+ADMIN_CONFIRM_REFUSED_TEXT = os.getenv(
+    "ADMIN_CONFIRM_REFUSED_TEXT",
+    "⛔️ تأیید نشد؛ چیزی برای تأیید کردن پیدا نشد یا تأییدکننده مالک نبود.",
 )
 ADMIN_NOT_CONFIGURED_TEXT = os.getenv(
     "ADMIN_NOT_CONFIGURED_TEXT",

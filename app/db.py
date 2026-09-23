@@ -724,6 +724,53 @@ def init() -> None:
             outcome TEXT NOT NULL DEFAULT '',
             detail TEXT NOT NULL DEFAULT '')"""
     )
+    # The same shape for the same reason, one layer up: an action the assistant
+    # proposed against *this* bot and did not take. Promoting somebody, or
+    # silencing the assistant itself, is recorded here and waits for the owner.
+    #
+    # A second table rather than a ``scope`` column on the one above, and the
+    # choice is deliberate. The two rows are read by different resolvers with
+    # different waiting-lists — a VPN confirmation must not be able to release a
+    # promotion — and the shared table would have to carry a discriminator that
+    # every query remembered to filter on. A discriminator somebody can forget is
+    # a discriminator that will be forgotten, and the failure it produces is one
+    # subsystem confirming another's operation. Two tables make that
+    # unrepresentable instead of merely checked.
+    #
+    # The columns are the same because the *lifecycle* is the same: recorded with
+    # a payload, waiting, claimed by a compare-and-swap, finished or released,
+    # and bounded by its own expiry. ``payload`` holds the arguments the first
+    # request carried, so what executes is what was recorded and not what a
+    # second message says.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS admin_pending_ops (
+            request_id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER NOT NULL DEFAULT 0,
+            actor_id INTEGER NOT NULL DEFAULT 0,
+            chat_id INTEGER NOT NULL DEFAULT 0,
+            operation TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            payload TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            confirmed_by INTEGER NOT NULL DEFAULT 0,
+            confirmed_at INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '')"""
+    )
+    # Both pending tables now have a retention sweep, and both sweeps range over
+    # ``expires_at`` alone — so by the rule the chat index above was added for,
+    # both need the index their own predicate needs. The tables are small today,
+    # which is exactly the state in which a missing index is invisible and then
+    # stops being so.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vpn_pending_expires "
+        "ON vpn_pending_ops(expires_at)"
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_pending_expires "
+        "ON admin_pending_ops(expires_at)"
+    )
     _conn.commit()
 
 
@@ -2470,6 +2517,182 @@ def vpn_pending_reset() -> None:
     """Forget every pending operation. For tests."""
     with _lock:
         _conn.execute("DELETE FROM vpn_pending_ops")
+        _conn.commit()
+
+
+# ── Actions the assistant proposed, and the owner has not approved ────────
+# The same lifecycle as ``vpn_pending_ops``, one layer up. The reader is
+# ``admin_service._confirm_pending`` and it reads *only* this table, which is why
+# there are two tables: a VPN confirmation must not be able to release a
+# promotion, and the way to make that impossible is for the two waiting-lists to
+# be different lists rather than one list with a discriminator on it.
+_ADMIN_PENDING_COLS = (
+    "request_id, created_at, expires_at, actor_id, chat_id, operation, "
+    "subject, payload, status, confirmed_by, confirmed_at, outcome, detail"
+)
+
+
+def _admin_pending_row(r) -> dict:
+    return {
+        "request_id": str(r[0]),
+        "created_at": int(r[1] or 0),
+        "expires_at": int(r[2] or 0),
+        "actor_id": int(r[3] or 0),
+        "chat_id": int(r[4] or 0),
+        "operation": str(r[5] or ""),
+        "subject": str(r[6] or ""),
+        "payload": str(r[7] or "{}"),
+        "status": str(r[8] or ""),
+        "confirmed_by": int(r[9] or 0),
+        "confirmed_at": int(r[10] or 0),
+        "outcome": str(r[11] or ""),
+        "detail": str(r[12] or ""),
+    }
+
+
+def admin_pending_add(
+    request_id: str,
+    *,
+    actor_id: int,
+    chat_id: int,
+    operation: str,
+    subject: str,
+    payload: str,
+    expires_at: int,
+    now: int | None = None,
+) -> bool:
+    """Record one proposed action as awaiting approval. ``False`` if taken."""
+    stamp = int(now if now is not None else time.time())
+    try:
+        with _lock:
+            _conn.execute(
+                "INSERT INTO admin_pending_ops "
+                f"({_ADMIN_PENDING_COLS}) VALUES (?,?,?,?,?,?,?,?,'pending',0,0,'','')",
+                (
+                    str(request_id),
+                    stamp,
+                    int(expires_at),
+                    int(actor_id),
+                    int(chat_id),
+                    str(operation),
+                    str(subject),
+                    str(payload),
+                ),
+            )
+            _conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def admin_pending_waiting(
+    *, chat_id: int = 0, now: int | None = None
+) -> list[dict]:
+    """Unapproved actions that have not expired, oldest first.
+
+    Scoped to the room when one is given, and that is the fail-closed direction
+    for the same reason the VPN waiting list is: the wrong answer to "what is
+    waiting" is "here, the other group's action".
+
+    Not scoped to the actor, and that is deliberate rather than an omission. What
+    may be confirmed is decided by ``agent_bridge.resolve_confirmation`` from
+    ``rbac.is_owner`` — the owner may approve anything on this list. Narrowing
+    here as well would be a second place where the rule is written, and the two
+    would eventually disagree.
+    """
+    stamp = int(now if now is not None else time.time())
+    sql = (
+        f"SELECT {_ADMIN_PENDING_COLS} FROM admin_pending_ops "
+        "WHERE status='pending' AND expires_at > ?"
+    )
+    args: list = [stamp]
+    if chat_id:
+        sql += " AND chat_id = ?"
+        args.append(int(chat_id))
+    sql += " ORDER BY created_at ASC"
+    with _lock:
+        rows = _conn.execute(sql, tuple(args)).fetchall()
+    return [_admin_pending_row(r) for r in rows]
+
+
+def admin_pending_get(request_id: str) -> dict | None:
+    with _lock:
+        row = _conn.execute(
+            f"SELECT {_ADMIN_PENDING_COLS} FROM admin_pending_ops WHERE request_id = ?",
+            (str(request_id),),
+        ).fetchone()
+    return _admin_pending_row(row) if row else None
+
+
+def admin_pending_claim(
+    request_id: str, *, actor_id: int = 0, now: int | None = None
+) -> bool:
+    """Take ownership of one recorded action. ``True`` for the winner only.
+
+    A compare-and-swap on one row, exactly like ``vpn_pending_claim`` and the
+    update-dedup claim, and for the same reason: two confirmations arriving
+    together must not both promote somebody.
+    """
+    stamp = int(now if now is not None else time.time())
+    with _lock:
+        cursor = _conn.execute(
+            "UPDATE admin_pending_ops SET status='confirmed', confirmed_by=?, "
+            "confirmed_at=? WHERE request_id = ? AND status='pending' "
+            "AND expires_at > ?",
+            (int(actor_id or 0), stamp, str(request_id), stamp),
+        )
+        _conn.commit()
+        return cursor.rowcount == 1
+
+
+def admin_pending_finish(request_id: str, *, outcome: str, detail: str = "") -> None:
+    with _lock:
+        _conn.execute(
+            "UPDATE admin_pending_ops SET status='done', outcome=?, detail=? "
+            "WHERE request_id = ?",
+            (str(outcome)[:64], str(detail)[:400], str(request_id)),
+        )
+        _conn.commit()
+
+
+def admin_pending_release(request_id: str) -> None:
+    """Put a claimed action back, for a failure before anything happened."""
+    with _lock:
+        _conn.execute(
+            "UPDATE admin_pending_ops SET status='pending', confirmed_by=0, "
+            "confirmed_at=0 WHERE request_id = ? AND status='confirmed'",
+            (str(request_id),),
+        )
+        _conn.commit()
+
+
+def admin_pending_prune(keep_seconds: int) -> int:
+    """Drop recorded actions nothing can act on any more. Best effort.
+
+    The same two predicates as ``vpn_pending_prune``, for the same reason: a
+    finished row past the window is a receipt, and a row whose own ``expires_at``
+    has passed can never be claimed — ``admin_pending_claim`` requires
+    ``expires_at > now``. A row that is still confirmable is never touched, and
+    the window is measured from the row's expiry rather than its creation, so a
+    rule about disk space cannot delete a promotion the owner is in the middle of
+    approving.
+    """
+    cutoff = int(time.time()) - max(1, int(keep_seconds))
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM admin_pending_ops WHERE "
+            "(status='done' AND confirmed_at > 0 AND confirmed_at < ?) "
+            "OR (expires_at > 0 AND expires_at < ?)",
+            (cutoff, cutoff),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def admin_pending_reset() -> None:
+    """Forget every recorded action. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM admin_pending_ops")
         _conn.commit()
 
 

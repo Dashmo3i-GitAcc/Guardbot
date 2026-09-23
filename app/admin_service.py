@@ -41,13 +41,14 @@ typed result.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Protocol, runtime_checkable
 
-from . import config, db, nexus, rbac, vpnbot
+from . import agent_bridge, config, db, nexus, rbac, vpnbot
 
 log = logging.getLogger("guardbot.admin")
 
@@ -122,6 +123,27 @@ class Operation:
     # would otherwise be impossible to perform precisely when they are needed —
     # turning Nexus back on while it is off.
     requires_nexus_online: bool = True
+    # Whether a request that came *from a conversation* is recorded and waits for
+    # the owner, instead of being carried out.
+    #
+    # This is not "is this operation dangerous". Banning is dangerous and is
+    # deliberately **not** in this set: moderation has to be immediate or it is
+    # not moderation, and every operation the automatic pipeline performs is
+    # outside this table entirely. What is in the set is the two kinds of action
+    # where a model's mistake is either invisible or a grant of authority:
+    #
+    #   * the switches — ``nexus_offline`` in particular silences the assistant
+    #     that would otherwise have reported it, so the failure is silent by
+    #     construction;
+    #   * promotions and demotions — the one thing in this table that hands
+    #     somebody else power.
+    #
+    # It applies to the **AI interface only**. A person typing ``/promote`` has
+    # stated the intent themselves and is present to see the result; the risk
+    # this guards is a model acting on an ambiguous sentence. So the typed
+    # commands stay one step, and the change is confined to the path where the
+    # model is the one deciding what was asked.
+    needs_confirmation: bool = False
 
 
 def _op(
@@ -164,6 +186,7 @@ OPERATIONS: dict[str, Operation] = {
         "admin.promote",
         changes_role=True,
         soft_right=True,
+        needs_confirmation=True,
     ),
     "demote_member": _op(
         "demote_member",
@@ -172,6 +195,7 @@ OPERATIONS: dict[str, Operation] = {
         "admin.demote",
         changes_role=True,
         soft_right=True,
+        needs_confirmation=True,
     ),
     # ── The conversational layer's own state ──────────────────────────────
     # Two operations rather than one with a parameter, and that is a security
@@ -184,6 +208,18 @@ OPERATIONS: dict[str, Operation] = {
     # ``nexus.control`` is held by the owner and by nobody else, because no role
     # bundle carries it — see ``app/rbac.py``. So "an administrator silences the
     # assistant" is not refused, it is inexpressible.
+    #
+    # ``needs_confirmation`` on all six switches, and the reason is stated once
+    # here rather than six times. The switches are the clearest case for the
+    # step: they are the only operations whose *effect* is on the assistant
+    # itself, so a model that acted on a misread sentence would be turning off
+    # the thing that could have told the owner what it did. ``nexus_offline`` is
+    # the sharpest of the six — silence is the outcome, and silence is
+    # indistinguishable from "nothing happened".
+    #
+    # Note what is deliberately not in this set: the moderation operations. A ban
+    # is more visible than a switch and is undone by ``unban_member``, and
+    # moderation that waited for a second message would not be moderation.
     "nexus_offline": _op(
         "nexus_offline",
         "nexus.control",
@@ -191,6 +227,7 @@ OPERATIONS: dict[str, Operation] = {
         "nexus.offline",
         kind=OP_SYSTEM,
         requires_nexus_online=False,
+        needs_confirmation=True,
     ),
     "nexus_online": _op(
         "nexus_online",
@@ -199,6 +236,7 @@ OPERATIONS: dict[str, Operation] = {
         "nexus.online",
         kind=OP_SYSTEM,
         requires_nexus_online=False,
+        needs_confirmation=True,
     ),
     # ── The awareness layer's own switch ──────────────────────────────────
     # Deliberately separate operations rather than a parameter on the two
@@ -218,6 +256,7 @@ OPERATIONS: dict[str, Operation] = {
         "awareness.offline",
         kind=OP_SYSTEM,
         requires_nexus_online=False,
+        needs_confirmation=True,
     ),
     "awareness_online": _op(
         "awareness_online",
@@ -226,6 +265,7 @@ OPERATIONS: dict[str, Operation] = {
         "awareness.online",
         kind=OP_SYSTEM,
         requires_nexus_online=False,
+        needs_confirmation=True,
     ),
     # ── The Web Search switch ─────────────────────────────────────────────
     # A third switch beside the two above, and separate for the same reason they
@@ -241,6 +281,7 @@ OPERATIONS: dict[str, Operation] = {
         "search.offline",
         kind=OP_SYSTEM,
         requires_nexus_online=False,
+        needs_confirmation=True,
     ),
     "search_online": _op(
         "search_online",
@@ -249,6 +290,7 @@ OPERATIONS: dict[str, Operation] = {
         "search.online",
         kind=OP_SYSTEM,
         requires_nexus_online=False,
+        needs_confirmation=True,
     ),
     # ── The coding agent ──────────────────────────────────────────────────
     # Asking the host's coding agent to work on one of this system's own
@@ -343,6 +385,33 @@ OPERATIONS: dict[str, Operation] = {
         "vpn.confirm",
         kind=OP_VPN,
     ),
+    # ── Releasing an action the assistant proposed ────────────────────────
+    # The second half of the ``needs_confirmation`` operations, and an ordinary
+    # operation in this table rather than a special case outside it — the same
+    # choice ``vpn_confirm`` makes, for the same reason. Confirming goes through
+    # all seven steps, so the second half of a privileged action is authorised by
+    # the same code as the first half, and ``needs_confirmation`` is **not** set
+    # here: an operation that had to be confirmed in order to confirm something
+    # could never be performed.
+    #
+    # ``admin.confirm`` is carried by no role, so the tool is offered to the
+    # owner alone. That is exposure, not authority — the confirmer is checked
+    # again in ``_confirm_pending`` by ``agent_bridge.resolve_confirmation``,
+    # which is the one place the owner rule is written.
+    #
+    # ``requires_nexus_online=False`` because this is the operation that has to
+    # work in every state. ``nexus_offline`` is one of the things it releases,
+    # so a confirmation that required the assistant to be awake would be
+    # unavailable in exactly the case it exists for — the owner saying "no, do
+    # not turn yourself off" after the model proposed it.
+    "admin_confirm": _op(
+        "admin_confirm",
+        "admin.confirm",
+        None,
+        "admin.confirm",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
 }
 
 # The VPN operations, by name. Kept here rather than imported from
@@ -416,6 +485,14 @@ OUTCOME_VPN_UNAVAILABLE = "vpn_unavailable"
 OUTCOME_VPN_REFUSED = "vpn_refused"
 OUTCOME_VPN_ERROR = "vpn_error"
 OUTCOME_VPN_AWAITING_CONFIRMATION = "vpn_awaiting_confirmation"
+# ── Releasing an action the assistant proposed ────────────────────────────
+# "Recorded, nothing ran, the next step is the owner's" — the same kind of
+# answer as ``OUTCOME_VPN_AWAITING_CONFIRMATION`` and for the same reason: it is
+# a state rather than a failure, and counting it as one would send the owner
+# looking for a problem that does not exist. It is deliberately **not** in
+# ``_REFUSAL_OUTCOMES``.
+OUTCOME_ADMIN_AWAITING_CONFIRMATION = "admin_awaiting_confirmation"
+OUTCOME_ADMIN_CONFIRM_REFUSED = "admin_confirm_refused"
 
 # Which interfaces can raise a request. Recorded in the audit trail, because
 # "was this a person typing or a model proposing?" is the first question after
@@ -895,11 +972,43 @@ async def execute(
         _record(request, result)
         return result
 
+    # 6.5 Confirmation, for the operations where the assistant proposing is not
+    #     the same as the owner asking.
+    #
+    #     Placed here rather than earlier, and the position is the point: every
+    #     check that can refuse has already refused, so a request that would have
+    #     been denied for any other reason is answered rather than turned into a
+    #     question. Placed here rather than later, because everything below has a
+    #     side effect and the whole purpose of this step is that nothing does.
+    #
+    #     Two conditions, and each excludes a case that must not be gated:
+    #
+    #     * ``INTERFACE_AI`` — a person typing ``/promote`` has stated the intent
+    #       themselves and is present to see the result. Gating that would make
+    #       every command two-step to guard against a risk that only exists when a
+    #       model is the one reading the sentence.
+    #     * ``pending_id`` — a request that names a recorded action is the
+    #       *execution* of one, produced by ``_confirm_pending`` below. Without
+    #       this, confirming would record a second pending action instead of
+    #       carrying the first one out, and no confirmation could ever complete.
+    #       It is not settable from outside: ``parse_write_call`` fills a field
+    #       only when the tool's schema declares it, and only the confirm tools
+    #       declare ``pending_id``.
+    if (
+        operation.needs_confirmation
+        and request.interface == INTERFACE_AI
+        and not request.pending_id
+    ):
+        return _record_pending(request, operation)
+
     # 7. The call itself. A Telegram failure is reported as a failure, never
     #    smoothed over — the brief is explicit that the caller must not fabricate
     #    success.
     try:
-        note = await _apply(request, operation, gateway)
+        if operation.name == "admin_confirm":
+            note = await _confirm_pending(request, gateway, actor=actor, bot_id=bot_id)
+        else:
+            note = await _apply(request, operation, gateway)
     except Exception as exc:  # noqa: BLE001 - reported, never raised
         log.warning("admin action %s failed: %s", request.operation, exc)
         result = _result(
@@ -958,6 +1067,233 @@ async def execute(
         request.chat_id,
     )
     return result
+
+
+# ── Recording a proposed action, and releasing it ─────────────────────────
+# The two halves of the ``needs_confirmation`` step. The shape is the one the
+# VPN adapter already uses, and deliberately so: a second pattern for the same
+# idea would be a second set of bugs in the part of the system that decides
+# whether something runs.
+#
+# What the confirming request contributes is its own identity and the id of the
+# recorded action. Everything the execution needs is re-read from the row
+# written the first time — so a model that confirms "the thing I recorded"
+# cannot smuggle a different target, a different role or a different operation
+# into the call, and cannot ask for one action and have another run.
+def _pending_subject(request: AdminRequest, operation: Operation) -> str:
+    """A short, human-readable description of what is being proposed.
+
+    Shown to the owner and written in the audit detail. Ids and a role name,
+    never a message body and never anything the model wrote freehand — the same
+    rule the audit row follows, for the same reason.
+    """
+    if operation.changes_role:
+        role = request.role or rbac.ROLE_MODERATOR
+        return f"target={request.target_id} role={role}"
+    return operation.name
+
+
+def _record_pending(request: AdminRequest, operation: Operation) -> AdminResult:
+    """Write the proposed action down and ask. Executes nothing."""
+    pending_id = new_request_id()
+    now = _now()
+    if not db.admin_pending_add(
+        pending_id,
+        actor_id=request.actor_id,
+        chat_id=request.chat_id,
+        operation=request.operation,
+        subject=_pending_subject(request, operation),
+        payload=json.dumps(
+            {
+                "target_id": int(request.target_id or 0),
+                "message_id": int(request.message_id or 0),
+                "role": str(request.role or ""),
+                "reason": str(request.reason or ""),
+            },
+            separators=(",", ":"),
+        ),
+        expires_at=now + max(60, int(config.ADMIN_CONFIRMATION_TTL_SECONDS)),
+        now=now,
+    ):
+        # The id was taken, which is not something the caller can cause but is
+        # not worth pretending about either. Reporting a question about an action
+        # that was never recorded would leave the owner approving nothing.
+        return _result(request, OUTCOME_TELEGRAM_ERROR, detail="could_not_record")
+
+    log.info(
+        "admin action %s recorded as pending %s for actor %s (interface=%s)",
+        request.operation,
+        pending_id,
+        request.actor_id,
+        request.interface,
+    )
+    return replace(
+        _result(request, OUTCOME_ADMIN_AWAITING_CONFIRMATION),
+        extra={
+            "pending": {
+                "pending_id": pending_id,
+                "operation": request.operation,
+                "subject": _pending_subject(request, operation),
+                "expires_at": now + max(60, int(config.ADMIN_CONFIRMATION_TTL_SECONDS)),
+            }
+        },
+    )
+
+
+def _request_from_pending(row: dict, confirming: AdminRequest) -> AdminRequest:
+    """Rebuild the proposed action from the row that was recorded.
+
+    This is the whole reason the confirmation is a reference and not an
+    approval. The confirming request supplies its own ``request_id`` — so the
+    execution is recorded against the request that caused it — and its
+    ``pending_id``, which is also what keeps ``execute`` from recording a second
+    proposal instead of carrying this one out.
+    """
+    try:
+        payload = json.loads(str(row.get("payload") or "{}"))
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return AdminRequest(
+        operation=str(row.get("operation") or ""),
+        chat_id=int(row.get("chat_id") or 0),
+        # The actor is the *confirming* one, re-derived from their own id, and
+        # ``authorize`` will check it again from scratch. The owner may confirm
+        # an action somebody else proposed — that is what the owner rule means —
+        # so taking the actor from the row would execute the action as the wrong
+        # person.
+        actor_id=int(confirming.actor_id or 0),
+        target_id=int(payload.get("target_id") or 0),
+        message_id=int(payload.get("message_id") or 0),
+        role=str(payload.get("role") or ""),
+        reason=str(payload.get("reason") or ""),
+        request_id=str(confirming.request_id or ""),
+        pending_id=str(row.get("request_id") or ""),
+        # The interface of the *original* request, kept so the audit row answers
+        # "did a person do this, or did the assistant?" with the truth: the
+        # assistant proposed it, and the owner released it. The pending id above
+        # is what stops this from being gated a second time.
+        interface=str(confirming.interface or INTERFACE_PYTHON),
+        at=_now(),
+    ).normalized()
+
+
+async def _confirm_pending(
+    request: AdminRequest,
+    gateway: Gateway,
+    *,
+    actor: rbac.Principal | None = None,
+    bot_id: int = 0,
+) -> AdminResult:
+    """Release one proposed action the owner has approved.
+
+    Four refusals before anything runs, and each is a different next step for the
+    owner: this is not yours to confirm, nothing is waiting, that reference is
+    not waiting (the candidates come back so the next message can name one), or
+    the reference is ambiguous because more than one action is.
+
+    The four are decided by ``agent_bridge.resolve_confirmation``, which is the
+    single place the owner rule is written — the same function the VPN adapter
+    and the coding-agent bridge use. Reimplementing it here would be a second
+    answer to "who may approve", and the two would eventually disagree.
+
+    The claim is a compare-and-swap on one row, so two confirmations arriving
+    together cannot both promote somebody.
+    """
+    actor_id = int(request.actor_id or 0)
+    waiting = db.admin_pending_waiting(chat_id=int(request.chat_id or 0))
+    decision = agent_bridge.resolve_confirmation(
+        actor_id=actor_id,
+        is_owner=rbac.is_owner(actor_id),
+        named_request_id=str(request.pending_id or ""),
+        waiting=waiting,
+    )
+    candidates = ", ".join(decision.candidates)
+
+    if decision.answer is agent_bridge.Confirm.NOT_OWNER:
+        return _result(
+            request,
+            OUTCOME_DENIED,
+            detail=rbac.REASON_NOT_ADMIN,
+            reason=rbac.REASON_NOT_ADMIN,
+        )
+    if decision.answer is agent_bridge.Confirm.NOTHING_PENDING:
+        # Nothing live is waiting — and that is also what an action whose window
+        # closed looks like from here, so a named reference is looked up to tell
+        # the two apart. The lookup is *after* the resolver, never before it:
+        # reaching this line means the owner check already passed, and moving the
+        # lookup earlier would put a second copy of that rule here.
+        detail = "expired" if _pending_expired(request.pending_id) else "nothing_pending"
+        return _result(request, OUTCOME_ADMIN_CONFIRM_REFUSED, detail=detail)
+    if decision.answer is agent_bridge.Confirm.NOT_WAITING:
+        if _pending_expired(request.pending_id):
+            return _result(request, OUTCOME_ADMIN_CONFIRM_REFUSED, detail="expired")
+        return _result(
+            request,
+            OUTCOME_ADMIN_CONFIRM_REFUSED,
+            detail=f"not_waiting {candidates}".strip(),
+        )
+    if decision.answer is agent_bridge.Confirm.AMBIGUOUS:
+        # More than one action is waiting, so a bare «اوکی» is a question rather
+        # than an approval. The ids go back so the next message can name one, and
+        # the model is told never to pick.
+        return replace(
+            _result(request, OUTCOME_ADMIN_CONFIRM_REFUSED, detail="ambiguous"),
+            extra={"candidates": list(decision.candidates)},
+        )
+
+    row = db.admin_pending_get(decision.request_id)
+    if not row:
+        return _result(request, OUTCOME_ADMIN_CONFIRM_REFUSED, detail="unknown_pending")
+    if not db.admin_pending_claim(decision.request_id, actor_id=actor_id):
+        # Lost the compare-and-swap: another confirmation took it between the
+        # read above and this line, or the window closed in the same moment.
+        # Either way nothing ran and the next step is to look again.
+        return _result(
+            request, OUTCOME_ADMIN_CONFIRM_REFUSED, detail="already_claimed"
+        )
+
+    # The recorded action, re-authorised from scratch by the ordinary pipeline:
+    # all seven steps, against the confirming actor's real id. A confirmation
+    # that bypassed authorisation would be a way to perform an action by first
+    # proposing it, which is the opposite of what this step is for.
+    result = await execute(
+        _request_from_pending(row, request), gateway, actor=actor, bot_id=bot_id
+    )
+    if result.outcome == OUTCOME_TELEGRAM_ERROR:
+        # Nothing was decided by a human or by a policy — the call failed — so
+        # the action goes back and can be confirmed again. A refusal is not put
+        # back: it is an answer, and re-asking would produce it again.
+        db.admin_pending_release(decision.request_id)
+    else:
+        db.admin_pending_finish(
+            decision.request_id, outcome=result.outcome, detail=result.detail
+        )
+    log.info(
+        "admin pending %s confirmed by %s -> %s",
+        decision.request_id,
+        actor_id,
+        result.outcome,
+    )
+    return result
+
+
+def _pending_expired(pending_id: str) -> bool:
+    """Whether the named action is one whose window has closed.
+
+    Only a row that is *still pending* and past its deadline counts. A row whose
+    status is ``confirmed`` or ``done`` is a different thing — it ran — and
+    calling that "expired" would tell the owner their action was dropped when in
+    fact it went through.
+    """
+    named = str(pending_id or "")
+    if not named:
+        return False
+    row = db.admin_pending_get(named)
+    if not row or row.get("status") != "pending":
+        return False
+    return int(row.get("expires_at") or 0) <= _now()
 
 
 async def _apply(
@@ -1200,16 +1536,23 @@ def _maybe_prune() -> None:
 
 
 def prune() -> None:
-    """Apply both administrative retention windows. Best effort; never raises.
+    """Apply the administrative retention windows. Best effort; never raises.
 
     Called from ``_record``, which is the one place an administrative request
     reaches regardless of outcome — a refusal is written down too, and a trail
     that only bounded itself on success would grow fastest on the requests that
     were denied.
+
+    ``admin_pending_ops`` is bounded here rather than from a counter of its own.
+    It is written by this module and read by this module, and ``_record`` runs on
+    every administrative request including the ones that propose an action — so
+    the hook that already exists is the right one, and a second counter would
+    only be a second thing to keep in step.
     """
     try:
         db.audit_prune(int(config.ADMIN_ACTIVITY_RETENTION))
         db.admin_request_prune(int(config.ADMIN_IDEMPOTENCY_RETENTION))
+        db.admin_pending_prune(int(config.ADMIN_PENDING_RETENTION_SECONDS))
     except Exception:  # noqa: BLE001
         log.exception("admin retention prune failed")
 
@@ -1247,6 +1590,8 @@ def message_for(outcome: str) -> str:
         OUTCOME_VPN_REFUSED: config.VPN_REFUSED_TEXT,
         OUTCOME_VPN_ERROR: config.VPN_FAILED_TEXT,
         OUTCOME_VPN_AWAITING_CONFIRMATION: config.VPN_AWAITING_CONFIRMATION_TEXT,
+        OUTCOME_ADMIN_AWAITING_CONFIRMATION: config.ADMIN_AWAITING_CONFIRMATION_TEXT,
+        OUTCOME_ADMIN_CONFIRM_REFUSED: config.ADMIN_CONFIRM_REFUSED_TEXT,
     }.get(outcome, config.ADMIN_DENIED_TEXT)
 
 
@@ -1308,6 +1653,16 @@ OUTCOME_GLOSS = {
     OUTCOME_VPN_AWAITING_CONFIRMATION: (
         "the operation was recorded but has not run: it moves money or rejects "
         "orders, and is waiting for the owner to confirm it explicitly"
+    ),
+    OUTCOME_ADMIN_AWAITING_CONFIRMATION: (
+        "the action was recorded but has not run: it would silence the "
+        "assistant or change somebody's role, and is waiting for the owner to "
+        "confirm it explicitly. Tell the owner what you recorded and ask them "
+        "to confirm; do not say it is done"
+    ),
+    OUTCOME_ADMIN_CONFIRM_REFUSED: (
+        "the confirmation was not accepted: the person asking is not the owner, "
+        "nothing was waiting, or the reference did not name a waiting action"
     ),
 }
 
@@ -1431,6 +1786,13 @@ _REFUSAL_OUTCOMES = frozenset({
     OUTCOME_VPN_UNAVAILABLE,
     OUTCOME_VPN_REFUSED,
     OUTCOME_VPN_ERROR,
+    # A confirmation that was refused — the wrong person asked, nothing was
+    # waiting, or the reference did not resolve. That is a refusal.
+    #
+    # ``OUTCOME_ADMIN_AWAITING_CONFIRMATION`` is deliberately absent: nothing
+    # failed, nothing ran, and the next step is the owner's own approval. See the
+    # note where it is defined.
+    OUTCOME_ADMIN_CONFIRM_REFUSED,
 })
 
 

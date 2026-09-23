@@ -63,13 +63,23 @@ owner two different answers on two surfaces.
 | `admins.manage` | create, change and remove administrators |
 | `config.manage` | see and change runtime configuration |
 | `commands.use` | use the bot's commands at all |
+| `nexus.control` | the assistant's own switches — **no role carries it** |
+| `agent.request` | ask the coding agent to change a repository — **no role carries it** |
+| `vpn.read` / `vpn.manage` | read the VPN panel / change it — **no role carries them** |
+| `admin.confirm` | release a recorded action the model proposed — **no role carries it** |
 
 | Role | Carries |
 |---|---|
 | `helper` | review, warn, commands |
 | `moderator` | + delete, mute |
-| `senior_admin` | + ban, admins.manage, config.manage |
+| `admin` | + ban |
+| `senior_admin` | + admins.manage, config.manage |
 | `owner` | everything (implicit, from configuration) |
+
+The last five permissions are in `OWNER_ONLY_PERMISSIONS` and are held by no role
+bundle, so "an administrator turns the assistant off" is not refused — it cannot
+be asked for. `admin.confirm` is what makes the confirmation gate (§29.16) an
+owner-only step rather than a second kind of administrator.
 
 Authorisation compares **permissions**, never role names, so adding a role cannot
 accidentally widen an existing one.
@@ -281,10 +291,10 @@ Two things make this safe rather than a new attack surface:
    conversation* arrives as text the model has been told to distrust. The
    server-side block says who is asking; anything else is content.
 
-### 29.4 The tool set: eight writes, nine reads
+### 29.4 The administrative tool set
 
-`app/admin_tools.py` declares seventeen tools. The write tools map onto the eight
-operations in `admin_service.OPERATIONS`:
+`app/admin_tools.py` declares the administrative tools. The write tools map onto
+the operations in `admin_service.OPERATIONS`:
 
 | Tool | Permission | Telegram right | Notes |
 |---|---|---|---|
@@ -292,7 +302,11 @@ operations in `admin_service.OPERATIONS`:
 | `mute_member` / `unmute_member` | `moderation.mute` | `can_restrict_members` | duration from `MUTE_MINUTES` |
 | `warn_member` | `moderation.warn` | — | application-owned |
 | `delete_message` | `moderation.delete` | `can_delete_messages` | |
-| `promote_member` / `demote_member` | `admins.manage` | `can_promote_members` | *soft right*, see 29.7 |
+| `promote_member` / `demote_member` | `admins.manage` | `can_promote_members` | *soft right*, see 29.7; **gated**, see 29.16 |
+| `nexus_offline` / `nexus_online` | `nexus.control` | — | **gated**, see 29.16 |
+| `awareness_offline` / `awareness_online` | `nexus.control` | — | **gated**, see 29.16 |
+| `search_offline` / `search_online` | `nexus.control` | — | **gated**, see 29.16 |
+| `confirm_admin_action` | `admin.confirm` | — | releases a recorded action; see 29.16 |
 
 The read tools — `get_member`, `get_member_status`, `get_admin_status`,
 `list_admins`, `get_role`, `get_permissions`, `get_chat_info`,
@@ -472,6 +486,28 @@ rule that only runs when somebody remembers is not a retention rule.
 `config.py` rather than trusted to the operator, because a request forgotten
 while it is still replayable fails silently.
 
+The audit trail is the one record whose **durability** is worth stating out loud.
+The database runs in WAL with `synchronous=NORMAL` (assistant.md §17.4.1), which
+is what took the per-message commit cost from 63 ms to 1.7 ms — and the price of
+that setting is that a hard power loss can roll back the last committed
+transactions. So: an administrative action taken in the last seconds before a
+power cut could be missing from `admin_audit`. The database cannot be corrupted,
+and every other table in this file loses at most something reconstructible, but
+this is the row where the window is real. `synchronous=FULL` is the one-word
+reversal and costs the 18.6 ms row of that table.
+
+The other table that had no rule at all was `vpn_pending_ops`, and it is worth
+recording *how* it went unnoticed: it is small, it is written one row per
+confirmation, and nothing ever reads it in full. A table that only grows has no
+symptom until it has one, so the rule is now explicit — `vpn_pending_prune`,
+applied from the operation path on `VPN_PENDING_RETENTION_SECONDS` — and it drops
+only rows that can no longer be acted on: finished receipts past the window, and
+operations whose own `expires_at` has passed, which `vpn_pending_claim` already
+refuses. A row that is still confirmable is never touched, and the window is
+measured from the operation's expiry rather than from its creation, so the
+retention rule cannot delete a money operation the owner is in the middle of
+approving.
+
 ### 29.12 Configuration
 
 | Setting | Default | Meaning |
@@ -481,6 +517,8 @@ while it is still replayable fails silently.
 | `ADMIN_REQUEST_REPLAY_WINDOW` | `120` | seconds; older requests are refused as stale |
 | `ADMIN_IDEMPOTENCY_RETENTION` | `86400` | floored at the replay window |
 | `ADMIN_ACTIVITY_RETENTION` | `7776000` | 90 days of audit trail |
+| `ADMIN_CONFIRMATION_TTL_SECONDS` | `600` | how long a recorded action may be released |
+| `ADMIN_PENDING_RETENTION_SECONDS` | `86400` | window for finished/lapsed recorded actions |
 | `ADMIN_CONTEXT_LIMIT` | `12` | recent events shown to the model |
 | `ADMIN_CONTEXT_WINDOW` | `21600` | and over what window |
 | `ADMIN_TOOL_MAX_CALLS` | `4` | tool calls per turn before the loop stops |
@@ -504,8 +542,10 @@ is made without tools, so the model has to answer in words.
 2. **Prompt injection is not solved; it is defanged.** Somebody can still put
    text in a message that persuades the model to call `ban_member` on somebody.
    What they cannot do is make that call succeed for an actor without
-   `moderation.ban`, or against the owner, or against a peer, or twice. The blast
-   radius of a fully compromised model is "the set of actions the person who
+   `moderation.ban`, or against the owner, or against a peer, or twice. For the
+   gated set (§29.16) the blast radius is smaller still: a compromised model can
+   *propose* a role change or a switch, and the proposal does nothing until the
+   owner releases it. Everywhere else it is "the set of actions the person who
    triggered it could have performed anyway by typing the command".
 3. **A refusal is only a refusal if nothing reached Telegram.** Every test in
    `tests/test_ai_admin.py` that asserts a refusal also asserts that the fake
@@ -777,6 +817,74 @@ alone: one logical request that met a `503` and a free-tier `429` before an
 answer came back cost **one** charge (606 → 605), where the old rule would have
 cost three. A real question from the owner was answered at 17:56:39 UTC with
 `sent=True`, which is the only proof that matters.
+
+### 29.16 The confirmation gate: the model proposes, the owner releases
+
+Some administrative actions are never carried out on the model's say-so. Asking
+for one records it and answers `admin_awaiting_confirmation`; nothing runs until
+the owner releases it, which is a second request naming the recorded row.
+
+**The set.** Exactly eight operations carry `Operation.needs_confirmation`:
+`promote_member`, `demote_member`, and the six assistant switches
+(`nexus_offline`/`nexus_online`, `awareness_offline`/`awareness_online`,
+`search_offline`/`search_online`). Two things about the boundary matter:
+
+* **Moderation is not in it.** A ban the model asks for is a ban. The
+  alternative is a moderation bot that has to ask permission to do the one thing
+  it exists for. The six switches are in it because of the silent-failure rule:
+  the model that turns awareness off and says nothing is exactly the failure a
+  confirmation exists to prevent, and a role change is not something to do on a
+  model's word at all.
+* **A typed command is not in it.** The gate is applied only when
+  `request.interface == INTERFACE_AI`. A person running `/promote` or `/ban` is
+  acting directly and *is* the authority; only the model has to ask.
+
+**Where the gate sits.** Step 6.5 of `execute()`, after the whole authority
+pipeline and before the call. That ordering is the point: a proposal the
+proposer could not make is refused by `rbac` before anything is written, so the
+waiting list can never contain an action that only the owner's authority would
+have made legitimate.
+
+**The confirmation is a reference, not an approval.** `_record_pending` writes
+the operation, the target and the role into `admin_pending_ops` as a JSON
+payload, and `_request_from_pending` rebuilds the request from that row — never
+from the confirming request's own fields. A confirming request carrying a
+different target, a different role or a different operation changes nothing:
+what was recorded is what runs. The *actor* is taken from the confirming request,
+because the owner may release an action somebody else proposed, and `authorize`
+then re-checks from scratch against that actor's real id.
+
+**Who releases, and how often.** `agent_bridge.resolve_confirmation` decides —
+the same function the VPN adapter and the coding-agent bridge use, so there is
+one answer to "who may approve". Only the owner; a named reference must actually
+be waiting; a bare approval resolves only when exactly one action is waiting, and
+with two it is a question with the ids handed back so the next message can name
+one. The release itself is a compare-and-swap (`admin_pending_claim`), so two
+approvals arriving together cannot both promote somebody.
+
+**The one thing the gate relies on.** `needs_confirmation` is skipped for any
+request that carries a `pending_id`. That is safe only because `pending_id` has
+exactly two sources — the `confirm_admin_action` and `confirm_vpn_operation`
+tools — and `parse_write_call` refuses a call whose arguments are not the ones
+the schema declares. No other tool may ever declare the parameter.
+
+**Lapsing and retention.** A proposal expires (`ADMIN_CONFIRMATION_TTL_SECONDS`,
+600s); a lapsed row cannot be claimed and answers `expired`, told apart from
+"nothing was waiting" by a lookup that happens *after* the owner check. The table
+is bounded by the same administrative sweep that windows the audit trail
+(`ADMIN_PENDING_RETENTION_SECONDS`, one day), and the window is measured from the
+row's expiry rather than its creation, so a rule about disk space can never
+delete a promotion the owner is in the middle of approving.
+
+**What the owner sees.** `pending_actions_block` puts the waiting list into the
+model's context, but only for the owner and only in the room the action was
+proposed in. Without it an approval the model cannot see is an approval it cannot
+recognise; with it, «تأیید می‌کنم» has a referent, and the model is told never to
+pick when more than one is waiting.
+
+Verified end to end: a model `promote_member` records and reaches no Telegram
+call; the owner's `confirm_admin_action` runs the recorded promote once and the
+role becomes `moderator`; a second confirmation of the same row is refused.
 
 ---
 

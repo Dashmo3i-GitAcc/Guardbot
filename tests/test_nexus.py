@@ -238,7 +238,7 @@ def install_model(monkeypatch, *, call=None, text="باشه"):
 def install_awareness_model(
     monkeypatch, *, call=None, text="انجام شد", relevant=True, respond=True
 ):
-    """Replace the *awareness* transport, and optionally script one tool call.
+    """Replace the *awareness* transport, and optionally script tool calls.
 
     Since Group Awareness an unaddressed message is no longer answered by
     ``chat.reply``: it joins the room window and the awareness pass reads it,
@@ -250,8 +250,21 @@ def install_awareness_model(
 
     ``respond`` is what the model decided; ``text`` is what it chose to say. A
     test that wants "understood but silent" passes ``respond=False``.
+
+    ``call`` may be a single ``(tool_name, args)`` pair — used on every pass,
+    which is what a one-turn test wants — or a list of pairs, consumed one per
+    pass. The list form exists for the confirmation tests: a gated action takes
+    two turns, so the first pass scripts the proposal and the second the
+    approval, and the same stub carries both.
     """
     import json
+
+    if call is None:
+        scripted: list[tuple] = []
+    elif isinstance(call, list):
+        scripted = list(call)
+    else:
+        scripted = [call]
 
     passes: list[dict] = []
 
@@ -262,8 +275,9 @@ def install_awareness_model(
             "tools": tools,
         }
         passes.append(entry)
-        if call is not None and on_tool is not None:
-            entry["tool_result"] = await on_tool(call[0], call[1])
+        if scripted and on_tool is not None:
+            pair = scripted[min(len(passes) - 1, len(scripted) - 1)]
+            entry["tool_result"] = await on_tool(pair[0], pair[1])
         return chat.AwarenessReply(
             text=json.dumps(
                 {
@@ -280,6 +294,34 @@ def install_awareness_model(
 
     monkeypatch.setattr(main.chat, "awareness", _awareness)
     return passes
+
+
+def let_the_next_pass_run(monkeypatch):
+    """Let a second awareness pass fire immediately after the first.
+
+    Two gates would otherwise stop it, and both are about *pacing* rather than
+    meaning: the room debounce, which exists so the bot does not read a room
+    that is still talking, and ``_awareness_allowance_gap``, which floors the
+    gap between passes at one second even when the configured interval is zero
+    so the day's allowance is spread out. A two-turn test's approval arrives
+    milliseconds after the proposal, so both are zeroed here and left at their
+    production values everywhere else.
+    """
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(main, "_awareness_allowance_gap", lambda *a, **k: 0.0)
+
+
+def run_the_scheduled_pass(bot):
+    """Fire the debounce deadline the way the timer job does.
+
+    An unaddressed message that does not read as an action is *scheduled*, not
+    answered on the spot: the room's deadline is armed and the pass runs when it
+    expires. «تأیید می‌کنم» is exactly such a message, so a test whose second turn
+    is an approval has to let the deadline fire — which is what production's
+    one-second tick does, and what this does here.
+    """
+    ctx = SimpleNamespace(bot=bot, args=[], application=SimpleNamespace(bot=bot))
+    asyncio.run(main._awareness_deadline_tick(ctx))
 
 
 def run(handler, msg, bot, actor=MEMBER, ctx=None):
@@ -599,15 +641,23 @@ NEW_ADMIN = 1212121212
 
 
 def test_the_owner_can_define_an_admin_by_user_id(monkeypatch):
-    """The brief's "Add user 123 as Admin", end to end.
+    """The brief's "Add user 123 as Admin", end to end, in two turns.
 
-    Natural language in, a typed request out, the role actually stored — and the
-    role stored is the one the owner named, decided by `rbac`, not by the model.
+    Natural language in, a typed request out, the owner's approval, and only
+    then the role actually stored — and the role stored is the one the owner
+    named, decided by `rbac`, not by the model. The first turn is asserted to
+    have changed nothing, because that is the gate: a role change the model
+    asked for is recorded and waits, and the test would otherwise pass on a bot
+    that skipped straight to the promotion.
     """
     bot = FakeBot()
+    let_the_next_pass_run(monkeypatch)
     passes = install_awareness_model(
         monkeypatch,
-        call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "admin"}),
+        call=[
+            ("promote_member", {"target_user_id": NEW_ADMIN, "role": "admin"}),
+            ("confirm_admin_action", {}),
+        ],
         text="انجام شد",
     )
 
@@ -618,7 +668,23 @@ def test_the_owner_can_define_an_admin_by_user_id(monkeypatch):
         actor=OWNER,
     )
 
-    assert passes[0]["tool_result"]["ok"] is True
+    assert passes[0]["tool_result"]["ok"] is False
+    assert (
+        passes[0]["tool_result"]["outcome"]
+        == admin_service.OUTCOME_ADMIN_AWAITING_CONFIRMATION
+    )
+    assert db.admin_get(NEW_ADMIN) is None, "the gate let a promotion through"
+    assert not any(call[0] == "promote" for call in bot.actions)
+
+    run(
+        main.on_group_chat,
+        message(text="تأیید می‌کنم"),
+        bot,
+        actor=OWNER,
+    )
+    run_the_scheduled_pass(bot)
+
+    assert passes[1]["tool_result"]["ok"] is True
     assert db.admin_get(NEW_ADMIN)["role"] == rbac.ROLE_ADMIN
     # And the new admin is now an authorized Nexus actor, from the stored row.
     assert rbac.resolve(NEW_ADMIN).is_admin is True
@@ -630,9 +696,13 @@ def test_the_owner_can_define_an_admin_by_user_id(monkeypatch):
 
 def test_the_owner_can_define_a_senior_admin(monkeypatch):
     bot = FakeBot()
+    let_the_next_pass_run(monkeypatch)
     install_awareness_model(
         monkeypatch,
-        call=("promote_member", {"target_user_id": NEW_ADMIN, "role": "senior_admin"}),
+        call=[
+            ("promote_member", {"target_user_id": NEW_ADMIN, "role": "senior_admin"}),
+            ("confirm_admin_action", {}),
+        ],
         text="انجام شد",
     )
 
@@ -642,6 +712,15 @@ def test_the_owner_can_define_a_senior_admin(monkeypatch):
         bot,
         actor=OWNER,
     )
+    assert db.admin_get(NEW_ADMIN) is None
+
+    run(
+        main.on_group_chat,
+        message(text="تأیید می‌کنم"),
+        bot,
+        actor=OWNER,
+    )
+    run_the_scheduled_pass(bot)
 
     assert db.admin_get(NEW_ADMIN)["role"] == rbac.ROLE_SENIOR_ADMIN
 
@@ -710,9 +789,13 @@ def test_the_owner_can_remove_an_admin(monkeypatch):
     assert rbac.resolve(NEW_ADMIN).is_admin is True
 
     bot = FakeBot()
+    let_the_next_pass_run(monkeypatch)
     passes = install_awareness_model(
         monkeypatch,
-        call=("demote_member", {"target_user_id": NEW_ADMIN}),
+        call=[
+            ("demote_member", {"target_user_id": NEW_ADMIN}),
+            ("confirm_admin_action", {}),
+        ],
         text="انجام شد",
     )
     run(
@@ -723,8 +806,19 @@ def test_the_owner_can_remove_an_admin(monkeypatch):
     )
 
     assert len(passes) == 1
-    assert passes[0]["tool_result"]["ok"] is True
-    assert bot.messages == ["انجام شد"]
+    assert passes[0]["tool_result"]["ok"] is False
+    assert db.admin_get(NEW_ADMIN) is not None, "the gate let a demotion through"
+
+    run(
+        main.on_group_chat,
+        message(text="تأیید می‌کنم"),
+        bot,
+        actor=OWNER,
+    )
+    run_the_scheduled_pass(bot)
+
+    assert passes[1]["tool_result"]["ok"] is True
+    assert bot.messages == ["انجام شد", "انجام شد"]
 
     assert db.admin_get(NEW_ADMIN) is None
     assert rbac.resolve(NEW_ADMIN).is_admin is False

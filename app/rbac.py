@@ -113,6 +113,17 @@ PERMISSIONS = (
     # ``_MASK_PERMISSIONS`` is built from this tuple by index, so inserting
     # anywhere but the end would silently re-point every stored mask.
     "vpn.manage",
+    # Approve an administrative action the assistant proposed but did not take.
+    #
+    # Owner-only, and carried by no role, for the reason the whole two-step
+    # exists: the operations it releases are the ones where a model's mistake is
+    # either invisible or a grant of authority — promoting somebody, or
+    # silencing the assistant that would have reported it. If an administrator
+    # could confirm their own request, the step would be a formality and would
+    # protect nothing, so the confirmer is the owner by construction.
+    #
+    # Appended last, per the note above.
+    "admin.confirm",
 )
 
 PERMISSION_SET = frozenset(PERMISSIONS)
@@ -123,7 +134,7 @@ PERMISSION_SET = frozenset(PERMISSIONS)
 # a checked property of the tables below rather than a fact somebody has to
 # notice while editing them.
 OWNER_ONLY_PERMISSIONS = frozenset(
-    {"nexus.control", "agent.request", "vpn.read", "vpn.manage"}
+    {"nexus.control", "agent.request", "vpn.read", "vpn.manage", "admin.confirm"}
 )
 
 # The permission implied by every other one. Held by every principal, including
@@ -228,6 +239,7 @@ PERMISSION_LABELS = {
     "agent.request": "درخواست از عامل برنامه‌نویسی",
     "vpn.read": "دیدن اطلاعات سرویس VPN",
     "vpn.manage": "تغییر سرویس‌های VPN",
+    "admin.confirm": "تأیید کارهای مدیریتی پیشنهادی دستیار",
 }
 ROLE_LABELS = {
     ROLE_OWNER: "مالک",
@@ -305,6 +317,10 @@ PERMISSION_TELEGRAM_RIGHT = {
     # corresponds to any of them.
     "vpn.read": None,
     "vpn.manage": None,
+    # Nor is approving an action the assistant proposed. It is a power over this
+    # bot's own behaviour, not a capability inside a chat, and no Telegram
+    # administrator flag corresponds to it.
+    "admin.confirm": None,
 }
 
 # Rights the bot must itself hold before it can grant them to somebody else.

@@ -1415,6 +1415,31 @@ reference file is stale and this list is the one to fix first.
 * `AdminRequest` must have **no** `is_owner` / `actor_role` / `allowed` field,
   and the actor must be re-resolved from `actor_id` via `rbac.resolve()` on
   **every** call.
+* A gated operation (`Operation.needs_confirmation`) **never** executes on the
+  model's say-so: from `INTERFACE_AI` it is recorded and answers
+  `admin_awaiting_confirmation`, and nothing runs until the owner releases it.
+  The gate sits **after** the whole authority pipeline, so a proposal the
+  proposer could not make is refused before anything is written.
+* The gated set is **exactly** the six assistant switches
+  (`nexus`/`awareness`/`search` × `offline`/`online`) plus `promote_member` and
+  `demote_member`. Moderation is **never** gated — a ban the model asks for is a
+  ban, because a moderation bot that must ask permission to moderate is not one.
+* A typed command (`INTERFACE_PYTHON`) is **not** gated: a person acting
+  directly is the authority, and only the model has to ask.
+* The confirmation is a **reference, not an approval**. What runs is re-read
+  from the recorded row, so a confirming request **cannot** change the target,
+  the role or the operation.
+* Only the **owner** releases a recorded action, and only **once** — a
+  compare-and-swap claim, so two approvals arriving together cannot both promote
+  somebody. The rule lives in `agent_bridge.resolve_confirmation` and is
+  **never** reimplemented; a bare approval with more than one action waiting is
+  a **question**, and the model **never** picks.
+* `pending_id` may reach an `AdminRequest` from a model **only** through the two
+  confirm tools, and the gate is skipped for a request that carries one — so no
+  other tool may ever declare the parameter, and an undeclared argument stays
+  refused.
+* A lapsed proposal (`expires_at` passed) is unclaimable and answers `expired`;
+  the retention window drops a finished row and **never** a live one.
 * `parse_write_call` takes `actor_id` and `chat_id` from the **caller**, never
   from the model's arguments; an undeclared argument is refused, not ignored.
   **Refuse rather than repair** — never coerce a missing id or role.
@@ -1433,7 +1458,9 @@ reference file is stale and this list is the one to fix first.
 * Refusals are audited; the action vocabulary is **never** forked; the detail
   column **never** holds a message body.
 * Retention is enforced on the administrative path; `ADMIN_IDEMPOTENCY_RETENTION`
-  is floored at the replay window in config.
+  is floored at the replay window in config. `admin_service.prune()` applies
+  **three** windows — `admin_audit`, `admin_request_ids` and `admin_pending_ops`
+  — and the audit trail is **windowed, never truncated**.
 * The model's judgement is **not** a security control; prompt injection is
   defanged, not solved; a refusal is only a refusal if **nothing reached
   Telegram**.

@@ -54,8 +54,12 @@ def admin_env(monkeypatch):
     monkeypatch.setattr(config, "ADMIN_REQUEST_REPLAY_WINDOW", 120)
     db.init()
     db.admin_reset()
+    db.admin_pending_reset()
+    admin_service.nexus.reset_state()
     yield
     db.admin_reset()
+    db.admin_pending_reset()
+    admin_service.nexus.reset_state()
 
 
 # ── The gateway double ────────────────────────────────────────────────────
@@ -166,6 +170,47 @@ def execute(operation: str, gateway=None, **kwargs):
             request(operation, **kwargs), gateway, bot_id=BOT_ID
         )
     ), gateway
+
+
+def confirm(pending_id: str, gateway=None, *, actor_id=OWNER, chat_id=CHAT):
+    """Release one recorded action the way the owner does: a second request.
+
+    The confirming request is deliberately built here rather than through
+    ``ai_call``, because what is under test is the service's two-step shape and
+    not the model's ability to emit the tool. The actor defaults to the owner
+    because that is the only actor ``resolve_confirmation`` will ever release an
+    action for.
+    """
+    gateway = gateway or FakeGateway()
+    return run(
+        admin_service.execute(
+            request(
+                "admin_confirm",
+                actor_id=actor_id,
+                chat_id=chat_id,
+                pending_id=pending_id,
+            ),
+            gateway,
+            bot_id=BOT_ID,
+        )
+    ), gateway
+
+
+def execute_confirmed(operation: str, gateway=None, **kwargs):
+    """Propose a gated operation from the AI, then release it as the owner.
+
+    The two steps are the behaviour now, so a test about what a promotion
+    *does* has to walk both of them; asserting only the first would be asserting
+    the proposal rather than the promotion. The first step's outcome is asserted
+    here because it is the evidence that the proposing actor's authority was
+    sufficient: the gate sits after the whole authority pipeline, so a denial
+    would have stopped there instead of recording anything.
+    """
+    gateway = gateway or FakeGateway()
+    first, _ = execute(operation, gateway=gateway, **kwargs)
+    assert first.outcome == admin_service.OUTCOME_ADMIN_AWAITING_CONFIRMATION, first
+    pending_id = first.extra["pending"]["pending_id"]
+    return confirm(pending_id, gateway=gateway)
 
 
 def ai_call(name: str, args: dict, *, actor_id: int, chat_id: int = CHAT):
@@ -334,7 +379,13 @@ def test_a_senior_admin_cannot_create_another_senior_admin():
 
 
 def test_a_senior_admin_may_create_a_moderator():
-    result, gateway = execute(
+    """The senior's authority is enough to *propose*; the owner releases it.
+
+    The proof that the senior was allowed is the first step's outcome: the gate
+    runs after the whole authority pipeline, so a senior who could not grant the
+    role would have been refused there and nothing would have been recorded.
+    """
+    result, gateway = execute_confirmed(
         "promote_member", actor_id=SENIOR, target_id=MEMBER, role="moderator"
     )
 
@@ -344,7 +395,7 @@ def test_a_senior_admin_may_create_a_moderator():
 
 
 def test_the_owner_can_create_a_senior_admin():
-    result, _ = execute(
+    result, _ = execute_confirmed(
         "promote_member", target_id=MEMBER, role="senior_admin"
     )
 
@@ -397,7 +448,7 @@ def test_the_self_refusal_survives_the_model_forging_a_target():
     works, which the tests above already cover. Here the actor and the target
     differ by one digit.
     """
-    result, gateway = execute(
+    result, gateway = execute_confirmed(
         "promote_member", actor_id=SENIOR, target_id=MODERATOR, role="moderator"
     )
 
@@ -433,7 +484,7 @@ def test_the_self_refusal_is_explained_in_terms_of_its_own_rule():
 
 def test_promotion_grants_only_what_the_role_carries():
     """The caller names a role; the application decides the Telegram flags."""
-    _, gateway = execute("promote_member", target_id=MEMBER, role="moderator")
+    _, gateway = execute_confirmed("promote_member", target_id=MEMBER, role="moderator")
 
     _, _, _, rights = next(c for c in gateway.actions() if c[0] == "promote")
     expected = rbac.telegram_rights_for(rbac.ROLE_PERMISSIONS[rbac.ROLE_MODERATOR])
@@ -690,8 +741,8 @@ def test_a_promotion_records_the_role_even_when_telegram_refuses():
     """
     gateway = FakeGateway(fail={"promote"})
 
-    result, _ = execute("promote_member", gateway=gateway, target_id=MEMBER,
-                        role="moderator")
+    result, _ = execute_confirmed("promote_member", gateway=gateway, target_id=MEMBER,
+                                  role="moderator")
 
     assert result.ok
     assert db.admin_get(MEMBER)["role"] == rbac.ROLE_MODERATOR
@@ -701,8 +752,8 @@ def test_a_promotion_records_the_role_even_when_telegram_refuses():
 def test_a_promotion_without_the_bot_right_is_noted_not_refused():
     gateway = FakeGateway(can_promote=False)
 
-    result, _ = execute("promote_member", gateway=gateway, target_id=MEMBER,
-                        role="moderator")
+    result, _ = execute_confirmed("promote_member", gateway=gateway, target_id=MEMBER,
+                                  role="moderator")
 
     assert result.ok
     assert result.extra.get("telegram_note")
@@ -710,7 +761,7 @@ def test_a_promotion_without_the_bot_right_is_noted_not_refused():
 
 
 def test_demoting_somebody_who_is_not_an_admin_says_so():
-    result, gateway = execute("demote_member", target_id=MEMBER)
+    result, gateway = execute_confirmed("demote_member", target_id=MEMBER)
 
     assert not result.ok
     assert result.outcome == admin_service.OUTCOME_NOT_AN_ADMIN
@@ -721,7 +772,7 @@ def test_a_demotion_removes_the_role_and_the_rights():
     db.admin_set(MEMBER, rbac.ROLE_MODERATOR,
                  rbac.ROLE_PERMISSIONS[rbac.ROLE_MODERATOR], granted_by=OWNER)
 
-    result, gateway = execute("demote_member", target_id=MEMBER)
+    result, gateway = execute_confirmed("demote_member", target_id=MEMBER)
 
     assert result.ok
     assert db.admin_get(MEMBER) is None
@@ -1349,3 +1400,308 @@ def test_events_and_requests_are_separate_from_conversational_memory():
     history = db.chat_history(CHAT, OWNER, limit=10, ttl=3600)
 
     assert history == []
+
+
+# ══ THE CONFIRMATION GATE ═════════════════════════════════════════════════
+# Some actions are never carried out on the model's say-so: changing somebody's
+# role, and switching the assistant, its room awareness or its web search on or
+# off. Asking for one records it and answers ``admin_awaiting_confirmation``;
+# nothing runs until the owner releases it, which is a second request carrying
+# the id of the recorded row.
+#
+# Two properties make the shape safe, and both are asserted below rather than
+# assumed:
+#
+# * **The confirmation is a reference, not an approval.** What runs is re-read
+#   from the row that was written, so a confirming request cannot smuggle a
+#   different target, role or operation into the call.
+# * **Only the owner releases, and only once.** The owner rule lives in
+#   ``agent_bridge.resolve_confirmation`` — the same function the VPN adapter and
+#   the coding-agent bridge use — and the claim is a compare-and-swap, so two
+#   approvals arriving together cannot both promote somebody.
+#
+# The set is deliberately narrow. Moderation is *not* gated: a ban the model
+# asks for is a ban, because the alternative is a moderation bot that has to ask
+# permission to do the one thing it exists for.
+GATED = (
+    "promote_member",
+    "demote_member",
+    "nexus_offline",
+    "nexus_online",
+    "awareness_offline",
+    "awareness_online",
+    "search_offline",
+    "search_online",
+)
+
+
+def test_the_gated_set_is_exactly_these_eight_operations():
+    """Named, not counted: a ninth appearing by accident should fail here."""
+    gated = {
+        name
+        for name, op in admin_service.OPERATIONS.items()
+        if op.needs_confirmation
+    }
+
+    assert gated == set(GATED)
+
+
+def test_a_moderation_action_is_never_gated():
+    """The other half of the rule, asserted so the set cannot quietly grow."""
+    for name in ("ban_member", "unban_member", "mute_member", "unmute_member",
+                 "delete_message", "warn_member"):
+        assert not admin_service.OPERATIONS[name].needs_confirmation
+
+
+def test_a_gated_action_from_the_model_records_and_does_not_execute():
+    """One representative of each half of the set: a role and a switch."""
+    for operation, kwargs in (
+        ("promote_member", {"target_id": MEMBER, "role": "moderator"}),
+        ("nexus_offline", {}),
+    ):
+        db.admin_pending_reset()
+        db.admin_reset()
+
+        result, gateway = execute(operation, **kwargs)
+
+        assert (
+            result.outcome
+            == admin_service.OUTCOME_ADMIN_AWAITING_CONFIRMATION
+        ), operation
+        assert not result.ok, operation
+        # Nothing reached Telegram, and no state changed.
+        assert gateway.actions() == [], operation
+        assert db.admin_get(MEMBER) is None, operation
+        # And the proposal is on the record, so it can be released.
+        waiting = db.admin_pending_waiting(chat_id=CHAT)
+        assert len(waiting) == 1, operation
+        assert waiting[0]["operation"] == operation
+        assert waiting[0]["status"] == "pending"
+
+
+def test_a_typed_command_is_not_gated():
+    """A person acting directly is the authority; only the model has to ask."""
+    result, gateway = execute(
+        "promote_member",
+        interface=admin_service.INTERFACE_PYTHON,
+        target_id=MEMBER,
+        role="moderator",
+    )
+
+    assert result.ok
+    assert any(c[0] == "promote" for c in gateway.actions())
+    assert db.admin_get(MEMBER)["role"] == rbac.ROLE_MODERATOR
+    assert db.admin_pending_waiting(chat_id=CHAT) == []
+
+
+def test_a_moderation_action_from_the_model_is_not_gated():
+    result, gateway = execute("ban_member", target_id=MEMBER)
+
+    assert result.ok
+    assert any(c[0] == "ban" for c in gateway.actions())
+    assert db.admin_pending_waiting(chat_id=CHAT) == []
+
+
+def test_only_the_owner_may_release_a_recorded_action():
+    """A senior admin — who could propose it — still cannot approve it."""
+    result, _ = execute("promote_member", target_id=MEMBER, role="moderator")
+    pending_id = result.extra["pending"]["pending_id"]
+
+    result, gateway = confirm(pending_id, actor_id=SENIOR)
+
+    assert not result.ok
+    assert result.outcome == admin_service.OUTCOME_DENIED
+    assert gateway.actions() == []
+    assert db.admin_get(MEMBER) is None
+    # The proposal is still waiting: a refusal to approve is not a withdrawal.
+    assert len(db.admin_pending_waiting(chat_id=CHAT)) == 1
+
+
+def test_the_recorded_action_is_what_runs_not_the_confirmation():
+    """The confirming request cannot change the target, the role or the op.
+
+    This is the whole reason the confirmation is a reference rather than an
+    approval. The confirming request here is built by hand with fields of its
+    own — a different target, a different role — and every one of them is
+    ignored, because what runs is re-read from the row written the first time.
+
+    The reliance this exposes is worth naming: ``needs_confirmation`` is skipped
+    for *any* request that carries a ``pending_id``, so the rule is only safe
+    because ``pending_id`` has exactly two sources — the two confirm tools — and
+    ``parse_write_call`` refuses a call whose arguments are not the ones the
+    schema declares (the test above). Nothing else may hand a model a request
+    that arrives pre-approved.
+    """
+    result, _ = execute("promote_member", target_id=MEMBER, role="moderator")
+    pending_id = result.extra["pending"]["pending_id"]
+
+    gateway = FakeGateway()
+    run(
+        admin_service.execute(
+            request(
+                "admin_confirm",
+                actor_id=OWNER,
+                target_id=STRANGER,      # not the recorded target
+                role="senior_admin",     # not the recorded role
+                pending_id=pending_id,
+            ),
+            gateway,
+            bot_id=BOT_ID,
+        )
+    )
+
+    assert db.admin_get(MEMBER)["role"] == rbac.ROLE_MODERATOR
+    assert db.admin_get(STRANGER) is None
+
+
+def test_a_model_cannot_set_a_pending_id_on_a_gated_operation():
+    """The field is only reachable through the two confirm tools.
+
+    ``needs_confirmation`` is skipped for a request that carries a pending id, so
+    a gated tool that read the field from its arguments would be a way to skip
+    the gate entirely. It cannot: only ``vpn_confirm`` and ``admin_confirm``
+    declare the parameter, and the parser refuses a call whose arguments are not
+    exactly the ones the schema declares — so a stray ``pending_id`` does not
+    slip through as a harmless extra, it makes the call malformed and nothing is
+    executed at all.
+    """
+    req = admin_tools.parse_write_call(
+        "promote_member",
+        {"target_user_id": MEMBER, "role": "moderator", "pending_id": "forged"},
+        actor_id=OWNER,
+        chat_id=CHAT,
+        request_id=admin_service.new_request_id(),
+    )
+
+    assert req is None, "a gated tool read a pending id out of its arguments"
+
+    # And the same call without the forged field still goes through the gate.
+    honest = admin_tools.parse_write_call(
+        "promote_member",
+        {"target_user_id": MEMBER, "role": "moderator"},
+        actor_id=OWNER,
+        chat_id=CHAT,
+        request_id=admin_service.new_request_id(),
+    )
+    assert honest is not None
+    assert honest.pending_id == ""
+    result = run(admin_service.execute(honest, FakeGateway(), bot_id=BOT_ID))
+    assert result.outcome == admin_service.OUTCOME_ADMIN_AWAITING_CONFIRMATION
+
+
+def test_a_bare_approval_with_two_waiting_is_a_question_and_runs_nothing():
+    """«اوکی» with two proposals is ambiguous, and the server will not guess."""
+    first, _ = execute("promote_member", target_id=MEMBER, role="moderator")
+    second, _ = execute("nexus_offline")
+
+    result, gateway = confirm("")  # a bare approval names nothing
+
+    assert not result.ok
+    assert result.outcome == admin_service.OUTCOME_ADMIN_CONFIRM_REFUSED
+    assert result.detail == "ambiguous"
+    assert gateway.actions() == []
+    assert db.admin_get(MEMBER) is None
+    # Both are still waiting, and the ids go back so the next message can name one.
+    assert len(db.admin_pending_waiting(chat_id=CHAT)) == 2
+    assert set(result.extra["candidates"]) == {
+        first.extra["pending"]["pending_id"],
+        second.extra["pending"]["pending_id"],
+    }
+
+
+def test_approving_with_nothing_waiting_is_refused():
+    result, gateway = confirm("")
+
+    assert not result.ok
+    assert result.outcome == admin_service.OUTCOME_ADMIN_CONFIRM_REFUSED
+    assert result.detail == "nothing_pending"
+    assert gateway.actions() == []
+
+
+def test_an_unknown_reference_is_refused():
+    result, gateway = execute("promote_member", target_id=MEMBER, role="moderator")
+    execute("nexus_offline")  # a second, so the reference is not "the only one"
+
+    result, gateway = confirm("not-a-recorded-id")
+
+    assert not result.ok
+    assert result.outcome == admin_service.OUTCOME_ADMIN_CONFIRM_REFUSED
+    assert result.detail.startswith("not_waiting")
+    assert gateway.actions() == []
+
+
+def test_an_action_cannot_be_released_twice():
+    """The claim is a compare-and-swap, so the second approval finds nothing."""
+    result, _ = execute("promote_member", target_id=MEMBER, role="moderator")
+    pending_id = result.extra["pending"]["pending_id"]
+
+    first, _ = confirm(pending_id)
+    assert first.ok
+
+    second, gateway = confirm(pending_id)
+
+    assert not second.ok
+    assert second.outcome == admin_service.OUTCOME_ADMIN_CONFIRM_REFUSED
+    assert gateway.actions() == []
+
+
+def test_a_lapsed_proposal_cannot_be_released():
+    """Past its window the row is unclaimable, and the owner is told so."""
+    result, _ = execute("promote_member", target_id=MEMBER, role="moderator")
+    pending_id = result.extra["pending"]["pending_id"]
+
+    # Age the row past its expiry without touching the clock the rest of the
+    # service reads: the row is the only thing the confirmation consults.
+    with db._lock:
+        db._conn.execute(
+            "UPDATE admin_pending_ops SET expires_at = ? WHERE request_id = ?",
+            (int(time.time()) - 1, pending_id),
+        )
+        db._conn.commit()
+
+    result, gateway = confirm(pending_id)
+
+    assert not result.ok
+    assert result.outcome == admin_service.OUTCOME_ADMIN_CONFIRM_REFUSED
+    assert result.detail == "expired"
+    assert gateway.actions() == []
+    assert db.admin_get(MEMBER) is None
+
+
+def test_a_switch_confirmed_by_the_owner_actually_moves_the_switch():
+    """The end of the path: the recorded switch runs, once, on approval."""
+    admin_service.nexus.reset_state()
+    result, _ = execute("nexus_offline")
+    pending_id = result.extra["pending"]["pending_id"]
+
+    # The proposal alone changed nothing.
+    assert admin_service.nexus.state() == "online"
+
+    result, gateway = confirm(pending_id)
+
+    assert result.ok
+    assert admin_service.nexus.state() == "offline"
+    assert gateway.actions() == []
+
+
+def test_the_retention_window_drops_finished_rows_and_keeps_waiting_ones():
+    """The table is bounded, and never at the cost of a live proposal."""
+    done, _ = execute("promote_member", target_id=MEMBER, role="moderator")
+    done_id = done.extra["pending"]["pending_id"]
+    confirm(done_id)
+
+    waiting, _ = execute("nexus_offline")
+    waiting_id = waiting.extra["pending"]["pending_id"]
+
+    with db._lock:
+        db._conn.execute(
+            "UPDATE admin_pending_ops SET confirmed_at = ? WHERE request_id = ?",
+            (int(time.time()) - 10_000, done_id),
+        )
+        db._conn.commit()
+
+    db.admin_pending_prune(keep_seconds=3600)
+
+    assert db.admin_pending_get(done_id) is None, "a finished row was kept"
+    assert db.admin_pending_get(waiting_id) is not None, "a live proposal was pruned"
+
