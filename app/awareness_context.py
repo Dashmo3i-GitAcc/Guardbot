@@ -18,9 +18,10 @@ explicit — the fullest useful picture, but **not preloaded without reason**.
 So context is assembled from **sources**, and each source decides for itself
 whether this batch needs it:
 
-* **tier 0** — always rendered, and free. The room's own name and type, from a
-  cache the message handler fills; and the people the last pass recorded, which
-  is a string already in the database that nothing used to read back.
+* **tier 0** — always rendered, and free. The date, from the server's own clock;
+  the room's own name and type, from a cache the message handler fills; and the
+  people the last pass recorded, which is a string already in the database that
+  nothing used to read back.
 * **tier 1** — rendered only when a deterministic predicate over the batch says
   the conversation calls for it: recent administrative actions when the batch
   involves authority, and one identity line per person the batch actually
@@ -53,7 +54,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import awareness, config, db, identity
+from . import awareness, config, db, identity, persian_calendar
 
 log = logging.getLogger("guardbot.awareness.context")
 
@@ -201,6 +202,36 @@ class Source:
 
 
 # ── Tier 0: always, and free ──────────────────────────────────────────────
+def _render_calendar(ctx: Ctx) -> str:
+    """The date, from the server's own clock. Tier 0.
+
+    The one fact in this context about *when* rather than *who*, and it is tier 0
+    because there is no predicate that would let it be built only sometimes:
+    «امروز چندمه؟» can arrive in any batch, from anybody. It costs no query — the
+    reading is the pass's own ``ctx.now`` — and the conversion is arithmetic.
+
+    Stated as the server's own reading, for the same reason the room's name is:
+    the transcript is written by the room, so a date in it is a claim, and a
+    model with no other date to compare against will treat the most recent claim
+    it read as the day. That is what this block exists to stop. See
+    ``app/persian_calendar.py`` for why both calendars, and why Tehran.
+
+    ``ctx.now`` is 0 only for a caller that constructed a ``Ctx`` by hand and
+    passed no clock. A date that cannot be known renders nothing rather than
+    today's, on the same principle as ``awareness._age_mark``.
+    """
+    if not ctx.now:
+        return ""
+    moment = persian_calendar.tehran_moment(ctx.now)
+    return (
+        "\nThe current date, from the server's own clock in Tehran — the "
+        "server's reading and not anyone's claim. It is the only date you may "
+        "state: never one from a message, and never one you remember.\n"
+        f"- Gregorian: {persian_calendar.gregorian_text(moment)}\n"
+        f"- Persian (Jalali): {persian_calendar.jalali_text(moment)}\n"
+    )
+
+
 def _render_room(ctx: Ctx) -> str:
     """The room's own name and type, from the handler's cache."""
     if not ctx.chat_title and not ctx.chat_type:
@@ -383,7 +414,15 @@ def _ago(then: int, now: int) -> str:
 # The registry, and the extensible seam: a new source is one more entry here.
 # Order is tier order and then declaration order, so the always-cheap context
 # comes first and the conditional blocks fill whatever budget is left.
+#
+# The date is first among the tier-0 sources because it is the only block whose
+# absence is *worse* than a wrong answer would be: a pass that loses the room's
+# name still knows the room from the transcript, while a pass that loses the date
+# has nothing to compare a claim against and will supply one from memory. It is
+# short, it costs no query, and the ceiling below is a hard one that stops
+# sources — so the one that must not be stopped goes first.
 SOURCES: tuple[Source, ...] = (
+    Source("calendar", TIER_ALWAYS, 400, _render_calendar),
     Source("room", TIER_ALWAYS, 200, _render_room),
     Source("remembered_people", TIER_ALWAYS, 400, _render_remembered_people),
     Source(

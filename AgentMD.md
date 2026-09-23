@@ -3864,10 +3864,11 @@ asked for are paid on every pass for ever; describing all forty members of a
 group on a pass that mentions two of them is exactly the preload the owner
 asked to avoid. So each source declares its own tier:
 
-* **Tier 0 — always, and free.** `room` (the group's title and type, from a
-  cache the message handler fills out of `update.effective_chat`, so a pass
-  needs no `get_chat` call) and `remembered_people` (the `participants` string
-  `awareness.record` has always written and nothing used to read back).
+* **Tier 0 — always, and free.** `calendar` (today's date, Gregorian and Solar
+  Hijri, from the pass's own clock reading); `room` (the group's title and type,
+  from a cache the message handler fills out of `update.effective_chat`, so a
+  pass needs no `get_chat` call); and `remembered_people` (the `participants`
+  string `awareness.record` has always written and nothing used to read back).
 * **Tier 1 — only when a deterministic predicate over the batch says so.**
   `admin_activity` (recent actions from `db.audit_since`, scoped to this room
   and to the batch's own time span) renders only when the batch involves
@@ -3877,6 +3878,24 @@ asked to avoid. So each source declares its own tier:
   renders only when the window contains a reply edge, which is what makes a
   person *referred to* rather than merely present. Neither predicate consults a
   model, and neither fires on an ordinary member's ordinary message.
+
+The date is the one source whose *absence* is worse than a wrong answer would be.
+Every other block is about **who** — the room, the people, the actions — and a
+pass that loses one of them still knows the room from the transcript. The date is
+the only fact with no second source: the transcript carries relative ages, so a
+model with no absolute anchor answers «امروز چندمه؟» out of its own training, or
+out of a date somebody happened to type. `calendar` therefore renders **first** —
+the ceiling below is a hard stop, so position decides what survives a busy pass —
+and it states both calendars, because a Persian-language room asks in Solar Hijri
+and a date written in a message is almost always Gregorian. It is derived from
+`Ctx.now` and from nothing else, and the block says as much, because handing the
+model a date does not by itself stop it preferring the newest claim it read.
+Tehran rather than UTC is the same argument as the `chat_id` key above: a date
+that rolls at midnight UTC is wrong for three and a half hours every night, which
+is the busiest part of a Persian group's evening. `app/persian_calendar.py`
+carries the conversion, the reasoning behind the rule chosen, and how far it was
+verified before being written down — including a cross-check against a different
+algorithm over 146,097 consecutive days.
 
 `Ctx` is a frozen value holding the pass's own window, anchor and roles, so a
 source cannot read something the pass did not already read: "cheap always, deep
@@ -3904,6 +3923,11 @@ argument as a live one. It is appended at the *end* of the line on purpose: the
 header is the line's identity — what the model and the tests key on — and an age
 wedged into the middle of it would make the one part that must not move depend
 on when the pass happened to run.
+
+It is the complement of `calendar` rather than a duplicate of it: the transcript
+says how long ago, the date block says *when*, and neither is derivable from the
+other. The transcript can be right about a message being four minutes old while
+the model still cannot say what day four minutes ago was on.
 
 ### 35.4 When a room is read: debounce, ceiling, floor, budget
 
@@ -4256,7 +4280,8 @@ started and «همون مشکل قبلی» would have no antecedent.
 ### 35.12 Tests
 
 `tests/test_awareness.py` (122 tests), `tests/test_awareness_context.py`
-(34 tests, the staged context of §35.3) plus the Awareness cases in
+(41 tests, the staged context of §35.3), `tests/test_persian_calendar.py`
+(41 tests, the date that context now carries) plus the Awareness cases in
 `tests/test_nexus.py` (144 tests, up from 140) cover the brief's list:
 
 * **Capture and window** — every message is captured including a member's;
@@ -4291,6 +4316,18 @@ started and «همون مشکل قبلی» would have no antecedent.
   else's.
 * **`NEXUS_ACTORS_ONLY`** — the gate is read in the awareness path; a member is
   understood and not answered; the status line agrees with the config.
+* **The date** — it renders on every pass and only from the pass's own clock; it
+  rolls over at midnight in Tehran and *not* at midnight UTC; a date somebody
+  typed cannot reach it, asserted both as "the claim is absent" and as "the block
+  is byte-identical whatever the transcript says"; the sentence that tells the
+  model which date wins is pinned; it survives a ceiling that starves every other
+  block; and a pass with no clock reading renders no date rather than today's.
+  The conversion itself is in `tests/test_persian_calendar.py` — against the
+  published Gregorian boundaries of every month of 1404 and 1405, against 22
+  Bahman 1357, and against three structural invariants walked over 26,000
+  consecutive days (every day advances the Persian date by exactly one, every
+  month has the length its position gives it, and every year is 365 or 366 days
+  with its Esfand agreeing).
 
 Two structural tests are worth naming, because they are what makes the claims in
 §35.7 and §35.11 checkable rather than aspirational:
@@ -4328,7 +4365,7 @@ database already held are untouched. No migration step is needed.
 | `NEXUS_AWARENESS_MAX_CHATS_PER_TICK` | `2` | rooms read per tick |
 | `NEXUS_AWARENESS_DAILY_LIMIT` | `200` | the workload's per-account ceiling |
 | `NEXUS_AWARENESS_CONTEXT_MESSAGES` | `20` | room messages shown to the *addressed* path |
-| `NEXUS_AWARENESS_CONTEXT_CHARS` | `1500` | the staged context's total character ceiling (§35.3) |
+| `NEXUS_AWARENESS_CONTEXT_CHARS` | `1500` | the staged context's total character ceiling (§35.3); the date renders first, so a tight ceiling cannot remove it |
 | `NEXUS_AWARENESS_CONTEXT_DEEP` | `true` | whether the conditional tier of the staged context runs at all |
 | `NEXUS_AWARENESS_ADMIN_ACTIONS` | `5` | recent administrative actions the context may show |
 | `NEXUS_AWARENESS_REFERENCED_PEOPLE` | `4` | people the context may describe |
