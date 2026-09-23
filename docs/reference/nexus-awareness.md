@@ -13,6 +13,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [35. Nexus Group Awareness: understanding the room](#s35)
 - [36. The assistant reads a room when its own clock expires](#s36)
 - [41. The allowance is a day's, so it is spent across the day](#s41)
+- [42. Who does «این» mean? The referent resolver](#s42)
 
 ---
 
@@ -1481,3 +1482,178 @@ return is precisely when a timeline is most useful; a turn that never consults
 the model reports a zero model stage rather than borrowing somebody else's
 duration; and `sent` is the same value the function returns, because the caller
 uses it to decide whether the ambient path may still speak.
+
+---
+
+<a id="s42"></a>
+
+## 42. Who does «این» mean? The referent resolver
+
+### 42.1 The gap, stated in the room's own language
+
+A moderation instruction in a group is almost never self-contained. «اینو ساکت
+کن», «همون کاربر رو بن کن», «ادمینه رو محدود کن» — the person is named by a
+pronoun or a role, and the only thing in the world that says who that is, is the
+conversation around it.
+
+Before this stage the server resolved exactly one of those cases: the *reply
+edge*. If the instruction was sent as a reply, the target is a stored column and
+`awareness.instruction_block` states it as fact. If it was not, the server said
+so and told the model to read the transcript and ask if it could not tell.
+
+That is the right fail-safe direction, but it leaves a large, determinable class
+of cases on the table. A message that names somebody, states an id, or follows a
+person who has been the subject of the last three replies has a referent the
+server could have found without a model call — and a model handed a ranked list
+of candidates makes fewer wrong-person mistakes than one asked to re-derive the
+room from a transcript.
+
+### 42.2 What the module is, and what it deliberately is not
+
+`app/referents.py` is **evidence**, in exactly the sense `app/addressing.py` is
+evidence: it reads the text and the window and reports what it found, with the
+strength of each finding. It is not a decision, and the distinction is
+load-bearing rather than pedantic:
+
+* it cannot make a message relevant — relevance is the model's;
+* it cannot make anything happen — only `app/admin_service.py` authorises;
+* it cannot choose the referent — the model chooses, and the chosen id is
+  re-authorised from the actor's Telegram id like every other request.
+
+That last one is why `resolve` reports `ambiguous` instead of picking. When two
+candidates are genuinely close, the honest answer is "the server could not tell
+these apart", and the model is told that so it can ask. A resolver that silently
+picked the higher score would be guessing with extra steps, and a wrong-person
+moderation action is the worst mistake available here.
+
+The module is pure at import time — no `db`, no `config`, no pool, no `rbac` —
+so it is testable against a realistic corpus without a key, a clock or a bot.
+`awareness_context` is its only importer.
+
+### 42.3 The kinds, and why the kind is carried rather than flattened
+
+* **person** — «این کاربر», «همون طرف». The message says "person" outright.
+* **role** — «ادمینه», «مدیره». It names a role, not a person, so the
+  candidates are whoever holds that role now, which is a fact about `rbac` and
+  the window rather than about the text.
+* **prior** — «قبلی», «قبلیش». It points at what came before, which is the one
+  referent `instruction_block` explicitly warns against reusing; the candidates
+  are offered with that warning attached rather than suppressed.
+* **clitic** — the object clitic «ـش» on a moderation verb: «ساکتش کن» says
+  "mute him" with no demonstrative at all. The lexicon is borrowed from
+  `addressing.ACTION_WORDS` rather than copied, late and guarded, so the module
+  stays importable on its own.
+* **deictic** — the bare «این», «اون», «همون». The weakest about personhood: it
+  may point at a message, a config or a link.
+
+The demonstratives are listed as **surfaces** («اینو», «همونو»), not stems. The
+first draft stripped the object marker «و» generically, which turns «اینو» into
+«این» — and also turns «آمو» or any other word ending in «و» into something it
+is not, because «و» is both the object marker and an ordinary letter.
+
+### 42.4 The scoring, and the one case the server actually knows
+
+Each source is a reason to believe one person is the referent, weighted by how
+much the evidence *is* the referent rather than merely correlates with it: a
+reply edge (1.00), a stated id (0.95), a name in the message (0.80), a role the
+message names (0.70), the room's replies having been aimed at them (0.40), and
+recency (0.50/0.30/0.15 by band). Two independent sources agreeing add 0.05, and
+never enough to overtake a strong single signal.
+
+A reply edge short-circuits the verdict rather than merely scoring high: when the
+message *is* a reply, that id is the referent, and reporting it as ambiguous
+because somebody else was also named would be worse than useless.
+
+### 42.5 Anaphora: «همون» is not «این»
+
+The last measured imperfection was ambiguity *precision*: the resolver cried
+"cannot tell" on a room that had plainly settled. The case was «همون کاربر رو بن
+کن» with three replies in a row aimed at رضا.
+
+The reading is linguistic. «همون» and «اون» are **anaphoric** — "that same one",
+the entity already under discussion — and so is the object clitic, because "him"
+can only be somebody already on the table. For those, what the room has been
+about is not a hint among hints; it is what the word means. A bare «این» points
+at whatever is nearest, which may be a message or a link, and «قبلی» points at a
+*position in a sequence* rather than at the room's subject; neither gets the
+reading.
+
+The rule is deliberately strict. It fires only when every reply in the window
+targets one person **and there is more than one of them** — a single incidental
+reply edge is not "what the room has been about", and a room whose replies are
+split between two people is exactly the case where the resolver must stay
+unsure. Both fall back to the ordinary hint-scoring, which reports ambiguity
+when it cannot decide.
+
+### 42.6 The benchmark is the claim
+
+`tools/eval_intent.py` runs a fixed corpus (`tools/eval_cases.json`) through
+addressing and referent resolution and reports the numbers. It runs on a bare
+checkout — it sets placeholder environment variables at import — so the number
+is reproducible by anyone.
+
+On the 41-case corpus, with the anaphoric rule disabled and enabled — the same
+corpus both times, so the delta is the rule and nothing else:
+
+```
+                                rule off   rule on
+expression accuracy               100.0%   100.0%
+addressing accuracy                97.6%    97.6%
+top-1 accuracy                    100.0%   100.0%
+ambiguity recall                  100.0%   100.0%
+ambiguity precision                66.7%   100.0%
+wrong-but-confident                   0        0
+provided before (reply edge)       58.3%    58.3%
+provided after  (resolver)        100.0%   100.0%
+confident and correct              83.3%    91.7%
+block chars mean / max          249 / 503  253 / 527
+resolver us mean                ~0.6-1.7 ms (noisy; floor is 3 ms)
+```
+
+"Provided" is the fraction of answerable cases where the server hands the model
+the right person: 58.3% with only the reply edge, 100.0% with the resolver. That
+pair is a property of the corpus rather than of the rule, which is why it does
+not move. What the rule moves is **ambiguity precision** — 66.7% to 100% — and
+with it the fraction of answerable cases the resolver is both right *and*
+certain about, 83.3% to 91.7%, while `wrong-but-confident` stays at zero.
+
+The resolver's own cost is pure Python and sub-millisecond in the mean, but the
+measurement is noisy on a shared host (the same corpus has read anywhere from
+~0.6 ms to ~1.7 ms), so `tests/test_intent_eval.py` pins a 3 ms ceiling rather
+than the number itself. The block it renders stays under 600 characters.
+
+`tests/test_intent_eval.py` holds those numbers as a floor: `wrong_confident`
+must be 0, top-1 and ambiguity recall **and precision** must be 1.0, and
+`provided_before < provided_after`. A change to the lexicon moves the numbers on
+purpose, by editing the corpus — never by loosening the floor.
+
+The corpus covers the cases the brief names: reference, ambiguity, continuation,
+mixed Persian/English, ordinary chatter, addressing, typo, correction,
+topic-switch, temporal reference, reply chains and slang. One addressing case is
+pinned as a **known gap** — an exact name mid-sentence in a message talking
+*about* Nexus — because every deterministic rule that catches it also demotes a
+real request with the name in the same position.
+
+### 42.7 What the pass now records
+
+The decision the awareness pass returns was `topic`, `summary`, `relevant`,
+`respond`, `message`: a judgement of what the room is doing, expressed as prose
+nobody can count. Two fields now carry the structured half:
+
+* **intent** — what the batch is doing, from a closed vocabulary
+  (`question | instruction | discussion | social | other`);
+* **about** — the Telegram id of the person the batch concerns, or 0.
+
+Both are recorded and neither is obeyed: nothing gates a reply, an action or a
+permission on them. `intent` is clamped in `parse_decision` and again at the
+store, so the column only ever holds the vocabulary. `about` is checked against
+the window by `awareness.about_in_window` — a model that names somebody the room
+never mentioned has not read the room, and storing its guess would let the next
+pass inherit the mistake. The stored id is rendered back as "About then: …" in
+`memory_block`, read out of the stored participants rather than looked up again,
+so the understanding a pass records is what the next pass is handed.
+
+The columns are additive and reach production through `_ensure_column` rather
+than `CREATE TABLE`; a row written before them reads as `''`/`0` rather than
+being guessed at. Rollback is reverting the code: the columns stay and are
+ignored.
