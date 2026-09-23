@@ -858,6 +858,74 @@ def test_the_counters_add_up_when_the_budget_stops_a_request(provider, monkeypat
     assert account.successes == 0
 
 
+def test_a_slow_but_healthy_model_is_not_cut_by_the_ceiling(provider, monkeypatch):
+    """The ceiling bounds the *walk*, not a call that is already answering.
+
+    On 2026-09-23 the provider was slow rather than down, and answers in the
+    ten-to-twenty-second range were normal. A ceiling that cut those would turn
+    "the model was slow" into "the bot said nothing", which is the worse
+    outcome. The check happens *before* each attempt, so a call in flight is
+    allowed to finish even when it outlasts the ceiling — only the *next*
+    attempt is refused.
+    """
+    clock = Clock()
+    monkeypatch.setattr(gemini_pool, "time", clock)
+    # Nineteen seconds, then the answer. The call is instant in real time — the
+    # fake provider advances the pool's own clock, which is what the ceiling
+    # reads.
+    provider.tick = lambda: clock.advance(19.0)
+    provider.always(KEY_A, TEXT_MODELS[0], "slow but fine")
+
+    # Deliberately *below* the call's duration: the model answered, and an
+    # answer that arrives slowly still beats one that never arrives.
+    assert call(make_pool(time_budget=15.0)) == "slow but fine"
+    assert provider.total_calls == 1
+
+
+def test_cancelling_a_request_propagates_and_leaves_no_task_behind(
+    provider, monkeypatch
+):
+    """Cancellation is shutdown, not a failure.
+
+    It must not be swallowed, retried, or turned into ``PoolUnavailable`` — a
+    handler being cancelled has to unwind — and no attempt task may survive the
+    cancellation, or a cancelled reply would keep spending requests.
+    """
+    class HangingModels:
+        async def generate_content(self, *, model, contents, config):  # noqa: A002
+            await asyncio.sleep(3600)
+
+    class HangingClient:
+        def __init__(self):
+            self.aio = type("Aio", (), {"models": HangingModels()})()
+
+    monkeypatch.setattr(
+        gemini_pool, "_client_for", lambda key, timeout=None: HangingClient()
+    )
+    # Retries are on deliberately: the cancellation has to escape the retry
+    # loop rather than being treated as another attempt's worth of failure.
+    pool = make_pool(retries=2)
+
+    async def scenario():
+        task = asyncio.create_task(
+            gemini_pool.generate(
+                pool,
+                build_contents=lambda types: "hello",
+                build_config=lambda types: {"cfg": True},
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        leftover = [
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+        ]
+        assert leftover == [], f"a cancelled request left {leftover} running"
+
+    asyncio.run(scenario())
+
+
 def test_only_the_workloads_that_need_a_ceiling_have_one():
     """The ceiling is opt-in per workload, and the set that opts in is fixed.
 
