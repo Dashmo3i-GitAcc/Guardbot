@@ -614,3 +614,88 @@ def test_the_context_builder_never_sends_or_acts():
 def test_the_awareness_module_does_not_import_the_context_builder():
     """The dependency points one way: ``main`` wires the two together."""
     assert "awareness_context" not in _imported_names(awareness)
+
+
+# ── Tier 1: the referent candidates ───────────────────────────────────────
+# The block that answers "who does «این» mean" for an instruction the reply edge
+# cannot settle. It is the one conditional source that serves the *correctness*
+# of an action rather than its context, so the tests pin both when it fires and
+# when it deliberately does not.
+def _referent_ctx(anchor, messages):
+    """A context whose window ends with the anchor, as a real pass always has."""
+    return ctx_of([*messages, anchor], anchor=anchor, now=int(anchor["at"]))
+
+
+def test_an_authority_deictic_instruction_renders_the_candidates():
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    messages = [
+        _msg(TARGET, "سلام", name="Reza", at=960),
+        _msg(OTHER, "چطوری", name="Sara", at=980),
+    ]
+    ctx = _referent_ctx(anchor, messages)
+    assert awareness_context._wants_referents(ctx) is True
+    out = awareness_context.blocks(ctx)
+    assert "اینو" in out
+    assert str(TARGET) in out or str(OTHER) in out
+    assert "evidence, not a decision" in out
+
+
+def test_a_reply_instruction_leaves_the_referent_to_instruction_block():
+    """A reply edge is the answer; a candidate list beside it is wasted tokens."""
+    anchor = _msg(
+        ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000,
+        reply_user_id=TARGET, reply_name="Reza",
+    )
+    ctx = _referent_ctx(anchor, [_msg(TARGET, "سلام", name="Reza", at=960)])
+    assert awareness_context._wants_referents(ctx) is False
+    assert "evidence, not a decision" not in awareness_context.blocks(ctx)
+
+
+def test_a_member_deictic_does_not_render_the_candidates():
+    """A member cannot act, so a ranked list of the room's people is pure cost."""
+    anchor = _msg(MEMBER, "اینو بن کن", role="member", name="Someone", at=1000)
+    ctx = _referent_ctx(anchor, [_msg(TARGET, "سلام", name="Reza", at=960)])
+    assert awareness_context._wants_referents(ctx) is False
+
+
+def test_a_directed_member_message_still_gets_the_candidates():
+    """Nexus was asked something, and the referent is what it was asked about."""
+    anchor = _msg(
+        MEMBER, "نکسوس اینو بررسی کن", role="member", name="Someone", at=1000,
+        directed=True,
+    )
+    ctx = _referent_ctx(anchor, [_msg(TARGET, "سلام", name="Reza", at=960)])
+    assert awareness_context._wants_referents(ctx) is True
+
+
+def test_the_candidate_list_is_bounded_by_config(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_REFERENTS", 2)
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    messages = [
+        _msg(uid, "سلام", name=f"User{uid}", at=1000 - uid)
+        for uid in (TARGET, OTHER, 45, 46, 47)
+    ]
+    out = awareness_context._render_referent_candidates(_referent_ctx(anchor, messages))
+    # One line per candidate, plus the header and the verdict line.
+    candidate_lines = [line for line in out.splitlines() if line.startswith("- ")]
+    assert len(candidate_lines) == 2
+
+
+def test_the_candidates_are_read_from_the_context_not_the_database():
+    """It reads the window the pass already read, so it costs no query."""
+    anchor = _msg(ADMIN, "ادمینه رو محدود کن", role="admin", name="Admin", at=1000)
+    messages = [_msg(ADMIN, "سلام", role="admin", name="Admin", at=990)]
+    ctx = _referent_ctx(anchor, messages)
+    # Built from a hand-made window and a hand-made anchor: if the source read
+    # the database it would find nothing, because nothing was captured.
+    out = awareness_context._render_referent_candidates(ctx)
+    assert "ادمینه" in out
+    assert str(ADMIN) in out
+
+
+def test_the_referent_block_is_bounded_by_the_pass_ceiling(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_CHARS", 120)
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    messages = [_msg(TARGET, "سلام", name="Reza", at=960)]
+    out = awareness_context.blocks(_referent_ctx(anchor, messages))
+    assert len(out) <= 120

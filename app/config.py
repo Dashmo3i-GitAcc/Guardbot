@@ -1044,6 +1044,13 @@ NEXUS_AWARENESS_CONTEXT_DEEP = _bool("NEXUS_AWARENESS_CONTEXT_DEEP", True)
 NEXUS_AWARENESS_ADMIN_ACTIONS = _int("NEXUS_AWARENESS_ADMIN_ACTIONS", 5)
 NEXUS_AWARENESS_REFERENCED_PEOPLE = _int("NEXUS_AWARENESS_REFERENCED_PEOPLE", 4)
 
+# How many referent candidates a deictic instruction may be shown. Bounded for
+# the same reason as the two above — this is context, not a directory — and
+# kept small deliberately: a list of six people is a list the model has to
+# reason about, and the resolver's whole point is that the answer is usually
+# one or two names, or an honest "these are too close to tell apart".
+NEXUS_AWARENESS_REFERENTS = _int("NEXUS_AWARENESS_REFERENTS", 4)
+
 # Sent when an awareness pass actually performed an action but the model gave no
 # wording for it. Rare, and the alternative is worse: an administrator whose
 # instruction was carried out and never acknowledged believes it was ignored,

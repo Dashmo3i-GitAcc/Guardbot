@@ -54,7 +54,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import awareness, config, db, identity, persian_calendar
+from . import awareness, config, db, identity, persian_calendar, referents
 
 log = logging.getLogger("guardbot.awareness.context")
 
@@ -397,6 +397,64 @@ def _identity_line(user_id: int, chat_id: int, now: int) -> str:
     return "- " + ", ".join(bits)
 
 
+def _wants_referents(ctx: Ctx) -> bool:
+    """Whether this batch is one where a pronoun needs resolving.
+
+    Two clauses, and each excludes a case where the block would be waste:
+
+    * **a reply edge settles it already.** When the instruction was sent as a
+      reply, ``awareness.instruction_block`` states that id as fact, and a ranked
+      candidate list beside it would spend tokens re-deciding something the
+      server already knows. The resolver's value is exactly the cases the reply
+      edge cannot reach.
+    * **only somebody who can act.** The block exists to resolve a person for a
+      possible action, and only an authority can act. A member's «این چیه» has no
+      action behind it, so the block would put a ranked list of the room's people
+      in front of the model for an ordinary message — tokens with no use, and the
+      kind of preload the owner asked to avoid. A *directed* message is the
+      second case, because Nexus has been asked something and the referent is
+      what it is being asked about.
+    """
+    if int((ctx.anchor or {}).get("reply_user_id") or 0):
+        return False
+    if ctx.is_authority(ctx.anchor_id()):
+        return True
+    # The capture-time ``actor`` hint is the second reading, and it is a stored
+    # server fact rather than a second authority model: it was written by
+    # ``nexus.is_actor``, which is itself a read of ``app/rbac.py``. It covers
+    # the case the role lookup cannot — an anchor whose row is not in the window
+    # the roles were resolved from — without ever granting anything.
+    if bool((ctx.anchor or {}).get("actor")):
+        return True
+    return bool((ctx.anchor or {}).get("directed"))
+
+
+def _render_referent_candidates(ctx: Ctx) -> str:
+    """Who a deictic instruction may mean, ranked. Tier 1.
+
+    The resolver is ``app/referents.py`` and the rendering is its own, because
+    the two are one idea: the candidates and the honest reading of how close
+    they are. This function only decides that the batch calls for it and bounds
+    the list — the arithmetic and the wording both live beside the tests that
+    pin them.
+
+    It reads the window the pass already read (``ctx.messages``) and the roles
+    the pass already resolved (``ctx.roles``), so it costs no query. A resolver
+    that raises contributes nothing, like every other source.
+    """
+    try:
+        resolution = referents.resolve(
+            ctx.anchor,
+            messages=list(ctx.messages),
+            roles=dict(ctx.roles or {}),
+            limit=max(1, int(config.NEXUS_AWARENESS_REFERENTS)),
+        )
+    except Exception:  # noqa: BLE001 - context, never worth a crash
+        log.exception("could not resolve the referent candidates")
+        return ""
+    return referents.render(resolution)
+
+
 def _ago(then: int, now: int) -> str:
     """A short, honest age. ``""`` when it cannot be known."""
     if not then or not now or then > now:
@@ -431,6 +489,21 @@ SOURCES: tuple[Source, ...] = (
         500,
         _render_admin_activity,
         lambda ctx: ctx.authority_involved(),
+    ),
+    # Before ``referenced_people`` and after ``admin_activity``: it is the block
+    # that answers "who does this instruction mean", so it goes ahead of the
+    # directory of who these people are, and behind the record of what has
+    # already been tried here. The two predicates are disjoint in practice —
+    # this one declines whenever the anchor is a reply, and ``referenced_people``
+    # requires a reply edge somewhere in the window — so on the batch that
+    # matters most (an authority's un-replied «اینو بن کن») this is the only
+    # conditional block with something to say.
+    Source(
+        "referent_candidates",
+        TIER_CONDITIONAL,
+        700,
+        _render_referent_candidates,
+        _wants_referents,
     ),
     Source(
         "referenced_people",
