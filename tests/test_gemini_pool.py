@@ -764,6 +764,38 @@ def test_every_account_gets_a_turn_before_the_first_gets_a_second_round(provider
         assert provider.models_used(key), f"account {key[-1]} was never contacted"
 
 
+def test_the_production_shape_reaches_every_account(provider, monkeypatch):
+    """The exact shape of the 2026-09-23 incident, asserted end to end.
+
+    Four accounts, eight models each, one retry per model, and the shipped
+    ceiling of twelve. That is 4 x 8 x 2 = 64 possible calls for one message,
+    and the twelve the pool is allowed used to be spent inside account #1 —
+    so accounts #2-#4 were unreachable by construction and a request failed
+    reporting ``attempt_budget`` while three healthy projects sat untouched.
+
+    The property: every account is contacted before any account gets a second
+    round, and the total is still the ceiling.
+    """
+    monkeypatch.setattr(config, "GEMINI_POOL_MAX_ATTEMPTS", 12)
+    eight = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-3.6-flash",
+             "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
+             "gemini-3.7-flash", "gemini-pro-latest"]
+    keys = (("1", KEY_A), ("2", KEY_B), ("3", KEY_C), ("4", KEY_D))
+    for key in (KEY_A, KEY_B, KEY_C):
+        for model in eight:
+            provider.then(key, model, overloaded())
+    for model in eight:
+        provider.always(KEY_D, model, "the fourth account")
+
+    pool = make_pool(keys=keys, models=eight, retries=1)
+
+    assert call(pool) == "the fourth account"
+    for key in (KEY_A, KEY_B, KEY_C):
+        assert provider.models_used(key), f"account {key[-1]} was never contacted"
+    # The share is 12 // 4 = 3 per account, and the ceiling still binds.
+    assert provider.total_calls <= 12
+
+
 def test_a_healthy_first_account_is_still_the_one_that_answers(provider):
     """Sharing the budget must not disturb the ordinary case."""
     provider.answers(KEY_A, "first")
@@ -1272,6 +1304,86 @@ def test_the_client_cache_is_keyed_by_fingerprint_not_by_key(monkeypatch):
     for cache_key in gemini_pool._clients:
         assert KEY_A not in repr(cache_key)
         assert gemini_pool.fingerprint(KEY_A) in repr(cache_key)
+
+
+# ── The deadline the SDK is actually given ────────────────────────────────
+class _FakeHttpOptions:
+    def __init__(self, timeout=None):
+        self.timeout = timeout
+
+
+def _fake_sdk(seen: list[int]):
+    """An SDK whose only job is to record the deadline it was handed."""
+
+    class _Genai:
+        @staticmethod
+        def Client(*, api_key, http_options):  # noqa: N802 - it is the SDK's name
+            seen.append(http_options.timeout)
+            return object()
+
+    types = type("Types", (), {"HttpOptions": _FakeHttpOptions})
+    return _Genai, types
+
+
+def test_a_client_is_never_built_with_a_deadline_the_api_refuses(monkeypatch):
+    """The API does not clamp a short deadline, it refuses the request.
+
+    ``400 INVALID_ARGUMENT  Manually set deadline 6s is too short. Minimum
+    allowed deadline is 10s.`` — per call, so a pool configured below the floor
+    would present as every account and every model failing at once. The five
+    sibling workloads each floor their own deadline; this pool, which builds the
+    client for every workload that has one, did not.
+    """
+    seen: list[int] = []
+    monkeypatch.setattr(gemini_pool, "_load_sdk", lambda: _fake_sdk(seen))
+
+    gemini_pool.build_client(KEY_A, 1.0)
+
+    assert seen == [int(config.MIN_GEMINI_DEADLINE_SECONDS * 1000)]
+
+
+def test_a_deadline_above_the_floor_is_passed_through_unchanged(monkeypatch):
+    """The floor is a floor, not a rewrite."""
+    seen: list[int] = []
+    monkeypatch.setattr(gemini_pool, "_load_sdk", lambda: _fake_sdk(seen))
+
+    gemini_pool.build_client(KEY_A, 25.0)
+
+    assert seen == [25000]
+
+
+def test_the_pools_own_bound_is_not_the_apis_floor(monkeypatch):
+    """Two different numbers about two different things.
+
+    ``Pool.timeout`` is *our* wall clock, enforced by ``asyncio.wait_for``, and a
+    test pool legitimately sets it to 5s. The deadline inside the SDK client is
+    the API's, and it may not go below 10s. Collapsing them would either make
+    every short-timeout pool invalid or silently lengthen every wait.
+    """
+    seen: list[int] = []
+    monkeypatch.setattr(gemini_pool, "_load_sdk", lambda: _fake_sdk(seen))
+    gemini_pool.reset_clients()
+    pool = make_pool()
+
+    assert pool.timeout == 5.0, "our own bound is what was asked for"
+
+    gemini_pool._client_for(KEY_A, pool.timeout)
+
+    assert seen == [10000], "and the client it builds still satisfies the API"
+
+
+def test_two_timeouts_that_floor_to_one_deadline_share_a_client(monkeypatch):
+    """The cache is keyed by the deadline the client was built with."""
+    seen: list[int] = []
+    monkeypatch.setattr(gemini_pool, "_load_sdk", lambda: _fake_sdk(seen))
+    gemini_pool.reset_clients()
+
+    first, _ = gemini_pool.client_for(KEY_A, 5.0)
+    second, _ = gemini_pool.client_for(KEY_A, 10.0)
+
+    assert first is second
+    assert seen == [10000], "one client, built once"
+    assert len(gemini_pool._clients) == 1
 
 
 def test_the_masked_form_never_reveals_more_than_four_characters():

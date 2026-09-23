@@ -1360,6 +1360,12 @@ reference file is stale and this list is the one to fix first.
 * `GEMINI_TIMEOUT_SECONDS` stays at the API's 10s floor; **never** raise a
   deadline to green a metric, and **never** trim the fallback model list on
   selection-effect data.
+* Two deadlines, and they are different numbers: `Pool.timeout` is our
+  `asyncio.wait_for` bound and may be short, while the `HttpOptions.timeout` the
+  SDK client is built with is the **API's** and may **never** go below
+  `config.MIN_GEMINI_DEADLINE_SECONDS` — the API refuses such a request per call,
+  so it would present as every account failing at once. `_deadline_ms` is the one
+  place that floor is applied, and the client cache is keyed by its result.
 * Each workload keeps its own `_recent_calls`, `_consecutive_failures`,
   `_circuit_open_until`, `_client` and `_client_key`; no workload imports
   another, and no workload touches another's counter table.

@@ -226,6 +226,33 @@ A `SCOPE_REQUEST` failure — a 400 that is not a capability mismatch — stops
 immediately without trying another account: the payload is wrong, every account
 would answer identically, and the rest of the pool would be pure waste.
 
+#### The deadline inside the SDK client is the API's, not ours
+
+Two deadlines, and they are different numbers about different things:
+
+* `Pool.timeout` is **our** wall clock on one attempt, enforced by
+  `asyncio.wait_for`. Any positive value is meaningful, including a short one.
+* the `timeout` in `HttpOptions` is the deadline the **API** is given. It has a
+  hard minimum of 10s, and the API does not clamp a shorter one — it refuses the
+  request: `400 INVALID_ARGUMENT  Manually set deadline 6s is too short. Minimum
+  allowed deadline is 10s.`
+
+`build_client` and `client_for` used to floor that second value at one second,
+which is no floor at all. Nothing in production reached it, because
+`config._deadline` already floors every workload's timeout — and that is exactly
+why it was worth fixing: the invariant "a client is never built with a deadline
+the API refuses" rested on every caller having remembered, and a pool configured
+below the floor would have presented as *every account and every model failing at
+once* rather than as a number in a config file being wrong. The five sibling
+workloads (`chat`, `ai_intent`, `ai_moderation`, `transcribe`, `web_search`) each
+already floor their own deadline; this pool, which builds the client for all of
+them, was the one that did not.
+
+`_deadline_ms` now applies `config.MIN_GEMINI_DEADLINE_SECONDS` in the one place
+a client is built, and the client cache is keyed by that floored value — so two
+callers passing 5 and 10 share one client instead of keeping two handles on the
+same credential alive.
+
 ### 28.7 Selection: least-recently-successful, not "first until it dies"
 
 `ordered_accounts()` sorts by `last_success` ascending. Staying on API #1 until

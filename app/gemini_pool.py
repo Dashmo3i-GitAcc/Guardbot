@@ -1034,6 +1034,10 @@ class Pool:
         self.allow_experimental = allow_experimental
         self.retries = max(0, int(retries))
         self.backoff = max(0.0, float(backoff))
+        # *Our* wall-clock bound on one attempt, which ``asyncio.wait_for``
+        # enforces. It is deliberately not floored at the API's minimum: the two
+        # are different numbers about different things, and ``_deadline_ms``
+        # applies the API's floor where the SDK client is built.
         self.timeout = max(1.0, float(timeout))
         self.daily_budget = max(0, int(daily_budget))
         self.rotate_models = bool(rotate_models)
@@ -1365,6 +1369,30 @@ def _load_sdk():
     return genai, types
 
 
+def _deadline_ms(timeout: float) -> int:
+    """The SDK's own deadline in milliseconds, never below the API's floor.
+
+    The API does not *clamp* a manually-set deadline below its minimum, it
+    *refuses* the request:
+
+        400 INVALID_ARGUMENT  Manually set deadline 6s is too short.
+                              Minimum allowed deadline is 10s.
+
+    The refusal arrives per call, so a pool configured with a five-second
+    deadline would present as every account and every model failing at once —
+    an outage rather than a number in a config file being wrong.
+
+    ``config._deadline`` already floors every workload's timeout, so nothing in
+    production reaches this with a small value. That is precisely why the floor
+    belongs here as well: "a client is never built with a deadline the API
+    refuses" must not depend on every caller having remembered, and this is the
+    single place a client is built. It is also what the cache below is keyed by,
+    so two callers passing 5 and 10 now share one client instead of building two
+    that are the same client.
+    """
+    return int(max(config.MIN_GEMINI_DEADLINE_SECONDS, float(timeout)) * 1000)
+
+
 def build_client(key: str, timeout: float):
     """Construct an SDK client for one credential. Returns ``(client, types)``.
 
@@ -1375,7 +1403,7 @@ def build_client(key: str, timeout: float):
     genai, types = _load_sdk()
     client = genai.Client(
         api_key=key,
-        http_options=types.HttpOptions(timeout=int(max(1.0, timeout) * 1000)),
+        http_options=types.HttpOptions(timeout=_deadline_ms(timeout)),
     )
     return client, types
 
@@ -1383,12 +1411,16 @@ def build_client(key: str, timeout: float):
 def client_for(key: str, timeout: float):
     """A cached client for one credential, plus the ``types`` module.
 
-    Cached per ``(fingerprint, timeout)`` because building one per request would
+    Cached per ``(fingerprint, deadline)`` because building one per request would
     open a connection pool per request. The key itself is never a dictionary key
     — only its fingerprint — so a stray ``repr`` of the cache cannot leak it.
+
+    The deadline in that key is the one the client was actually built with, so
+    two timeouts that floor to the same value share one entry rather than
+    keeping two handles on the same credential alive.
     """
     _genai, types = _load_sdk()
-    cache_key = (fingerprint(key), int(max(1.0, timeout) * 1000))
+    cache_key = (fingerprint(key), _deadline_ms(timeout))
     client = _clients.get(cache_key)
     if client is None:
         client, _types = build_client(key, timeout)
@@ -1485,16 +1517,13 @@ async def probe_credential(
     """
     if not key:
         return False, "invalid_credential", "no credential"
-    deadline = max(
-        config.MIN_GEMINI_DEADLINE_SECONDS,
-        float(
-            config.GEMINI_KEY_PROBE_TIMEOUT_SECONDS
-            if timeout is None
-            else timeout
-        ),
-    )
+    # No floor here: ``build_client`` applies the API's minimum itself, and two
+    # places encoding one rule is how the two answers drift apart.
     try:
-        client, _types = build_client(key, deadline)
+        client, _types = build_client(
+            key,
+            config.GEMINI_KEY_PROBE_TIMEOUT_SECONDS if timeout is None else timeout,
+        )
     except asyncio.CancelledError:
         raise
     except PoolUnavailable as exc:
