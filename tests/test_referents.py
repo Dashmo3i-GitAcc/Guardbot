@@ -92,6 +92,23 @@ def test_a_word_ending_in_vav_is_not_mistaken_for_a_demonstrative():
     assert not R.find_expression("تو خوبی")
 
 
+@pytest.mark.parametrize(
+    "text,anaphoric",
+    [
+        ("همون کاربر رو بن کن", True),
+        ("اونو ساکتش کن", True),  # the clitic «ـش» is reported, and it is anaphoric
+        ("همونو بن کن", True),
+        ("ساکتش کن", True),
+        ("اینو بن کن", False),
+        ("این کاربر رو بن کن", False),
+        ("قبلیش رو بن کن", False),  # backwards at a position, not at the subject
+    ],
+)
+def test_anaphora_is_the_far_demonstratives_and_the_object_clitic(text, anaphoric):
+    """«همون»/«اون»/«ـش» point at an established person; «این» points at the nearest."""
+    assert R.find_expression(text).anaphoric() is anaphoric
+
+
 # ── The verdict ───────────────────────────────────────────────────────────
 def test_no_expression_resolves_to_nothing():
     result = R.resolve(anchor("سلام"), messages=[row(11, "رضا")])
@@ -196,6 +213,74 @@ def test_the_room_being_about_one_person_is_evidence():
     result = R.resolve(anchor("همون کاربر رو بن کن"), messages=messages)
     assert result.top().user_id == 11
     assert any("aimed at them" in why for why in result.top().why)
+
+
+def test_an_anaphoric_demonstrative_settles_a_unanimous_room():
+    """«همون» means "that same one": a room replying to one person is the answer.
+
+    The about-signal is only a hint for a bare «این», but for «همون»/«اون» it is
+    what the word points at — so the resolver is confident rather than unsure.
+    """
+    messages = [
+        row(33, "مالک", "الف", at=800, reply=11, reply_name="رضا"),
+        row(33, "مالک", "ب", at=820, reply=11, reply_name="رضا"),
+        row(22, "سارا", "ج", at=840, reply=11, reply_name="رضا"),
+        row(11, "رضا", "د", at=850),
+    ]
+    for text in ("همون کاربر رو بن کن", "همونو بن کن", "اونو ساکتش کن"):
+        result = R.resolve(anchor(text), messages=messages)
+        assert result.top().user_id == 11, text
+        assert result.confident is True, text
+        assert result.ambiguous is False, text
+
+
+def test_a_near_demonstrative_does_not_get_the_anaphoric_reading():
+    """«این» points at whatever is nearest, which the room does not settle."""
+    messages = [
+        row(33, "مالک", "الف", at=800, reply=11, reply_name="رضا"),
+        row(33, "مالک", "ب", at=820, reply=11, reply_name="رضا"),
+        row(22, "سارا", "ج", at=840, reply=11, reply_name="رضا"),
+        row(11, "رضا", "د", at=850),
+    ]
+    result = R.resolve(anchor("اینو بن کن"), messages=messages)
+    assert result.top().user_id == 11
+    assert result.confident is False
+
+
+def test_a_prior_expression_is_not_treated_as_anaphoric():
+    """«قبلی» points at a position in a sequence, not at the room's subject."""
+    messages = [
+        row(33, "مالک", "الف", at=800, reply=11, reply_name="رضا"),
+        row(33, "مالک", "ب", at=820, reply=11, reply_name="رضا"),
+        row(22, "سارا", "ج", at=840, reply=11, reply_name="رضا"),
+        row(11, "رضا", "د", at=850),
+    ]
+    result = R.resolve(anchor("قبلیش رو بن کن"), messages=messages)
+    assert result.confident is False
+
+
+def test_a_split_room_is_not_an_anaphoric_focus():
+    """Replies aimed at two people is exactly when «همون» must stay unsure."""
+    messages = [
+        row(33, "مالک", "الف", at=800, reply=11, reply_name="رضا"),
+        row(33, "مالک", "ب", at=820, reply=11, reply_name="رضا"),
+        row(22, "سارا", "ج", at=840, reply=22, reply_name="سارا"),
+        row(22, "سارا", "د", at=860, reply=22, reply_name="سارا"),
+        row(11, "رضا", "ه", at=870),
+        row(22, "سارا", "و", at=880),
+    ]
+    result = R.resolve(anchor("همون کاربر رو بن کن"), messages=messages)
+    assert result.confident is False
+    assert result.ambiguous is True
+
+
+def test_a_single_reply_edge_is_not_a_focus():
+    """One reply is not "what the room has been about" — the bar is repeated."""
+    messages = [row(33, "مالک", "الف", at=800, reply=11, reply_name="رضا"), row(11, "رضا", "د", at=850)]
+    result = R.resolve(anchor("همون کاربر رو بن کن"), messages=messages)
+    assert result.top().user_id == 11
+    assert result.confident is False
+    assert not any("all been aimed" in why for why in result.top().why)
 
 
 def test_nexus_is_never_a_candidate():

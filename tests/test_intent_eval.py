@@ -69,6 +69,16 @@ def test_it_never_guesses_when_the_room_is_ambiguous():
     assert m["ambiguity_recall"] == 1.0
 
 
+def test_it_does_not_cry_ambiguity_when_the_room_has_settled():
+    """Precision matters too: a needless "I cannot tell" is a wasted round trip.
+
+    The anaphoric reading is what earns this — «همون کاربر» in a room whose
+    replies have all been aimed at one person is not ambiguous, it is answered.
+    """
+    m = result()
+    assert m["ambiguity_precision"] == 1.0
+
+
 def test_the_resolver_is_a_strict_improvement_over_the_reply_edge():
     """The claim, as a fraction: the reply edge alone versus the resolver."""
     m = result()

@@ -397,6 +397,132 @@
       }
     },
     {
+      "id": "clitic-anaphoric-room",
+      "category": "continuation",
+      "note": "«ساکتش کن» — the clitic «ـش» is a pronoun, and the room has been replying to رضا.",
+      "window": [
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا آروم",
+          "at": 900,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "آره رضا",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "رضا بس کن",
+          "at": 940,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 950,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ساکتش کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "anaphoric-split-room",
+      "category": "ambiguity",
+      "note": "«همون کاربر», but the room's replies are split between رضا and سارا — the anaphor does not settle it.",
+      "window": [
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا آروم",
+          "at": 900,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا حواست باشه",
+          "at": 910,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "سارا تو هم",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 22,
+          "reply_name": "سارا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "سارا بس کن",
+          "at": 930,
+          "role": "member",
+          "reply_user_id": 22,
+          "reply_name": "سارا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 940,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "چشم",
+          "at": 950,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false
+      }
+    },
+    {
       "id": "deictic-three-recent",
       "category": "ambiguity",
       "note": "Three people spoke moments ago and nobody was replied to — do not guess.",

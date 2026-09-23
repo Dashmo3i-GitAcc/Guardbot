@@ -205,14 +205,38 @@ def _bare(token: str) -> str:
 
 @dataclass(frozen=True)
 class Expression:
-    """The deictic a message used, and how strongly it implies a *person*."""
+    """The deictic a message used, and how strongly it implies a *person*.
+
+    ``distance`` is ``"near"``, ``"far"`` or ``""``, and it is not decoration:
+    «همون» and «اون» are *anaphoric* — "that same one", the one already under
+    discussion — while «این» points at whatever is nearest and may be a message,
+    a config or a link. The resolver reads the difference: for an anaphoric
+    expression, what the room has been about is decisive evidence; for a near
+    one it is a hint among hints.
+    """
 
     surface: str
     kind: str
     strength: int
+    distance: str = ""
 
     def __bool__(self) -> bool:
         return bool(self.surface)
+
+    def anaphoric(self) -> bool:
+        """Whether the expression points at a person the conversation has set up.
+
+        «همون»/«اون» are anaphoric in the strict sense — "that same one", the
+        entity already under discussion — and so is the object clitic: «ساکتش
+        کن» says "mute *him*", and "him" can only be somebody already on the
+        table. Both are read against what the room has been about.
+
+        «قبلی» also points backwards, but at a *position in a sequence* ("the
+        previous one"), which is a different claim about the room, and a bare
+        «این» may point at a message or a link rather than a person; neither is
+        counted here.
+        """
+        return self.distance == "far" or self.kind == KIND_CLITIC
 
 
 def find_expression(text: str | None) -> Expression:
@@ -249,12 +273,14 @@ def find_expression(text: str | None) -> Expression:
         # person: a person noun, optionally with a demonstrative before it.
         if token in _PERSON_NOUNS:
             if index and _deictic(bare[index - 1]):
-                return Expression(surface(index - 1, 1), KIND_PERSON, 3)
+                return Expression(
+                    surface(index - 1, 1), KIND_PERSON, 3, _deictic(bare[index - 1])
+                )
             return Expression(tokens[index], KIND_PERSON, 3)
         # person: a demonstrative followed by a person noun.
         if _deictic(token) and index + 1 < len(bare):
             if bare[index + 1] in _PERSON_NOUNS:
-                return Expression(surface(index, 1), KIND_PERSON, 3)
+                return Expression(surface(index, 1), KIND_PERSON, 3, _deictic(token))
         if token in _ROLE_WORDS:
             return Expression(tokens[index], KIND_ROLE, 2)
         if token in _PRIOR_WORDS:
@@ -276,7 +302,7 @@ def find_expression(text: str | None) -> Expression:
             extra = 0
             if index + 1 < len(bare) and bare[index + 1] in _OBJECT_MARKERS:
                 extra = 1
-            return Expression(surface(index, extra), KIND_DEICTIC, 1)
+            return Expression(surface(index, extra), KIND_DEICTIC, 1, _deictic(token))
     return Expression("", "", 0)
 
 
@@ -291,6 +317,16 @@ SCORE_NAMED = 0.80        # the message contains their name
 SCORE_ROLE = 0.70         # the message names a role they hold
 SCORE_ABOUT_MAX = 0.40    # the room's recent replies have been aimed at them
 SCORE_RECENT_MAX = 0.50   # they spoke just before the instruction
+
+# An anaphoric expression — «همون کاربر», «اون», or the clitic «ـش» — points at
+# the person the room has already been about, and when the room's replies have
+# been aimed at one person and nobody else, that is not a hint among hints — it
+# is what the word means. The score is high enough to settle the referent on its
+# own, and the rule fires only on a unanimous, repeated signal (see
+# ``_about_focus``): one incidental reply edge is not "what the room has been
+# about".
+SCORE_ABOUT_FOCUS = 0.90
+ABOUT_FOCUS_MIN_REPLIES = 2
 
 # A second, independent source adds a little: two weak signals agreeing is
 # stronger than one, but never enough to overtake a strong single signal.
@@ -403,6 +439,27 @@ def _about_scores(messages) -> dict[int, float]:
     }
 
 
+def _about_focus(messages) -> int:
+    """The one person the room's replies have been aimed at, or 0.
+
+    «همون کاربر» means "that same user" — the one already under discussion. When
+    every reply in the window targets the same person, and there is more than one
+    of them, that person *is* what the room has been about, and the anaphoric
+    demonstrative points at them rather than at a set of options.
+
+    Deliberately strict: a single reply edge is not "what the room has been
+    about", and a room whose replies are split between two people is exactly the
+    case where the resolver must stay unsure. Both return 0, which leaves the
+    ordinary hint-scoring to decide — and to report ambiguity if it cannot.
+    """
+    targets = [int(message.get("reply_user_id") or 0) for message in messages or ()]
+    targets = [target for target in targets if target]
+    if len(targets) < ABOUT_FOCUS_MIN_REPLIES:
+        return 0
+    unique = set(targets)
+    return next(iter(unique)) if len(unique) == 1 else 0
+
+
 def _recent_scores(anchor: dict | None, people: dict[int, dict]) -> dict[int, float]:
     """Who spoke just before the instruction, by how long ago."""
     anchor_at = int((anchor or {}).get("at") or 0)
@@ -480,6 +537,20 @@ def resolve(
 
     for user_id, score in _about_scores(messages).items():
         add(user_id, score, "the room's recent replies have been aimed at them")
+
+    # An anaphoric expression — «همون»/«اون», or the object clitic — points back
+    # at the person the room has been about. When that person is unambiguous —
+    # every reply in the window aimed at them — the pointer is settled by the
+    # word itself, not merely hinted at.
+    if expression.anaphoric():
+        focus = _about_focus(messages)
+        if focus:
+            add(
+                focus,
+                SCORE_ABOUT_FOCUS,
+                f"the room's replies have all been aimed at them, and "
+                f"«{expression.surface}» points back at them",
+            )
 
     for user_id, score in _recent_scores(anchor, people).items():
         add(user_id, score, "they spoke shortly before this message")

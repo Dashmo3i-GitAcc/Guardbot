@@ -1594,6 +1594,29 @@ reference file is stale and this list is the one to fix first.
   `NEXUS_ACTORS_ONLY` cannot open it, and being an administrator cannot open it.
 * The private gate runs **before** `_answer_conversationally`: no model call and
   **no row written** for a non-owner.
+* `app/referents.py` is **evidence, never a decision**: it ranks who a pronoun
+  may mean and reports `ambiguous` instead of picking. The model chooses, and
+  the chosen id is re-authorised from the actor's Telegram id like every other
+  request. It is pure at import time — no `db`, no `config`, no pool, no `rbac`
+  — and a test asserts the import set.
+* A **reply edge is the answer, not a hint**: `resolve` reports it `confident`
+  outright, and no other candidate may make it ambiguous.
+* An **anaphoric** expression — «همون»/«اون» (`distance == "far"`) or the object
+  clitic (`KIND_CLITIC`, e.g. «ساکتش کن») — is settled by a room whose replies
+  have **all** been aimed at one person, and there is **more than one** of them
+  (`_about_focus`). A split room, a single reply edge, a bare «این» and «قبلی»
+  are **not** anaphoric and stay hints among hints.
+* The resolver is **bounded** (`CANDIDATE_LIMIT`) and **cheap** — pure Python,
+  no query — and the block it renders is capped and labelled "evidence, not a
+  decision".
+* `awareness_context` may import `referents`; `referents` may import nothing that
+  could send, delete, restrict or ask a model. `awareness_context` stays the
+  only importer.
+* The benchmark is the number behind any claim: `tools/eval_intent.py` over
+  `tools/eval_cases.json`, with the floors asserted in `tests/test_intent_eval.py`
+  (`wrong_confident == 0`, top-1 and ambiguity recall **and** precision,
+  `provided_before < provided_after`). A change to the lexicon moves those
+  numbers **on purpose**, by editing the corpus — never by loosening the floor.
 
 ### 53.8 The assistant
 
