@@ -61,6 +61,7 @@ from . import (
     discourse,
     entities,
     identity,
+    objects,
     persian_calendar,
     referents,
     requests,
@@ -279,29 +280,35 @@ def _render_remembered_people(ctx: Ctx) -> str:
 
 # ── The batch's own reading, and what the room left open ──────────────────
 def _render_anchor_act(ctx: Ctx) -> str:
-    """What the message the pass is about is doing, and in which direction. Tier 0.
+    """What the message the pass is about is doing, in which direction, and at
+    what. Tier 0.
 
-    One line plus, when there is one, the polarity line: the anchor's act and
-    whether it asks for the action or forbids it, both read off its own words.
-    «چقدره؟» and «بنش کن» are the same length and opposite in force, and a model
-    reading a transcript has to work that out from the sentence — which it can,
-    and which this saves it from having to do on every pass.
+    Three lines at most, and one source: the anchor's act, whether it asks for
+    the action or forbids it, and what the request acts on. «چقدره؟» and «بنش کن»
+    are the same length and opposite in force, and a model reading a transcript
+    has to work that out from the sentence — which it can, and which this saves it
+    from having to do on every pass.
 
-    The two are one block on purpose. An act that says *instruction* while the
-    message forbids the action is the dangerous half-truth — «بنش کن» and «بنش
-    نکن» read identically to the act reader — so the polarity must not be a
-    separate source that a budget can drop while the act survives.
+    They are one block on purpose, twice over. An act that says *instruction*
+    while the message forbids the action is one half-truth — «بنش کن» and «بنش
+    نکن» read identically to the act reader. An act that says *instruction, the
+    directive «پاک»* while the message is about a file is the other — the model
+    has to join the directive to the thing it acts on, and that join is where a
+    person gets banned over a photograph. Neither may be a separate source that a
+    budget can drop while the act survives.
 
-    The polarity line comes **first** for the same reason one level down: a clip
-    keeps whole lines from the front, so if a budget ever did bite, the line that
-    survives must be the one saying the message forbids the action. The act line
-    alone is the half-truth; the polarity line alone is a warning.
+    The two contradicting lines come **first**, for the same reason one level
+    down: a clip keeps whole lines from the front, so if a budget ever did bite,
+    the lines that survive must be the ones that contradict a naive reading, not
+    the naive reading itself.
 
-    Evidence, never a gate: nothing branches on either.
+    Evidence, never a gate: nothing branches on any of it.
     """
     text = (ctx.anchor or {}).get("text")
-    return requests.render(requests.read_request(text)) + discourse.render_act(
-        discourse.read_act(text)
+    return (
+        requests.render(requests.read_request(text))
+        + objects.render(objects.read_object(text, ctx.messages, ctx.anchor))
+        + discourse.render_act(discourse.read_act(text))
     )
 
 
@@ -604,10 +611,14 @@ SOURCES: tuple[Source, ...] = (
     # renders nothing when the words carry no reading; the question block is
     # empty unless there is a question no reply points at.
     #
-    # The budget covers the polarity line too — the act and the direction it
-    # points in are one source on purpose, so an "instruction" reading can never
-    # outlive the negation that reverses it.
-    Source("anchor_act", TIER_ALWAYS, 320, _render_anchor_act),
+    # The budget covers all three lines — the act, the direction it points in and
+    # the thing it acts on — because they are one source on purpose: an
+    # "instruction" reading must never outlive the negation that reverses it, nor
+    # the object line that says it is aimed at a file rather than at a person. The
+    # longest block the corpus produces is 297 characters (a negated request whose
+    # object is a named thing), so 420 leaves room for a longer surface word
+    # without letting the block grow unbounded.
+    Source("anchor_act", TIER_ALWAYS, 420, _render_anchor_act),
     Source("open_questions", TIER_ALWAYS, 500, _render_open_questions),
     # Who is talking to whom, and whether this message is still the same thread.
     # Tier 0: both are a pass over the window the pass already read. The graph is

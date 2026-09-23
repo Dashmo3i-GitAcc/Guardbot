@@ -329,6 +329,81 @@ def directives(text: str | None) -> list[tuple[int, str]]:
     return [(index, token) for index, token, _ in _directives(_tokens(text))]
 
 
+# ── What each directive acts on ───────────────────────────────────────────
+# ``addressing.ACTION_WORDS`` is a flat list: it holds «بن» and «پاک» side by
+# side. Which side of that list a verb falls on is the one fact it does not carry
+# and two readers need — ``app/objects.py`` to say what a request acts on, and
+# ``referents`` to stop reading the object clitic on a *content* verb as a person
+# — so the split is stated here, beside the lexicon it splits, rather than in
+# either consumer. A test asserts the two lists **cover** the borrowed lexicon
+# and do not overlap, so a word added there fails until somebody decides its side.
+#
+# The person verbs: a ban, a mute, a kick, a role change and a warning all act on
+# a *member*. There is no reading of «بنش کن» under which the object is a file.
+_PERSON_VERBS = frozenset(
+    {
+        "بن", "بنش", "بنشون", "بنشونش", "آنبن", "انبن", "آنبنش", "انبنش",
+        "اخراج", "اخراجش", "بیرون", "بنداز", "بندازش",
+        "ساکت", "ساکتش", "خفه", "خفهش", "محدود", "محدودش", "محدودیت",
+        "محدودیتش", "اخطار", "اخطارش", "محروم", "تعلیق", "توقیف", "مسدود",
+        "مسدودش", "بلاک", "بلاکش", "ممنوع",
+        "ادمین", "ادمینش", "مدیر", "مدیرش", "ارتقا", "تنزل",
+        "دسترسی", "دسترسیش", "سطح", "سطحش", "نقش", "نقشش", "رول", "رولش",
+        "آزاد", "ازاد", "رفع", "نتونه", "نتونن", "بنکن",
+        "ban", "unban", "mute", "unmute", "kick", "promote", "demote", "warn",
+        "restrict", "admin", "moderator", "role", "roles", "permission",
+        "permissions", "revoke", "suspend",
+    }
+)
+
+# The thing verbs: deleting, removing, sending and looking at act on a *message*
+# or on what is in it. There is no reading of «پاکش کن» under which the object is
+# a member. This list also carries the ordinary imperatives that act on a thing
+# but are not moderation verbs («بفرست»، «ببین»), which is why the coverage test
+# is one-directional.
+_THING_VERBS = frozenset(
+    {
+        "حذف", "حذفش", "پاک", "پاکش", "قطع", "نذار", "نزار",
+        "delete", "remove",
+        "بفرست", "بفرستید", "ببین", "ببینید", "ببینن", "بخون", "بخونید",
+        "send", "see", "look", "show", "check",
+    }
+)
+
+ACTS_ON_PERSON = "person"
+ACTS_ON_THING = "thing"
+ACTS_ON = (ACTS_ON_PERSON, ACTS_ON_THING)
+
+
+def acts_on(token: str | None) -> str:
+    """What a directive acts on — ``"person"``, ``"thing"``, or ``""``.
+
+    The third answer is the important one. An operator may add a word to the
+    moderation lexicon through ``NEXUS_EXTRA_ACTION_WORDS``, and a future release
+    may add one to the built-in list; neither arrives with a side attached.
+    Guessing a side is the mistake the split exists to prevent — a guessed
+    *person* for a message about a file is the worst direction available here — so
+    an unclassified word answers nothing and the readers that ask abstain.
+
+    ``_bare`` is tried as well, because the lexicon lists the clitic forms a group
+    actually types («بنش»، «ساکتش») and a verb arriving with one more clitic than
+    the list holds should still be found.
+    """
+    if not token:
+        return ""
+    if token in _PERSON_VERBS:
+        return ACTS_ON_PERSON
+    if token in _THING_VERBS:
+        return ACTS_ON_THING
+    bare = _bare(token)
+    if bare != token:
+        if bare in _PERSON_VERBS:
+            return ACTS_ON_PERSON
+        if bare in _THING_VERBS:
+            return ACTS_ON_THING
+    return ""
+
+
 def read_act(text: str | None) -> Act:
     """What the message is doing, from the closed vocabulary, or nothing.
 

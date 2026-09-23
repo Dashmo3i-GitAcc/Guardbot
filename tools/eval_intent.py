@@ -59,6 +59,7 @@ from app import (  # noqa: E402
     config,
     discourse,
     entities,
+    objects,
     referents,
     requests,
     room_state,
@@ -147,6 +148,13 @@ def evaluate(cases: dict) -> dict:
         request_block = requests.render(request)
         request_us = (time.perf_counter() - request_started) * 1_000_000
 
+        # …and the object reader, which walks the window for the thing the
+        # message points at.
+        object_started = time.perf_counter()
+        target = objects.read_object(anchor["text"], window, anchor)
+        object_block = objects.render(target)
+        object_us = (time.perf_counter() - object_started) * 1_000_000
+
         top = resolution.top()
         top_id = top.user_id if top else None
 
@@ -183,6 +191,14 @@ def evaluate(cases: dict) -> dict:
         expected_directive = str(expected_request.get("directive") or "")
         expected_polarity = str(expected_request.get("polarity") or "")
         expected_manner = str(expected_request.get("manner") or "")
+
+        # The object is a reading of the words, so it is scored only where
+        # labelled — and its label says the *truth*, which is why the harness can
+        # count the residual wrong lead below rather than hiding it.
+        expected_object = expect.get("object") or {}
+        has_object_label = "object" in expect
+        expected_object_kind = str(expected_object.get("kind") or "")
+        expected_object_source = str(expected_object.get("source") or "")
 
         detail.append(
             {
@@ -238,11 +254,20 @@ def evaluate(cases: dict) -> dict:
                 "got_manner": request.manner,
                 "request_why": request.why[0] if request.why else "",
                 "request_chars": len(request_block),
+                "has_object_label": has_object_label,
+                "expected_object_kind": expected_object_kind,
+                "got_object_kind": target.kind,
+                "expected_object_source": expected_object_source,
+                "got_object_source": target.source,
+                "object_surface": target.surface,
+                "object_why": target.why[0] if target.why else "",
+                "object_chars": len(object_block),
                 "block_chars": len(block),
                 "us": elapsed_us,
                 "when_us": when_us,
                 "entity_us": entity_us,
                 "request_us": request_us,
+                "object_us": object_us,
                 "kind_ok": expression.kind == expect["expression_kind"],
                 "addressed_ok": bool(addressed) == bool(expect["addressed"]),
                 "act_ok": act.kind == expect.get("act", discourse.ACT_UNKNOWN),
@@ -262,6 +287,12 @@ def evaluate(cases: dict) -> dict:
                     and request.polarity == expected_polarity
                     and request.manner == expected_manner
                 ),
+                "object_ok": (
+                    target.kind == expected_object_kind
+                    and target.source == expected_object_source
+                ),
+                "object_kind_ok": target.kind == expected_object_kind,
+                "object_source_ok": target.source == expected_object_source,
             }
         )
 
@@ -367,6 +398,22 @@ def _metrics(detail: list[dict]) -> dict:
         for r in request_negated
         if r["got_polarity"] == requests.POLARITY_AFFIRMATIVE
     ]
+
+    # ── What the request acts on ──────────────────────────────────────────
+    # Scored only where labelled, because it is a reading of the words. Two
+    # numbers matter and they are different numbers. The accuracy says whether the
+    # server read the target right. The *residual lead* says whether the prompt
+    # still contains the wrong one: a request whose object is a thing, with the
+    # resolver still offering a person as who it might mean. The object line
+    # corrects that in words; the next increment removes the lead.
+    object_cases = [r for r in detail if r["has_object_label"]]
+    object_thing = [
+        r for r in object_cases if r["expected_object_kind"] != objects.CLASS_PERSON
+    ]
+    object_person = [
+        r for r in object_cases if r["expected_object_kind"] == objects.CLASS_PERSON
+    ]
+    object_person_offered = [r for r in object_thing if r["got_referent"] is not None]
 
     return {
         "cases": len(detail),
@@ -497,6 +544,47 @@ def _metrics(detail: list[dict]) -> dict:
         ),
         "request_us_p95": (
             sorted(r["request_us"] for r in detail)[
+                min(len(detail) - 1, int(len(detail) * 0.95))
+            ]
+            if detail
+            else 0.0
+        ),
+        "object_cases": len(object_cases),
+        "object_correct": sum(1 for r in object_cases if r["object_ok"]),
+        "object_accuracy": rate(object_cases, lambda r: r["object_ok"]),
+        # Split, because the class is what the model acts on and the source is how
+        # much the server is claiming to know.
+        "object_kind_accuracy": rate(object_cases, lambda r: r["object_kind_ok"]),
+        "object_source_accuracy": rate(object_cases, lambda r: r["object_source_ok"]),
+        "object_by_kind": {
+            kind: {
+                "total": sum(
+                    1 for r in object_cases if r["expected_object_kind"] == kind
+                ),
+                "correct": sum(
+                    1
+                    for r in object_cases
+                    if r["expected_object_kind"] == kind and r["object_kind_ok"]
+                ),
+            }
+            for kind in ("",) + objects.CLASSES
+        },
+        # Of the requests whose object is a person, the fraction read as a person.
+        "object_person_cases": len(object_person),
+        "object_person_recall": rate(
+            object_person, lambda r: r["got_object_kind"] == objects.CLASS_PERSON
+        ),
+        # The residual wrong lead, counted rather than hidden: a thing-object
+        # request for which the prompt still lists a person. The object line
+        # corrects it in words; driving this to zero is its own change.
+        "object_thing_cases": len(object_thing),
+        "object_person_offered_for_a_thing": len(object_person_offered),
+        "object_chars_max": max((r["object_chars"] for r in detail), default=0),
+        "object_us_mean": (
+            statistics.fmean([r["object_us"] for r in detail]) if detail else 0.0
+        ),
+        "object_us_p95": (
+            sorted(r["object_us"] for r in detail)[
                 min(len(detail) - 1, int(len(detail) * 0.95))
             ]
             if detail
@@ -635,6 +723,25 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"/{m['request_affirmative_cases']}",
         f"  block chars max            {m['request_chars_max']}",
         "",
+        f"what the request acts on (over {m['object_cases']} labelled cases)",
+        f"  exact (class·source)       {m['object_correct']} / {m['object_cases']}",
+        f"  accuracy                   {_pct(m['object_accuracy'])}",
+        "  per field                  "
+        f"class {_pct(m['object_kind_accuracy'])}  "
+        f"source {_pct(m['object_source_accuracy'])}",
+        "  per class (correct/total)  "
+        + "  ".join(
+            f"{kind or 'none'} {v['correct']}/{v['total']}"
+            for kind, v in m["object_by_kind"].items()
+            if v["total"]
+        ),
+        f"  person recall              {m['object_person_cases']} cases, "
+        f"{_pct(m['object_person_recall'])} read as a person",
+        f"  a person still offered for a thing-object request  "
+        f"{m['object_person_offered_for_a_thing']} / {m['object_thing_cases']} "
+        "(the object line corrects it; removing the lead is its own change)",
+        f"  block chars max            {m['object_chars_max']}",
+        "",
         f"referent resolution ({m['answerable']} answerable of {m['needs_resolution']} open)",
         f"  top-1 accuracy             {_pct(m['resolution_top1_accuracy'])}",
         f"  ambiguity recall           {_pct(m['ambiguity_recall'])}",
@@ -656,6 +763,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  time-word us mean / p95    {m['when_us_mean']:.0f} / {m['when_us_p95']:.0f}",
         f"  entity us mean / p95       {m['entity_us_mean']:.0f} / {m['entity_us_p95']:.0f}",
         f"  polarity us mean / p95     {m['request_us_mean']:.0f} / {m['request_us_p95']:.0f}",
+        f"  object us mean / p95       {m['object_us_mean']:.0f} / {m['object_us_p95']:.0f}",
         "",
     ]
     failures = [
@@ -667,6 +775,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])
         or (r["has_request_label"] and not r["request_ok"])
+        or (r["has_object_label"] and not r["object_ok"])
         or (r["requires_resolution"] and r["expected_referent"] is not None
             and r["got_referent"] != r["expected_referent"])
         or (r["expected_ambiguous"] and not r["got_ambiguous"])
@@ -693,6 +802,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
                 f"req {r['got_directive']!r}·{r['got_polarity']!r}·{r['got_manner']!r}"
                 f"/{r['expected_directive']!r}·{r['expected_polarity']!r}"
                 f"·{r['expected_manner']!r} "
+                f"obj {r['got_object_kind']!r}·{r['got_object_source']!r}"
+                f"/{r['expected_object_kind']!r}·{r['expected_object_source']!r} "
                 f"q {r['got_questions']}/{r['expected_questions']}"
             )
             if verbose and r["note"]:

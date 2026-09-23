@@ -574,13 +574,13 @@ def test_a_clock_reading_of_zero_renders_no_date_rather_than_todays():
 
 # ── Wiring, and the boundary that does not move ───────────────────────────
 def test_every_reader_splits_tokens_the_same_way():
-    """Five readers, one tokenizer — pinned together so it cannot drift.
+    """Six readers, one tokenizer — pinned together so it cannot drift.
 
     «؟» «،» «؛» live inside ``\\u0600-\\u06ff``, so a "split on anything that is
     not a Persian letter" class keeps them glued to the word before it. Every
     lexicon lookup on the last word of a message then fails: «این لینک؟» names no
     thing, «سارا؟» names nobody, «ممنون؟» is not a greeting, and «چی شده؟» is not
-    the sentence «چی شده». The polarity reader is the most sensitive of the five,
+    the sentence «چی شده». The polarity reader is the most sensitive of the six,
     because the prohibitor is usually the *last* word: «میشه بنش نکنی؟» carries
     «نکنی؟», which is not «نکنی», and the prohibition read as a request *to* act.
 
@@ -590,11 +590,12 @@ def test_every_reader_splits_tokens_the_same_way():
 
     The pattern is copied into each reader rather than imported, because each one
     is pure at import and importing a shared helper would be a new edge in a graph
-    that is asserted elsewhere. The copies are therefore pinned here: if a sixth
+    that is asserted elsewhere. The copies are therefore pinned here: if a seventh
     reader is added, or one of these is edited, the test says so.
     """
     import app.discourse as discourse
     import app.entities as entities
+    import app.objects as objects
     import app.referents as referents
     import app.requests as requests
     import app.room_state as room_state
@@ -602,6 +603,7 @@ def test_every_reader_splits_tokens_the_same_way():
     readers = {
         "discourse": discourse,
         "entities": entities,
+        "objects": objects,
         "referents": referents,
         "requests": requests,
         "room_state": room_state,
@@ -824,6 +826,45 @@ def test_the_direction_is_not_rendered_by_any_other_source():
         assert "negates" not in _source_blocks(ctx, name), name
 
 
+# ── …and what the request acts on, in the same block ──────────────────────
+# "Instruction, the directive «پاک»" without "acts on a thing" is the other
+# half-truth: the model has to join the directive to the object itself, and that
+# join is where a person gets banned over a photograph.
+def test_the_object_line_travels_with_the_act():
+    anchor = _msg(ADMIN, "پاکش کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "[document] report.pdf", name="Reza", at=960)]
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, window))
+    assert "instruction" in out
+    assert "not a person" in out
+
+
+def test_the_object_line_comes_before_the_act_line():
+    """Both contradicting lines come first: a clip keeps whole lines from the
+    front, so what survives must be what contradicts a naive reading."""
+    anchor = _msg(ADMIN, "پاکش کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "[document] report.pdf", name="Reza", at=960)]
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, window))
+    assert out.index("not a person") < out.index("instruction")
+
+
+def test_a_person_object_says_so_and_does_not_warn_about_a_thing():
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "سلام", name="Reza", at=960)]
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, window))
+    assert "person" in out
+    assert "not a person" not in out
+
+
+def test_the_object_is_not_rendered_by_any_other_source():
+    anchor = _msg(ADMIN, "پاکش کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "[document] report.pdf", name="Reza", at=960)]
+    ctx = _referent_ctx(anchor, window)
+    for source in awareness_context.SOURCES:
+        if source.name == "anchor_act":
+            continue
+        assert "not a person" not in _source_blocks(ctx, source.name), source.name
+
+
 def test_the_open_questions_are_rendered():
     anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
     window = [_msg(TARGET, "قیمت چنده؟", name="Reza", at=900, message_id=5)]
@@ -860,7 +901,7 @@ def test_the_new_sources_are_bounded_by_their_own_budget(monkeypatch):
     ]
     ctx = _referent_ctx(anchor, window)
     assert len(_source_blocks(ctx, "open_questions")) <= 500
-    assert len(_source_blocks(ctx, "anchor_act")) <= 320
+    assert len(_source_blocks(ctx, "anchor_act")) <= 420
     assert len(_source_blocks(ctx, "anchor_when")) <= 300
     assert len(_source_blocks(ctx, "reply_graph")) <= 600
     assert len(_source_blocks(ctx, "thread")) <= 500

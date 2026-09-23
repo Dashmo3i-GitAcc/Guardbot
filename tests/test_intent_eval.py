@@ -85,6 +85,10 @@ def test_the_corpus_is_well_formed():
                 "polarity",
                 "manner",
             }, case["id"]
+        # …and an object label carries both halves, for the same reason: a label
+        # with the source missing would score an abstention as a pass.
+        if "object" in case["expect"]:
+            assert set(case["expect"]["object"]) == {"kind", "source"}, case["id"]
 
 
 def test_expression_detection_is_exact_on_the_corpus():
@@ -375,6 +379,8 @@ def test_a_trailing_mark_never_changes_a_reading():
             assert r["relation_ok"], case_id
         if r["has_request_label"]:
             assert r["request_ok"], case_id
+        if r["has_object_label"]:
+            assert r["object_ok"], case_id
 
 
 # ── The directive's direction ─────────────────────────────────────────────
@@ -479,3 +485,85 @@ def test_the_harness_runs_without_a_database_or_a_key():
     assert eval_intent.load_cases()["cases"]
     m = result()
     assert m["cases"] >= 30
+
+
+# ── What the request acts on ──────────────────────────────────────────────
+def test_what_the_request_acts_on_is_exact_on_the_labelled_cases():
+    m = result()
+    assert m["object_cases"] >= 13
+    assert m["object_correct"] == m["object_cases"]
+    assert m["object_accuracy"] == 1.0
+    assert m["object_kind_accuracy"] == 1.0
+    assert m["object_source_accuracy"] == 1.0
+
+
+def test_every_object_class_is_exercised():
+    """A corpus that only held «person» would score a constant at 1.0."""
+    kinds = {
+        (c["expect"].get("object") or {}).get("kind")
+        for c in eval_intent.load_cases()["cases"]
+        if "object" in c["expect"]
+    }
+    assert {"person", "media", "link", "message", "thing", ""} <= kinds
+
+
+def test_the_person_reading_is_never_lost():
+    """The other direction of the same rule: a request that acts on a member must
+    still read as a person. A reader that called everything a thing would be safe
+    and useless."""
+    m = result()
+    assert m["object_person_cases"] >= 3
+    assert m["object_person_recall"] == 1.0
+
+
+def test_the_residual_person_lead_is_counted_and_pinned():
+    """The number the next increment exists to drive to zero.
+
+    ``referents`` still offers a person for a request whose object is a thing —
+    the clitic on a content verb, and the bare demonstrative with one. The object
+    line corrects it in words, which is why the prompt is not wrong; but the lead
+    is still *in* the prompt, and hiding that would be the opposite of what this
+    harness is for. It is pinned here so the increment that removes it fails this
+    test and says so, exactly as ``KNOWN_ADDRESSING_GAPS`` does.
+    """
+    m = result()
+    assert m["object_thing_cases"] >= 10
+    assert m["object_person_offered_for_a_thing"] == 5
+
+
+def test_the_object_block_stays_small():
+    assert result()["object_chars_max"] <= 200
+
+
+def test_the_object_reader_is_fast_enough_to_run_on_every_pass():
+    """It tokenizes the anchor and walks the window once — no query."""
+    assert result()["object_us_mean"] < 1000
+
+
+def test_every_object_case_is_exact():
+    """The cases the increment added, scored on every column they label."""
+    m = result()
+    detail = {r["id"]: r for r in m["detail"]}
+    ids = sorted(
+        c["id"]
+        for c in eval_intent.load_cases()["cases"]
+        if c.get("category") == "object"
+    )
+    assert len(ids) >= 13, ids
+    for case_id in ids:
+        r = detail[case_id]
+        assert r["object_ok"], case_id
+        assert r["kind_ok"] and r["act_ok"] and r["when_ok"], case_id
+        assert r["edges_ok"] and r["focus_ok"], case_id
+        assert r["media_ok"] and r["link_ok"], case_id
+        if r["has_named_label"]:
+            assert r["named_ok"], case_id
+        if r["has_request_label"]:
+            assert r["request_ok"], case_id
+
+
+def test_the_corpus_labels_the_object_where_it_matters():
+    """Every case in the object category carries the label."""
+    for case in eval_intent.load_cases()["cases"]:
+        if case.get("category") == "object":
+            assert "object" in case["expect"], case["id"]

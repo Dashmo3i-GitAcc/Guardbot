@@ -1791,6 +1791,38 @@ reference file is stale and this list is the one to fix first.
   asking for it, which is the mistake counted. A change to the lexicon moves
   those numbers **on purpose**, by editing the corpus, never by loosening the
   floor.
+* `app/objects.py` reads **what the request acts on** — the join the model
+  otherwise had to make itself between *"instruction, the directive «پاک»"* and
+  *"things — media"*. It reports a closed class (`person`/`media`/`link`/
+  `message`/`thing`), the surface word the message used, and **how** it knows
+  (`named`/`pointed`/`verb`). It is evidence, never a gate, pure at import time,
+  and `awareness_context` stays the only importer.
+* **A named noun wins over the verb**, and the kind is **never guessed from the
+  room**: «پاک کن» acts on a thing and does not say which, so the reading is
+  `thing` rather than the room's newest photograph. Only a message that actually
+  *points* — a clitic or a demonstrative — borrows a kind from the window.
+* The split of the directive lexicon by **what each verb acts on** lives in
+  `app/discourse.py`, beside the lexicon it splits, and is borrowed by
+  `objects` (and by `referents` in the next increment). Two tests hold it: it must
+  **cover** `addressing.ACTION_WORDS`, and no word may be on both sides — so a
+  word added to the moderation lexicon fails the suite until somebody decides its
+  side.
+* `discourse.acts_on` answers `"person"`, `"thing"`, or **`""`** — and the third
+  answer is the load-bearing one. A verb in neither list (a generic imperative, or
+  a word an operator added through `NEXUS_EXTRA_ACTION_WORDS` without a side)
+  answers nothing and the readers that ask **abstain**. Guessing a side is the
+  mistake the split exists to prevent: a guessed *person* for a message about a
+  file is the worst direction available here.
+* The object line renders into the **same source as the act and the direction**
+  (`anchor_act`, budget 420 — the longest block the corpus produces is 297), and
+  the two lines that contradict a naive reading come **first**: `_clip` keeps
+  whole lines from the front, so what survives a tight budget is the warning, not
+  the claim it warns about.
+* `tools/eval_intent.py` reports **`object_person_offered_for_a_thing`** — the
+  residual wrong lead, a thing-object request for which `referents` still lists a
+  person — rather than hiding it, and `tests/test_intent_eval.py` **pins** it at 5
+  so the increment that removes it fails the test and says so. Removing it is a
+  change to `referents`, with its own baseline.
 
 ### 53.8 The assistant
 

@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -45,7 +45,14 @@
     "Every case carries expect.entities, so a window with no media and no link says",
     "so explicitly rather than leaving the fact to a default — the same rule",
     "expect.when follows. A window row with media or a link but no label would",
-    "otherwise read in the report as a false positive in the reader."
+    "otherwise read in the report as a false positive in the reader.",
+    "",
+    "expect.object         what the request acts on:",
+    "  .kind               '' / person / media / link / message / thing —",
+    "                        the class, where 'thing' means a thing whose",
+    "                        kind the message does not state",
+    "  .source             '' / named / pointed / verb — how the server knows",
+    "                        — scored only where labelled, like `state.relation`"
   ],
   "cases": [
     {
@@ -4584,6 +4591,1232 @@
           "directive": "بنش",
           "polarity": "",
           "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "object-thing-named-media",
+      "category": "object",
+      "note": "The message names the thing it acts on, so the object needs no inference.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "این فایل رو پاک کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false,
+          "named": "media"
+        },
+        "request": {
+          "directive": "پاک",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "named"
+        }
+      }
+    },
+    {
+      "id": "object-thing-named-link",
+      "category": "object",
+      "note": "The same, for a link: the noun is the strongest evidence and it wins.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "این لینک رو حذف کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false,
+          "named": "link"
+        },
+        "request": {
+          "directive": "حذف",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "link",
+          "source": "named"
+        }
+      }
+    },
+    {
+      "id": "object-thing-named-message",
+      "category": "object",
+      "note": "And for a message.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "این پیام رو پاک کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false,
+          "named": "message"
+        },
+        "request": {
+          "directive": "پاک",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "message",
+          "source": "named"
+        }
+      }
+    },
+    {
+      "id": "object-thing-pointed",
+      "category": "object",
+      "note": "The clitic carries the object and the verb says it is a thing, so the object is the media row the room holds. Before this reader the same message handed the model a person.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "پاکش کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "پاکش",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "object-thing-pointed-delete",
+      "category": "object",
+      "note": "The same shape with a second content verb, because the reading must come from the verb and not from one lucky word.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "حذفش کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "حذفش",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "object-thing-pointed-link",
+      "category": "object",
+      "note": "A bare demonstrative with a content verb, in a room whose newest thing is a link rather than a media row.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "اینو ببینید https://example.com/report",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "اینو حذف کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": true
+        },
+        "request": {
+          "directive": "حذف",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "link",
+          "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "object-thing-unstated",
+      "category": "object",
+      "note": "The verb says a thing, and the message points at nothing in particular: the kind is stated as unknown rather than guessed from the room.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "پاک کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "پاک",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "thing",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-person-clitic",
+      "category": "object",
+      "note": "The same shape as object-thing-pointed and the opposite side: «ساکت» acts on a member.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "ساکتش کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 14,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ساکتش",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "person",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-person-deictic",
+      "category": "object",
+      "note": "A person verb with a bare demonstrative: the object is a person.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "اینو بن کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 14,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بن",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "person",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-person-polite",
+      "category": "object",
+      "note": "The politeness frame does not change the side of the verb.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "میشه اینو محدود کنی؟",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 14,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "محدود",
+          "polarity": "affirmative",
+          "manner": "request"
+        },
+        "object": {
+          "kind": "person",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-abstain-generic",
+      "category": "object",
+      "note": "A generic imperative carries no side, so the reader abstains. Before this reader the same message handed the model a person.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "برای اینم همین کارو بکن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بکن",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "object-abstain-no-directive",
+      "category": "object",
+      "note": "No directive, so no object — the abstention is silent, not a line in the prompt.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "سلام بچه ها",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "",
+          "polarity": "",
+          "manner": ""
+        },
+        "object": {
+          "kind": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "object-thing-negated",
+      "category": "object",
+      "note": "The object is read the same way under a negation: the direction and the target are independent readings and both are reported.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "پاکش نکن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "پاکش",
+          "polarity": "negated",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
         }
       }
     }

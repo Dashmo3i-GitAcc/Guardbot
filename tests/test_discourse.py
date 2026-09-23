@@ -407,3 +407,53 @@ def test_without_the_time_nouns_the_duration_guard_degrades_to_the_old_reading()
         assert D.read_act("قیمت چنده؟").kind == D.ACT_QUESTION
     finally:
         D._temporal_nouns = original
+
+
+# ── What each directive acts on ───────────────────────────────────────────
+# Two readers need the split — ``app/objects.py`` to say what a request acts on,
+# and ``referents`` to stop reading the object clitic on a content verb as a
+# person — so it is stated here, beside the lexicon it splits, and borrowed. These
+# tests are what keep it honest.
+def test_the_split_covers_the_borrowed_moderation_lexicon():
+    """A word added to ``addressing.ACTION_WORDS`` fails here until somebody
+    decides which side it falls on. That is the point: an unclassified verb
+    answers nothing, and a guessed side is the mistake the split prevents."""
+    from app import addressing
+
+    borrowed = set(addressing.ACTION_WORDS)
+    classified = D._PERSON_VERBS | D._THING_VERBS
+    assert borrowed <= classified, sorted(borrowed - classified)
+
+
+def test_no_verb_is_on_both_sides():
+    """«پاک» and «بن» must never both be the answer for the same word."""
+    assert not (D._PERSON_VERBS & D._THING_VERBS)
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["بن", "بنش", "ساکت", "ساکتش", "محدود", "اخراج", "ادمین", "ban", "kick", "mute"],
+)
+def test_a_person_verb_acts_on_a_person(word):
+    assert D.acts_on(word) == D.ACTS_ON_PERSON
+
+
+@pytest.mark.parametrize(
+    "word", ["پاک", "پاکش", "حذف", "حذفش", "delete", "remove", "بفرست", "ببین"]
+)
+def test_a_content_verb_acts_on_a_thing(word):
+    assert D.acts_on(word) == D.ACTS_ON_THING
+
+
+@pytest.mark.parametrize("word", ["بکن", "کن", "لطفا", "چک", "xyz", "", None])
+def test_a_word_with_no_side_answers_nothing(word):
+    """The third answer, and the important one: an unclassified word — a generic
+    imperative, or one an operator added without a side — abstains."""
+    assert D.acts_on(word) == ""
+
+
+def test_the_clitic_forms_are_found_through_one_more_clitic():
+    """The lexicon lists the forms a group actually types; a verb arriving with
+    one more clitic than the list holds is still found."""
+    assert D.acts_on("پاکش") == D.ACTS_ON_THING
+    assert D.acts_on("بنش") == D.ACTS_ON_PERSON

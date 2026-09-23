@@ -20,6 +20,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [46. What does «این» point at when it is not a person](#s46)
 - [47. The question mark was part of the word](#s47)
 - [48. «بنش کن» and «بنش نکن» were the same message](#s48)
+- [49. What does the request act on?](#s49)
 
 ---
 
@@ -2516,3 +2517,159 @@ names a thing and leaves no person open.
 **A multi-word directive is not in the lexicon.** Same boundary §47.4 recorded,
 seen from the other reader: the directive lexicon is token-level, so a two-word
 phrase is not a directive and the direction reader has nothing to be about.
+
+## 49. What does the request act on?
+
+<a id="s49"></a>
+
+### 49.1 The join that was missing
+
+By §48 the server could say a great deal about a message. It could say what the
+message is *doing*, which way its directive points, what a demonstrative points at
+when it is not a person, and which people a pronoun may mean. What it could not say
+is the one thing a moderation room needs most:
+
+```
+«فایل رو پاک کن»   the server said: instruction, the directive «پاک»
+                   …and, on another line: things — media
+
+«بنش کن»           the server said: instruction, the directive «بنش»
+                   …and, on another line: who «بنش» may mean — the room
+```
+
+Nothing joined them. The model had to work out for itself which of those lines the
+directive was aimed at, and that join is where the worst mistake available here
+happens: acting on a **person** when the message was about a file.
+
+The baseline was measured before any code was written, over a window holding both a
+person and a media row:
+
+```
+the request acts on …                        before
+stated at all                                0 / 13
+a person still offered for a thing-object
+request (the dangerous direction)            5 / 10
+```
+
+Five of ten. Every one of the five used the object clitic on a content verb —
+«پاکش کن», «حذفش کن», «فایل رو پاکش کن» — or a bare demonstrative with one, and
+`referents` read the clitic as a person and offered the room's members.
+
+`app/objects.py` closes the join. One question, one closed answer:
+
+```
+person    the request acts on a person
+media     …on a media message (a file, a photo, a voice note, …)
+link      …on a link
+message   …on a text message
+thing     …on a thing whose kind the message does not state
+""        no reading
+```
+
+plus **how** the server knows — `named` (the message names it), `pointed` (the
+message points at a thing the room holds), or `verb` (only the verb says which
+side). Evidence, never a gate: nothing branches on it, and it is pure at import
+time — no `db`, no `config`, no pool, no `rbac`, asserted by a test.
+
+### 49.2 The verb decides the side, and the shape cannot
+
+This is the load-bearing rule, and the reason the reading needs a lexicon split
+that did not exist before:
+
+```
+پاکش کن    a directive carrying the object clitic «ـش»  →  acts on a file
+بنش کن     a directive carrying the object clitic «ـش»  →  acts on a person
+```
+
+Identical in shape. Only the verb separates them. So `app/discourse.py` — the module
+that already owns the directive lexicon — now states which side each of its words
+falls on, in two lists, and exposes `acts_on(token)` answering `"person"`,
+`"thing"`, or `""`.
+
+The third answer is the important one. `addressing.ACTION_WORDS` is borrowed and
+flat; it holds «بن» and «پاک» side by side, and it arrives without sides. An operator
+can add a word to it through `NEXUS_EXTRA_ACTION_WORDS` and a future release can add
+one to the built-in list, and neither comes with a side attached. **Guessing a side
+is exactly the mistake this increment exists to prevent** — a guessed *person* for a
+message about a file is the worst direction available — so an unclassified word
+answers nothing and both readers that ask abstain. Two tests hold the split to the
+lexicon: it must **cover** `addressing.ACTION_WORDS`, and no word may be on both
+sides. A word added there fails the suite until somebody decides its side.
+
+The order of evidence inside the reader is deliberate too. A **named noun wins over
+the verb**, because the message's own words are what the room actually said while the
+verb only says which side an argument has. And the kind is **not guessed from the
+room**: «پاک کن» acts on a thing and the message does not say which, so the reading
+is `thing` rather than the room's newest photograph. Only a message that actually
+*points* — a clitic or a demonstrative — borrows a kind from the window.
+
+### 49.3 Where it reaches the model
+
+Into the **same source as the act and the direction** (`anchor_act`, budget 320 →
+420). Same reasoning as §48, one join further along: *instruction, the directive
+«پاک»* without *acts on a thing* is the other half-truth, so a budget must never be
+able to keep one and drop the other.
+
+All three lines now render from one source, and the order is: the two lines that
+**contradict a naive reading** first, the naive reading last. `_clip` keeps whole
+lines from the front, so if a budget ever bit, what survives is the warning rather
+than the claim it warns about. The longest block the corpus produces is 297
+characters — a negated request whose object is a named thing — which is why the
+budget is 420.
+
+A request that acts on a person adds no warning, and a message with no directive adds
+nothing at all.
+
+### 49.4 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 120 cases — the 107 from §48 plus 13
+`object` ones), with the object reader absent and present:
+
+```
+the request acts on …                    before   after
+labelled cases                                -      13
+exact (class · source)                        -   13/13
+  class                                       -   100.0%
+  source                                      -   100.0%
+  per class (correct/total)                   -   none 2/2  person 3/3  media 4/4
+                                                  link 2/2  message 1/1  thing 1/1
+person cases read as a person                 -    3/3
+block chars max                               -     123
+reading cost                                  -  ~0.11 ms mean
+```
+
+The other half of the increment is the number that did **not** move, and it is
+reported rather than hidden:
+
+```
+a person still offered for a thing-object request   5 / 10
+```
+
+The object line corrects it in words — *"Do not read it as aimed at anybody in the
+room"* — so the prompt's final word on the target is right. But the lead is still
+*in* the prompt, and the harness counts it in the report and pins it in
+`tests/test_intent_eval.py` so the increment that removes it fails the test and says
+so, exactly as `KNOWN_ADDRESSING_GAPS` does for the addressing miss. Removing it is a
+change to `referents`, and it gets its own baseline.
+
+Nothing else moved:
+
+```
+                                  before   after
+cases                                107     120
+expression accuracy               100.0%  100.0%
+addressing accuracy                99.1%   99.2%
+act accuracy                      100.0%  100.0%
+act false positives / negatives      0 / 0   0 / 0
+relation exact                      12/12   12/12
+named class exact                   11/11   11/11
+referent top-1 accuracy           100.0%  100.0%
+ambiguity precision               100.0%  100.0%
+wrong-but-confident                     0       0
+the direction, exact                16/16   29/29
+Gemini calls added                      0       0
+```
+
+The direction's labelled set grew 16 → 29 because the 13 new cases carry a `request`
+label too — the same messages read by two readers, which is what makes the corpus a
+cross-check rather than two disjoint sets.
