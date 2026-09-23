@@ -1421,9 +1421,10 @@ reference file is stale and this list is the one to fix first.
   cooldowns are ignored.
 * `daily_calls` / `daily_exhausted` / `daily_remaining` / `Pool.daily_exhausted`
   take **no clock** and read `time.time()` themselves.
-* Only `chat` sets `daily_budget`; 0 means unlimited, and a workload without an
-  allowance gets no counter from a refund. The charge stays in `note_request`
-  and is refunded — **never** moved to after the call.
+* Four workloads set `daily_budget` — `chat`, `awareness`, `live_voice` and
+  `search`; the rest have none, and a workload with no allowance gets no counter
+  from a refund. `0` means unlimited. The charge stays in `note_request` and is
+  refunded — **never** moved to after the call.
 
 ### 53.6 The audit trail and identity
 
@@ -1475,9 +1476,12 @@ reference file is stale and this list is the one to fix first.
 * `people.py` grants **nothing**, **never** guesses (exact normalised
   comparison, never similarity), and stores no conversation. Queries under three
   characters are refused.
-* `nexus.control` is in **no** role bundle, cannot be expressed in a grant, and
-  is appended **last** in `PERMISSIONS` — that tuple is the promotion dialog's
-  bitmask.
+* `nexus.control` is in **no** role bundle and cannot be expressed in a grant.
+* The owner-only permissions are **appended** to the end of `PERMISSIONS`, never
+  inserted in the middle: that tuple is the promotion dialog's bitmask by index
+  (`main._MASK_PERMISSIONS`), so inserting anywhere else silently re-points every
+  stored mask. The current tail order is `nexus.control`, `agent.request`,
+  `vpn.read`, `vpn.manage`.
 * **No store contains a message body** except the bounded conversation history.
 * Deterministic gates are for **infrastructure and security only**; relevance,
   action and speech are the model's exclusively.
@@ -1561,8 +1565,9 @@ reference file is stale and this list is the one to fix first.
   recorded as their kind; a voice turn as its transcript.
 * A thinking model returning empty text means **raise the output budget** —
   never edit the prompt.
-* `transcribe` is called from **exactly two** places; a test asserts the count.
-  Nothing transcribes a group voice note on arrival.
+* `transcribe` is called from **exactly three** places — the awareness read, the
+  conversational path and the transcription command — and a test asserts the
+  count. Nothing transcribes a group voice note on arrival.
 * The transcription instruction is **verbatim**, with no translate and no
   answer; `NOSPEECH` / `UNINTELLIGIBLE` only as the **whole** answer.
 * Voice replies are off by default and best-effort; `_tts_request` is a separate
@@ -1613,8 +1618,8 @@ reference file is stale and this list is the one to fix first.
   `vpn_service.py` is **never** called by a Telegram handler. An operation
   against an unconfigured integration is refused **before anything is
   recorded**.
-* `vpn.read` / `vpn.manage` are appended **last** to `PERMISSIONS` and are in
-  **no** role bundle.
+* `vpn.read` / `vpn.manage` are **appended** to the end of `PERMISSIONS` like
+  the other owner-only permissions (§53.7) and are in **no** role bundle.
 * The second step of a VPN write is a **reference, not an approval**: everything
   is re-read from the stored row, `pending_id` is named differently from
   `request_id`, and a forged confirmation cannot smuggle different values.
