@@ -273,17 +273,104 @@ def test_the_block_is_bounded():
     assert len(text) <= 120
 
 
+# ── The object clitic ─────────────────────────────────────────────────────
+# «ساکتش کن» points at a person with no demonstrative at all: the object is the
+# clitic «ـش» on the verb. It is the most common way a Persian instruction names
+# its target, and missing it means missing the instruction.
+@pytest.mark.parametrize(
+    "text",
+    ["ساکتش کن", "بنش کن", "حذفش کن", "بیرونش کن", "اخراجش کن", "محدودش کن"],
+)
+def test_an_action_verb_with_the_object_clitic_is_a_person_reference(text):
+    assert R.find_expression(text).kind == R.KIND_CLITIC
+
+
+def test_a_bare_action_stem_is_not_a_person_reference():
+    """«بن» on its own is a topic word; only the clitic makes the object real."""
+    assert R.find_expression("بن").kind == ""
+    assert R.find_expression("ساکت").kind == ""
+
+
+@pytest.mark.parametrize("text", ["بنفش", "خواهش", "آرش", "چشم"])
+def test_ordinary_words_ending_in_sheen_are_not_clitics(text):
+    assert R.find_expression(text).kind == ""
+
+
+def test_a_clitic_instruction_resolves_through_the_reply_edge():
+    messages = [row(11, "رضا", at=960), row(22, "سارا", at=980)]
+    result = R.resolve(anchor("ساکتش کن", reply=22, reply_name="سارا"), messages=messages)
+    assert result.top().user_id == 22
+    assert result.confident is True
+
+
+def test_a_person_noun_beats_a_clitic():
+    """«این کاربر» names what the object is; the clitic only implies one."""
+    assert R.find_expression("این کاربر رو ساکتش کن").kind == R.KIND_PERSON
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
-def test_the_module_reaches_no_database_model_or_authority():
-    """It is evidence about text: no db, no config, no pool, no rbac."""
+def _imports(tree, *, top_level_only: bool) -> set[str]:
+    """The module names a parsed file imports.
+
+    ``from . import x`` is an ``ImportFrom`` with ``module=None`` and the name in
+    ``names``, so a helper that only read ``module`` would miss exactly the
+    relative imports this module uses — and the purity test would pass on a
+    module that had grown a top-level ``from . import db``.
+    """
+    import ast
+
+    nodes = tree.body if top_level_only else ast.walk(tree)
+    names: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module.split(".")[0])
+            else:
+                # A bare relative import: ``from . import addressing``. The
+                # module is the imported name, not ``node.module``.
+                names.update(alias.name.split(".")[0] for alias in node.names)
+    return names
+
+
+def _module_level_imports(module) -> set[str]:
+    """Imports at the top of the file, not the guarded ones inside functions."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(module))
+    return _imports(tree, top_level_only=True)
+
+
+def test_the_module_is_pure_at_import_time():
+    """No db, no config, no pool, no rbac at import — it is evidence about text."""
+    assert _module_level_imports(R) <= {
+        "__future__", "re", "unicodedata", "dataclasses"
+    }
+
+
+def test_the_action_lexicon_is_borrowed_lazily_and_guarded():
+    """The one cross-module reach is late and degrades to nothing.
+
+    It must be inside a function — so importing this module never pulls in
+    ``config`` — and it must be wrapped, so a host without the lexicon loses a
+    clitic match rather than the module.
+    """
     import ast
     import inspect
 
     tree = ast.parse(inspect.getsource(R))
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module.split(".")[0])
-    assert imported <= {"__future__", "re", "unicodedata", "dataclasses", "people"}, imported
+    lazy = _imports(tree, top_level_only=False) - _imports(tree, top_level_only=True)
+    assert "addressing" in lazy
+    assert "addressing" not in _module_level_imports(R)
+    source = inspect.getsource(R._action_words)
+    assert "try:" in source and "except Exception" in source
+    # And with no lexicon at all, it finds no clitic rather than raising.
+    original = R._action_words
+    try:
+        R._action_words = lambda: frozenset()
+        assert R.find_expression("ساکتش کن").kind == ""
+        assert R.find_expression("اینو بن کن").kind == R.KIND_DEICTIC
+    finally:
+        R._action_words = original

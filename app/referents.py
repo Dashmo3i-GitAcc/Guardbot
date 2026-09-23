@@ -94,6 +94,7 @@ def _fold(text: str) -> str:
 KIND_PERSON = "person"
 KIND_ROLE = "role"
 KIND_PRIOR = "prior"
+KIND_CLITIC = "clitic"
 KIND_DEICTIC = "deictic"
 
 # The demonstratives are listed as **surfaces**, not stems, and that is the
@@ -112,9 +113,20 @@ _FAR_SURFACES = frozenset(
      "همون", "همونو", "همونرو", "همونیکی", "همونیک"}
 )
 _PERSON_NOUNS = frozenset(
-    {"کاربر", "یوزر", "شخص", "طرف", "آدم", "بنده", "کاربره", "یوزره", "طرفه"}
+    {
+        "کاربر", "یوزر", "شخص", "طرف", "آدم", "بنده", "کاربره", "یوزره", "طرفه",
+        # The Latin half. A group that writes Persian and English in one
+        # sentence is the norm here, not the exception, and «این user» points at
+        # a person exactly as «این کاربر» does.
+        "user", "guy", "dude", "person", "member",
+    }
 )
-_ROLE_WORDS = frozenset({"ادمین", "مدیر", "مالک", "صاحب", "ادمینه", "مدیره"})
+_ROLE_WORDS = frozenset(
+    {
+        "ادمین", "مدیر", "مالک", "صاحب", "ادمینه", "مدیره",
+        "admin", "moderator", "mod", "owner",
+    }
+)
 _PRIOR_WORDS = frozenset({"قبلی", "قبلیش", "قبلیه", "قبلیا"})
 
 # The object marker as its own token, skipped when it follows a demonstrative.
@@ -133,6 +145,48 @@ def _deictic(token: str) -> str:
     if token in _FAR_SURFACES:
         return "far"
     return ""
+
+
+def _action_words() -> frozenset[str]:
+    """The moderation vocabulary, borrowed rather than copied.
+
+    «ساکتش کن», «بنش کن», «حذفش کن» point at a person with no demonstrative at
+    all: the object is the clitic «ـش» attached to the verb. The list that knows
+    which words those are already exists — ``app/addressing.py``'s
+    ``ACTION_WORDS``, whose stated purpose is telling a *call* from a *mention* —
+    and a second copy here would be a second answer that drifts the first time
+    either changed.
+
+    The import is late and guarded, exactly as ``_fold`` guards its import of
+    ``people``: this module must stay importable and testable with no
+    configuration, so a missing lexicon degrades to "no clitic found" rather
+    than to an import error.
+    """
+    try:
+        from . import addressing
+
+        return frozenset(addressing.ACTION_WORDS)
+    except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
+        return frozenset()
+
+
+def _clitic_person(token: str) -> bool:
+    """Whether a token is an action verb with the 3rd-person object clitic.
+
+    Only the «ـش» forms count. The bare stem («بن», «ساکت») is a topic word that
+    may or may not have a person behind it, and treating it as a referent would
+    fire on ordinary conversation; the clitic is what makes the object explicit.
+    Checked against the *raw* token, because the generic clitic stripper would
+    have already removed the «ش» that carries the meaning.
+    """
+    if len(token) < 3 or not token.endswith("ش"):
+        return False
+    words = _action_words()
+    if token in words:
+        return True
+    # «بیرونش» is «بیرون» + the clitic, and the lexicon lists the bare stem.
+    stem = token[:-1]
+    return len(stem) >= 2 and stem in words
 
 _TOKEN_SPLIT = re.compile(r"[^\w\u0600-\u06ff]|_")
 
@@ -179,6 +233,18 @@ def find_expression(text: str | None) -> Expression:
     def surface(index: int, extra: int = 0) -> str:
         return " ".join(tokens[index : index + extra + 1])
 
+    # Two passes, and the split is the design rather than an accident.
+    #
+    # The first pass looks for the words that *name what the object is*: a
+    # person noun, a role, a backwards pointer, or the object clitic on a verb.
+    # Those are checked across the whole message before any bare demonstrative
+    # is considered, because the kind selects which evidence the resolver may
+    # use — a role expression is what makes the role candidates available — and a
+    # message like «این ادمینه رو محدود کن» carries both. Reporting the bare
+    # «این» there would throw away the one signal that identifies the person.
+    #
+    # The second pass takes the bare demonstratives, which are the weakest about
+    # personhood and the most common in ordinary talk.
     for index, token in enumerate(bare):
         # person: a person noun, optionally with a demonstrative before it.
         if token in _PERSON_NOUNS:
@@ -193,6 +259,14 @@ def find_expression(text: str | None) -> Expression:
             return Expression(tokens[index], KIND_ROLE, 2)
         if token in _PRIOR_WORDS:
             return Expression(tokens[index], KIND_PRIOR, 2)
+        # The object clitic on an action verb — «ساکتش کن» says "mute him" with
+        # no demonstrative at all. Weaker than a person noun, which names what
+        # the object is, and stronger than a bare «این», which may point at a
+        # message. When a message carries both («اینو ساکتش کن») this is the kind
+        # reported, because the two agree about the referent and the clitic is
+        # the more explicit about there being a person at all.
+        if _clitic_person(tokens[index]):
+            return Expression(tokens[index], KIND_CLITIC, 2)
 
     # The bare demonstratives, last because they are the weakest about
     # personhood. A separated object marker is folded into the surface so the

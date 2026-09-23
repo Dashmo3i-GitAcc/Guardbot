@@ -1,0 +1,1170 @@
+{
+  "version": 2,
+  "about": [
+    "A labelled corpus for the deterministic half of Nexus understanding.",
+    "Each case is a room window plus the anchor message a pass would be about,",
+    "and the reading the server should reach. The harness in tools/eval_intent.py",
+    "scores it; tests/test_intent_eval.py holds the floor.",
+    "",
+    "expect.expression_kind  the deictic kind the resolver should find ('' for none)",
+    "expect.referent         the Telegram id the message points at, or null",
+    "expect.requires_resolution  whether the text alone leaves the referent open",
+    "expect.ambiguous        whether the server should report it could not tell",
+    "expect.addressed        whether addressing.addressed should fire",
+    "",
+    "A note on `ambiguous` and an empty room: with no window there is nothing to",
+    "be ambiguous *between*, so the flag is false and the render says the server",
+    "found no candidate. That is a different reading from 'these two are too",
+    "close', and the corpus keeps them distinct on purpose."
+  ],
+  "cases": [
+    {
+      "id": "reply-edge-basic",
+      "category": "reference",
+      "note": "A reply to رضا and «اینو» — the id is the answer, not a candidate.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "این آدم اذیتم کرد",
+          "at": 960,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 11,
+        "reply_name": "رضا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "reply-edge-colloquial",
+      "category": "reference",
+      "note": "Colloquial object form: the clitic is reported, because it is checked with the explicit person-words before any bare demonstrative.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "شلوغش نکن",
+          "at": 970,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ساکتش کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "reply-edge-noun",
+      "category": "reference",
+      "note": "«این کاربر» as a reply — person kind, and the edge still settles it.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم مینویسه",
+          "at": 975,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این کاربر رو محدود کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "clitic-reply",
+      "category": "reference",
+      "note": "No demonstrative at all: the object is the clitic on the verb.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 975,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ساکتش کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "clitic-no-reply",
+      "category": "reference",
+      "note": "«بنش کن» with one person having just spoken.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من بودم",
+          "at": 998,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "named-in-text",
+      "category": "reference",
+      "note": "No reply edge, but the instruction names رضا.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "چی شده؟",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "هیچی",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا اینو ببین",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "stated-id",
+      "category": "reference",
+      "note": "The instruction states the Telegram id outright.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "چی شده؟",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "هیچی",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین 22",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "role-single-admin",
+      "category": "reference",
+      "note": "«ادمینه» with exactly one administrator in the room.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "منم هستم",
+          "at": 985,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "خوبم",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": 44,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "role-two-admins",
+      "category": "ambiguity",
+      "note": "«ادمینه» with two administrators is not a referent — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "منم هستم",
+          "at": 985,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "منم",
+          "at": 988,
+          "role": "admin"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false
+      }
+    },
+    {
+      "id": "member-cannot-be-role",
+      "category": "reference",
+      "note": "A member spoke more recently, but «ادمینه» is the administrator.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "من ادمینم",
+          "at": 900,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من کاربرم",
+          "at": 998,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": 44,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "room-about",
+      "category": "continuation",
+      "note": "«همون کاربر» — three replies in a row aimed at رضا.",
+      "window": [
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا آروم",
+          "at": 900,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "آره رضا",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "رضا بس کن",
+          "at": 940,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 950,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "deictic-three-recent",
+      "category": "ambiguity",
+      "note": "Three people spoke moments ago and nobody was replied to — do not guess.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "الف",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "ب",
+          "at": 994,
+          "role": "member"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ج",
+          "at": 997,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false
+      }
+    },
+    {
+      "id": "deictic-one-recent",
+      "category": "reference",
+      "note": "One person spoke just before; still not a confident referent alone.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من بودم",
+          "at": 998,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "prior-expression",
+      "category": "reference",
+      "note": "«قبلیش» points backwards; the kind is recorded even when weak.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "الف",
+          "at": 985,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "ب",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "قبلیش رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "prior",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false
+      }
+    },
+    {
+      "id": "mixed-user-noun",
+      "category": "mixed",
+      "note": "Persian and English in one sentence: «این user».",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "spam",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این user رو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "mixed-role-admin",
+      "category": "mixed",
+      "note": "A Latin role word with a Persian instruction.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "hmm",
+          "at": 995,
+          "role": "admin"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "admin رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": 44,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "english-deictic-person",
+      "category": "mixed",
+      "note": "Fully English phrasing with a Persian room.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "spam spam",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "this user رو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "no-expression-chatter",
+      "category": "ordinary",
+      "note": "Ordinary conversation points at nobody.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 980,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "سلام بچه ها چطوری",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "no-expression-name-only",
+      "category": "ordinary",
+      "note": "An explicit name needs no resolution — the transcript already carries it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "بله",
+          "at": 980,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "no-expression-question",
+      "category": "ordinary",
+      "note": "A price question is not a person reference.",
+      "window": [],
+      "anchor": {
+        "user_id": 55,
+        "name": "مهدی",
+        "text": "قیمت چنده؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "no-expression-vav-word",
+      "category": "ordinary",
+      "note": "A word ending in «و» must not be read as a demonstrative.",
+      "window": [],
+      "anchor": {
+        "user_id": 55,
+        "name": "مهدی",
+        "text": "آموزش رو ببین",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "no-expression-bare-stem",
+      "category": "ordinary",
+      "note": "A bare action stem has no object; only the clitic does.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "addressed-exact",
+      "category": "addressing",
+      "note": "Nexus called by name, with an instruction.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "spam",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نکسوس اینو بررسی کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true
+      }
+    },
+    {
+      "id": "addressed-typo",
+      "category": "addressing",
+      "note": "The name written the way a group writes it.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نکسی اینو ببین",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true
+      }
+    },
+    {
+      "id": "addressed-clitic-name",
+      "category": "addressing",
+      "note": "The object marker attached to the name, and a clitic on the verb.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نکسوسو ساکتش کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true
+      }
+    },
+    {
+      "id": "quotation-not-addressed",
+      "category": "addressing",
+      "note": "A quotation about Nexus is not a call to Nexus. KNOWN GAP: the matcher reads a name-first message as a call.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "نکسوس گفت که اینو بن کنه",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "quotation-reporting-verb",
+      "category": "addressing",
+      "note": "Same KNOWN GAP, shorter form.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "نکسوس گفت اینو بن کن",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "about-nexus-mid-sentence",
+      "category": "addressing",
+      "note": "Talking about Nexus mid-sentence. KNOWN GAP: an exact name match is always a call.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "من با نکسوس کار نکردم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "directed-member-question",
+      "category": "addressing",
+      "note": "A member addressing Nexus is addressed, even though they cannot act.",
+      "window": [],
+      "anchor": {
+        "user_id": 55,
+        "name": "مهدی",
+        "text": "نکسوس این چیه",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true
+      }
+    },
+    {
+      "id": "typo-in-instruction",
+      "category": "typo",
+      "note": "A misspelled instruction still carries its deictic.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بگنش",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "zwnj-person-noun",
+      "category": "typo",
+      "note": "A zero-width non-joiner inside the phrase must not split it.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این‌کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "arabic-yeh-fold",
+      "category": "typo",
+      "note": "Arabic yeh/kaf folded to Persian before matching.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اين كاربر رو بن كن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "correction-named",
+      "category": "correction",
+      "note": "A correction that names the person it corrects to.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "من نه",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ببخشید",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نه منظورم مهدی بود، اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 55,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "topic-switch-no-reference",
+      "category": "topic-switch",
+      "note": "A sudden unrelated message carries no person reference.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "بحث قبلی",
+          "at": 960,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "راستی فردا تعطیله؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "temporal-reference",
+      "category": "temporal",
+      "note": "A temporal word is not a person reference.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "قبلاً گفتم که اینکار رو نکنید",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "two-users-reply-chain",
+      "category": "reply-chain",
+      "note": "A chain of replies between two people; the edge names the target.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سارا؟",
+          "at": 900,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بله",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "بیا",
+          "at": 940,
+          "role": "member",
+          "reply_user_id": 22,
+          "reply_name": "سارا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همینو محدود کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 11,
+        "reply_name": "رضا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "owner-anchor-deictic",
+      "category": "reference",
+      "note": "The owner's instruction with a reply edge is the confident case.",
+      "window": [
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "شرمنده",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو از گروه حذف کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 55,
+        "reply_name": "مهدی"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 55,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "admin-anchor-deictic",
+      "category": "reference",
+      "note": "An administrator's instruction behaves the same as the owner's.",
+      "window": [
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ببخشید",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 44,
+        "name": "نیما",
+        "text": "این کاربر رو ساکت کن",
+        "at": 1000,
+        "role": "admin",
+        "reply_user_id": 55,
+        "reply_name": "مهدی"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 55,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    },
+    {
+      "id": "slang-instruction",
+      "category": "slang",
+      "note": "Slang for muting, with a reply edge.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو خفه کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false
+      }
+    }
+  ]
+}
