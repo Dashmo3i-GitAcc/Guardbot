@@ -1857,6 +1857,19 @@ reference file is stale and this list is the one to fix first.
   `addressing._quoted` demotes «نکسوس گفت که...» to the weak grade. The rule is
   **one token wide** — the verb must come immediately after the name — so
   «نکسوس بگو...», «نکسوس جان» and «میشه نکسوس اینو بررسی کنی؟» stay calls.
+* A name that is the **object of a preposition** is a mention too:
+  `addressing._complement` demotes «من با نکسوس کار نکردم» and «i never worked
+  with nexus». Also **one token wide** — only a preposition *immediately* before
+  the name — so «میشه نکسوس اینو بررسی کنی؟» («میشه» is not a preposition) and
+  «با اجازه نکسوس اینو پاک کن» (the token before the name is «اجازه») stay calls.
+  «to» and «for» are deliberately **not** in `_PREPOSITIONS`: both can head a
+  line that addresses somebody («to nexus: ...»), and demoting on them would
+  silence a real call.
+* A demotion is **not a silencing**: both rules leave `mentioned` true, so the
+  line still reaches the model as "your name came up here" context. Only the
+  *immediate* reply is withdrawn. `_PREPOSITIONS` is a **closed grammatical
+  class**, not a phrase list; `_quoted` and `_complement` share one helper
+  (`_reading`) so a new strong-reading branch cannot forget to apply them.
 * `on_group_text` **must** return before `classifier.classify` when the message
   will be answered — ask `main._nexus_will_answer`, **never** the narrower
   `_addressed_to_bot`, or a name-addressed message gets both a reply and a trial

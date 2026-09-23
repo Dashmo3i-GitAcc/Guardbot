@@ -19,10 +19,12 @@ opposite costs when they are wrong:
   which is the more annoying of the two mistakes, so it demands real evidence:
   the token is the name, or the name plus a clitic, or one edit away from it, or
   a vowel-skeleton match that the surrounding words show is a *call* rather than
-  a mention. The one thing an exact name does **not** survive is being the
-  subject of a reporting verb — «نکسوس گفت که...» is somebody quoting the
-  assistant, and a quotation is the clearest case there is of a message that is
-  *about* it rather than *to* it. See ``_quoted``.
+  a mention. Two things an exact name does **not** survive, and both are
+  grammatical rather than contextual: being the subject of a reporting verb —
+  «نکسوس گفت که...» is somebody quoting the assistant — and being the object of a
+  preposition — «من با نکسوس کار نکردم» is a statement about it. A quotation and
+  a complement are the two clearest cases there are of a message that is *about*
+  the assistant rather than *to* it. See ``_quoted`` and ``_complement``.
 * **``mentioned``** is the weak signal, and it is context rather than a trigger.
   It is what the awareness pass is told — "your name came up here" — so the
   model can judge whether the conversation concerns it. A false positive costs
@@ -136,6 +138,32 @@ _VOCATIVES = ("جان", "جون", "عزیز", "گرامی", "خان", "خانم"
 # Separate words a group puts *before* the name when calling somebody. A message
 # that opens with one of these and then the name is a call.
 _CALLERS = ("ای", "هی", "یا", "الا", "سلام", "درود")
+
+# The second thing an exact name does not survive, beside ``_REPORTING_VERBS``,
+# and the same one-token width. A name immediately after a preposition is the
+# *object* of that preposition — «با نکسوس», «درباره نکسوس», «از نکسوس» — so the
+# sentence is about the assistant rather than addressed to it. «من با نکسوس کار
+# نکردم» is a statement about it; the corpus labels it that way and the strong
+# grade used to read it as a call, which made the assistant answer a message that
+# was not for it.
+#
+# Grammatical rather than a phrase list: prepositions are a closed class and they
+# govern what follows them. The width is the safety. «میشه نکسوس اینو بررسی
+# کنی؟» has the name in the middle and is still a call, because «میشه» is not a
+# preposition; «با اجازه نکسوس اینو پاک کن» is not demoted either, because the
+# token before the name is «اجازه». Only a preposition *immediately* before the
+# name makes it a complement.
+#
+# The English half is for the mixed text a group actually writes. «to» and «for»
+# are deliberately absent: both can head a line that addresses somebody («to
+# nexus: ...», «for nexus: ...»), so demoting on them would silence a real call.
+_PREPOSITIONS = frozenset(
+    {
+        "با", "به", "از", "برای", "واسه", "درباره", "درمورد", "راجع", "مورد",
+        "نزد", "پیش", "روی", "توی", "در", "بی", "همراه", "بدون",
+        "with", "about", "from", "of", "without",
+    }
+)
 
 # The verbs that make a name its *subject* rather than its addressee. «نکسوس
 # گفت که...» is somebody repeating what the assistant said; the assistant is
@@ -311,9 +339,13 @@ def _addressing_intent(tokens: list[str], index: int) -> bool:
       A group that types the name first and then says what it wants is calling;
       a group that says «نکسوس گفت که...» is quoting.
 
-    Used only to promote a *skeleton* match. An exact match needs no help, and
-    letting this function demote one would make the strong signal context-
-    dependent for no gain.
+    Used only to promote a *skeleton* match, never to demote an exact one. That
+    is not because demoting is wrong in principle — ``_quoted`` and
+    ``_complement`` both demote an exact match — but because this test is a
+    *presence* test: it asks whether a call is happening anywhere in the message,
+    and an exact name in a message that also happens to contain an imperative is
+    still a call. Demoting on it would make the strong signal depend on the
+    presence of an unrelated verb.
     """
     if index == 0:
         return True
@@ -375,6 +407,35 @@ def _quoted(tokens: list[str], index: int) -> bool:
     return index + 1 < len(tokens) and tokens[index + 1] in _REPORTING_VERBS
 
 
+def _complement(tokens: list[str], index: int) -> bool:
+    """Whether the name is the object of a preposition — about it, not to it.
+
+    The second demotion, beside ``_quoted``, and the same one-token width for the
+    same reason: only a preposition *immediately* before the name makes it a
+    complement. «من با نکسوس کار نکردم» is a statement about the assistant;
+    «میشه نکسوس اینو بررسی کنی؟» is a request to it, and «میشه» is not a
+    preposition.
+    """
+    return index > 0 and tokens[index - 1] in _PREPOSITIONS
+
+
+def _reading(tokens: list[str], index: int, token: str, name: str, reason: str) -> Address:
+    """The strong reading, unless the words around the match show a mention.
+
+    Two demotions, and both are grammatical rather than contextual: the name as
+    the subject of a reporting verb is a quotation (``_quoted``), and the name as
+    the object of a preposition is a complement (``_complement``). Either makes
+    the message *about* the assistant rather than *to* it. The reason is carried
+    rather than flattened, so a log line can say which of them applied — the same
+    reason ``reason`` exists for the strong readings.
+    """
+    if _quoted(tokens, index):
+        return Address(MENTION, token, name, "quoted")
+    if _complement(tokens, index):
+        return Address(MENTION, token, name, "complement")
+    return Address(ADDRESSED, token, name, reason)
+
+
 def _match(token: str, name: str, tokens: list[str], index: int) -> Address:
     """One token against one configured name. Returns the strongest reading."""
     bare = _letters(token)
@@ -382,20 +443,14 @@ def _match(token: str, name: str, tokens: list[str], index: int) -> Address:
         return Address()
 
     if bare == name:
-        if _quoted(tokens, index):
-            return Address(MENTION, token, name, "quoted")
-        return Address(ADDRESSED, token, name, "exact")
+        return _reading(tokens, index, token, name, "exact")
 
     stripped = _strip_clitic(bare)
     if stripped and stripped != bare and stripped == name:
-        if _quoted(tokens, index):
-            return Address(MENTION, token, name, "quoted")
-        return Address(ADDRESSED, token, name, "clitic")
+        return _reading(tokens, index, token, name, "clitic")
 
     if len(name) >= 4 and _distance(bare, name, 1) <= 1:
-        if _quoted(tokens, index):
-            return Address(MENTION, token, name, "quoted")
-        return Address(ADDRESSED, token, name, "typo")
+        return _reading(tokens, index, token, name, "typo")
 
     # The skeleton comparison, last because it is the weakest evidence.
     skeleton_name = skeleton(name)
@@ -412,7 +467,11 @@ def _match(token: str, name: str, tokens: list[str], index: int) -> Address:
     # to share its consonants".
     if _distance(bare, name, 2) > 2:
         return Address()
-    if _addressing_intent(tokens, index) and not _quoted(tokens, index):
+    if (
+        _addressing_intent(tokens, index)
+        and not _quoted(tokens, index)
+        and not _complement(tokens, index)
+    ):
         return Address(ADDRESSED, token, name, "skeleton")
     return Address(MENTION, token, name, "skeleton")
 

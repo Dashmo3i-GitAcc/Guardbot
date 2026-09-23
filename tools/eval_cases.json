@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 11,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -1340,12 +1340,96 @@
     {
       "id": "about-nexus-mid-sentence",
       "category": "addressing",
-      "note": "Talking about Nexus mid-sentence. KNOWN GAP, left on purpose: every deterministic rule that catches it also demotes a real request.",
+      "note": "Talking about Nexus mid-sentence: the name is the object of the preposition «با», so the sentence is about the assistant rather than addressed to it. It used to be the corpus's one known gap — the strong grade read it as a call and the assistant would answer a statement that was not for it. A name immediately after a preposition is now a mention; the weak grade is unchanged, so the line still reaches the model as context.",
       "window": [],
       "anchor": {
         "user_id": 11,
         "name": "رضا",
         "text": "من با نکسوس کار نکردم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "about-nexus-english",
+      "category": "addressing",
+      "note": "The same reading in the mixed text a group actually writes: «with nexus» is a prepositional phrase, so the message is about the assistant. The English half of the preposition list exists for exactly this, and it is deliberately short — «to» and «for» are absent because both can head a line that addresses somebody.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "i never worked with nexus",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "addressed-mid-sentence-request",
+      "category": "addressing",
+      "note": "The case the demotion had to protect, and the reason the old gap was left open: the name is in the middle of the message and this is still a call, because «میشه» is not a preposition. It was pinned only in a unit test; it is in the corpus now so the measurement holds both sides of the rule at once.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "میشه نکسوس اینو بررسی کنی؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "about-nexus-preposition-boundary",
+      "category": "addressing",
+      "note": "The boundary, stated rather than hidden: «از نکسوس بپرس» is a third-person instruction to the room — ask Nexus — so the message is about the assistant and the strong grade demotes it. A group that wants the assistant itself says «نکسوس، ...». The weak grade still marks the line for the model, so the message is not silenced; only the immediate reply is.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "از نکسوس بپرس",
         "at": 1000,
         "role": "member"
       },

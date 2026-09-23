@@ -29,15 +29,14 @@ eval_intent = importlib.util.module_from_spec(_spec)
 sys.modules["eval_intent"] = eval_intent
 _spec.loader.exec_module(eval_intent)
 
-# The addressing case the matcher gets wrong today: an exact name in the middle
-# of a sentence that is talking *about* Nexus rather than to it — «من با نکسوس
-# کار نکردم». It is left alone on purpose. Every deterministic rule that catches
-# it also demotes a real request with the name in the same position («میشه نکسوس
-# اینو بررسی کنی؟»), and missing a call is the worse of the two mistakes; the
-# weak grade already marks the line "⋯ about you" for the model to read.
-KNOWN_ADDRESSING_GAPS = {
-    "about-nexus-mid-sentence",
-}
+# The addressing case the matcher used to get wrong: an exact name in the middle
+# of a sentence talking *about* Nexus rather than to it — «من با نکسوس کار
+# نکردم». It is empty now: a name immediately after a preposition is the object
+# of that preposition, so the message is about the assistant and the strong grade
+# no longer reads it as a call. The set is kept rather than deleted, because the
+# assertion below is what catches the next gap — and what catches a *new* one
+# appearing in a case that had been passing.
+KNOWN_ADDRESSING_GAPS: set[str] = set()
 
 
 def result():

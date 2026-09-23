@@ -22,6 +22,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [48. «بنش کن» and «بنش نکن» were the same message](#s48)
 - [49. What does the request act on?](#s49)
 - [50. The person lead the object reading removed](#s50)
+- [51. Talking about Nexus, not to it](#s51)
 
 ---
 
@@ -2829,3 +2830,116 @@ are all identical to §49's report.
   word in neither half of the split, and **an unknown side is unknown, not a thing**, so
   «برای اینم همین کارو بکن» keeps its reading. Guessing a side is the mistake the split
   exists to prevent.
+
+---
+
+<a id="s51"></a>
+## 51. Talking about Nexus, not to it
+
+### 51.1 The last open number
+
+For six increments the benchmark carried exactly one unmet case, and it was the
+addressing column:
+
+```
+[addressing] about-nexus-mid-sentence  addr True/False
+           «من با نکسوس کار نکردم»  ("I have not worked with Nexus")
+```
+
+The strong grade read the exact name and fired, so the assistant would answer a
+statement *about* it as though it were a call. The corpus recorded it as a gap
+**left on purpose**, with the reason written beside it: every deterministic rule
+that catches it also demotes a real request with the name in the same position —
+«میشه نکسوس اینو بررسی کنی؟» — and missing a call is the worse of the two
+mistakes.
+
+That reasoning was checked rather than trusted. The obvious rule, "an exact name
+that is not the first token is a mention", was applied to the corpus and to the
+pinned call list: it fixes the gap and **demotes «میشه نکسوس اینو بررسی کنی؟»**,
+which `tests/test_addressing.py` pins as a call. The note was right about that
+rule. It was not right that *every* rule has that cost.
+
+### 51.2 The rule: a name after a preposition is a complement
+
+A name immediately after a preposition is the **object** of that preposition, so
+the sentence is about the assistant:
+
+```
+من با نکسوس کار نکردم          with Nexus      → about it
+درباره نکسوس چی میدونی         about Nexus     → about it
+i never worked with nexus                       → about it
+میشه نکسوس اینو بررسی کنی؟     «میشه» is not a preposition → to it
+با اجازه نکسوس اینو پاک کن     the token before the name is «اجازه» → to it
+```
+
+`addressing._complement` is the second demotion beside `_quoted`, and it is the
+same **one token wide** for the same reason: only a preposition *immediately*
+before the name makes it a complement. `_PREPOSITIONS` is a **closed
+grammatical class**, not a phrase list — prepositions govern what follows them,
+which is what makes the rule grammatical rather than a list somebody maintains.
+
+Both demotions now share one helper, `_reading`, so a fourth strong-reading
+branch cannot be added without inheriting them.
+
+### 51.3 What is deliberately absent
+
+The English half of the list is short on purpose:
+
+```
+with, about, from, of, without        present
+to, for                               ABSENT
+```
+
+«to nexus: ...» and «for nexus: ...» are how a group writes an *address*, not a
+prepositional phrase about the assistant. Demoting on them would silence a real
+call, which is the worse of the two mistakes — so they are out, and
+`tests/test_addressing.py` asserts that they are.
+
+### 51.4 A demotion is not a silencing
+
+This is the property that makes the change safe, and it is worth stating
+separately: the weak grade is untouched. `mentioned` is still true for every
+demoted message, so the awareness pass still tells the model *"your name came up
+here"* and the model can still decide the room is talking about it. What is
+withdrawn is only the **immediate reply** — the thing that made the assistant
+answer a statement that was not for it.
+
+### 51.5 The numbers
+
+`tools/eval_intent.py`, corpus 120 → 123 cases (version 11; three new
+`addressing` cases — the English form, the protected mid-sentence call, and the
+boundary below):
+
+```
+                                  before   after
+cases                                120     123
+addressing accuracy                99.2%  100.0%
+corpus mismatches                      1       0
+not met                              1       0
+```
+
+Nothing else moved: expression, act, open questions, time, room state, entities,
+the direction, the object reading, the referent top-1 / ambiguity / wrong-but-
+confident, and `provided_before < provided_after` are all identical to §50's
+report. The act-coverage line reads 85.0% → 83.7% and the entity/edge denominators
+grew 120 → 123; both are the new cases, not a reading that changed.
+
+Cost and boundaries:
+
+```
+addressing cost                 one set-membership test per candidate match
+context/token overhead          none (addressing is a trigger, not a block)
+new sources / budget change     none
+Gemini / provider calls added   0
+database change                 none
+```
+
+### 51.6 The boundary, stated rather than hidden
+
+«از نکسوس بپرس» ("ask Nexus") is now demoted, and it is in the corpus as
+`about-nexus-preposition-boundary` so the behaviour is visible rather than
+implied. It is a **third-person instruction to the room** — the speaker is
+telling somebody else to go and ask the assistant — so the message is about
+Nexus, and a group that wants the assistant itself says «نکسوس، ...». Anyone who
+disagrees with that reading has one line to change and one case to move, which is
+the point of putting it in the corpus.
