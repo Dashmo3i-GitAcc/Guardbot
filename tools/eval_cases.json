@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -34,6 +34,13 @@
     "  .has_link             whether a URL is in the window",
     "  .named                the class the message names ('' / media / link /",
     "                        message) — scored only where labelled",
+    "",
+    "expect.request          the directive the anchor uses, and its direction:",
+    "  .directive            the word that makes it an instruction, quoted",
+    "  .polarity             '' / affirmative / negated — '' when a negation",
+    "                        is present that the reader cannot scope",
+    "  .manner               '' / command / request",
+    "                        — scored only where labelled, like `state.relation`",
     "",
     "Every case carries expect.entities, so a window with no media and no link says",
     "so explicitly rather than leaving the fact to a default — the same rule",
@@ -262,6 +269,11 @@
         "entities": {
           "newest_media": "",
           "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "affirmative",
+          "manner": "command"
         }
       }
     },
@@ -1555,6 +1567,11 @@
         "entities": {
           "newest_media": "",
           "has_link": false
+        },
+        "request": {
+          "directive": "بن",
+          "polarity": "",
+          "manner": "command"
         }
       }
     },
@@ -2031,6 +2048,11 @@
         "entities": {
           "newest_media": "",
           "has_link": false
+        },
+        "request": {
+          "directive": "check",
+          "polarity": "affirmative",
+          "manner": "request"
         }
       }
     },
@@ -3552,6 +3574,11 @@
           "newest_media": "photo",
           "has_link": false,
           "named": "media"
+        },
+        "request": {
+          "directive": "بفرست",
+          "polarity": "affirmative",
+          "manner": "command"
         }
       }
     },
@@ -3897,6 +3924,11 @@
         "entities": {
           "newest_media": "",
           "has_link": false
+        },
+        "request": {
+          "directive": "بن",
+          "polarity": "affirmative",
+          "manner": "command"
         }
       }
     },
@@ -4012,6 +4044,546 @@
           "edges": [],
           "focus": 0,
           "relation": "continues"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-persian",
+      "category": "polarity",
+      "note": "The dangerous pair. «بنش نکن» is built on the same directive as «بنش کن» and asks for the opposite; the act reader alone reads both as an instruction.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش نکن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-clitic",
+      "category": "polarity",
+      "note": "«ساکتش نکن» — the object clitic is inside the directive and the prohibitor follows it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ساکتش نکن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ساکتش",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-polite",
+      "category": "polarity",
+      "note": "A polite request NOT to act — the case the module exists for. Reading it as a request to ban is the worst mistake available here.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "میشه بنش نکنی؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "negated",
+          "manner": "request"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-trailing",
+      "category": "polarity",
+      "note": "The politeness word comes after the prohibitor, so the prohibition is still the token right after the directive.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش نکن لطفا",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "negated",
+          "manner": "request"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-plural",
+      "category": "polarity",
+      "note": "The plural prohibitor «نکنید», which is what a room writes to several administrators. The clitic «ـش» points at the file, not at a person, so the message names a thing and leaves no person open — the referent column is not exercised here on purpose.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو پاکش نکنید",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": "media"
+        },
+        "request": {
+          "directive": "پاکش",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-english",
+      "category": "polarity",
+      "note": "English puts the negator before the verb, and the tokenizer splits the apostrophe: «don't» arrives as «don» + «t». Without the look-back window this read as a plain instruction to ban. The Persian reader finds no deictic expression in an English sentence, and the label says so rather than claiming a resolution the server does not make.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "don't ban him",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ban",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-affirmative-command",
+      "category": "polarity",
+      "note": "The other half of the pair: a bare imperative with nothing negating it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "affirmative",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-affirmative-polite",
+      "category": "polarity",
+      "note": "A polite request, with nothing negating it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "میشه بنش کنی؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "affirmative",
+          "manner": "request"
+        }
+      }
+    },
+    {
+      "id": "polarity-affirmative-english",
+      "category": "polarity",
+      "note": "The English affirmative, for the pair with polarity-negated-english.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ban him",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ban",
+          "polarity": "affirmative",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-unscoped-negation",
+      "category": "polarity",
+      "note": "A negation that has nothing to do with the directive. The reader abstains rather than claiming the message asks for the action — the fail-safe direction.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این آدم خوب نیست، بنش کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-unscoped-disagreement",
+      "category": "polarity",
+      "note": "«نه بنش کن» is 'no, ban him' — a disagreement, not a negation. In Persian the negator of a directive follows it, so a Persian word before the directive never makes it negated; it only costs an abstention.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نه بنش کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "",
+          "manner": "command"
         }
       }
     }

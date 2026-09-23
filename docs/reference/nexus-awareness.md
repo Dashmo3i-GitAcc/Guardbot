@@ -19,6 +19,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [45. Who is talking to whom, and is this still the same thread](#s45)
 - [46. What does «این» point at when it is not a person](#s46)
 - [47. The question mark was part of the word](#s47)
+- [48. «بنش کن» and «بنش نکن» were the same message](#s48)
 
 ---
 
@@ -2350,3 +2351,168 @@ it reads as a question. That is a lexicon-and-segmentation question, not a
 punctuation one — it reads `unknown` with and without the mark — and it is
 recorded here rather than fixed, because fixing it means deciding how multi-word
 phrases enter a token-level lexicon, which is its own change.
+
+## 48. «بنش کن» and «بنش نکن» were the same message
+
+<a id="s48"></a>
+
+### 48.1 The half-truth, in one line
+
+`app/discourse.py` reads *what a message is doing* and reports one closed
+vocabulary. Both of these messages are `instruction` to it, and both quote the
+same directive:
+
+```
+بنش کن    →  instruction, the directive «بنش»
+بنش نکن   →  instruction, the directive «بنش»
+```
+
+One asks for a ban. The other forbids one. To the transcript they are the same
+message, and the transcript is what the model reads. So a room that writes «بنش
+نکن» — the message where it is *protecting* somebody — handed the model a line
+saying the room is asking for a ban, with the directive quoted. A wrong-person
+moderation action is the worst mistake available here, and this was a path to one
+built out of the server's own evidence.
+
+`app/requests.py` closes it. It reads three things the act alone cannot say:
+
+* **the directive** — quoted, not mapped to an action category. The lexicon is
+  `app/discourse.py`'s, borrowed rather than copied, because a second list would
+  be a second answer that drifts;
+* **the polarity** — `affirmative`, `negated`, or `""`;
+* **the manner** — a bare imperative («بنش کن») or a politeness frame
+  («میشه بنش کنی؟»). The same request at a different social distance.
+
+It is evidence in exactly the sense §42–§47 are: it reads text and reports what
+it found with the reason attached. Nothing branches on it, it cannot authorise
+anything, and it holds no path to a permission — no `db`, no `config`, no pool,
+no `rbac`. A test asserts the import set.
+
+### 48.2 Two negation rules, pointing in opposite directions on purpose
+
+This is the part worth reading carefully, because the two rules are not
+symmetric and the asymmetry is the design.
+
+**The rule that claims** — "this directive is negated" — is scoped tightly: the
+prohibitor must be the token *immediately after* the directive. That is the shape
+Persian actually uses («بنش نکن», «پاکش نکنید», «ساکتش نکن»), and the English shape
+is the mirror image, a negator within two tokens *before* it («don't ban him»,
+which the tokenizer delivers as «don» + «t»). «بنش رو نکن» does **not** claim a
+negation, because the word after the directive is «رو»; it falls through to the
+downgrade instead. A wider window would claim a negation the message does not
+make.
+
+**The rule that downgrades** is deliberately broad, and broad in the *safe*
+direction. When a negation appears anywhere else in the message the reader does
+not report `affirmative` — it reports nothing at all, because it cannot tell what
+the negation scopes. «این آدم خوب نیست، بنش کن» has a negation that has nothing to
+do with the directive, and the honest reading is silence. Breadth is affordable
+here in a way it was not in §47: a false hit costs an *abstention*, where a false
+hit in the directive lexicon costs a false instruction. So the downgrade rule is
+a list, two prefixes, and a stem rule for the negative past:
+
+```
+«نمی» / «نی»   +  stem      →  نمیشه, نمیخواد, نیست, نیومد
+«ن» + past stem            →  نکرد, نگفت, ندید, نرفت, نداشت
+```
+
+The stem rule is a stem list rather than forty spelled-out forms, and it is safe
+for the same reason: «نبرد» ("battle") is a false hit and it costs an abstention.
+A bare «ن» would not be safe — «نگاه», «نام», «نوع» all start with it — so the
+stem is what makes it a negation.
+
+**Two directives, two directions.** The reading is about the *first* directive,
+because that is the one whose neighbourhood decides the direction. But a message
+can carry a second, negated directive — «بنش کن، پاکش نکن» asks for a ban *and*
+forbids a deletion — and a one-line summary cannot hold both. Reporting
+`affirmative` for the first half there would be the dangerous direction again, so
+the reader abstains. «پاکش نکن، بنش کن» reports the first directive as negated,
+which is true of the directive it is about; that is pinned by a test rather than
+left to drift.
+
+### 48.3 Where it reaches the model
+
+The polarity is rendered into the **same source** as the act
+(`awareness_context._render_anchor_act`, `anchor_act`, tier 0, budget raised 200 →
+320). That is not tidiness. An act that says *instruction* while the message
+forbids the action is the half-truth this increment exists for, so the direction
+must not be a separate source that a budget could drop while the act survives.
+
+The polarity line comes **first** for the same reason one level down: `_clip`
+keeps whole lines from the front, so if a budget ever did bite, the line that
+survives has to be the one saying the message forbids the action. The act line
+alone is the half-truth; the polarity line alone is a warning.
+
+A bare affirmative command renders **nothing** — the act line already says
+`instruction`, and a line saying "and it is affirmative" would be noise on every
+ordinary moderation message. So the block only grows on the messages where the
+direction is not the obvious one.
+
+### 48.4 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 107 cases — the 96 from §47 plus 11
+`polarity` ones), with the direction reader absent and present:
+
+```
+the directive's direction          before   after
+labelled cases                         16      16
+exact (word · direction · manner)     0/16   16/16
+  word                              (act)   100.0%
+  direction                             -   100.0%
+  manner                                -   100.0%
+negated cases                           6       6
+negated recall                          -   100.0%
+forbidden read as asked-for          6/6       0
+abstained (safe)                        -       0
+block chars max                         -     155
+```
+
+"Before" is the act reader alone, which is what the server had: it reads 15 of
+the 16 as `instruction` and **never** carries a direction, so all six negated
+directives were presented to the model as an instruction to act. That is the
+`6/6` in the table — not a near miss, every one of them. After, it is zero.
+
+The rest of the corpus did not move:
+
+```
+                                  before   after
+cases                                 96     107
+expression accuracy               100.0%  100.0%
+addressing accuracy                98.9%   99.1%
+act accuracy                      100.0%  100.0%
+act false positives / negatives      0 / 0   0 / 0
+relation exact                      12/12   12/12
+named class exact                   10/10   11/11
+referent top-1 accuracy           100.0%  100.0%
+ambiguity precision               100.0%  100.0%
+wrong-but-confident                     0       0
+referent block chars mean / max  131/527  138/527
+Gemini calls added                      0       0
+```
+
+The referent mean moves 131 → 138 for a corpus reason, not a code one: the 11 new
+cases are directive messages with a person in the window, so the referent block
+renders on more of them. `answerable` fell 35 → 33 because two of the new English
+cases carry no Persian deictic expression at all — the label says so rather than
+claiming a resolution the server does not make.
+
+Reading cost, measured apart from the other readers:
+
+```
+polarity reader us mean / p95   ~0.08 ms / ~0.13 ms   (no query, no model call)
+```
+
+### 48.5 Two known boundaries
+
+**A clitic that points at a thing still offers a person.** «فایل رو پاکش نکنید»
+has the object clitic «ـش», which points at the file; the person resolver still
+lists the room's members for it (not confidently — the render says so). §46's
+guard covers a bare *demonstrative* before a thing word, and this is the same
+class of mistake one morpheme over. It is recorded rather than fixed, because the
+fix belongs to the referent reader and would need its own corpus and its own
+numbers. The case that exposed it is labelled for what it is: a message that
+names a thing and leaves no person open.
+
+**A multi-word directive is not in the lexicon.** Same boundary §47.4 recorded,
+seen from the other reader: the directive lexicon is token-level, so a two-word
+phrase is not a directive and the direction reader has nothing to be about.

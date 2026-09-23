@@ -6,10 +6,11 @@ Why this exists
 The brief for this stage is explicit that no claim of "smarter" may be made
 without a number, and that the number must be reproducible. This is where the
 numbers come from. It runs the *deterministic* layers — the name matcher, the
-deictic expression finder, the referent resolver, the act reader, the open-question
-reader, the time-word reader, the room-state reader and the entity reader — over a
-labelled corpus and reports accuracy, ambiguity behaviour, the cost in microseconds,
-and the size of the block the model would be shown.
+deictic expression finder, the referent resolver, the act reader, the polarity
+reader, the open-question reader, the time-word reader, the room-state reader and
+the entity reader — over a labelled corpus and reports accuracy, ambiguity
+behaviour, the cost in microseconds, and the size of the block the model would be
+shown.
 
 What it can and cannot measure
 ------------------------------
@@ -59,6 +60,7 @@ from app import (  # noqa: E402
     discourse,
     entities,
     referents,
+    requests,
     room_state,
     temporal,
 )
@@ -138,6 +140,13 @@ def evaluate(cases: dict) -> dict:
         media = ent.of_kind(entities.KIND_MEDIA)
         newest_media = media[0].detail if media else ""
 
+        # Timed apart again: the polarity reader borrows the act lexicon and
+        # tokenizes the anchor once, and its cost must not be hidden.
+        request_started = time.perf_counter()
+        request = requests.read_request(anchor["text"])
+        request_block = requests.render(request)
+        request_us = (time.perf_counter() - request_started) * 1_000_000
+
         top = resolution.top()
         top_id = top.user_id if top else None
 
@@ -164,6 +173,16 @@ def evaluate(cases: dict) -> dict:
         expected_has_link = bool(expected_entities.get("has_link") or False)
         has_named_label = "named" in expected_entities
         expected_named = str(expected_entities.get("named") or "")
+
+        # The directive, its direction and its manner are a reading of the words,
+        # so they are scored only where labelled — the same rule the relation and
+        # the named class follow. The default is the empty reading, which is what
+        # a message with no directive legitimately gets.
+        expected_request = expect.get("request") or {}
+        has_request_label = "request" in expect
+        expected_directive = str(expected_request.get("directive") or "")
+        expected_polarity = str(expected_request.get("polarity") or "")
+        expected_manner = str(expected_request.get("manner") or "")
 
         detail.append(
             {
@@ -210,10 +229,20 @@ def evaluate(cases: dict) -> dict:
                 "expected_named": expected_named,
                 "got_named": ent.named,
                 "entity_chars": len(entity_block),
+                "has_request_label": has_request_label,
+                "expected_directive": expected_directive,
+                "got_directive": request.directive,
+                "expected_polarity": expected_polarity,
+                "got_polarity": request.polarity,
+                "expected_manner": expected_manner,
+                "got_manner": request.manner,
+                "request_why": request.why[0] if request.why else "",
+                "request_chars": len(request_block),
                 "block_chars": len(block),
                 "us": elapsed_us,
                 "when_us": when_us,
                 "entity_us": entity_us,
+                "request_us": request_us,
                 "kind_ok": expression.kind == expect["expression_kind"],
                 "addressed_ok": bool(addressed) == bool(expect["addressed"]),
                 "act_ok": act.kind == expect.get("act", discourse.ACT_UNKNOWN),
@@ -225,6 +254,14 @@ def evaluate(cases: dict) -> dict:
                 "media_ok": newest_media == expected_newest_media,
                 "link_ok": bool(ent.of_kind(entities.KIND_LINK)) == expected_has_link,
                 "named_ok": ent.named == expected_named,
+                "directive_ok": request.directive == expected_directive,
+                "polarity_ok": request.polarity == expected_polarity,
+                "manner_ok": request.manner == expected_manner,
+                "request_ok": (
+                    request.directive == expected_directive
+                    and request.polarity == expected_polarity
+                    and request.manner == expected_manner
+                ),
             }
         )
 
@@ -313,6 +350,23 @@ def _metrics(detail: list[dict]) -> dict:
     # they are scored over every case. The class the message names is a reading of
     # the words, so it is scored only where it was labelled.
     named_cases = [r for r in detail if r["has_named_label"]]
+
+    # ── The directive's direction ─────────────────────────────────────────
+    # Scored only where labelled, because it is a reading of the words. The
+    # metric that matters is the *dangerous direction*: a message that forbids
+    # the action read as ``affirmative`` — «بنش نکن» reported as "asks for a
+    # ban" — which is the mistake this reader exists to prevent. The safe
+    # direction, an abstention (``""``), is counted apart from it.
+    request_cases = [r for r in detail if r["has_request_label"]]
+    request_negated = [r for r in request_cases if r["expected_polarity"] == requests.POLARITY_NEGATED]
+    request_affirmative = [
+        r for r in request_cases if r["expected_polarity"] == requests.POLARITY_AFFIRMATIVE
+    ]
+    request_false_affirmative = [
+        r
+        for r in request_negated
+        if r["got_polarity"] == requests.POLARITY_AFFIRMATIVE
+    ]
 
     return {
         "cases": len(detail),
@@ -410,6 +464,44 @@ def _metrics(detail: list[dict]) -> dict:
         "named_correct": sum(1 for r in named_cases if r["named_ok"]),
         "named_accuracy": rate(named_cases, lambda r: r["named_ok"]),
         "entity_block_chars_max": max((r["entity_chars"] for r in detail), default=0),
+        "request_cases": len(request_cases),
+        "request_correct": sum(1 for r in request_cases if r["request_ok"]),
+        "request_accuracy": rate(request_cases, lambda r: r["request_ok"]),
+        # Per field, because the directive and the manner are inherited from the
+        # act lexicon while the polarity is what this increment added: a single
+        # accuracy figure would let the new column hide behind the old ones.
+        "request_directive_accuracy": rate(request_cases, lambda r: r["directive_ok"]),
+        "request_polarity_accuracy": rate(request_cases, lambda r: r["polarity_ok"]),
+        "request_manner_accuracy": rate(request_cases, lambda r: r["manner_ok"]),
+        "request_negated_cases": len(request_negated),
+        "request_negated_recall": rate(request_negated, lambda r: r["polarity_ok"]),
+        # The dangerous direction, named: a message that forbids the action read
+        # as asking for it. Should be zero, and it is the number to watch.
+        "request_false_affirmative": len(request_false_affirmative),
+        # The safe direction: the reader abstained on a case that has an answer.
+        "request_abstained": sum(
+            1
+            for r in request_cases
+            if r["got_polarity"] == "" and r["expected_polarity"] != ""
+        ),
+        # …split by what was expected, because abstaining on a negated case still
+        # withholds the warning while abstaining on an affirmative one only
+        # withholds a nicety.
+        "request_affirmative_cases": len(request_affirmative),
+        "request_affirmative_abstained": sum(
+            1 for r in request_affirmative if r["got_polarity"] == ""
+        ),
+        "request_chars_max": max((r["request_chars"] for r in detail), default=0),
+        "request_us_mean": (
+            statistics.fmean([r["request_us"] for r in detail]) if detail else 0.0
+        ),
+        "request_us_p95": (
+            sorted(r["request_us"] for r in detail)[
+                min(len(detail) - 1, int(len(detail) * 0.95))
+            ]
+            if detail
+            else 0.0
+        ),
         "needs_resolution": len(needs),
         "answerable": len(answerable),
         "resolution_top1_accuracy": rate(
@@ -527,6 +619,22 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  named class accuracy       {_pct(m['named_accuracy'])}",
         f"  block chars max            {m['entity_block_chars_max']}",
         "",
+        f"the directive's direction (over {m['request_cases']} labelled cases)",
+        f"  exact (word·direction·manner)  {m['request_correct']} / {m['request_cases']}",
+        f"  accuracy                   {_pct(m['request_accuracy'])}",
+        "  per field                  "
+        f"word {_pct(m['request_directive_accuracy'])}  "
+        f"direction {_pct(m['request_polarity_accuracy'])}  "
+        f"manner {_pct(m['request_manner_accuracy'])}",
+        f"  negated recall             {m['request_negated_cases']} cases, "
+        f"{_pct(m['request_negated_recall'])} found",
+        f"  forbidden read as asked-for {m['request_false_affirmative']} "
+        "(the dangerous direction — should be 0)",
+        f"  abstained (safe)           {m['request_abstained']} "
+        f"of which affirmative {m['request_affirmative_abstained']}"
+        f"/{m['request_affirmative_cases']}",
+        f"  block chars max            {m['request_chars_max']}",
+        "",
         f"referent resolution ({m['answerable']} answerable of {m['needs_resolution']} open)",
         f"  top-1 accuracy             {_pct(m['resolution_top1_accuracy'])}",
         f"  ambiguity recall           {_pct(m['ambiguity_recall'])}",
@@ -547,6 +655,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  resolver us mean / p95     {m['us_mean']:.0f} / {m['us_p95']:.0f}",
         f"  time-word us mean / p95    {m['when_us_mean']:.0f} / {m['when_us_p95']:.0f}",
         f"  entity us mean / p95       {m['entity_us_mean']:.0f} / {m['entity_us_p95']:.0f}",
+        f"  polarity us mean / p95     {m['request_us_mean']:.0f} / {m['request_us_p95']:.0f}",
         "",
     ]
     failures = [
@@ -557,6 +666,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])
+        or (r["has_request_label"] and not r["request_ok"])
         or (r["requires_resolution"] and r["expected_referent"] is not None
             and r["got_referent"] != r["expected_referent"])
         or (r["expected_ambiguous"] and not r["got_ambiguous"])
@@ -580,6 +690,9 @@ def report(result: dict, *, verbose: bool = False) -> str:
                 f"media {r['got_newest_media']!r}/{r['expected_newest_media']!r} "
                 f"link {r['got_has_link']}/{r['expected_has_link']} "
                 f"named {r['got_named']!r}/{r['expected_named']!r} "
+                f"req {r['got_directive']!r}·{r['got_polarity']!r}·{r['got_manner']!r}"
+                f"/{r['expected_directive']!r}·{r['expected_polarity']!r}"
+                f"·{r['expected_manner']!r} "
                 f"q {r['got_questions']}/{r['expected_questions']}"
             )
             if verbose and r["note"]:

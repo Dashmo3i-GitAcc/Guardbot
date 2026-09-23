@@ -297,6 +297,38 @@ def _hits(tokens: list[str], words: frozenset[str]) -> list[str]:
     return out
 
 
+def _directives(tokens: list[str]) -> list[tuple[int, str, bool]]:
+    """Every token that makes the message an instruction.
+
+    ``(index, surface, is_action)``, in token order. ``is_action`` says the token
+    is a moderation verb rather than an ordinary imperative, which is the
+    distinction ``read_act`` needs to keep quoting the word that says *what* is
+    being asked for («ببین بنش کن» quotes «بنش», not «ببین»).
+
+    The index is carried because the *polarity* of a directive depends on what
+    comes after it — «بنش کن» asks for a ban and «بنش نکن» forbids one — and
+    ``app/requests.py`` must ask its question about the same word this module
+    already found. One lexicon, two readers.
+    """
+    action = set(_hits(tokens, _action_words()))
+    imperative = set(_hits(tokens, _IMPERATIVES))
+    return [
+        (index, token, token in action)
+        for index, token in enumerate(tokens)
+        if token in action or token in imperative
+    ]
+
+
+def directives(text: str | None) -> list[tuple[int, str]]:
+    """The public form of :func:`_directives`, for the polarity reader.
+
+    ``(index, surface)`` in token order. The polarity reader wants the *first*
+    directive by position, because that is the one whose neighbourhood decides
+    whether the message asks for the action or forbids it.
+    """
+    return [(index, token) for index, token, _ in _directives(_tokens(text))]
+
+
 def read_act(text: str | None) -> Act:
     """What the message is doing, from the closed vocabulary, or nothing.
 
@@ -327,11 +359,14 @@ def read_act(text: str | None) -> Act:
     if report and ACT_CORRECTION not in found:
         found[ACT_REPORT] = (f"the reporting verb «{report[0]}»",)
 
-    action = _hits(tokens, _action_words())
-    imperative = _hits(tokens, _IMPERATIVES)
-    if action or imperative:
-        word = (action or imperative)[0]
-        found[ACT_INSTRUCTION] = (f"the directive «{word}»",)
+    directive = _directives(tokens)
+    if directive:
+        # A moderation verb is preferred over an ordinary imperative, whichever
+        # comes first in the message: «ببین بنش کن» quotes «بنش», the word that
+        # says what is being asked for, rather than the «ببین» that only says
+        # where to look. This is the rule the inline version had, kept.
+        chosen = next((d for d in directive if d[2]), directive[0])
+        found[ACT_INSTRUCTION] = (f"the directive «{chosen[1]}»",)
 
     social = _hits(tokens, _SOCIAL_WORDS)
     if social:

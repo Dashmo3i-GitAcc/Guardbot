@@ -75,6 +75,16 @@ def test_the_corpus_is_well_formed():
         ent_keys = set(case["expect"]["entities"])
         assert {"newest_media", "has_link"} <= ent_keys, case["id"]
         assert ent_keys <= {"newest_media", "has_link", "named"}, case["id"]
+        # A direction label carries all three parts, because they are one
+        # reading: a label with the polarity missing would score an abstention
+        # as a pass. Optional, because a case about the thread is not a case
+        # about the directive.
+        if "request" in case["expect"]:
+            assert set(case["expect"]["request"]) == {
+                "directive",
+                "polarity",
+                "manner",
+            }, case["id"]
 
 
 def test_expression_detection_is_exact_on_the_corpus():
@@ -363,6 +373,105 @@ def test_a_trailing_mark_never_changes_a_reading():
             assert r["named_ok"], case_id
         if r["has_relation_label"]:
             assert r["relation_ok"], case_id
+        if r["has_request_label"]:
+            assert r["request_ok"], case_id
+
+
+# ── The directive's direction ─────────────────────────────────────────────
+def test_the_direction_reader_is_exact_on_the_labelled_cases():
+    m = result()
+    assert m["request_cases"] >= 16
+    assert m["request_correct"] == m["request_cases"]
+    assert m["request_accuracy"] == 1.0
+
+
+def test_the_direction_reader_never_reads_a_forbidden_action_as_asked_for():
+    """The floor the whole increment exists for.
+
+    ``app/discourse.py`` reads «بنش کن» and «بنش نکن» identically — both are
+    ``instruction`` with the directive «بنش». Before this reader the transcript
+    said the room was asking for a ban in both cases, and the second one is the
+    message where the room is protecting somebody. This number is that mistake,
+    counted. It is zero, and it must stay zero.
+    """
+    m = result()
+    assert m["request_negated_cases"] >= 6
+    assert m["request_false_affirmative"] == 0
+
+
+def test_every_negated_directive_is_found():
+    m = result()
+    assert m["request_negated_recall"] == 1.0
+    assert m["request_polarity_accuracy"] == 1.0
+
+
+def test_the_direction_reader_abstains_rather_than_guessing():
+    """A negation the reader cannot scope is not an affirmative.
+
+    Scored on the polarity cases the corpus labels ``""``: the negation is in the
+    message but not attached to the directive, so the honest reading is silence.
+    A third such case lives in the ``correction`` category, where the negation
+    «نه» is the correction marker itself.
+    """
+    m = result()
+    detail = {r["id"]: r for r in m["detail"]}
+    unscoped = [
+        c["id"]
+        for c in eval_intent.load_cases()["cases"]
+        if c.get("category") == "polarity"
+        and (c["expect"].get("request") or {}).get("polarity") == ""
+    ]
+    assert len(unscoped) >= 2, unscoped
+    for case_id in unscoped:
+        assert detail[case_id]["got_polarity"] == "", case_id
+        assert detail[case_id]["request_ok"], case_id
+
+
+def test_every_polarity_case_is_exact():
+    """The cases the increment added, scored on every column they label."""
+    m = result()
+    detail = {r["id"]: r for r in m["detail"]}
+    ids = sorted(
+        c["id"]
+        for c in eval_intent.load_cases()["cases"]
+        if c.get("category") == "polarity"
+    )
+    assert len(ids) >= 11, ids
+    for case_id in ids:
+        r = detail[case_id]
+        assert r["request_ok"], case_id
+        assert r["kind_ok"] and r["act_ok"] and r["when_ok"], case_id
+        assert r["edges_ok"] and r["focus_ok"], case_id
+        assert r["media_ok"] and r["link_ok"], case_id
+        if r["has_named_label"]:
+            assert r["named_ok"], case_id
+
+
+def test_the_direction_block_stays_small():
+    """The act line and the polarity line share one source, budget 320."""
+    assert result()["request_chars_max"] <= 320
+
+
+def test_the_direction_reader_is_fast_enough_to_run_on_every_pass():
+    """It tokenizes the anchor once and borrows the act lexicon — no query."""
+    assert result()["request_us_mean"] < 1000
+
+
+def test_every_direction_is_exercised():
+    """A corpus that only holds affirmatives would score a constant at 1.0."""
+    polarities = {
+        (c["expect"].get("request") or {}).get("polarity")
+        for c in eval_intent.load_cases()["cases"]
+        if "request" in c["expect"]
+    }
+    assert {"affirmative", "negated", ""} <= polarities
+
+
+def test_the_corpus_labels_the_direction_where_it_matters():
+    """Every directive case in the polarity category carries the label."""
+    for case in eval_intent.load_cases()["cases"]:
+        if case.get("category") == "polarity":
+            assert "request" in case["expect"], case["id"]
 
 
 def test_the_harness_runs_without_a_database_or_a_key():

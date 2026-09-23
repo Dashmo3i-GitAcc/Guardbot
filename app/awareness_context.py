@@ -63,6 +63,7 @@ from . import (
     identity,
     persian_calendar,
     referents,
+    requests,
     room_state,
     temporal,
 )
@@ -278,15 +279,30 @@ def _render_remembered_people(ctx: Ctx) -> str:
 
 # ── The batch's own reading, and what the room left open ──────────────────
 def _render_anchor_act(ctx: Ctx) -> str:
-    """What the message the pass is about is doing. Tier 0.
+    """What the message the pass is about is doing, and in which direction. Tier 0.
 
-    One line, and the cheapest signal in this file: the anchor's act, read off
-    its own words. «چقدره؟» and «بنش کن» are the same length and opposite in
-    force, and a model reading a transcript has to work that out from the
-    sentence — which it can, and which this saves it from having to do on every
-    pass. Evidence, never a gate: nothing branches on it.
+    One line plus, when there is one, the polarity line: the anchor's act and
+    whether it asks for the action or forbids it, both read off its own words.
+    «چقدره؟» and «بنش کن» are the same length and opposite in force, and a model
+    reading a transcript has to work that out from the sentence — which it can,
+    and which this saves it from having to do on every pass.
+
+    The two are one block on purpose. An act that says *instruction* while the
+    message forbids the action is the dangerous half-truth — «بنش کن» and «بنش
+    نکن» read identically to the act reader — so the polarity must not be a
+    separate source that a budget can drop while the act survives.
+
+    The polarity line comes **first** for the same reason one level down: a clip
+    keeps whole lines from the front, so if a budget ever did bite, the line that
+    survives must be the one saying the message forbids the action. The act line
+    alone is the half-truth; the polarity line alone is a warning.
+
+    Evidence, never a gate: nothing branches on either.
     """
-    return discourse.render_act(discourse.read_act((ctx.anchor or {}).get("text")))
+    text = (ctx.anchor or {}).get("text")
+    return requests.render(requests.read_request(text)) + discourse.render_act(
+        discourse.read_act(text)
+    )
 
 
 def _render_open_questions(ctx: Ctx) -> str:
@@ -587,7 +603,11 @@ SOURCES: tuple[Source, ...] = (
     # to re-derive from a transcript on every pass. The act is one line and
     # renders nothing when the words carry no reading; the question block is
     # empty unless there is a question no reply points at.
-    Source("anchor_act", TIER_ALWAYS, 200, _render_anchor_act),
+    #
+    # The budget covers the polarity line too — the act and the direction it
+    # points in are one source on purpose, so an "instruction" reading can never
+    # outlive the negation that reverses it.
+    Source("anchor_act", TIER_ALWAYS, 320, _render_anchor_act),
     Source("open_questions", TIER_ALWAYS, 500, _render_open_questions),
     # Who is talking to whom, and whether this message is still the same thread.
     # Tier 0: both are a pass over the window the pass already read. The graph is

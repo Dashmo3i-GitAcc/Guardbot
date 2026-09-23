@@ -1731,15 +1731,66 @@ reference file is stale and this list is the one to fix first.
   Persian letter" class keeps them glued to the word before it. Every reader that
   looks a word up in a lexicon must exclude them by name, or «این لینک؟» names no
   thing, «سارا؟» names nobody, «ممنون؟» is not a greeting, and «چی شده؟» is not
-  the sentence «چی شده». The pattern is **copied** into each reader (they are
-  pure at import, and a shared helper would be a new edge in the graph) and
-  `tests/test_awareness_context.py` pins the copies together so they cannot
+  the sentence «چی شده». The pattern is **copied** into each of the five readers
+  (they are pure at import, and a shared helper would be a new edge in the graph)
+  and `tests/test_awareness_context.py` pins the copies together so they cannot
   drift. `addressing` is immune by construction — `_letters` keeps only
   alphanumerics — and is deliberately left alone.
 * A **trailing mark never changes a reading**: `discourse`'s act, `referents`'s
-  name/id matching and thing guard, `entities`'s noun lookup and `room_state`'s
-  content words all hold with the mark attached. `tools/eval_intent.py` has a
-  `punctuation` category and a floor that fails if any of those regress.
+  name/id matching and thing guard, `entities`'s noun lookup, `requests`'s
+  prohibition and `room_state`'s content words all hold with the mark attached.
+  `tools/eval_intent.py` has a `punctuation` category and a floor that fails if
+  any of those regress.
+* `app/requests.py` reads whether a message **asks for the action or forbids
+  it** — the half-truth `discourse` cannot see, because «بنش کن» and «بنش نکن» are
+  the same `instruction` with the same directive to it. It reports the directive
+  (quoted, never mapped to an action category), the **polarity**
+  (`affirmative`/`negated`/`""`) and the **manner** (`command`/`request`). It is
+  evidence, never a gate, pure at import time, and `awareness_context` stays the
+  only importer.
+* The directive lexicon is **borrowed from `discourse`, never copied** — a second
+  list would be a second answer that drifts. `discourse.directives` is the public
+  form, and `read_act` uses the same function so the act line and the direction
+  line can never disagree about *which* word made the message an instruction.
+* The two negation rules point in **opposite directions on purpose**. The rule
+  that **claims** a negation is scoped tightly — the prohibitor must be the token
+  immediately **after** the directive (Persian: «بنش نکن»), or a negator within
+  two tokens **before** it (English: «don't ban him», which the tokenizer delivers
+  as «don» + «t»). The rule that **downgrades** is deliberately broad: any other
+  negation in the message means the reader reports `""`, **never**
+  `affirmative`, because it cannot tell what the negation scopes. Breadth is
+  affordable in the downgrade direction — a false hit costs an abstention, where a
+  false hit in the directive lexicon costs a false instruction.
+* A **Persian word before a directive is never a negator**: «نه بنش کن» is "no,
+  ban him", and the look-back window therefore lists **English forms only**. A
+  Persian negation the reader cannot scope still downgrades through the broad
+  rule; it never makes a claim.
+* The negative past is read by a **stem rule** («ن» + a known past stem →
+  «نکرد», «نگفت», «ندید», «نرفت»), not forty spelled-out forms. A bare «ن» would
+  not be safe («نگاه», «نام», «نوع» all start with it), so the stem is what makes
+  it a negation, and the rule only ever downgrades — «نبرد» ("battle") is a false
+  hit that costs an abstention.
+* The reading is about the **first** directive, because that is the one whose
+  neighbourhood decides the direction. A **later negated directive** —
+  «بنش کن، پاکش نکن» asks for a ban *and* forbids a deletion — makes the reader
+  **abstain**, because a one-line summary cannot hold two directions and
+  reporting `affirmative` for the first half would be the dangerous direction
+  again.
+* The polarity is rendered into the **same source as the act**
+  (`anchor_act`, budget 320), and the polarity line comes **first**. An act line
+  that says `instruction` while the message forbids the action is exactly the
+  half-truth this reader exists for, so a budget must never be able to drop the
+  direction and keep the act; `_clip` keeps whole lines from the front, so the
+  warning goes first.
+* A **bare affirmative command renders nothing** — the act line already says
+  `instruction`, and a direction line on every ordinary moderation message would
+  be noise. The block grows only where the direction is not the obvious one.
+* The floors for the direction live in `tests/test_intent_eval.py`:
+  `request_accuracy == 1.0`, `request_negated_recall == 1.0`, and above all
+  **`request_false_affirmative == 0`** — a message that forbids the action read as
+  asking for it, which is the mistake counted. A change to the lexicon moves
+  those numbers **on purpose**, by editing the corpus, never by loosening the
+  floor.
 
 ### 53.8 The assistant
 

@@ -580,7 +580,13 @@ def test_every_reader_splits_tokens_the_same_way():
     not a Persian letter" class keeps them glued to the word before it. Every
     lexicon lookup on the last word of a message then fails: «این لینک؟» names no
     thing, «سارا؟» names nobody, «ممنون؟» is not a greeting, and «چی شده؟» is not
-    the sentence «چی شده».
+    the sentence «چی شده». The polarity reader is the most sensitive of the five,
+    because the prohibitor is usually the *last* word: «میشه بنش نکنی؟» carries
+    «نکنی؟», which is not «نکنی», and the prohibition read as a request *to* act.
+
+    ``app/addressing.py`` is deliberately not in the set: it splits the same
+    string but then keeps only alphanumerics (``_letters``), so the mark is
+    removed either way and it never had the bug.
 
     The pattern is copied into each reader rather than imported, because each one
     is pure at import and importing a shared helper would be a new edge in a graph
@@ -590,12 +596,14 @@ def test_every_reader_splits_tokens_the_same_way():
     import app.discourse as discourse
     import app.entities as entities
     import app.referents as referents
+    import app.requests as requests
     import app.room_state as room_state
 
     readers = {
         "discourse": discourse,
         "entities": entities,
         "referents": referents,
+        "requests": requests,
         "room_state": room_state,
     }
     patterns = {name: module._TOKEN_SPLIT.pattern for name, module in readers.items()}
@@ -770,6 +778,52 @@ def test_the_anchor_act_renders_nothing_when_the_words_carry_no_reading():
     assert awareness_context._render_anchor_act(_referent_ctx(anchor, [])) == ""
 
 
+# ── The act and the direction it points in are one block ──────────────────
+# «بنش کن» and «بنش نکن» are the same reading to the act reader — both are
+# ``instruction`` with the directive «بنش» — and one of them is the message where
+# the room is protecting somebody. The direction therefore has to travel with the
+# act, in the same source, or an "instruction" line can outlive the negation that
+# reverses it.
+def test_a_forbidden_action_renders_both_the_act_and_the_direction():
+    anchor = _msg(ADMIN, "بنش نکن", role="admin", name="Admin", at=1000)
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, []))
+    assert "instruction" in out
+    assert "negates" in out
+
+
+def test_the_direction_line_comes_before_the_act_line():
+    """A clip keeps whole lines from the front, so the warning must be first.
+
+    If a budget ever bit into this block, the line that must survive is the one
+    saying the message forbids the action — the act line alone is the half-truth.
+    """
+    anchor = _msg(ADMIN, "بنش نکن", role="admin", name="Admin", at=1000)
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, []))
+    assert out.index("negates") < out.index("instruction")
+
+
+def test_a_bare_affirmative_command_adds_no_direction_line():
+    """The act line already says ``instruction``; a direction line on every
+    ordinary moderation message would be noise in the prompt."""
+    anchor = _msg(ADMIN, "بنش کن", role="admin", name="Admin", at=1000)
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, []))
+    assert "instruction" in out
+    assert "negates" not in out
+
+
+def test_the_direction_is_not_rendered_by_any_other_source():
+    """One source, so no budget can drop the direction and keep the act."""
+    anchor = _msg(ADMIN, "بنش نکن", role="admin", name="Admin", at=1000)
+    ctx = _referent_ctx(anchor, [])
+    others = [
+        source.name
+        for source in awareness_context.SOURCES
+        if source.name != "anchor_act"
+    ]
+    for name in others:
+        assert "negates" not in _source_blocks(ctx, name), name
+
+
 def test_the_open_questions_are_rendered():
     anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
     window = [_msg(TARGET, "قیمت چنده؟", name="Reza", at=900, message_id=5)]
@@ -806,7 +860,7 @@ def test_the_new_sources_are_bounded_by_their_own_budget(monkeypatch):
     ]
     ctx = _referent_ctx(anchor, window)
     assert len(_source_blocks(ctx, "open_questions")) <= 500
-    assert len(_source_blocks(ctx, "anchor_act")) <= 200
+    assert len(_source_blocks(ctx, "anchor_act")) <= 320
     assert len(_source_blocks(ctx, "anchor_when")) <= 300
     assert len(_source_blocks(ctx, "reply_graph")) <= 600
     assert len(_source_blocks(ctx, "thread")) <= 500
