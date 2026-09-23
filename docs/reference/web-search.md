@@ -16,11 +16,12 @@ The text below is verbatim; it was not edited during the move.
 
 ### 52.1 What it is, and the one-sentence reason it is separate
 
-Nexus answers informational questions from the **live web** by default, using the
-provider's own Google Search grounding
-(`types.Tool(google_search=types.GoogleSearch())`). The findings are fetched at
-request time, enter the answer's generation as bounded reference material, and
-the sources are shown to the person.
+Nexus answers informational questions from the **live web** by default, using a
+search provider. Two are selectable and exactly one is active at a time: the
+original Google Search grounding
+(`types.Tool(google_search=types.GoogleSearch())`), and Tavily. The findings are
+fetched at request time, enter the answer's generation as bounded reference
+material, and the sources are shown to the person.
 
 It is a **separate pool workload**, `search`, and that is the whole design rather
 than a detail of it. Grounding runs *inside* a Gemini request, so the tempting
@@ -183,8 +184,10 @@ model's prose.
 
 | variable | default | what it does |
 |---|---|---|
-| `GEMINI_SEARCH_ENABLED` | **`true`** | the feature switch. Safe because a missing credential makes it inert |
-| `GEMINI_SEARCH_API_KEY` | `""` | its own credential; empty means no search and an unchanged assistant |
+| `GEMINI_SEARCH_ENABLED` | **`true`** | the feature switch for the whole capability, whichever provider is active. Safe because a missing credential makes it inert |
+| `SEARCH_PROVIDER` | `gemini` | which provider answers: `gemini` (Google Search grounding) or `tavily`. Exactly one is active — there is **no** automatic fallback between them |
+| `GEMINI_SEARCH_API_KEY` | `""` | the Gemini provider's own credential; empty means no grounding and an unchanged assistant |
+| `TAVILY_API_KEY` | `""` | the Tavily provider's own credential, never shared with a Gemini workload; empty means Tavily search is inert |
 | `GEMINI_SEARCH_ALLOW_SHARED_KEY` | `false` | opt-in to the shared pool; off, because grounding has a quota of its own |
 | `GEMINI_SEARCH_MODEL` | the chat model | first choice; every default model supports grounding |
 | `GEMINI_SEARCH_FALLBACK_MODELS` | the chat fallbacks | |
@@ -243,3 +246,97 @@ own reason. No existing test was weakened to accept this change.
 * **No change to Nexus's trigger policy, addressing, awareness context or
   conversational flow.** The only new thing on the conversational path is one
   labelled context block and one attribution message.
+
+### 52.12 Providers: Gemini grounding and Tavily
+
+The capability is provider-agnostic. The policy (`should_search`), the brakes
+(rate window, breaker, daily allowance), the untrusted frame (`untrusted_block`),
+the honest failure note (`failure_block`) and the attribution footer
+(`sources_block`) are all provider-independent and were not duplicated. Only two
+things are provider-specific: **the transport** and **the shape of the response**.
+
+**Selection.** `SEARCH_PROVIDER` chooses the active provider: `gemini` (the
+default, and the original) or `tavily`. The value is normalised, so `TAVILY` and
+`tavily` are the same. An unknown value is not an error — it falls back to
+`gemini` and logs one warning, because a typo in an environment variable must
+never be the reason the assistant stops answering. `GEMINI_SEARCH_ENABLED`
+remains the single master switch for the whole capability, whichever provider is
+active.
+
+**No fallback, on purpose.** Exactly one provider is consulted per search. There
+is deliberately **no** automatic cross-provider fallback: a fallback would spend
+two requests on one question, and a failure on one provider would quietly draw on
+the other's allowance and breaker — the opposite of the isolation this workload
+exists to hold. A failed search degrades to the honest "could not check" note,
+exactly as a Gemini-only failure always did.
+
+**Credential boundaries.** Each provider has its own credential:
+`GEMINI_SEARCH_API_KEY` (with the shared-pool opt-in, off by default) for Gemini,
+and `TAVILY_API_KEY` for Tavily. The Tavily key is never eligible for the Gemini
+shared pool — a different vendor's key is meaningless there as well as unsafe —
+and is never shared with chat, intent, moderation, awareness or live voice. It is
+read from `config` at call time, never logged, never in a status and never in an
+exception; the status reports `tavily_configured` as a boolean, and the field is
+named so that no status key contains the word "key" at all.
+
+**The Tavily transport.** `web_search._tavily_request` is the only place the
+Tavily network is touched, and the only thing its tests replace — the sibling of
+the Gemini seam `web_search._request`. It POSTs to `https://api.tavily.com/search`
+with the key in the `Authorization: Bearer` header and **nowhere else**: not the
+body, not the URL, not a log line. The body carries the bounded question and
+`max_results`; `include_answer` and `include_raw_content` are off, so what comes
+back is the result set, not a second model's prose. Only the question is sent —
+the room window is other people's conversation and is never forwarded.
+
+**Error mapping.** Each failure becomes a `SearchUnavailable` with a kind, so the
+existing `Finding` semantics are unchanged and the caller still cannot mistake a
+failure for a live fact:
+
+| condition | kind | retried |
+|---|---|---|
+| 401 / 403 | `unauthorized` | no — a bad credential stays bad |
+| 429 | `rate_limited` | no — Tavily asks us to *reduce* the rate; the breaker backs off |
+| 5xx / other ≥400 | `provider_error` | yes, bounded |
+| request timeout | `timeout` | yes, bounded |
+| connection / transport failure | `connection` | yes, bounded |
+| unreadable or non-object response | `malformed` | no |
+| no usable results | `empty_results` | no |
+| cancellation | *(propagates)* | never swallowed |
+
+Retries are the existing loop: bounded by `GEMINI_SEARCH_MAX_RETRIES`, spaced by
+`GEMINI_SEARCH_BACKOFF_SECONDS`, and the deadline is the existing
+`GEMINI_SEARCH_TIMEOUT_SECONDS` (never below the API floor).
+
+**Sources and the security boundary.** Tavily carries no grounding metadata, so
+the sources *are* the results: each `results[].url` is validated through the same
+`_clean_url` as a Gemini source — `http(s)` only, userinfo stripped, deduplicated
+and capped by `GEMINI_SEARCH_MAX_RESULTS` — and the brief is built from the titles
+and snippets, control characters stripped and bounded by
+`GEMINI_SEARCH_MAX_CHARS`. The brief still crosses back into the conversation only
+through `untrusted_block`, inside the same delimiters and the same server-authored
+warning. There are no tools and no execution surface on the Tavily path: a page
+that says "run this" is a string in a prompt, exactly as it is for Gemini. The
+structural tests that assert the workload has no shell, no database write, no
+Telegram call and no authority route scan the whole module, so they cover the
+Tavily code too.
+
+**Isolation, unchanged.** Tavily is still the `search` workload: the same
+module-level rate window, breaker, daily allowance and failure state, and the
+same `db.daily_add("search", …)` accounting. It does not touch the Gemini pool,
+the chat allowance, or any other workload's breaker — a property asserted by the
+tests. Sharing the workload's own brakes between providers is deliberate: because
+only one provider is ever active, one set of brakes is correct, and it is what
+makes a provider swap unable to bypass the budget.
+
+**Tests.** `tests/test_web_search.py` gained a Tavily section: provider
+selection (default, case-insensitivity, unknown-value fallback with one warning);
+a successful search with multiple results; source extraction, attribution,
+dedupe, capping, userinfo stripping and non-`http` dropping; every failure kind
+above; 401/403 and 429 not retried and 5xx retried, with the retry loop proven
+bounded and one turn proven to spend exactly one request; cancellation
+propagating; missing
+key inert; query privacy (only the bounded question, no history); the key absent
+from logs and status; a hostile result framed as data; the Gemini seam proven
+unused under Tavily; allowance and breaker isolation; the transport's header/body
+and status mapping; and one integration test through the real
+`main._answer_conversationally`. The existing Gemini tests were not weakened.

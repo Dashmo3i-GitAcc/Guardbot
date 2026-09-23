@@ -41,8 +41,12 @@ from . import config
 log = logging.getLogger("guardbot.net")
 
 # The hosts the AI SDKs talk to. Narrow on purpose — the wrapper below is
-# process-wide, so it covers the smallest set of names that need it.
-AI_HOSTS = frozenset({"generativelanguage.googleapis.com"})
+# process-wide, so it covers the smallest set of names that need it. Tavily is
+# here for the same reason the Gemini host is: it is a search provider Nexus
+# calls directly, so it wants the same address-family ordering.
+AI_HOSTS = frozenset(
+    {"generativelanguage.googleapis.com", "api.tavily.com"}
+)
 
 IPV6 = "IPv6"
 IPV4 = "IPv4"

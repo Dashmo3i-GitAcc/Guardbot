@@ -64,6 +64,8 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 
+import httpx
+
 from . import config, db, gemini_pool, persian_calendar
 
 log = logging.getLogger("guardbot.search")
@@ -235,9 +237,16 @@ SEARCH_INSTRUCTION = (
     "guessing from memory."
 )
 
-# Failures a retry cannot fix. A missing SDK stays missing and a blank answer
-# will be blank again; only the transport problems are worth a second attempt.
-_PERMANENT = frozenset({"sdk_missing", "empty_response"})
+# Failures a retry cannot fix. A missing SDK stays missing, a blank answer will
+# be blank again, an unauthorised credential stays unauthorised and a response we
+# could not read will not read better on a second try; only the transport
+# problems are worth another attempt. The two provider-specific kinds here are
+# raised only by the Tavily path, so they are inert for Gemini. ``rate_limited``
+# is *not* here: it is permanent for Tavily alone, added at the call site, because
+# Gemini's 429 is a per-minute quota its pool already knows how to back off.
+_PERMANENT = frozenset(
+    {"sdk_missing", "empty_response", "unauthorized", "malformed"}
+)
 
 
 class SearchUnavailable(Exception):
@@ -301,6 +310,7 @@ _recent_calls: list[float] = []
 _consecutive_failures = 0
 _circuit_open_until = 0.0
 _sdk_missing_logged = False
+_provider_warned = False
 _client = None
 _client_key = ""
 
@@ -318,15 +328,39 @@ stats: dict = {
 def reset_state() -> None:
     """Forget the rate window, the breaker and the cached client. For tests."""
     global _consecutive_failures, _circuit_open_until, _client, _client_key
-    global _sdk_missing_logged
+    global _sdk_missing_logged, _provider_warned
     _recent_calls.clear()
     _consecutive_failures = 0
     _circuit_open_until = 0.0
     _sdk_missing_logged = False
+    _provider_warned = False
     _client = None
     _client_key = ""
     for key in stats:
         stats[key] = 0
+
+
+def provider() -> str:
+    """Which provider answers a search: ``gemini`` (the default) or ``tavily``.
+
+    The name is normalised, so ``TAVILY`` and ``tavily`` are the same choice. An
+    unknown value is not an error: it falls back to the existing provider and
+    says so once, because a typo in an environment variable must never be the
+    reason the assistant stops answering.
+    """
+    global _provider_warned
+    raw = (getattr(config, "SEARCH_PROVIDER", "") or "").strip().lower()
+    if raw == "tavily":
+        return "tavily"
+    if raw in ("", "gemini", "gemini_search", "google"):
+        return "gemini"
+    if not _provider_warned:
+        _provider_warned = True
+        log.warning(
+            "[search] unknown SEARCH_PROVIDER=%r; falling back to gemini",
+            raw[:32],
+        )
+    return "gemini"
 
 
 def api_key() -> str:
@@ -344,8 +378,27 @@ def api_key() -> str:
     return ""
 
 
+def tavily_api_key() -> str:
+    """Tavily's own credential, and only ever its own.
+
+    It is deliberately not eligible for the Gemini shared pool: a Tavily key is
+    a different vendor entirely, so borrowing one would be meaningless as well
+    as unsafe.
+    """
+    return config.TAVILY_API_KEY
+
+
+def _has_credential(prov: str) -> bool:
+    """Whether the chosen provider has something to call with."""
+    if prov == "tavily":
+        return bool(tavily_api_key())
+    return bool(api_key() or gemini_pool.has_accounts(WORKLOAD))
+
+
 def shares_google_project() -> bool:
     """Whether search is running on the classifier's key."""
+    if provider() == "tavily":
+        return False
     return bool(
         not config.GEMINI_SEARCH_API_KEY
         and config.GEMINI_SEARCH_ALLOW_SHARED_KEY
@@ -355,18 +408,21 @@ def shares_google_project() -> bool:
 
 def is_enabled() -> bool:
     """Whether a search could be made at all."""
-    return bool(
-        config.GEMINI_SEARCH_ENABLED
-        and (api_key() or gemini_pool.has_accounts(WORKLOAD))
-    )
+    return bool(config.GEMINI_SEARCH_ENABLED and _has_credential(provider()))
 
 
 def status() -> dict:
     """A description safe to log or show an operator. No key, no query, ever."""
+    prov = provider()
     pool = gemini_pool.pool_for(WORKLOAD)
     return {
         "enabled": bool(config.GEMINI_SEARCH_ENABLED),
-        "configured": bool(api_key() or gemini_pool.has_accounts(WORKLOAD)),
+        "provider": prov,
+        "configured": _has_credential(prov),
+        # Named ``tavily_configured`` rather than anything with "key" in it: a
+        # status is shown and logged, and this module never puts a credential —
+        # or a field that invites one — into either.
+        "tavily_configured": bool(config.TAVILY_API_KEY),
         "active": is_enabled(),
         "shares_google_project": shares_google_project(),
         "model": config.GEMINI_SEARCH_MODEL,
@@ -425,9 +481,10 @@ def _daily_used(day: str | None = None) -> int:
 
 
 def _daily_left() -> bool:
-    pool = gemini_pool.pool_for(WORKLOAD)
-    if pool is not None and pool.enabled:
-        return not pool.daily_exhausted()
+    if provider() == "gemini":
+        pool = gemini_pool.pool_for(WORKLOAD)
+        if pool is not None and pool.enabled:
+            return not pool.daily_exhausted()
     return _daily_used() < max(1, int(config.GEMINI_SEARCH_DAILY_LIMIT))
 
 
@@ -538,6 +595,60 @@ async def _request(contents: str):
     return await _single_request(contents)
 
 
+# ── The Tavily transport ──────────────────────────────────────────────────
+# Tavily is a search API rather than a Gemini request, so it does not go through
+# the pool and it carries no grounding metadata: the results *are* the sources.
+# The credential travels in the ``Authorization`` header and nowhere else —
+# never in the body, never in the URL, never in a log line. Only the bounded
+# question is sent; the room window is other people's conversation and is never
+# forwarded.
+TAVILY_ENDPOINT = "https://api.tavily.com/search"
+
+
+async def _tavily_request(query: str) -> dict:
+    """One Tavily search. **The only place the Tavily network is touched.**"""
+    key = tavily_api_key()
+    if not key:
+        raise SearchUnavailable("no_key")
+
+    body = {
+        "query": query,
+        "max_results": max(1, int(config.GEMINI_SEARCH_MAX_RESULTS)),
+        "search_depth": "basic",
+        "include_answer": False,
+        "include_raw_content": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds()) as client:
+            response = await client.post(TAVILY_ENDPOINT, json=body, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise SearchUnavailable("timeout", str(exc)[:80]) from exc
+    except httpx.TransportError as exc:
+        raise SearchUnavailable("connection", str(exc)[:80]) from exc
+
+    code = int(getattr(response, "status_code", 0) or 0)
+    if code in (401, 403):
+        # A bad or unauthorised credential: retrying it would only spend time.
+        raise SearchUnavailable("unauthorized", str(code))
+    if code == 429:
+        raise SearchUnavailable("rate_limited", str(code))
+    if code >= 400:
+        raise SearchUnavailable("provider_error", str(code))
+
+    try:
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001 - any read failure is the same fact
+        raise SearchUnavailable("malformed", type(exc).__name__) from exc
+    if not isinstance(data, dict):
+        raise SearchUnavailable("malformed", "not_an_object")
+    return data
+
+
 def _is_transient(exc: BaseException) -> bool:
     """Whether one more try could plausibly succeed."""
     code = getattr(exc, "code", None)
@@ -645,13 +756,70 @@ def _queries(meta) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _parse_tavily(response) -> tuple[str, tuple[Source, ...], tuple[str, ...]]:
+    """Turn a Tavily response into ``(brief, sources, queries)``.
+
+    Tavily carries no grounding metadata: the results *are* the sources, so they
+    are read from ``results[].url`` and validated exactly like any other source
+    — ``http(s)`` only, userinfo stripped, deduplicated and capped. The brief is
+    built from the titles and snippets, control characters stripped and bounded,
+    and it still reaches the conversation only through ``untrusted_block``: a
+    page is data, never an instruction. An empty result set is a failure to
+    answer, not an answer of "nothing".
+    """
+    if not isinstance(response, dict):
+        raise SearchUnavailable("malformed", "not_an_object")
+    results = response.get("results")
+    if not isinstance(results, list) or not results:
+        raise SearchUnavailable("empty_results")
+
+    cap = max(1, int(config.GEMINI_SEARCH_MAX_RESULTS))
+    out: list[Source] = []
+    seen: set[str] = set()
+    lines: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        url = _clean_url(item.get("url", ""))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        title = _clean_text(item.get("title", ""))[:120]
+        snippet = _clean_text(item.get("content", ""))[:400]
+        try:
+            domain = _clean_text(urllib.parse.urlsplit(url).hostname or "")[:80]
+        except ValueError:
+            domain = ""
+        out.append(Source(title=title, url=url, domain=domain))
+        if title and snippet:
+            lines.append(f"- {title}: {snippet}")
+        elif title or snippet:
+            lines.append(f"- {title or snippet}")
+        if len(out) >= cap:
+            break
+
+    brief = _strip_control("\n".join(lines)).strip()
+    brief = re.sub(r"\n{3,}", "\n\n", brief)
+    if not out or not brief:
+        raise SearchUnavailable("empty_results")
+    return (
+        brief[: max(1, int(config.GEMINI_SEARCH_MAX_CHARS))],
+        tuple(out),
+        (),
+    )
+
+
 def parse_response(response) -> tuple[str, tuple[Source, ...], tuple[str, ...]]:
     """Turn a provider response into ``(brief, sources, queries)``.
 
-    Strict about the one thing that matters: a response with no text is a
-    failure to answer, not an answer of "nothing". Whether the result is
-    *grounded* is decided by the caller, which requires at least one source.
+    The shape is the active provider's: a Gemini grounded response carries
+    grounding metadata, a Tavily response carries its results. Strict about the
+    one thing that matters: a response with no text is a failure to answer, not
+    an answer of "nothing". Whether the result is *usable* is decided by the
+    caller, which requires at least one source.
     """
+    if provider() == "tavily":
+        return _parse_tavily(response)
     text = getattr(response, "text", None)
     if not isinstance(text, str) or not text.strip():
         raise SearchUnavailable("empty_response")
@@ -717,7 +885,8 @@ async def research(question: str, *, history: str = "", now: float = 0.0) -> Fin
     """
     if not config.GEMINI_SEARCH_ENABLED:
         return _skipped("disabled")
-    if not (api_key() or gemini_pool.has_accounts(WORKLOAD)):
+    prov = provider()
+    if not _has_credential(prov):
         # Not counted as a skip: with no key every question would print a line,
         # and the startup log already says the workload is inert.
         return _skipped("no_key")
@@ -736,13 +905,27 @@ async def research(question: str, *, history: str = "", now: float = 0.0) -> Fin
     payload = _query(question)
     if not payload:
         return _skipped("empty")
-    contents = _contents(payload, history=history, now=now or time.time())
+    # The date-and-question prompt is the Gemini shape. Tavily is sent only the
+    # bounded question — never the history, never the room window.
+    contents = (
+        _contents(payload, history=history, now=now or time.time())
+        if prov == "gemini"
+        else ""
+    )
 
-    pooled = gemini_pool.pool_for(WORKLOAD) is not None and gemini_pool.has_accounts(
-        WORKLOAD
+    pooled = (
+        prov == "gemini"
+        and gemini_pool.pool_for(WORKLOAD) is not None
+        and gemini_pool.has_accounts(WORKLOAD)
     )
     attempts = 1 if pooled else max(0, int(config.GEMINI_SEARCH_MAX_RETRIES)) + 1
     backoff = max(0.0, float(config.GEMINI_SEARCH_BACKOFF_SECONDS))
+    # A 429 is the provider asking us to *reduce* our request rate and to honour
+    # its ``Retry-After``. Tavily says so in as many words, and a second
+    # immediate request only spends another request to be refused again — so for
+    # Tavily a 429 is permanent for this attempt, and the circuit breaker is what
+    # backs off. Gemini is unchanged: its 429 is handled by its pool.
+    permanent = _PERMANENT | {"rate_limited"} if prov == "tavily" else _PERMANENT
     last: SearchUnavailable | None = None
 
     for attempt in range(attempts):
@@ -755,12 +938,15 @@ async def research(question: str, *, history: str = "", now: float = 0.0) -> Fin
             except Exception:  # noqa: BLE001 - accounting is never worth a reply
                 log.exception("could not record the search request")
         try:
-            response = await _request(contents)
+            if prov == "tavily":
+                response = await _tavily_request(payload)
+            else:
+                response = await _request(contents)
         except asyncio.CancelledError:
             raise
         except SearchUnavailable as exc:
             last = exc
-            if exc.kind in _PERMANENT:
+            if exc.kind in permanent:
                 break
         except asyncio.TimeoutError:
             last = SearchUnavailable("timeout")
@@ -882,12 +1068,14 @@ __all__ = [
     "failure_block",
     "is_enabled",
     "parse_response",
+    "provider",
     "research",
     "reset_state",
     "should_search",
     "shares_google_project",
     "sources_block",
     "status",
+    "tavily_api_key",
     "timeout_seconds",
     "untrusted_block",
 ]

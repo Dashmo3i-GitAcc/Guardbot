@@ -2324,6 +2324,20 @@ GEMINI_SEARCH_ENABLED = _bool("GEMINI_SEARCH_ENABLED", True)
 GEMINI_SEARCH_API_KEY = os.getenv("GEMINI_SEARCH_API_KEY", "").strip()
 GEMINI_SEARCH_ALLOW_SHARED_KEY = _bool("GEMINI_SEARCH_ALLOW_SHARED_KEY", False)
 
+# Which provider answers a search: ``gemini`` (Google Search grounding, the
+# original) or ``tavily``. The default is the existing provider, so a deployment
+# that sets nothing behaves exactly as before this existed. Exactly one provider
+# is active — there is deliberately **no** automatic cross-provider fallback,
+# because a fallback would make one question spend two requests and would let a
+# failure on one provider quietly draw on the other's allowance.
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "gemini").strip()
+
+# Tavily's own credential, kept separate from every Gemini workload so that its
+# quota and its failures are its own. Empty means Tavily search is inert and the
+# assistant is unchanged. Read from the environment at call time, never logged,
+# never in a status and never in an exception.
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+
 # Its own model preference, defaulting to the conversation's family because the
 # job has the same shape (read text, reason, write text) — but a *separate*
 # setting, so it can be moved without touching the assistant. Every model in the

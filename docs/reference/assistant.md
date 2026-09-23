@@ -170,9 +170,13 @@ only thing that ever happens to it is that it is HTML-escaped and sent to
 Telegram. There is no code path from a reply to an action.
 
 The prompt requires it to say plainly that it is an AI when asked, and forbids
-stating prices, plan details, links or credentials — those it cannot know, and a
-confident wrong price in a private chat is a commercial problem, not a cosmetic
-one.
+stating our own prices, plan details, links or credentials — those it cannot
+know, and a confident wrong price in a private chat is a commercial problem, not
+a cosmetic one. A **public** market figure (a cryptocurrency, gold, a currency or
+exchange rate, a stock or an index) is different: it may be stated **only** when
+this turn's web search results carry it, and never from memory or by estimation.
+The search results are untrusted data; the rule that withholds our own commercial
+information is not something a page can lift.
 
 ### 17.7 Verifying it
 

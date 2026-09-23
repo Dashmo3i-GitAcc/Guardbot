@@ -1262,7 +1262,7 @@ Full text: [`docs/reference/voice-live.md#s51`](docs/reference/voice-live.md#s51
 
 ## 52. Web search: the live web, as a workload of its own
 
-Web search as a workload of its own: why it is separate, where it plugs in, when it searches, the security boundary, attribution, failure behaviour and isolation. Grounding is never switched on for `app/chat.py`; the search call declares no function tools; and a page is data, never a command.
+Web search as a workload of its own: why it is separate, where it plugs in, when it searches, the security boundary, attribution, failure behaviour and isolation. Grounding is never switched on for `app/chat.py`; the search call declares no function tools; and a page is data, never a command. The workload is **provider-agnostic**: `SEARCH_PROVIDER` selects Gemini grounding (the default) or Tavily, exactly one at a time, with no automatic fallback between them.
 
 Full text: [`docs/reference/web-search.md#s52`](docs/reference/web-search.md#s52).
 
@@ -1562,7 +1562,10 @@ reference file is stale and this list is the one to fix first.
 * `chat.py` **never** reads `db.ai_*`; `ai_intent` **never** reads `db.chat_*`;
   `reply()` **never** raises.
 * There is **no** code path from a reply to an action; output is HTML-escaped
-  text only; the prompt forbids prices, plan details, links and credentials.
+  text only; the prompt forbids our own prices, plan details, links and
+  credentials. A **public** figure (crypto, gold, FX, stock, index) may be stated
+  **only** when it is in that turn's web search results — never from memory, never
+  estimated — and the results stay untrusted data.
 * **Never** ask an already-answered question, re-greet, close by offering more,
   repeat a sentence, or narrate helpfulness.
 * **Do not** pretend to be human; **do not** announce being an AI.
@@ -1713,6 +1716,20 @@ reference file is stale and this list is the one to fix first.
 * `GEMINI_SEARCH_ENABLED` is true by default but the workload is **inert without
   a credential**; the search credential is deliberately **not** in
   `GEMINI_KEY_MANAGED_WORKLOADS`.
+* The workload is **provider-agnostic**: `SEARCH_PROVIDER` selects `gemini` (the
+  default) or `tavily`, and **exactly one is active**. There is **no automatic
+  cross-provider fallback** — a fallback would spend two requests on one question
+  and would let a failure on one provider draw on the other's allowance. An
+  unknown value falls back to `gemini` and warns once.
+* Tavily's credential is **its own** (`TAVILY_API_KEY`), never shared with any
+  Gemini workload and never eligible for the shared pool. It travels **only** in
+  the `Authorization` header — never in the request body, the URL or a log line.
 * Only the **question** is sent, never the room history; neither the question
   nor the credential is ever logged.
+* One addressed turn makes **exactly one** search call. The only multiplier is
+  the retry loop, which runs **only after a failure** (never after a success),
+  is hard-bounded by `GEMINI_SEARCH_MAX_RETRIES`, and **does not retry a Tavily
+  429** — Tavily asks us to reduce the request rate, so the breaker is the
+  backoff. Credit waste is a design concern: `search_depth` is `basic` (1 credit),
+  and `include_answer`/`include_raw_content` are off.
 * The **awareness pass does not search**.

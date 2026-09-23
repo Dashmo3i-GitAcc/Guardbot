@@ -5144,16 +5144,21 @@ async def post_init(app: Application) -> None:
     if not config.GEMINI_SEARCH_ENABLED:
         log.info("Web search: off")
     elif web_search.is_enabled():
+        prov = web_search.provider()
         log.info(
-            "Web search: on model=%s results=%d daily=%d/account",
-            config.GEMINI_SEARCH_MODEL,
+            "Web search: on provider=%s model=%s results=%d daily=%d/account",
+            prov,
+            config.GEMINI_SEARCH_MODEL if prov == "gemini" else "-",
             int(config.GEMINI_SEARCH_MAX_RESULTS),
             int(config.GEMINI_SEARCH_DAILY_LIMIT),
         )
     else:
+        prov = web_search.provider()
         log.info(
-            "Web search: on but no credential; the assistant is unchanged. "
-            "Set GEMINI_SEARCH_API_KEY."
+            "Web search: on provider=%s but no credential; the assistant is "
+            "unchanged. Set %s.",
+            prov,
+            "GEMINI_SEARCH_API_KEY" if prov == "gemini" else "TAVILY_API_KEY",
         )
     # The coding-agent bridge. Registered here, and not in the awareness block,
     # because it is deliberately *not* part of the awareness workload: a coding
