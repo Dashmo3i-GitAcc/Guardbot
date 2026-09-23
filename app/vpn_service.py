@@ -45,6 +45,13 @@ from . import admin_service, agent_bridge, agent_data, config, db, rbac, vpnbot
 
 log = logging.getLogger("guardbot.vpn")
 
+# Every how many recorded operations the retention window is applied. The same
+# shape as ``people.py`` and ``admin_service.py``, and for the same reason: this
+# is called from the operation path, so it must not run a DELETE per call, and a
+# rule that is never applied is not a retention rule.
+PRUNE_EVERY = 50
+_since_prune = 0
+
 
 # ── The operation catalogue ───────────────────────────────────────────────
 # The six writes, by the name they are audited under and the name the model is
@@ -533,6 +540,7 @@ def _record_pending(request, operation: VpnOperation) -> admin_service.AdminResu
         pending_id,
         request.actor_id,
     )
+    _maybe_prune()
     return _result(
         request,
         admin_service.OUTCOME_VPN_AWAITING_CONFIRMATION,
@@ -726,6 +734,39 @@ def pending_lines(*, chat_id: int = 0, limit: int = 5) -> list[str]:
     ]
 
 
+# ── Retention ─────────────────────────────────────────────────────────────
+def _maybe_prune() -> None:
+    global _since_prune
+    _since_prune += 1
+    if _since_prune < PRUNE_EVERY:
+        return
+    _since_prune = 0
+    prune()
+
+
+def prune() -> int:
+    """Apply the retention window to recorded operations. Best effort.
+
+    Called from the operation path rather than from a timer, for the same reason
+    ``admin_service.prune`` is: this process has no scheduler, and a retention
+    rule that only runs when somebody remembers is not a retention rule.
+    """
+    try:
+        return db.vpn_pending_prune(
+            max(1, int(config.VPN_PENDING_RETENTION_SECONDS))
+        )
+    except Exception:  # noqa: BLE001 - retention is never worth a crash
+        log.exception("vpn pending retention prune failed")
+        return 0
+
+
+def prune_reset() -> None:
+    """Forget the prune counter. For tests."""
+    global _since_prune
+    _since_prune = 0
+
+
 def reset_state() -> None:
-    """No module-level mutable state; kept for the test-reset convention."""
+    """Reset the module's own state, for the test-reset convention."""
+    prune_reset()
     return None

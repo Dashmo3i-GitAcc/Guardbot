@@ -272,6 +272,16 @@ GROUP_TRIAL_REPLY_PRICING = os.getenv(
 # does not stay armed for a day.
 VPN_CONFIRMATION_TTL_SECONDS = _int("VPN_CONFIRMATION_TTL_SECONDS", 900)
 
+# How long a settled VPN operation stays in ``vpn_pending_ops`` afterwards.
+#
+# The table had no retention rule at all before this: every offer the bot ever
+# made stayed in it for the life of the database. A day is long enough to answer
+# "did that go through?" from the row and short enough that the table stays a
+# working set rather than a history. It is measured from the operation's own
+# expiry, so it can never cut short an operation that is still confirmable —
+# see ``db.vpn_pending_prune``.
+VPN_PENDING_RETENTION_SECONDS = _int("VPN_PENDING_RETENTION_SECONDS", 86400)
+
 # Asked when a money operation has been recorded and is waiting. It names the
 # operation and its subject, because the owner is being asked to approve a
 # specific thing and «اوکی» to an unnamed request is not an approval.
@@ -1415,6 +1425,15 @@ AGENT_FAILED_HEADER = os.getenv(
 AGENT_TIMEOUT_HEADER = os.getenv(
     "AGENT_TIMEOUT_HEADER",
     "⌛️ {request_id} — {repository}: از زمان خارج شد",
+)
+# Sent when a dangerous task waited for an approval nobody gave. It is a
+# different sentence from the two timeout bodies because it is a different
+# event: nothing ran, nothing is running, and the runner was never asked to do
+# anything. The owner has to be able to tell "you did not approve this in time"
+# from "the host never picked this up".
+AGENT_APPROVAL_LAPSED_TEXT = os.getenv(
+    "AGENT_APPROVAL_LAPSED_TEXT",
+    "این درخواست تأیید نشد و باطل شد؛ چیزی اجرا نشد. اگر هنوز لازمه دوباره بفرست.",
 )
 AGENT_QUESTION_HEADER = os.getenv(
     "AGENT_QUESTION_HEADER",

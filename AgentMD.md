@@ -1664,7 +1664,9 @@ reference file is stale and this list is the one to fix first.
 * The operation vocabulary is **closed**; the task text can only **add** danger,
   never remove it.
 * A dangerous request is recorded and **never** written to the spool;
-  `waiting_for_owner` exits only to `queued`.
+  `waiting_for_owner` reaches `running` only through `queued`, and an approval
+  nobody answered **lapses** to `timed_out` on the poller's bound — it may not
+  hold a repository's only slot for ever.
 * Approval is the owner's, checked by id; a bare confirmation resolves only when
   **exactly one** task is waiting; answering a question recomputes the danger; a
   task that never started cannot be resumed.

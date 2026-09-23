@@ -127,9 +127,10 @@ file. A dangerous request is written to `agent_tasks` with
 spool. The runner's only source of work is that directory, so a task the owner
 has not approved is not merely refused by the runner — it is invisible to it.
 
-Belt and braces: `waiting_for_owner` has exactly one legal exit, and it is
-`queued`. `running` is not reachable from it, so even a forged `started` line
-could not move an unapproved task into execution. Both are tested.
+Belt and braces: `waiting_for_owner` cannot reach `running` at all — the only
+route is back through `queued`, and only `confirm` (or `resume`) can take it
+there. `running` is not reachable from it, so even a forged `started` line could
+not move an unapproved task into execution. Both are tested.
 
 ### 39.7 Approval is the owner's, server-side, and unambiguous
 
@@ -159,6 +160,21 @@ Two meanings share `waiting_for_owner`, and they are told apart by `started_at`:
 * `started_at > 0` — it ran and stopped to ask a question. These are **not** in
   the waiting list, because confirming one would re-run work that was already
   under way. They are answered with `answer_agent_task` instead.
+
+The first kind has a **window**, and it has to. `agent_bridge.scope_check` counts
+`waiting_for_owner` among the active statuses and `AGENT_MAX_PER_REPOSITORY`
+defaults to one, so an approval the owner never answered was holding that
+repository's only slot with nothing in the system able to release it: every later
+task on that repository was refused `repository_busy`, for ever, and the refusal
+read as "busy" rather than as a leak. The poller now applies the same bound to
+this state as to any other wait (`agent_poller._enforce_timeout`, on
+`AGENT_TIMEOUT_SECONDS`), moving the row to `timed_out` and telling the owner
+that **nothing ran** — a different sentence from the one used when a published
+task was never picked up, because the runner was never asked to do anything here.
+
+The silence itself is still not a fault, which is what the old behaviour was
+right about and what a `waiting_for_owner` row still means inside its window: an
+unapproved request is invisible to the runner and costs nothing but the slot.
 
 ### 39.8 Answering a question is not a backdoor approval
 
@@ -282,7 +298,8 @@ to do it deliberately.
 
 `queued → running → succeeded | failed | cancelled | timed_out`, with
 `waiting_for_owner` reachable from `running` (the agent asked a question) and
-exiting only to `queued` (approved or answered). Terminal states are terminal.
+exiting to `queued` (approved or answered) or to `timed_out` (nobody answered
+inside the poller's bound — see §39.7). Terminal states are terminal.
 
 Every task has a `request_id`, an actor id, a repository, `created_at`, a
 status, a result or an error, and an optional CodeBuddy session id. No task body

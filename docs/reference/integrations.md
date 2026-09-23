@@ -162,6 +162,14 @@ is taken *before* the call and **released again only when the failure was a
 transport one** — a refusal from the VPN bot is a decision, and re-asking would
 produce the same answer.
 
+`vpn_pending_ops` is bounded by `db.vpn_pending_prune`, applied from this path on
+`VPN_PENDING_RETENTION_SECONDS` (see `admin-and-audit.md` §29.11). The rule is
+narrow on purpose: it drops a finished receipt past the window, and an operation
+whose own `expires_at` has passed — which `vpn_pending_claim` already refuses — and
+it never touches a row that is still confirmable. The window is measured from the
+operation's expiry rather than from its creation, so a rule about disk space
+cannot delete a money operation the owner is in the middle of approving.
+
 ### 49.5 Fail-closed, in four outcomes rather than one
 
 `OUTCOME_VPN_UNAVAILABLE`, `OUTCOME_VPN_REFUSED`, `OUTCOME_VPN_ERROR` and

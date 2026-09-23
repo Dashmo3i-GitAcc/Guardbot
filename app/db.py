@@ -2513,6 +2513,43 @@ def vpn_pending_release(request_id: str) -> None:
         _conn.commit()
 
 
+def vpn_pending_prune(keep_seconds: int) -> int:
+    """Drop operations nothing can act on any more, once they are past the window.
+
+    This table had **no retention rule at all**: every operation the bot ever
+    offered stayed in it for the life of the database — approved, refused,
+    expired and abandoned alike. It is small, so nothing broke, which is exactly
+    why it went unnoticed; a table that only grows and is never read in full has
+    no symptom until it has one.
+
+    Two predicates, and between them they cover exactly the rows that are
+    unreachable:
+
+    * **finished** — ``status='done'`` and its confirmation older than the
+      window. The operation ran and was reported; the row is now a receipt, and
+      the window is how long "did that go through?" is still answerable from it.
+    * **expired** — ``expires_at`` older than the window. ``vpn_pending_claim``
+      requires ``expires_at > now``, so past that point no confirmation can ever
+      succeed, whatever the row's status: a ``pending`` offer nobody took, and a
+      ``confirmed`` row whose execution was abandoned by a restart.
+
+    A row that is **still claimable is never touched**, and that is the property
+    that makes this safe to run from the operation path. The window is measured
+    from the operation's own expiry and its default is far longer than the
+    confirmation TTL it is measured against, so the two cannot meet.
+    """
+    cutoff = int(time.time()) - max(1, int(keep_seconds))
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM vpn_pending_ops WHERE "
+            "(status='done' AND confirmed_at > 0 AND confirmed_at < ?) "
+            "OR (expires_at > 0 AND expires_at < ?)",
+            (cutoff, cutoff),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
 def vpn_pending_reset() -> None:
     """Forget every pending operation. For tests."""
     with _lock:

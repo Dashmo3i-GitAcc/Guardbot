@@ -688,16 +688,51 @@ def test_a_credential_in_a_progress_line_is_redacted():
 
 
 # ── The clock ─────────────────────────────────────────────────────────────
-def test_a_task_that_never_started_is_timed_out_and_reported():
-    request_id = _task()
-    # Age the row: the update set is closed, so the test writes the column
-    # directly rather than widening the API for its own convenience.
+def _age(request_id: str, seconds: int) -> None:
+    """Backdate a row's creation.
+
+    The update set is closed, so a test writes the column directly rather than
+    widening the API for its own convenience.
+    """
     with db._lock:
         db._conn.execute(
             "UPDATE agent_tasks SET created_at=? WHERE request_id=?",
-            (int(time.time()) - 4000, request_id),
+            (int(time.time()) - seconds, request_id),
         )
         db._conn.commit()
+
+
+def _dangerous(*, task="deploy it", operation="deploy") -> str:
+    """Record a task dangerous enough to need the owner, and never publish it.
+
+    Submitted through the same door as ``_task``, but it cannot go through that
+    helper: a dangerous request is answered ``agent_waiting`` with ``ok=False``,
+    which is the correct answer and not a failure.
+    """
+    result = asyncio.run(
+        agent_service.submit(
+            admin_service.AdminRequest(
+                operation="codebuddy_task",
+                chat_id=CHAT,
+                actor_id=OWNER,
+                repository="demo",
+                task=task,
+                agent_operation=operation,
+                interface=admin_service.INTERFACE_AI,
+            )
+        )
+    )
+    assert result.outcome == admin_service.OUTCOME_AGENT_WAITING, result.outcome
+    request_id = result.detail
+    row = db.agent_task_get(request_id)
+    assert row["status"] == "waiting_for_owner"
+    assert row["started_at"] == 0, "never published, so the host has no clock on it"
+    return request_id
+
+
+def test_a_task_that_never_started_is_timed_out_and_reported():
+    request_id = _task()
+    _age(request_id, 4000)
     ctx = FakeCtx()
     _tick(ctx)
     row = db.agent_task_get(request_id)
@@ -729,31 +764,70 @@ def test_a_task_within_its_bound_is_left_alone():
     assert db.agent_task_get(request_id)["status"] == "running"
 
 
-def test_an_unapproved_dangerous_task_is_not_timed_out():
-    """Nothing is running, so there is no clock. The owner's silence is not a fault."""
-    result = asyncio.run(
-        agent_service.submit(
-            admin_service.AdminRequest(
-                operation="codebuddy_task",
-                chat_id=CHAT,
-                actor_id=OWNER,
-                repository="demo",
-                task="deploy it",
-                agent_operation="deploy",
-                interface=admin_service.INTERFACE_AI,
-            )
-        )
-    )
-    with db._lock:
-        db._conn.execute(
-            "UPDATE agent_tasks SET created_at=? WHERE request_id=?",
-            (int(time.time()) - 4000, result.detail),
-        )
-        db._conn.commit()
+def test_an_approval_still_inside_its_window_is_left_waiting():
+    request_id = _dangerous()
     ctx = FakeCtx()
     _tick(ctx)
-    assert db.agent_task_get(result.detail)["status"] == "waiting_for_owner"
+    assert db.agent_task_get(request_id)["status"] == "waiting_for_owner"
     assert ctx.bot.sent == []
+
+
+def test_an_unapproved_dangerous_task_lapses_instead_of_holding_a_slot():
+    """The owner's silence is not a fault — and it is not a permanent claim either.
+
+    This test used to assert the opposite, and the reasoning it was written with
+    was half right: an unapproved task has never been published, so no clock is
+    running on the *host*. What that missed is that ``scope_check`` counts
+    ``waiting_for_owner`` among the active statuses and the per-repository
+    ceiling is one, so the request was holding that repository's only slot with
+    nothing in the system able to release it. A dangerous task the owner ignored
+    once would refuse every later task on that repository, for ever, and the
+    refusal would read as "busy" rather than as a leak.
+    """
+    request_id = _dangerous()
+    _age(request_id, 4000)
+    ctx = FakeCtx()
+
+    _tick(ctx)
+
+    row = db.agent_task_get(request_id)
+    assert row["status"] == "timed_out"
+    assert row["status"] not in db.AGENT_ACTIVE_STATUSES, "the slot is released"
+    assert any(config.AGENT_APPROVAL_LAPSED_TEXT in t for t in _texts(ctx))
+
+
+def test_the_lapsed_approval_says_nothing_ran():
+    """It must not borrow the sentence for "the host never picked it up".
+
+    Nothing was published and nothing ran, and a message that blamed the runner
+    would send the owner looking for a broken agent that was never asked to do
+    anything.
+    """
+    request_id = _dangerous()
+    _age(request_id, 4000)
+    ctx = FakeCtx()
+
+    _tick(ctx)
+
+    said = " ".join(_texts(ctx))
+    assert config.AGENT_APPROVAL_LAPSED_TEXT in said
+    assert "برنداشت" not in said
+    assert not agent_spool.cancel_requested(request_id)
+
+
+def test_a_lapsed_approval_frees_the_repository_for_the_next_task():
+    """The consequence, asserted rather than described: the next task is accepted."""
+    first = _dangerous()
+    _age(first, 4000)
+    _tick(FakeCtx())
+    assert db.agent_task_get(first)["status"] == "timed_out"
+
+    # The per-repository ceiling in this fixture is what makes this the test that
+    # would have failed before: with the row still waiting, ``scope_check``
+    # returned ``repository_busy`` and this submit was refused.
+    second = _task(task="something else entirely")
+
+    assert db.agent_task_get(second)["status"] == "queued"
 
 
 # ── Recovery ──────────────────────────────────────────────────────────────

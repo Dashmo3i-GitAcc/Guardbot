@@ -43,7 +43,7 @@ def fresh_nexus_state():
     later test capturing nothing and passing no rooms, and the failures would
     read as "awareness is broken" rather than "a test forgot to reset".
     """
-    from app import awareness, db, gemini_keys, main, nexus, web_search
+    from app import awareness, db, gemini_keys, main, nexus, vpn_service, web_search
 
     # The schema, for every test rather than for whichever test happened to need
     # it first. ``db._conn`` is a module global, so a test that reaches
@@ -74,6 +74,11 @@ def fresh_nexus_state():
     # permission to the next test's fake bot, and the failure would read as a
     # security bug — "it muted without the right" — rather than as a cache.
     main._bot_rights_cache.clear()
+    # The VPN service's retention counter. It is a plain integer that decides
+    # *when* the next prune runs, so a value carried over from one test would
+    # make the next test's first recorded operation prune (or not prune) for a
+    # reason that is not in that test.
+    vpn_service.prune_reset()
     yield
     nexus.reset_state()
     awareness.reset_timers()
@@ -82,4 +87,5 @@ def fresh_nexus_state():
     main._nexus_addressed.clear()
     main._bot_rights_cache.clear()
     web_search.reset_state()
+    vpn_service.prune_reset()
 

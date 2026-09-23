@@ -101,10 +101,19 @@ async def _service(ctx, row: dict, now: float) -> None:
         return
 
     # A dangerous task nobody has approved yet has never been published, so
-    # there is no stream to read and no clock running. Skipping it is not an
-    # optimisation: it is what keeps "waiting for the owner" from being reported
-    # as "running and silent".
+    # there is no stream to read and no clock running on the host. Skipping the
+    # stream is not an optimisation: it is what keeps "waiting for the owner"
+    # from being reported as "running and silent".
+    #
+    # The clock is a different matter, and this used to return without checking
+    # one. ``scope_check`` counts ``waiting_for_owner`` as active, and the
+    # per-repository ceiling is one, so an approval the owner never answered
+    # held that repository's only slot **for ever** — every later task refused
+    # with ``repository_busy``, and nothing in the system able to clear it. The
+    # request therefore lapses on the same bound as any other wait: an approval
+    # has a window, and past it the answer is "nothing was run, ask again".
     if row.get("status") == "waiting_for_owner" and not row.get("started_at"):
+        await _enforce_timeout(ctx, row, now)
         return
 
     records, next_offset = agent_spool.read_from(
@@ -380,6 +389,11 @@ async def _enforce_timeout(ctx, row: dict, now: float) -> None:
         # out is a task that can never be retried.
         agent_spool.request_cancel(request_id)
         body = "از زمان مجاز بیشتر طول کشید و متوقف شد."
+    elif row.get("status") == "waiting_for_owner":
+        # A dangerous task nobody approved. Nothing was published and nothing
+        # ran, so the sentence has to say that rather than borrow the one below,
+        # which blames the runner for work it was never offered.
+        body = config.AGENT_APPROVAL_LAPSED_TEXT
     else:
         body = (
             "عامل روی این میزبان این کار را برنداشت. "

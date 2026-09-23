@@ -30,7 +30,7 @@ import time
 
 import pytest
 
-from app import admin_service, admin_tools, config, db, gemini_pool
+from app import admin_service, admin_tools, config, db, gemini_pool, vpn_service
 
 NOW = int(time.time())
 DAY = 86400
@@ -43,9 +43,11 @@ def retention_env(monkeypatch, tmp_path):
     db.init()
     admin_service.prune_reset()
     gemini_pool.prune_reset()
+    vpn_service.prune_reset()
     yield
     admin_service.prune_reset()
     gemini_pool.prune_reset()
+    vpn_service.prune_reset()
 
 
 def event(*, at: int, workload: str = "chat", kind: str = "rate_limited") -> None:
@@ -167,17 +169,24 @@ def test_the_admin_sweep_is_reached_by_every_recorded_request(monkeypatch):
     assert calls == [1], "recording a request is what applies the window"
 
 
-def test_the_admin_sweep_applies_both_windows():
+def test_the_admin_sweep_applies_all_three_windows():
     db.audit_write(1, "mute_member", outcome="ok", chat_id=-100)
     db.admin_request_put(
         "old", actor_id=1, chat_id=-100, operation="mute_member", target_id=2,
         outcome="ok", at=NOW - 400 * DAY,
+    )
+    # A recorded action whose own window closed long ago: nothing can claim it,
+    # because ``admin_pending_claim`` requires ``expires_at > now``.
+    db.admin_pending_add(
+        "lapsed", actor_id=1, chat_id=-100, operation="nexus_offline",
+        subject="nexus_offline", payload="{}", expires_at=NOW - 400 * DAY,
     )
 
     admin_service.prune()
 
     assert db.audit_recent(limit=10), "a fresh audit row is kept"
     assert db.admin_request_get("old") is None, "an expired request id is dropped"
+    assert db.admin_pending_get("lapsed") is None, "a lapsed proposal is dropped"
 
 
 def test_the_audit_trail_is_windowed_and_never_emptied():
@@ -207,6 +216,7 @@ def test_the_admin_sweep_never_raises(monkeypatch):
 
     monkeypatch.setattr(db, "audit_prune", _boom)
     monkeypatch.setattr(db, "admin_request_prune", _boom)
+    monkeypatch.setattr(db, "admin_pending_prune", _boom)
 
     admin_service.prune()  # must not raise
 
@@ -280,3 +290,117 @@ def test_the_chat_purge_uses_that_index():
     detail = " ".join(str(row[-1]) for row in plan)
 
     assert "idx_chat_messages_at" in detail, detail
+
+
+# ── The VPN's recorded operations ─────────────────────────────────────────
+def pending(
+    request_id: str,
+    *,
+    status: str = "pending",
+    expires_at: int = 0,
+    confirmed_at: int = 0,
+) -> None:
+    """Record one operation, then put it in the state the test is about."""
+    db.vpn_pending_add(
+        request_id,
+        actor_id=1,
+        chat_id=-100,
+        operation="vpn_balance",
+        subject="u1",
+        payload="{}",
+        expires_at=expires_at or NOW + 900,
+        now=NOW,
+    )
+    if status != "pending" or confirmed_at:
+        db._exec(
+            "UPDATE vpn_pending_ops SET status=?, confirmed_at=? WHERE request_id=?",
+            (status, confirmed_at, request_id),
+        )
+
+
+def test_the_vpn_sweep_drops_a_finished_operation_past_the_window():
+    pending("done-old", status="done", confirmed_at=NOW - 10 * DAY)
+    pending("done-new", status="done", confirmed_at=NOW)
+
+    dropped = db.vpn_pending_prune(DAY)
+
+    assert dropped == 1, "exactly the receipt past the window"
+    assert db.vpn_pending_get("done-old") is None
+    assert db.vpn_pending_get("done-new") is not None
+
+
+def test_the_vpn_sweep_drops_an_operation_that_expired_long_ago():
+    pending("never-taken", expires_at=NOW - 10 * DAY)
+
+    dropped = db.vpn_pending_prune(DAY)
+
+    assert dropped == 1
+    assert db.vpn_pending_get("never-taken") is None
+
+
+def test_the_vpn_sweep_never_drops_an_operation_that_can_still_be_confirmed():
+    """The safety property, and the reason the window is measured from expiry.
+
+    ``vpn_pending_claim`` requires ``expires_at > now``, so a row inside its
+    window is one somebody may still approve. A window measured from
+    ``created_at`` instead would delete an operation the owner was in the middle
+    of approving — a money operation that then silently does not happen, which is
+    the one outcome this table exists to prevent.
+    """
+    pending("confirmable", expires_at=NOW + 900)
+    db._exec(
+        "UPDATE vpn_pending_ops SET created_at=? WHERE request_id=?",
+        (NOW - 400 * DAY, "confirmable"),
+    )
+
+    dropped = db.vpn_pending_prune(DAY)
+
+    assert dropped == 0
+    row = db.vpn_pending_get("confirmable")
+    assert row is not None and row["status"] == "pending"
+
+
+def test_a_confirmed_operation_is_kept_while_it_is_still_in_flight():
+    """Mid-execution is not garbage: ``vpn_pending_finish`` still has to find it."""
+    pending("in-flight", status="confirmed", confirmed_at=NOW)
+
+    assert db.vpn_pending_prune(DAY) == 0
+    assert db.vpn_pending_get("in-flight") is not None
+
+
+def test_the_vpn_sweep_never_raises(monkeypatch):
+    """A retention rule must not be the reason an operation fails."""
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the disk is gone")
+
+    monkeypatch.setattr(db, "vpn_pending_prune", _boom)
+
+    vpn_service.prune()  # must not raise
+
+
+def test_the_vpn_sweep_runs_on_the_operation_path_not_on_every_operation(monkeypatch):
+    calls: list[int] = []
+    monkeypatch.setattr(vpn_service, "prune", lambda: calls.append(1))
+    monkeypatch.setattr(vpn_service, "PRUNE_EVERY", 3)
+
+    for _ in range(5):
+        vpn_service._maybe_prune()
+
+    assert calls == [1], "five operations, one sweep"
+    vpn_service._maybe_prune()
+    assert calls == [1, 1], "and the counter resets rather than firing once ever"
+
+
+def test_the_vpn_sweep_is_wired_into_the_operation_path():
+    """The counter is useless if nothing calls it — which was the original bug.
+
+    ``daily_prune`` was documented as "called on the pool path" and had no caller
+    at all. Asserted against the source of the entry point, because that is the
+    thing that was untrue last time.
+    """
+    import inspect
+
+    source = inspect.getsource(vpn_service._record_pending)
+
+    assert "_maybe_prune()" in source, "the operation path must apply the window"
