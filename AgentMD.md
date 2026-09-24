@@ -35,6 +35,10 @@ handoff assumptions.**
   behaviour exists because a document mentions it. Open the file and check.
 - A prompt from the strategy agent is a request, not evidence. Verify every
   premise in it against the repository before you act on it.
+- For the permanent rule that keeps this continuity intact across sessions —
+  context preservation, durable checkpoints and session handoff — see **§55
+  Context Preservation & Session Handoff**. Context is temporary; the repository
+  is durable.
 
 ---
 
@@ -3941,3 +3945,243 @@ holds, **there is no executable next implementation step**.
 `docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5, §7), then verify `git status`,
 `git rev-parse HEAD`, `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.
+
+---
+
+## 55. Context Preservation & Session Handoff
+
+**This is a permanent, non-bypassable project rule.** No new session, agent or
+context window may cause the workflow, the architecture decisions, the completed
+work, the tests, the open problems, the checkpoints or the NEXT STEP to be lost.
+
+**Git and `AgentMD.md` are the source of truth for continuing the work — not a
+session's transient memory.**
+
+### 55.1 Never rely on chat context as project memory
+
+Critical project information must never live only in a context window, a chat
+history or an agent's transient memory. Everything needed to continue correctly
+must be recorded in the repository — in `AgentMD.md` or a durable checkpoint.
+
+"Critical" includes, at minimum:
+
+- the current branch;
+- the base commit;
+- the most recent commits;
+- completed work;
+- partial work;
+- pending work;
+- architecture decisions;
+- significant changes;
+- affected files and components;
+- tests run;
+- benchmarks;
+- test results;
+- known failures;
+- provider / infrastructure state;
+- credential / token state, without exposing a secret;
+- the rollback point;
+- current limitations;
+- work that must deliberately not be done;
+- frozen work;
+- the exact NEXT STEP.
+
+Nothing important may remain only in the conversation.
+
+### 55.2 Context usage monitoring
+
+On a long task, stay aware of how much context has been consumed:
+
+- **~70%** — reduce redundant investigation, stop re-scanning the repository,
+  keep important discoveries and decisions in `AgentMD.md`, and avoid repeating
+  unnecessary output.
+- **~80%** — before starting new work, create or update a durable checkpoint:
+  record the current state in the repository, commit the checkpoint, and push it
+  if the state needs to survive on the remote. Only then continue, and only with
+  essential, related work.
+- **~90%** — do not start new, broad work. First record and commit the smallest
+  safe checkpoint. The repository must be self-contained enough that a new agent
+  or session can continue without guessing. Critical project state must not
+  remain only in the chat.
+
+If context reaches the point where continuing safely is no longer possible:
+checkpoint, commit, push, then stop.
+
+### 55.3 Durable checkpoint format
+
+Every important checkpoint records at least:
+
+- **CHECKPOINT STATUS** — date/time, branch, HEAD commit, base/rollback commit,
+  current task;
+- **completed work**, **partial work**;
+- **changed components/files**;
+- **architecture decisions**;
+- **tests executed** and **test results**;
+- **benchmarks**, if applicable;
+- **known issues**, **blockers**;
+- **frozen items**;
+- **explicitly prohibited actions**;
+- **pending verification**;
+- the exact **NEXT STEP**.
+
+The most important part is the NEXT STEP: it must be a precise, executable
+instruction for the next agent.
+
+- Good: *"Do not modify code. First wait for the provider freeze to be explicitly
+  lifted. Then run the existing live context-quality probe with the documented
+  command. Do not rotate or move credentials."*
+- Bad: *"Continue testing."*
+
+The NEXT STEP must never be vague.
+
+### 55.4 Session handoff protocol
+
+Every new session or agent working on this repository must, before any
+implementation, inspect:
+
+1. `git status`
+2. the current branch
+3. HEAD
+4. recent commits
+5. `AgentMD.md`
+6. `AGENTS.md` / project instructions, if present
+7. the latest checkpoint
+8. the files and components relevant to the NEXT STEP
+
+Then reconcile the state recorded in `AgentMD.md` with the real repository. Do
+not trust a checkpoint blindly:
+
+- if the checkpoint says commit X exists, Git must confirm it really does;
+- if the checkpoint says work is completed, verify the relevant
+  implementation/tests when needed;
+- if the real repository differs from the checkpoint, treat the real repository
+  and Git as the source of truth, identify the discrepancy, reconcile
+  `AgentMD.md` with reality before continuing, and never re-do implementation
+  merely because an old checkpoint says so.
+
+### 55.5 Never restart completed work
+
+A new session must not audit or reimplement the project from scratch. After
+reading the checkpoint:
+
+- do not reimplement completed work;
+- do not redesign the existing architecture;
+- do not replace an existing subsystem with a parallel one;
+- do not re-run previously run tests without reason;
+- do not perform a full repository scan merely for reassurance.
+
+Re-examine or re-run completed work only when the repository state shows it does
+not really exist, the implementation is broken, the checkpoint contradicts Git,
+or verification is genuinely required to continue.
+
+### 55.6 Preserve decisions, not just file changes
+
+A checkpoint is not merely a list of changed files. It must preserve the
+important architecture decisions and their reasoning — for example:
+
+- why an existing subsystem was reused;
+- why a new subsystem was not created;
+- why a provider/workload was kept separate;
+- why a feature is currently disabled/frozen;
+- why a token allocation was deliberately left unchanged;
+- why a failure is acceptable or expected;
+- what was deliberately left out of scope.
+
+The goal is that the next agent does not have to re-derive the same reasoning
+from scratch.
+
+### 55.7 Preserve "do not do" information
+
+Negative information must also be durable. If something must not be done, record
+it explicitly. For example, **DO NOT**:
+
+- run the frozen live probe;
+- rotate credentials;
+- move tokens;
+- merge to `main`;
+- deploy;
+- create a parallel State system;
+- modify financial/audit history;
+- expose secrets.
+
+These must persist in the checkpoint or `AgentMD.md` so the next session does
+not do them by mistake.
+
+### 55.8 Commit checkpoints before context loss
+
+A checkpoint must not remain only in the working tree. When a checkpoint is
+preserving critical state:
+
+1. update `AgentMD.md`;
+2. review the diff;
+3. confirm no secret entered it;
+4. create a clear commit;
+5. push to the current branch;
+6. verify the remote.
+
+The checkpoint must be recoverable on GitHub.
+
+### 55.9 Safe continuation after compaction
+
+If the context was compacted, a new session started, or the agent senses it has
+lost part of the previous workflow: **stop implementation temporarily.** First:
+
+1. read `AgentMD.md`;
+2. find the latest checkpoint;
+3. check `git status`;
+4. check the branch;
+5. check HEAD and recent commits;
+6. compare the recorded state with the real repository;
+7. find the NEXT STEP;
+8. continue only after verifying all of the above.
+
+Never reconstruct the workflow from guesswork.
+
+### 55.10 Context loss must not change architecture
+
+Context loss must not cause an agent to: build a new architecture, create a
+parallel implementation, change a prior decision without investigation,
+duplicate an existing subsystem, expand scope, or rebuild completed features.
+
+If an architecture decision is recorded in `AgentMD.md`, a new session continues
+that decision unless repository evidence shows it is no longer valid. If the
+architecture changes, the reason must be recorded in `AgentMD.md`.
+
+### 55.11 Handoff must be self-contained
+
+At the end of a long task, or before context exhaustion, the agent must be able
+to hand a new session at least:
+
+- **CURRENT STATE** — what is true now?
+- **WHAT CHANGED** — what was implemented?
+- **WHAT WAS VERIFIED** — what tests/checks actually passed?
+- **WHAT IS NOT VERIFIED** — what remains uncertain?
+- **WHAT IS BLOCKED** — what cannot currently proceed, and why?
+- **WHAT MUST NOT HAPPEN** — what actions are explicitly forbidden/frozen?
+- **NEXT STEP** — exactly what the next agent should do.
+
+A new agent must be able to continue from the repository without asking the
+previous agent: "What did you do?", "What was the plan?", "Where were we?",
+"What should I run next?".
+
+### 55.12 AgentMD is durable project memory
+
+`AgentMD.md` is not merely documentation. It is the project's durable
+operational memory for architecture, implementation state, decisions,
+checkpoints, known limitations, test state, blockers, frozen work and handoff
+instructions. Update it when an important project decision or state change
+occurs. Do not overload it with transient noise — preserve only durable
+information that can materially affect future engineering decisions.
+
+### 55.13 Final rule
+
+**"CONTEXT IS TEMPORARY. THE REPOSITORY IS DURABLE."**
+
+Chat context may disappear. A session may restart. The agent may change. The
+context window may compact. The project must still remain understandable and
+safely continuable from Git + `AgentMD.md`. **No critical workflow may exist
+only in the agent's memory.**
+
+- Before context exhaustion: **CHECKPOINT → COMMIT → PUSH → VERIFY.**
+- After a new session: **READ → VERIFY → RECONCILE → CONTINUE.**
+- Never: **GUESS → RESTART → DUPLICATE → REIMPLEMENT.**
