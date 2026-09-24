@@ -5304,23 +5304,41 @@ dashboard must follow these conventions and the same dark visual family
 **Architecture decisions (proposed, to confirm before M1).**
 1. **Stack** — aiohttp + Jinja2 + static, mirroring `/opt/vpn-bot`; no new
    compiled dependency (`scrypt` from stdlib).
-2. **Placement** — a **second process** (`python -m app.web`) sharing the same
-   `./data` SQLite volume; either a second compose service or a second systemd
-   unit on the host. It must **not** run inside the bot's event loop, so a
-   dashboard restart can never disturb Telegram polling. Decision needed:
-   compose service vs systemd (the VPN bot uses systemd).
+2. **Placement — LOCKED (owner, 2026-09-24): a separate `dashboard` Compose
+   service.** It runs `python -m app.web` as its **own process**, sharing the
+   **same `./data` SQLite volume** (no second DB, no second data volume), and
+   must **not** run inside the bot's event loop, so a dashboard restart can never
+   disturb Telegram polling. Managed with the existing compose project.
+   **Image/layer optimization is a hard requirement** (owner): reuse the
+   existing GuardBot image layers where technically safe; **no duplicate Python/
+   system dependencies**; multi-stage build if there is a frontend build; keep
+   build-only deps out of the runtime image; prefer the existing runtime/base
+   image when compatible; **no heavyweight framework** when the existing stack
+   (aiohttp/Jinja) suffices; a correct `.dockerignore` (exclude `.git`, tests,
+   `.venv*`, caches, `data/`, artifacts); minimal optimized frontend assets; **no
+   dev dependencies in the production container**; reuse static assets rather
+   than duplicating; **log rotation configured** so dashboard logs cannot grow
+   unbounded; no persistent in-container caches unless measurably beneficial.
+   Security, reliability, maintainability and rollback must **not** be sacrificed
+   for size. The measured sizes must be reported (current GuardBot image,
+   dashboard image, additional unique disk, shared/reused layers, extra
+   persistent data/log/cache, total footprint) and recorded here.
 3. **Identity** — a dashboard admin identity **separate** from Telegram
    membership, reusing `rbac` for authorization (`config.manage` etc.). A
    Telegram group admin is **not** a dashboard admin (requirement §10).
 4. **Data** — new tables only (`dashboard_sessions`/`dashboard_credentials`/
    `dashboard_audit` as needed) via `CREATE TABLE IF NOT EXISTS` +
    `_ensure_column`; **no destructive rewrite** of history.
-5. **Multi-bot** — **GuardBot is single-bot today.** "Add another bot" is a real
-   architecture change (registry + per-bot Application/credentials/workloads).
-   It is **out of scope until the owner explicitly approves**; the first
-   dashboard release should surface and manage the **existing** single bot
-   (health, webhook/polling status, usage, errors, audit) and **not** pretend a
-   multi-bot capability exists.
+5. **Multi-bot — LOCKED (owner, 2026-09-24): single bot now, designed for
+   multi-bot later.** **GuardBot is single-bot today** (one `BOT_TOKEN`, one
+   `Application`); there is **no** registry and no token-rotation path. The
+   dashboard's first release surfaces and manages the **existing** single bot
+   (health, webhook/polling status, groups, usage, errors, audit, and **safe**
+   token rotation) and **must not pretend** a multi-bot capability exists. The
+   schema and API are shaped so a bot registry can be added later **without a
+   rewrite** (e.g. bot-scoped keys/columns and a `bot_id` seam that currently
+   resolves to the single configured bot), but **no multi-bot behaviour is
+   implemented** and no existing behaviour changes.
 6. **Untouchable** — Chat persona/architecture, credentials, pools, rate limits,
    breakers, context ownership, tenant isolation, workload boundaries
    (requirement §2). The dashboard reads through existing modules; it must not
@@ -5364,11 +5382,16 @@ firewalled/behind nginx like the VPN bot's; it must not be publicly exposed
 without TLS. (d) SQLite is single-writer: analytics must aggregate at the DB
 layer and paginate, not pull rows into the app.
 
-**NEXT STEP (exact).** Confirm the two open decisions — **(1) placement** (second
-compose service vs systemd unit) and **(2) whether multi-bot is in scope** — then
-implement **M1** (`app/web/` foundation + auth + dark shell + tests), commit and
-push, and continue M2…M8 from the repository. Do **not** modify Chat, pools,
-credentials, limits, breakers, tenant isolation or workload boundaries.
+**NEXT STEP (exact).** Both open decisions are now **locked** (see decisions 2
+and 5 above): a **separate `dashboard` Compose service** sharing `./data`, with
+aggressive image/layer optimization; and **single bot now, designed for
+multi-bot later**. Implement **M1** (`app/web/` foundation: aiohttp app, scrypt +
+signed session cookie + CSRF, Jinja templates + dark static shell, login/logout,
+`/healthz`, session expiry/rotation, brute-force rate limit, and tests), plus the
+`dashboard` Compose service, `.dockerignore`, log rotation and the **measured
+image/layer report**; then commit, push, and continue M2…M8 from the repository.
+Do **not** modify Chat, pools, credentials, limits, breakers, tenant isolation or
+workload boundaries.
 
 ---
 
