@@ -175,6 +175,56 @@ def test_a_member_is_not_a_role_candidate():
     assert [c.user_id for c in result.candidates] == [44, 11]
 
 
+def test_two_holders_of_a_role_are_ambiguous_even_when_the_room_converges():
+    """A role word does not name *which* holder, and the room does not settle it.
+
+    The room's replies have all been aimed at 44 — a genuine conversational
+    signal — but «ادمینه» names a role, not the room's topic, so the role tie
+    must not be broken by it. Two administrators is an ask, never a choice.
+    """
+    messages = [
+        row(44, "نیما", "منم هستم", at=960, role="admin"),
+        row(66, "لیلا", "منم", at=965, role="admin"),
+        row(11, "رضا", "باشه", at=970, reply=44, reply_name="نیما"),
+        row(22, "سارا", "چشم", at=975, reply=44, reply_name="نیما"),
+    ]
+    result = R.resolve(anchor("ادمینه رو محدود کن"), messages=messages)
+    assert result.ambiguous is True
+    assert result.confident is False
+
+
+def test_a_role_word_never_carries_the_anaphoric_focus_reason():
+    """The role signal and the room's convergence are different mechanisms.
+
+    ``_about_focus`` settles an *anaphoric* word by what the room has been
+    replying to. It must not appear on a role candidate — even when the room has
+    converged on one of the holders — while the same room and the same replies
+    DO settle «همون کاربر». This reads the evidence, not the verdict.
+    """
+    messages = [
+        row(44, "نیما", "من ادمینم", at=960, role="admin"),
+        row(66, "لیلا", "منم", at=962, role="admin"),
+        row(11, "رضا", "من کاربرم", at=965, role="member"),
+        row(22, "سارا", "باشه", at=970, reply=11, reply_name="رضا"),
+        row(55, "مهدی", "چشم", at=975, reply=11, reply_name="رضا"),
+    ]
+    role = R.resolve(anchor("ادمینه رو محدود کن"), messages=messages)
+    assert role.ambiguous is True
+    assert not any(
+        "points back at them" in reason
+        for candidate in role.candidates
+        for reason in candidate.why
+    )
+    # …and the same room, with an anaphor, is settled by it.
+    anaphor = R.resolve(anchor("همون کاربر رو بن کن"), messages=messages)
+    assert anaphor.top().user_id == 11
+    assert any(
+        "points back at them" in reason
+        for candidate in anaphor.candidates
+        for reason in candidate.why
+    )
+
+
 def test_equal_recency_is_reported_as_ambiguous_not_guessed():
     """The whole point: three plausible people is not a referent."""
     messages = [row(11, "رضا", at=990), row(22, "سارا", at=995), row(44, "نیما", at=998)]

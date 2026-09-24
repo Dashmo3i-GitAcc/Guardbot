@@ -17,7 +17,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from app import discourse, entities, objects, room_state, temporal
+from app import discourse, entities, objects, referents, room_state, temporal
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -582,6 +582,79 @@ def test_the_act_quote_check_is_not_vacuous():
     finally:
         discourse.render_act = original
     assert broken["act_quote_not_in_anchor_cases"] >= 1
+
+
+# ── The role scenario (increment S) ───────────────────────────────────────
+def test_a_role_word_with_two_holders_is_never_confident():
+    """«ادمینه» does not name *which* administrator, so it is not certainty.
+
+    Two holders of the role, the room's replies converged on one of them, and a
+    holder who just spoke are three different shapes — all three must read
+    ``ambiguous``. Choosing one would be the "sure, and wrong" the resolver
+    exists to withhold, and it would be choosing an admin *because* they are an
+    admin.
+    """
+    m = result()
+    assert m["role_two_admin_confident_cases"] == 0
+    shaped = [
+        r["id"]
+        for r in m["detail"]
+        if r["role_holders"] >= 2 and r["expected_kind"] == referents.KIND_ROLE
+    ]
+    assert len(shaped) >= 3, shaped
+
+
+def test_the_two_holder_certainty_check_is_not_vacuous():
+    """Removing both confidence guards trips the metric on the tied admins.
+
+    The two-holder shape is held apart by two guards, not one: the top must
+    clear ``CONFIDENT_MIN`` *and* lead the runner-up by ``MARGIN``. Two admins
+    at the same score fail the second even when the first is removed, so the
+    non-vacuity patch must drop both — otherwise the metric could read zero
+    for the wrong reason and the check would prove nothing.
+    """
+    floor, margin = referents.CONFIDENT_MIN, referents.MARGIN
+    try:
+        referents.CONFIDENT_MIN = 0.0
+        referents.MARGIN = -1.0
+        broken = eval_intent.evaluate(eval_intent.load_cases())
+    finally:
+        referents.CONFIDENT_MIN = floor
+        referents.MARGIN = margin
+    assert broken["role_two_admin_confident_cases"] >= 1
+
+
+def test_the_role_signal_never_uses_the_anaphoric_focus():
+    """Role and convergence are different mechanisms and must stay so.
+
+    The room's reply convergence (``_about_focus``) settles an *anaphoric* word
+    — «همون»/«اون», the object clitic — by what the room has been replying to.
+    A role word names a role, not the room's topic, so the focus reason must
+    never appear in a role candidate's evidence. The check reads the evidence
+    list, not the verdict, so a right-looking answer by the wrong mechanism
+    still fails.
+    """
+    m = result()
+    assert m["role_focus_used_cases"] == 0
+    # Non-vacuous: the same reason DOES appear on an anaphoric case, so the
+    # check is not "the string is never built".
+    anaphoric = [
+        r["id"]
+        for r in m["detail"]
+        if r["expected_kind"] != referents.KIND_ROLE and r["role_focus_reason"]
+    ]
+    assert anaphoric, "no case carries the focus reason at all — vacuous check"
+
+
+def test_the_role_focus_check_is_not_vacuous():
+    """Removing the anaphoric gate lets a role tie run convergence — caught."""
+    original = referents.Expression.anaphoric
+    try:
+        referents.Expression.anaphoric = lambda self: True
+        broken = eval_intent.evaluate(eval_intent.load_cases())
+    finally:
+        referents.Expression.anaphoric = original
+    assert broken["role_focus_used_cases"] >= 1
 
 
 # ── The assembled context ─────────────────────────────────────────────────

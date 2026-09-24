@@ -1,5 +1,5 @@
 {
-  "version": 17,
+  "version": 18,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -454,6 +454,278 @@
         "open_questions": [],
         "when": "",
         "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-two-admins-converge-one",
+      "category": "ambiguity",
+      "note": "«ادمینه» with two administrators: the room's replies converged on one of them, but a role word does not settle on the room's topic — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "منم هستم",
+          "at": 960,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "منم",
+          "at": 965,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 970,
+          "role": "member",
+          "reply_user_id": 44,
+          "reply_name": "نیما"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "چشم",
+          "at": 975,
+          "role": "member",
+          "reply_user_id": 44,
+          "reply_name": "نیما"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              11,
+              44
+            ],
+            [
+              22,
+              44
+            ]
+          ],
+          "focus": 44
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-admin-vs-member-converge",
+      "category": "ambiguity",
+      "note": "«ادمینه» but the room's replies converged on a member: the role word names an administrator, so the member is not the referent and the admin is not certain — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "من ادمینم",
+          "at": 960,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من کاربرم",
+          "at": 965,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "باشه",
+          "at": 970,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "چشم",
+          "at": 975,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-two-admins-recency",
+      "category": "ambiguity",
+      "note": "«ادمینه» with two administrators, one of them just spoke: recency orders the list but does not settle it — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "الف",
+          "at": 1000,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "ب",
+          "at": 4990,
+          "role": "admin"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 5000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-anaphoric-beats-admins",
+      "category": "continuation",
+      "note": "«همون کاربر» with two administrators in the room: the anaphor points at the person the room has been replying to, and the role holders do not enter the reading.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "من ادمینم",
+          "at": 960,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "منم",
+          "at": 962,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من کاربرم",
+          "at": 965,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "باشه",
+          "at": 970,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "چشم",
+          "at": 975,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        },
         "entities": {
           "newest_media": "",
           "has_link": false

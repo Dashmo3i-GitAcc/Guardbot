@@ -210,6 +210,27 @@ def _graph_claims_convergence(graph_block: str, state) -> bool:
     return len(sources) < 2
 
 
+def _role_focus_reason(candidates) -> bool:
+    """Whether any candidate's *evidence* is the anaphoric-focus reason.
+
+    The role signal and the room's reply convergence are different mechanisms
+    and must stay so. ``_about_focus`` settles an anaphoric word — «همون»/«اون»,
+    or the object clitic — by the room's unanimous replies, and it is scoped to
+    those expressions on purpose. A role word («ادمینه») names a role, not the
+    room's topic, so the focus reason must never appear on a role candidate.
+
+    This reads the EVIDENCE list, not the final verdict: a resolver that reached
+    a right-looking answer by letting the role tie invoke convergence still
+    fails. The same reason DOES appear on an anaphoric case, which is what makes
+    the check non-vacuous (see the test).
+    """
+    return any(
+        "points back at them" in reason
+        for candidate in candidates
+        for reason in candidate.why
+    )
+
+
 def _act_quote_not_in_anchor(act_block: str, text: str) -> bool:
     """Whether the act sentence quotes a word the message does not contain.
 
@@ -569,6 +590,19 @@ def evaluate(cases: dict) -> dict:
                 "expected_ambiguous": bool(expect["ambiguous"]),
                 "got_ambiguous": bool(resolution.ambiguous),
                 "got_confident": bool(resolution.confident),
+                # The role scenario: how many role-holders the room's labels put
+                # in the window (the anchor's own speaker is not a candidate),
+                # and whether the role signal pulled in the anaphoric-focus
+                # mechanism — which it must never do.
+                "role_holders": len(
+                    {
+                        int(row["user_id"])
+                        for row in window
+                        if str(row.get("role") or "") in ("owner", "admin")
+                        and int(row["user_id"]) != int(anchor.get("user_id") or 0)
+                    }
+                ),
+                "role_focus_reason": _role_focus_reason(resolution.candidates),
                 "reply_user_id": int(anchor.get("reply_user_id") or 0),
                 "expected_addressed": bool(expect["addressed"]),
                 "got_addressed": bool(addressed),
@@ -718,6 +752,14 @@ def _metrics(detail: list[dict]) -> dict:
     answerable = [r for r in needs if r["expected_referent"] is not None]
     ambiguous_cases = [r for r in detail if r["expected_ambiguous"]]
     predicted_ambiguous = [r for r in detail if r["got_ambiguous"]]
+
+    # ── The role scenario ─────────────────────────────────────────────────
+    # A role word («ادمینه») with more than one role-holder in the room is the
+    # two-admins case: the resolver must stay ambiguous, never manufacture
+    # certainty, and never settle it by the anaphoric/convergence mechanism
+    # (which is scoped to anaphoric expressions for exactly this reason).
+    role_cases = [r for r in detail if r["expected_kind"] == referents.KIND_ROLE]
+    role_two_admin = [r for r in role_cases if r["role_holders"] >= 2]
 
     # BEFORE: the reply edge and nothing else. The server names a person only
     # when the instruction was sent as a reply, and it names that edge's target.
@@ -1106,6 +1148,19 @@ def _metrics(detail: list[dict]) -> dict:
             for r in ambiguous_cases
             if r["got_confident"] and r["got_referent"] != r["expected_referent"]
         ),
+        # ── The role scenario (S) ─────────────────────────────────────────
+        "role_cases": len(role_cases),
+        "role_two_admin_cases": len(role_two_admin),
+        # A role word with two role-holders must read ambiguous, never
+        # confident: "the admin" does not name which one, and inventing a
+        # choice is the certainty the whole resolver exists to withhold.
+        "role_two_admin_confident_cases": sum(
+            1 for r in role_two_admin if r["got_confident"]
+        ),
+        # …and the role signal must not settle anything by the anaphoric-focus
+        # mechanism. Scoped to role cases; the reason is present on an
+        # anaphoric case, which is what makes the check non-vacuous.
+        "role_focus_used_cases": sum(1 for r in role_cases if r["role_focus_reason"]),
         "provided_before": provided_before,
         "provided_after": provided_after,
         "confident_and_correct": confident_correct,
@@ -1277,6 +1332,10 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  ambiguity recall           {_pct(m['ambiguity_recall'])}",
         f"  ambiguity precision        {_pct(m['ambiguity_precision'])}",
         f"  wrong-but-confident        {m['wrong_confident']}",
+        f"  the role scenario          {m['role_two_admin_cases']} two-holder of "
+        f"{m['role_cases']} role cases; {m['role_two_admin_confident_cases']} read "
+        "confident (should be 0); "
+        f"{m['role_focus_used_cases']} settled by the anaphoric focus (should be 0)",
         "",
         "the claim, as a fraction",
         f"  provided before (reply edge only)  {_pct(m['provided_before'])}",
@@ -1330,6 +1389,9 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or r["entity_gives_an_order"]
         or r["object_denies_a_person"]
         or r["graph_claims_convergence"]
+        or (r["role_holders"] >= 2 and r["expected_kind"] == referents.KIND_ROLE
+            and r["got_confident"])
+        or (r["expected_kind"] == referents.KIND_ROLE and r["role_focus_reason"])
         or r["anchor_clitic_words"] or r["shared_clitic_words"]
         or r["act_copula_directive"]
         or r["act_quote_not_in_anchor"]
