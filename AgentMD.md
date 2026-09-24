@@ -1589,6 +1589,62 @@ reference file is stale and this list is the one to fix first.
 * The memory block is rendered as **the person's own words**, never as a fact the
   server asserts, and only for the person the batch is **about**
   (`ctx.anchor_id()`), never for whoever happened to speak.
+* **Automatic memory is a second write path, never a replacement.** The explicit
+  request remains the strongest legitimate signal; `memory.observe` handles it
+  first, through the same `remember`, and both paths share the same validation,
+  bounds and isolation.
+* Automatic extraction is **a statement, not a guess**: a closed vocabulary of
+  slots (`memory.SLOTS`) matched by deterministic rules over the message the
+  person typed. A transient state, a question, a request and a statement about
+  somebody else are each a **whole-message refusal**, not a filter — so
+  "I'm tired today" cannot become "tired: yes" and "my brother is a programmer"
+  cannot become the speaker's occupation. The rules read statements about *what*
+  somebody is, never how they feel; no personality or sensitive trait is inferred.
+* **The slot is the key**, so a new value for the same slot replaces the old one:
+  create, update, replace, merge and deduplicate are what a slot-scoped upsert
+  *is*, not four algorithms. The vocabulary is closed and small, so a person's
+  automatic memories are bounded by the vocabulary rather than by how much they
+  type — the store stays a fact set, never a log.
+* **Behaviour is counted, not assumed.** A style (`style.playful`,
+  `preference.style`) is remembered only after `NEXUS_MEMORY_SIGNAL_THRESHOLD`
+  observations, in a separate bounded counter table that holds a number and never
+  a message, and decays by age (`NEXUS_MEMORY_SIGNAL_RETENTION`) so a person who
+  was playful a year ago is not labelled playful for ever. One playful message is
+  not a personality.
+* **Humour is a stated preference and nothing else.** The humour slots are
+  reached only by an explicit statement; the material is never stored, and the
+  flag is not permission — it changes no safety rule, authorises no content and
+  grants nothing. The chat layer's own policy is unaffected by it.
+* Model output is **untrusted candidate data**. The seam is off unless
+  `NEXUS_MEMORY_EXTRACT_MODEL` **and** an account in the isolated `memory`
+  workload both exist; `memory.validate_candidate` checks the slot against the
+  closed vocabulary and the value against the same rejections — including on the
+  value *as the model wrote it*, so stripping a leading "my " cannot hide
+  somebody else's attribute. Nothing reaches the table without passing it.
+* The `memory` workload is **isolated end to end**: its own key slots, models,
+  timeout, retries, backoff, breaker, daily allowance and counters
+  (`app/memory_extract.py` imports no chat, awareness, intent, moderation, search,
+  transcription or voice module). A memory backlog cannot spend, delay or exhaust
+  the request somebody is waiting on.
+* Memory is **off the answer path**. `main._schedule_memory_observation`
+  schedules `memory.observe` as a background task, so no extraction, write,
+  provider call, retry or failure can delay a reply; the worst case is that a
+  memory is not learned. The only synchronous work is the bounded read and
+  render (measured **0.06 ms p50** against **0.0004 ms** with the feature off).
+* Memory is **independent of awareness**. The memory block reaches an addressed
+  answer through the room reading when that reading exists, and through
+  `main._memory_context` when awareness is off or the reading cannot be built —
+  so turning awareness off (or losing it) does not take the person's memory with
+  it, and the block is never duplicated.
+* Retrieval is **relevance-first**. Rows that describe the person — explicit,
+  identity, preference, style, humour — are always relevant; an **interest** must
+  be mentioned to be shown, so a favourite game does not appear in an answer
+  about a programming project. Relevance is a deterministic lexical overlap plus
+  a small per-slot hint table, never a model judgement.
+* The automatic path writes only against a **closed slot vocabulary**, so a
+  hallucinated slot from the model seam is dropped rather than stored under a new
+  key: the server owns the allowed keys, the value size, the item count, the
+  scope, the retention and the storage limits.
 * `awareness.record` runs on **every** completed pass; `wants_to_speak` is
   `respond` **or** a write that actually ran.
 * `parse_decision` returning `None` means **say nothing** — never send the raw
@@ -2893,3 +2949,130 @@ point), then verify: `git status` (clean), `git rev-parse HEAD` (this checkpoint
 commit or later), `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`. Then
 begin X.
+
+### 54.7 Checkpoint (2026-09-24, after the W extension) — resume here (supersedes §54.6)
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`, on top of
+§54.6 (`70dd7e0`). The W extension is the automatic long-term memory described
+below. Working tree changes: `app/memory.py`, `app/db.py`, `app/config.py`,
+`app/awareness_context.py`, `app/main.py`, new `app/memory_extract.py`, new
+`tests/test_memory_auto.py`, `tests/test_chat_daily_budget.py`,
+`tests/test_gemini_pool.py`, `tests/test_nexus.py`, `tools/eval_memory.py`,
+`docs/intent-awareness-roadmap.txt`, `AgentMD.md`. `main` and the annotated tag
+`release-base/nexus-intel` are both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**.
+Suite **3417 passed, 0 failed** (was 3314). **Not merged, not deployed.**
+
+**The four context sources, and the boundary between them.** These are
+complementary and deliberately *not* one generic "context":
+
+* **Conversation History** — what was recently said. The room window
+  (`group_messages`, one hour) and the transcript; short-lived and chronological.
+* **Awareness** — what is happening around Nexus now. The room-scoped reading
+  (`app/awareness.py` + `app/awareness_context.py`): who spoke, the reply graph,
+  the addressed-message reading, the participants. Room-scoped and bounded by the
+  existing debounce, starvation, cooldown and daily-budget rules.
+* **Stateful Nexus / State** — what the current interaction is trying to
+  accomplish. **NOT BUILT YET**; it is increment **X** and its boundary is
+  reserved here so Memory is not asked to do its job. Memory must never be used
+  as a substitute for state.
+* **Long-Term User Memory** — what is worth remembering about this person.
+  `app/memory.py`, keyed `(chat_id, user_id)`, bounded, and never a raw archive.
+
+Each source contributes its own bounded block; the composition takes the minimum
+relevant combination rather than injecting all four. Memory adds **one** block,
+bounded by `NEXUS_MEMORY_ITEMS` rows and `NEXUS_MEMORY_CHARS` characters.
+
+**What the W extension adds (DONE).**
+
+* **A second write path, not a replacement.** `memory.observe` handles the
+  explicit clause first (through the same `remember`), then the automatic layer.
+  Explicit requests stay the strongest signal and share every validation, bound
+  and isolation rule.
+* **A statement, not a guess.** A closed slot vocabulary (`memory.SLOTS`, 17
+  slots) matched by deterministic rules over the message. A transient state, a
+  question, a request and a third-party statement are **whole-message refusals**.
+  Nothing psychological or sensitive is inferred; the rules read *what* somebody
+  is, never how they feel.
+* **The slot is the key**, so a new value replaces the old one — create, update,
+  replace, merge and deduplicate are one slot-scoped upsert. The vocabulary is
+  closed, so a person's automatic memories are bounded by it rather than by how
+  much they type.
+* **Behaviour is counted.** `style.playful` and `preference.style` are remembered
+  only past `NEXUS_MEMORY_SIGNAL_THRESHOLD`, in a separate bounded counter table
+  (`user_memory_signal`) that holds a number and never a message, decaying by age.
+* **Humour is a stated preference and nothing else.** Reached only by an explicit
+  statement; the material is never stored and the flag changes no safety rule.
+* **Relevance-first retrieval.** Explicit, identity, preference, style and humour
+  rows are always relevant; an **interest** must be mentioned. So a favourite game
+  does not appear in an answer about a programming project, while a known
+  programming language always does.
+* **The model seam is off and isolated.** `app/memory_extract.py` uses the
+  isolated `memory` Gemini workload; it is enabled only by
+  `NEXUS_MEMORY_EXTRACT_MODEL` **and** an account. Its output is untrusted —
+  `memory.validate_candidate` re-checks the slot and the value before storage.
+  There is no `GEMINI_MEMORY_API_KEY` on this host, so the seam is unexercised.
+* **Off the answer path.** `main._schedule_memory_observation` schedules
+  `memory.observe` as a background task. Nothing about memory is awaited by a
+  handler; a slow provider, a locked database or a broken rule costs a memory,
+  never a reply.
+* **Independent of awareness.** Memory reaches an addressed answer through the
+  room reading when it exists, and through `main._memory_context` when awareness
+  is off, the message is not in the window, or the reading cannot be built — and
+  it is never duplicated. Awareness stays an optional source.
+
+**Measured** (`python3 tools/eval_memory.py`, deterministic and offline):
+
+* explicit extraction precision **1.0** / recall **1.0** (12 pos / 13 neg), 0 FP;
+* automatic extraction precision **1.0** / recall **1.0** (16 pos / 15 neg), 0 FP;
+* gate: of 18 ordinary messages, 5 answered by the rules and **1 (5.6%)** reached
+  the seam; **0 provider calls**;
+* storage: 90 000 rows **16.91 MB**, **197 bytes/row**, projected **16.91 MB** at
+  3000 members (budget 200 MB); write 0.293 ms p50 / 0.678 ms p95;
+* lifecycle: 8 accepted / 4 rejected, 2 duplicates, 6 replacements, **5 rows** at
+  the end of the scripted conversation;
+* **sync cost** (the only work memory adds to a chat turn): read+render
+  **0.074 ms p50 / 0.176 ms p95**, against **0.0004 ms** with the feature off;
+* retrieval 0.049 ms p50 / 0.128 ms p95; block mean/max **145** chars (budget 300).
+
+**Live probe — NOT RUN, and why.** The probe compares a baseline (Conversation +
+Awareness) against Conversation + Awareness + relevant Memory and measures
+repeated-question reduction, relevance, incorrect/inappropriate memory, latency,
+model calls, context size and provider latency. It **cannot be run on this host**:
+there is no `GEMINI_MEMORY_API_KEY`, so the model seam is disabled and the
+deterministic suite never exercises a provider. The measurements above are the
+**server's** contribution — what is extracted, stored, rendered and what it costs
+— and they are **not** evidence that answer quality improved. Claiming otherwise
+would be exactly the overclaiming this project refuses. **Known limitation:** the
+model seam's validation path is tested with a synthetic untrusted payload
+(`tests/test_memory_auto.py`), not with a real provider answer.
+
+**Known limitations.** (1) Relevance is a deterministic lexical overlap plus a
+small per-slot hint table, so an interest stored in one script may not match a
+topic written in another unless a hint covers it. (2) The deterministic rules
+cover a fixed set of phrasings; the model seam exists for the remainder and is
+off. (3) The global prune is a whole-table statement (266 ms measured at 90 k
+rows) that runs every `PRUNE_EVERY` recordings once the table is over
+`NEXUS_MEMORY_MAX`; it is off the answer path but worth revisiting at scale.
+(4) State is not built, so continuity across turns is still the conversation
+window's job.
+
+**Rollback.** The extension is independently revertable: `git revert <sha>` on
+this branch, plus `DROP TABLE user_memory_signal` (the one new table, additive —
+no existing table was altered). W itself remains `ddc79aa` + `e55d48f` +
+`70dd7e0`, rollback `DROP TABLE user_memory`. The whole evolution reverts by
+leaving the branch unmerged; `main` at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709`
+is the production state and is an **ancestor** of the branch.
+
+**Exact next step.** INCREMENT **X** — Stateful Long-term Nexus (roadmap §5/X):
+bounded conversational STATE, explicitly distinct from Memory, scoped by
+`(chat_id, user_id)` or `(chat_id, task)`, never global; fresh explicit input wins
+over stale state; ambiguity stays ambiguous. It reuses W's bounded-store pattern.
+**Do NOT start X without the owner's explicit go-ahead.** Do not skip to Y, U
+or V.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§5 for W/W-extension/X/Y/U/V, §7 for the
+continuation point), then verify: `git status`, `git rev-parse HEAD`,
+`git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.

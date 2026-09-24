@@ -532,11 +532,20 @@ def _render_user_memory(ctx: Ctx) -> str:
     It is a *read*: the block reports what the person asked the server to
     remember, in their own words, and grants nothing. Authority is resolved from
     the Telegram id elsewhere and never from a memory.
+
+    Retrieval is **relevance-first**: the topic is the message the pass is
+    about, so a memory that bears on it is shown and an unrelated one is not.
+    A favourite game does not appear in an answer about a programming project.
+    The preference, style and humour rows are always relevant — they describe
+    how to talk to this person — and are ranked in with the rest by ``_rank``.
     """
     user_id = ctx.anchor_id()
     if not user_id:
         return ""
-    rows = memory.about(ctx.chat_id, user_id, limit=int(config.NEXUS_MEMORY_ITEMS))
+    topic = str((ctx.anchor or {}).get("text") or "")
+    rows = memory.about(
+        ctx.chat_id, user_id, limit=int(config.NEXUS_MEMORY_ITEMS), topic=topic
+    )
     if not rows:
         return ""
     return memory.render(rows, budget=int(config.NEXUS_MEMORY_CHARS))

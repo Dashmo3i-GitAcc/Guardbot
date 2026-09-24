@@ -2669,6 +2669,36 @@ def _room_reading(
         return ""
 
 
+def _memory_context(chat_id: int, user_id: int, text: str) -> str:
+    """The person's own long-term memory, as one bounded block.
+
+    A source of its own, deliberately not reached through the awareness layer:
+    the brief's requirement is that a chat answer survives awareness being off,
+    unavailable or failed, and the fallback it falls back *to* includes this.
+    Retrieval is relevance-first — the message being answered is the topic — so
+    an unrelated memory is not shown, and the block is bounded twice (rows and
+    characters).
+
+    It is a read that grants nothing. A failure returns ``""``: memory is an
+    enhancement, and a context block is never worth failing an answer over.
+    """
+    if not config.NEXUS_MEMORY_ENABLED or not chat_id or not user_id:
+        return ""
+    try:
+        rows = memory.about(
+            int(chat_id),
+            int(user_id),
+            limit=int(config.NEXUS_MEMORY_ITEMS),
+            topic=str(text or ""),
+        )
+        if not rows:
+            return ""
+        return memory.render(rows, budget=int(config.NEXUS_MEMORY_CHARS))
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the person's long-term memory")
+        return ""
+
+
 async def _answer_conversationally(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -2808,6 +2838,7 @@ async def _answer_conversationally(
     # rather than left to the model over raw text. Both are gated on the layer
     # being on, so switching awareness off still gives the speed back.
     room_window: list[dict] = []
+    reading = ""
     if awareness.enabled():
         room_window = awareness.window(
             room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
@@ -2817,11 +2848,23 @@ async def _answer_conversationally(
             limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES)),
             messages=room_window,
         )
-        context = context + _room_reading(
+        reading = _room_reading(
             room.id,
             message_id=int(getattr(msg, "message_id", 0) or 0),
             messages=room_window,
         )
+        context = context + reading
+
+    # Long-term memory is its own source and never a dependency of the awareness
+    # layer. It reaches this turn through the room reading when that reading was
+    # built — the ``user_memory`` source is one of its blocks — so it is rendered
+    # here only when the reading is missing: awareness switched off, the message
+    # not in the window, or the reading failing. Without this, turning awareness
+    # off would silently take the person's own memory with it, which is exactly
+    # the coupling the four-source architecture exists to remove. It is a bounded
+    # read (see ``memory.about``) and its failure is empty text, never an error.
+    if not reading:
+        context = (context or "") + _memory_context(room.id, user.id, text)
 
     # The server's own date, so the model can date what it reads instead of
     # treating the newest claim in the room or on a page as today. Appended here,
@@ -2975,6 +3018,36 @@ async def _send_voice(
         return False
 
 
+def _schedule_memory_observation(ctx, user, chat_id: int, text: str) -> None:
+    """Learn from one message **off** the answer path, and never wait for it.
+
+    Long-term memory is an enhancement, so it is deliberately the one thing on
+    this handler that is not awaited. Everything the automatic path does — the
+    deterministic rules, the behavioural counters, the bounded write, and the
+    gated provider call an operator may enable — runs in a background task, so
+    none of it can add a millisecond to the reply somebody is waiting for, and a
+    slow or unavailable memory workload cannot delay chat at all.
+
+    The task is fire-and-forget on purpose: ``memory.observe`` is written never
+    to raise, so there is no result to await and no failure to report. A host
+    whose context has no scheduler simply learns nothing this message, which is
+    the same outcome as a message that held no memory.
+    """
+    try:
+        coro = memory.observe(user, chat_id, text)
+    except Exception:  # noqa: BLE001 - building the coroutine must not fail
+        log.exception("could not prepare memory observation")
+        return
+    try:
+        schedule = getattr(getattr(ctx, "application", None), "create_task", None)
+        if schedule is None:
+            schedule = asyncio.get_running_loop().create_task
+        schedule(coro)
+    except Exception:  # noqa: BLE001 - a scheduler is never worth a handler
+        coro.close()
+        log.exception("could not schedule memory observation")
+
+
 async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """The assistant, in a group. The Nexus gate, in order.
 
@@ -3002,15 +3075,16 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     principal = rbac.resolve(user.id)
     text = _message_text(msg)
 
-    # Long-term user memory, also before every gate and also free. It records a
-    # clause only when the person explicitly asked to be remembered — the match
-    # is a regex over text the handler already holds, so an ordinary message
-    # costs one failed match and no write. It grants nothing: a memory is a
-    # sentence for the model to read, and authority stays in ``rbac`` above.
-    # Scoped to the group path because that is where the observation already
-    # happens; the key is ``(chat_id, user_id)``, so a private chat's memory
-    # could never render here in any case.
-    memory.remember(user, room.id, text)
+    # Long-term user memory, also before every gate and also free — and, unlike
+    # everything above it, **off this thread**. The learning is scheduled as a
+    # background task rather than awaited, so neither the regex pass, nor a
+    # memory write, nor the gated provider call the automatic path may make can
+    # add a millisecond to the reply somebody is waiting for. It grants nothing:
+    # a memory is a sentence for the model to read, and authority stays in
+    # ``rbac`` above. Scoped to the group path because that is where the
+    # observation already happens; the key is ``(chat_id, user_id)``, so a
+    # private chat's memory could never render here in any case.
+    _schedule_memory_observation(ctx, user, room.id, text)
 
     # 1a. Is this aimed at Nexus? Computed once and used twice — by the capture,
     #     which records it as a hint for choosing the pass's anchor, and by the

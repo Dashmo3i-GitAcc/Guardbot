@@ -311,8 +311,17 @@ def test_the_other_workloads_have_no_daily_allowance():
     runs *inside* a Gemini request, so grounding on the conversation's workload
     would have made every factual question spend the allowance a reply is waiting
     on. Giving it an allowance of its own is what keeps the two apart.
+
+    ``memory`` is the fourth, and it is the same argument as ``awareness`` with a
+    different subject: automatic memory extraction runs on its own workload so a
+    backlog of learning cannot spend the request a person is waiting on an answer
+    to. Its allowance is small (``NEXUS_MEMORY_MODEL_DAILY_LIMIT``) because the
+    seam is off by default and, when on, is reached by only a small share of
+    messages. The workloads that are neither conversation, awareness, search nor
+    memory — intent, moderation, transcription, tts — still have none, and that
+    is the property this test exists to hold.
     """
-    allowed = {"chat", "awareness", "live_voice", "search"}
+    allowed = {"chat", "awareness", "live_voice", "search", "memory"}
     for spec in config.GEMINI_POOLS:
         if spec["workload"] in allowed:
             assert spec["daily_budget"] >= 1

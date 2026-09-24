@@ -417,6 +417,54 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
               app/main.py, tests/conftest.py, tests/test_intent_eval.py,
               tools/eval_intent.py. Suite 3266 -> 3314. Narrative: reference §63.
 
+1.2f THE W EXTENSION — automatic long-term user memory (after §54.6, 70dd7e0)
+--------------------------------------------------------------------------------
+  WHAT: the SAME store, a SECOND write path. W v1 learned only what a person
+        explicitly asked to keep; this learns stable, useful things from ordinary
+        conversation — identity, interests, communication preferences, repeated
+        behavioural style — while keeping the four context sources distinct
+        (Conversation / Awareness / State / Memory) and keeping Memory OFF the
+        answer path.
+  HOW:  a CLOSED slot vocabulary (memory.SLOTS, 17 slots) matched by
+        deterministic rules. The SLOT IS THE KEY, so a new value replaces the old
+        one: create/update/replace/merge/dedup are one slot-scoped upsert, and the
+        vocabulary — not the message count — bounds the store. A transient state,
+        a question, a request and a third-party statement are WHOLE-MESSAGE
+        refusals. Behaviour (style.playful, preference.style) is COUNTED in its own
+        bounded table and promoted only past NEXUS_MEMORY_SIGNAL_THRESHOLD, then
+        decays by age. Humour is reached only by an EXPLICIT STATEMENT: the
+        material is never stored, the flag grants nothing.
+  MODEL: OFF by default. app/memory_extract.py uses the isolated `memory` Gemini
+        workload (own keys, budget, breaker, counters) and is enabled only by a
+        switch AND an account. Its output is UNTRUSTED: memory.validate_candidate
+        re-checks the slot and the value before storage — including on the value
+        as written, so stripping a leading "my " cannot hide a third party.
+  ASYNC: main._schedule_memory_observation schedules memory.observe as a
+        BACKGROUND TASK. Nothing about memory is awaited by a handler.
+  AWARENESS-INDEPENDENT: memory reaches an addressed answer through the room
+        reading when it exists, and through main._memory_context when awareness is
+        off or the reading cannot be built — never duplicated. Awareness stays an
+        optional source; chat falls back to Conversation + Memory.
+  RETRIEVAL: relevance-first. Explicit, identity, preference, style and humour
+        rows are always relevant; an INTEREST must be mentioned. A favourite game
+        stays out of an answer about a programming project.
+  MEASURED (tools/eval_memory.py): explicit extraction precision 1.0 / recall 1.0
+        (12 pos / 13 neg); AUTOMATIC extraction precision 1.0 / recall 1.0 (16 pos
+        / 15 neg), 0 false positives; gate — of 18 ordinary messages, 5 answered
+        by the rules and 1 (5.6%) reached the seam, 0 provider calls; storage
+        90 000 rows 16.91 MB, 197 bytes/row, projected 16.91 MB at 3000 members
+        (budget 200 MB); lifecycle over a scripted conversation 8 accepted /
+        4 rejected, 2 duplicates, 6 replacements, 5 rows at the end; SYNC COST
+        read+render 0.074 ms p50 / 0.176 p95 vs 0.0004 ms disabled.
+  NEW: app/memory_extract.py, tests/test_memory_auto.py.
+  CHANGED: app/memory.py, app/db.py, app/config.py, app/awareness_context.py,
+        app/main.py, tools/eval_memory.py, tests/test_chat_daily_budget.py,
+        tests/test_gemini_pool.py, tests/test_nexus.py. Suite 3314 -> 3417.
+        DB: one new additive table user_memory_signal (rollback DROP TABLE).
+        Narrative: reference §64. Checkpoint: AgentMD §54.7.
+  NOT RUN: the live probe. There is no GEMINI_MEMORY_API_KEY on this host, so the
+        model seam is unexercised and NO claim is made that answers improved.
+
 1.3 ARCHITECTURAL / SECURITY BOUNDARIES PRESERVED (verified in AgentMD §53.7)
 --------------------------------------------------------------------------------
 * Readers are EVIDENCE, NEVER A DECISION. Nothing branches on any reader; none
@@ -439,6 +487,10 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
   rollback is `DROP TABLE user_memory` and a row from before it reads as absent.
   It is not a `CREATE TABLE` change to an existing table, which is the shape the
   `151b1e1` precedent forbids. See §5/W.
+  **The W extension adds a SECOND new table.** `user_memory_signal` holds the
+  behavioural counters — a number and never a message — and is additive in the
+  same way: no existing table altered, rollback `DROP TABLE user_memory_signal`.
+  See §1.2f.
 * RUNTIME-PATH CHANGE: A–S changed NONE. Verified per file against main:
   app/main.py, app/chat.py, app/awareness.py, app/db.py and app/config.py are
   UNCHANGED by every lettered increment A–S. The only runtime-adjacent file A–S
@@ -456,6 +508,18 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
   handler already holds and fires only on an explicit request, so an ordinary
   message costs one failed match and no write; the read is one indexed lookup
   that returns nothing for most people. Zero model calls; see §5/W.
+* **The W extension keeps that shape and adds a second, equally bounded path.**
+  The automatic layer is a closed slot vocabulary matched by rules over the same
+  text; a new value for a slot replaces the old one, so the store stays a fact
+  set. Behaviour is counted in its own bounded counter table and promoted only
+  past a threshold. The model seam (app/memory_extract.py) is OFF by default and
+  isolated on its own workload; when on, its output is untrusted and re-validated
+  by the server. **Memory is scheduled, never awaited** —
+  app/main.py's `_schedule_memory_observation` runs `memory.observe` as a
+  background task — so the only synchronous cost is the bounded read+render
+  (0.074 ms p50). Memory is also **independent of awareness**: when the room
+  reading is missing, `main._memory_context` renders the block instead. See
+  §5/W-EXTENSION and §1.2f.
 * Zero Gemini calls added by any increment.
 * Context is bounded: hard ceiling NEXUS_AWARENESS_CONTEXT_CHARS = 1500, each
   source has its own budget, `_clip` keeps whole lines from the front so the
@@ -960,6 +1024,71 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
   memory for a referenced person other than the anchor. Both are recorded as
   later, separately-evidenced increments rather than half-built here.
 
+  INCREMENT W-EXTENSION — automatic long-term user memory  [DONE — see RESULT]
+  ------------------------------------------------------------------------------
+  Purpose:   The same store, a second write path. W v1 learned only what a person
+             explicitly asked to keep; this learns stable, useful things from
+             ordinary conversation — identity, interests, communication
+             preferences, repeated behavioural style — while keeping the four
+             context sources distinct (Conversation / Awareness / State /
+             Memory) and keeping Memory off the answer path.
+  Design:    A closed slot vocabulary (17 slots, ``memory.SLOTS``) matched by
+             deterministic rules over the message. The slot is the key, so
+             create/update/replace/merge/dedup are one slot-scoped upsert. A
+             transient state, a question, a request and a third-party statement
+             are whole-message refusals. Behaviour is counted in a separate
+             bounded counter table and promoted only past a threshold, decaying
+             by age. Humour is reached only by an explicit statement — the
+             material is never stored and the flag grants nothing.
+  Model:     OFF by default. ``app/memory_extract.py`` uses the isolated
+             ``memory`` Gemini workload (its own keys, budget, breaker, counters)
+             and is enabled only by a switch AND an account. Its output is
+             untrusted: ``memory.validate_candidate`` re-checks the slot against
+             the closed vocabulary and the value against the same rejections.
+  Async:     ``main._schedule_memory_observation`` schedules ``memory.observe``
+             as a background task. Nothing about memory is awaited by a handler.
+  Independence: Memory reaches an addressed answer through the room reading when
+             it exists, and through ``main._memory_context`` when awareness is
+             off or the reading cannot be built — so awareness stays optional and
+             the block is never duplicated.
+  DB:        ONE new table, ``user_memory_signal`` (counters), additive; rollback
+             is ``DROP TABLE user_memory_signal``. No existing table altered.
+  Files:     new ``app/memory_extract.py``, ``tests/test_memory_auto.py``;
+             changed ``app/memory.py``, ``app/db.py``, ``app/config.py``,
+             ``app/awareness_context.py``, ``app/main.py``, ``tools/eval_memory.py``,
+             ``tests/test_chat_daily_budget.py`` (the memory workload now has its
+             own allowance, which is the invariant that test exists to hold).
+  Gemini:    0 calls by default. The seam is off, and the gate is what keeps it
+             off even when on: of an 18-message ordinary stream, the rules
+             answered 5 and only 1 (5.6%) reached the seam.
+  RESULT (measured on this host, ``python3 tools/eval_memory.py``):
+    Explicit extraction  precision 1.0000 / recall 1.0000 (12 pos / 13 neg), 0 FP.
+    Automatic extraction precision 1.0000 / recall 1.0000 (16 pos / 15 neg), 0 FP.
+    Gate                 5 rules-answered / 5 self-information / 1 to the seam
+                         (5.6%) / **0 provider calls**.
+    Storage              3000 users x 30 items = 90 000 rows, **16.91 MB**,
+                         **197 bytes/row**, projected **16.91 MB** at 3000
+                         members (budget 200 MB). Write 0.293 ms p50 / 0.678 p95.
+    Lifecycle            scripted conversation: 8 accepted / 4 rejected, 2
+                         duplicates, 6 replacements, **5 rows at the end** —
+                         the store is a fact set, not a log.
+    Sync cost            read+render **0.074 ms p50 / 0.176 ms p95**; the same
+                         read with memory disabled **0.0004 ms**. This is the
+                         *only* work memory adds to a chat turn.
+    Retrieval            0.049 ms p50 / 0.128 ms p95; block mean/max **145**
+                         characters (budget 300).
+  Tests:     3314 → **3417** (+103 in ``tests/test_memory_auto.py``), full suite
+              green.
+  Live probe: NOT RUN — no ``GEMINI_MEMORY_API_KEY`` exists on this host, so the
+              model seam cannot be exercised and no claim about answer quality is
+              made. The deterministic numbers above measure the *server's*
+              contribution (what is extracted, what is stored, what is rendered,
+              what it costs), not whether the model's answers improved. See
+              AgentMD §54.7 for the probe methodology and its known limits.
+  What it deliberately does NOT do: no raw conversation archive, no psychological
+              profiling, no inferred sensitive traits, no third-party memory, no
+              per-message model call, no authority from memory.
+
   INCREMENT X — "what is happening right now"
   ------------------------------------------------------------------------------
   Purpose:   STATEFUL LONG-TERM NEXUS — bounded conversational STATE: active
@@ -1111,20 +1240,27 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     ddc79aadac92d36752fc85df9b1b056563d3f2bf (increment W; T was 5904791,
-          S e936aef). Docs commits sit on top — a commit that names its own count
-          would be wrong the moment it lands.
+HEAD:     see AgentMD.md §54.7 (the W-extension checkpoint). The previous
+          checkpoint was §54.6 at 70dd7e0; the W-extension commit sits on top of
+          it. Docs commits sit on top — a commit that names its own count would
+          be wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3314 passed, 0 failed
+Suite:    3417 passed, 0 failed
 Corpus:   141 cases, version 18
 Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           addressed path appends the reading), app/awareness_context.py (`skip` +
           CONVERSATION_SKIP) and app/awareness.py (`room_block` gained
           `messages`). **W adds a runtime write and a source**: app/main.py (the
           observation path records an explicit memory), app/memory.py (new),
-          app/awareness_context.py (one `Source`). DB changes on the branch: the
-          foundation's 151b1e1 (two additive columns) and **W's new
-          `user_memory` table** — additive, new-table, rollback `DROP TABLE`.
+          app/awareness_context.py (one `Source`). **The W extension adds a
+          background task and a fallback**: app/main.py (`_schedule_memory_observation`
+          schedules `memory.observe` off the answer path; `_memory_context` renders
+          the block when the room reading is missing), app/memory.py (the automatic
+          write path, the signals and `observe`), app/memory_extract.py (new, off
+          by default). DB changes on the branch: the foundation's 151b1e1 (two
+          additive columns), **W's new `user_memory` table** and **the
+          extension's new `user_memory_signal` table** — both additive, new-table,
+          rollback `DROP TABLE`.
 Next:     INCREMENT X — "what is happening right now" (stateful long-term Nexus,
           roadmap §5/X): bounded conversational STATE, explicitly distinct from
           Memory, scoped by (chat_id, user_id) or (chat_id, task), never a global
@@ -1132,13 +1268,14 @@ Next:     INCREMENT X — "what is happening right now" (stateful long-term Nexu
           X → Y → U → V; U and V come last because U spends the rationed request
           budget and V needs an answer-quality measurement that does not exist
           until Y. See §5 for the full scoping and the dependency rationale.
-          W is DONE (see §5/W RESULT). Do NOT start X without the owner's
-          explicit go-ahead. Do NOT skip to Y, U or V.
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.6 (the checkpoints).
-                 docs/reference/nexus-awareness.md §52–§63 (the narrative).
+          W and the W extension are DONE (see §5/W RESULT and §5/W-EXTENSION
+          RESULT). Do NOT start X without the owner's explicit go-ahead. Do NOT
+          skip to Y, U or V.
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.7 (the checkpoints).
+                 docs/reference/nexus-awareness.md §52–§64 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1–§54.6 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.7 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

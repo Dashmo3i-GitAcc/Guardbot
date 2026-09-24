@@ -532,6 +532,36 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_user_memory_updated "
         "ON user_memory(updated_at)"
     )
+    # ── Nexus Memory: the evidence behind a repeated behaviour ──
+    #
+    # A *counter*, not a memory. Automatic extraction will not label somebody
+    # "playful" on one playful message, so each behavioural signal is counted
+    # first and only promoted to a memory when it crosses the threshold. The row
+    # holds a number and two timestamps — there is no column for a message and no
+    # path writes one.
+    #
+    # Bounded by construction: the signal vocabulary is a closed, small set
+    # (``app/memory.SIGNALS``), so a person can have at most one row per signal.
+    # Keyed by ``(chat_id, user_id)`` for the same reason ``user_memory`` is: a
+    # group can never read another group's evidence, and a private chat's can
+    # never reach a group.
+    #
+    # Additive and new, so rollback is ``DROP TABLE user_memory_signal``.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_memory_signal (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            signal TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            first_at INTEGER NOT NULL DEFAULT 0,
+            last_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id, signal))"""
+    )
+    # The age prune's shape: a range seek on the last observation, not a scan.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memory_signal_last "
+        "ON user_memory_signal(last_at)"
+    )
     # ── Nexus Awareness: the bounded view of the room ──
     #
     # Two tables, and they are a *different thing* from ``chat_messages`` rather
@@ -2479,6 +2509,75 @@ def memory_reset() -> None:
     """Forget every remembered clause. For tests."""
     with _lock:
         _conn.execute("DELETE FROM user_memory")
+        _conn.commit()
+
+
+def signal_bump(chat_id: int, user_id: int, signal: str, *, now: int = 0) -> int:
+    """Count one observation of one behavioural signal. Returns the new count.
+
+    An upsert rather than an insert, because the useful thing is *how often*, not
+    *when each time*: the row is the evidence and the count is the reading. The
+    whole table is a bounded set of counters, never a log of what was said.
+    """
+    stamp = int(now or time.time())
+    with _lock:
+        _conn.execute(
+            """INSERT INTO user_memory_signal
+                   (chat_id, user_id, signal, count, first_at, last_at)
+               VALUES (?,?,?,1,?,?)
+               ON CONFLICT(chat_id, user_id, signal) DO UPDATE SET
+                   count=user_memory_signal.count + 1,
+                   last_at=excluded.last_at""",
+            (int(chat_id), int(user_id), str(signal), stamp, stamp),
+        )
+        _conn.commit()
+        row = _conn.execute(
+            "SELECT count FROM user_memory_signal "
+            "WHERE chat_id=? AND user_id=? AND signal=?",
+            (int(chat_id), int(user_id), str(signal)),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def signal_for(chat_id: int, user_id: int) -> dict[str, int]:
+    """Every counted signal for one person in one room, as ``{signal: count}``."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT signal, count FROM user_memory_signal "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchall()
+    return {str(row[0]): int(row[1]) for row in rows}
+
+
+def signal_prune(*, max_age: int = 0) -> int:
+    """Drop counters not observed for ``max_age``. Returns how many were dropped.
+
+    The decay that stops "playful a year ago" from being "playful for ever": a
+    behaviour has to keep being demonstrated to keep counting.
+    """
+    if not max_age or max_age <= 0:
+        return 0
+    cutoff = int(time.time()) - int(max_age)
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM user_memory_signal WHERE last_at < ?", (cutoff,)
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def signal_count() -> int:
+    with _lock:
+        return int(
+            _conn.execute("SELECT COUNT(*) FROM user_memory_signal").fetchone()[0]
+        )
+
+
+def signal_reset() -> None:
+    """Forget every behavioural counter. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM user_memory_signal")
         _conn.commit()
 
 

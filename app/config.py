@@ -950,6 +950,46 @@ NEXUS_MEMORY_VALUE_CHARS = _int("NEXUS_MEMORY_VALUE_CHARS", 200)
 NEXUS_MEMORY_ITEMS = _int("NEXUS_MEMORY_ITEMS", 4)
 NEXUS_MEMORY_CHARS = _int("NEXUS_MEMORY_CHARS", 300)
 
+# ── Automatic extraction ──────────────────────────────────────────────────
+# W v1 stored a memory only when a person explicitly asked. Automatic extraction
+# also learns stable, useful characteristics from ordinary conversation — the
+# same store, a second write path, and a deliberately conservative one.
+#
+# It is **deterministic first**: a closed vocabulary of SLOTS (identity,
+# interest, preference, style, humour) matched by rules over the message the
+# person typed. A slot is the memory's *identity*, so a new value for the same
+# slot replaces the old one — which is what stops "I program in JavaScript" and
+# "I program in Python" from both living for ever. The slot vocabulary is closed
+# and small, so a person's automatic memories are bounded by the vocabulary
+# rather than by how much they talk.
+NEXUS_MEMORY_AUTO_ENABLED = _bool("NEXUS_MEMORY_AUTO_ENABLED", True)
+
+# A repeated *behaviour* (a style or humour signal) is only promoted to a memory
+# after this many observations, because one playful message is not a personality.
+# The counters live in their own bounded table and decay by age, so a person who
+# was playful a year ago is not labelled playful for ever.
+NEXUS_MEMORY_SIGNAL_THRESHOLD = _int("NEXUS_MEMORY_SIGNAL_THRESHOLD", 5)
+NEXUS_MEMORY_SIGNAL_RETENTION = _int(
+    "NEXUS_MEMORY_SIGNAL_RETENTION", 30 * 86400
+)
+
+# ── The model seam (OFF by default, and isolated when on) ──────────────────
+# For a sentence that looks like durable self-information but matches no slot,
+# the deterministic layer may ask a model to structure it. That path is OFF
+# unless an operator turns it on AND gives the ``memory`` workload its own
+# credential; with either absent, extraction is deterministic-only and makes no
+# provider call at all. When it does run it uses its own workload pool (its own
+# key slots, model preference, breaker and daily allowance) and its output is
+# treated as **untrusted candidate data**: the server validates it against the
+# same slot vocabulary and the same rejections as the deterministic path, and
+# drops anything it does not recognise.
+NEXUS_MEMORY_EXTRACT_MODEL = _bool("NEXUS_MEMORY_EXTRACT_MODEL", False)
+
+# The model path's own per-account daily allowance, separate from chat's and
+# awareness's so it can never spend the request a person is waiting on an answer
+# to. Only consulted when the path is enabled and credentialed.
+NEXUS_MEMORY_MODEL_DAILY_LIMIT = _int("NEXUS_MEMORY_MODEL_DAILY_LIMIT", 50)
+
 
 # ---------------- Nexus Awareness: the room, understood -----------------------
 # The observation layer. Everything above decides *who may talk to Nexus and what
@@ -2260,6 +2300,40 @@ GEMINI_AWARENESS_CIRCUIT_SECONDS = _float(
     "GEMINI_AWARENESS_CIRCUIT_SECONDS", 300.0
 )
 
+# ── The memory-extraction workload (its own pool, and off without a key) ────
+#
+# A **seventh** workload, and separate for the same reason awareness is: the
+# provider's limits are per project, so a workload that shares a credential
+# shares a rate limit no per-workload counter can partition. It also has its own
+# breaker, so an extraction outage opens only its own circuit and cannot stop a
+# conversation or an awareness pass.
+#
+# ``ALLOW_SHARED_KEY`` defaults to **False**, unlike chat's and awareness's. The
+# point of this workload is isolation; letting it fall back onto the shared pool
+# would quietly undo that, so the default is "no credential, no extraction".
+# With no ``GEMINI_MEMORY_API_KEY`` the pool has no account, the deterministic
+# path is the whole of extraction, and no provider call is ever made.
+GEMINI_MEMORY_API_KEY = os.getenv("GEMINI_MEMORY_API_KEY", "").strip()
+GEMINI_MEMORY_ALLOW_SHARED_KEY = _bool("GEMINI_MEMORY_ALLOW_SHARED_KEY", False)
+GEMINI_MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", GEMINI_CHAT_MODEL)
+GEMINI_MEMORY_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_MEMORY_FALLBACK_MODELS", "")
+)
+# The API's floor is 10s; the default is comfortably above it.
+GEMINI_MEMORY_TIMEOUT_SECONDS = _float("GEMINI_MEMORY_TIMEOUT_SECONDS", 20.0)
+# No retries: an extraction is a background nicety, never something a person is
+# waiting on, so a failed attempt is simply "no candidate this time".
+GEMINI_MEMORY_MAX_RETRIES = _int("GEMINI_MEMORY_MAX_RETRIES", 0)
+GEMINI_MEMORY_BACKOFF_SECONDS = _float("GEMINI_MEMORY_BACKOFF_SECONDS", 1.5)
+GEMINI_MEMORY_CIRCUIT_FAILURES = _int("GEMINI_MEMORY_CIRCUIT_FAILURES", 5)
+GEMINI_MEMORY_CIRCUIT_SECONDS = _float("GEMINI_MEMORY_CIRCUIT_SECONDS", 300.0)
+# A hard wall-clock ceiling on one logical request, so a degraded pool cannot
+# hold a background task open. Short on purpose: the work is one short sentence
+# in, one small JSON out.
+GEMINI_MEMORY_TIME_BUDGET_SECONDS = _float(
+    "GEMINI_MEMORY_TIME_BUDGET_SECONDS", 30.0
+)
+
 # ── Nexus Voice Live ──────────────────────────────────────────────────────
 #
 # A live voice call: Nexus joins a Telegram voice chat and holds a realtime,
@@ -2731,6 +2805,40 @@ GEMINI_POOLS = [
         # cutting a pass short would lose the observation, not just the time.
         # See ``GEMINI_AWARENESS_TIME_BUDGET_SECONDS``.
         "time_budget": GEMINI_AWARENESS_TIME_BUDGET_SECONDS,
+    },
+    {
+        # Automatic memory extraction's own workload. It is a *seventh* pool
+        # rather than a corner of chat's or awareness's, because the thing being
+        # protected is the isolation: the provider's limits are per project, so a
+        # shared credential means a shared limit, and an extraction must never be
+        # able to spend the request a person is waiting on an answer to — nor the
+        # other way round.
+        #
+        # It has no shared-pool fallback (see ``GEMINI_MEMORY_ALLOW_SHARED_KEY``),
+        # so with no credential of its own it has no accounts and the pool is
+        # disabled. That is the default state: extraction is deterministic-only
+        # and costs no provider call at all.
+        "workload": "memory",
+        "keys": _pool_key_list(
+            GEMINI_MEMORY_API_KEY,
+            "GEMINI_MEMORY_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_MEMORY_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(GEMINI_MEMORY_MODEL, GEMINI_MEMORY_FALLBACK_MODELS),
+        # Text in, a small JSON object out — the same capability every text
+        # workload needs, and nothing more.
+        "capabilities": frozenset({"text"}),
+        "allow_experimental": False,
+        "retries": GEMINI_MEMORY_MAX_RETRIES,
+        "backoff": GEMINI_MEMORY_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_MEMORY_TIMEOUT_SECONDS),
+        # Per account, like chat's and awareness's, and its own number: an
+        # extraction must not be able to spend either of the other two.
+        "daily_budget": max(1, NEXUS_MEMORY_MODEL_DAILY_LIMIT),
+        # The caller is a background task, but a degraded pool must still not
+        # hold it open indefinitely.
+        "time_budget": GEMINI_MEMORY_TIME_BUDGET_SECONDS,
     },
     {
         # The live voice call. Its own workload, for the same reason awareness

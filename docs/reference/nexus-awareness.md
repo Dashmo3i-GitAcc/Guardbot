@@ -35,6 +35,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [61. Two admins and the tie the resolver refuses to break](#s61)
 - [62. The same room, read twice — once with a reading and once without](#s62)
 - [63. What the server may remember about a person](#s63)
+- [64. Four sources, and the one that learns on its own](#s64)
 
 ---
 
@@ -4145,16 +4146,200 @@ can be forgotten, a key cannot.
 
 ### 63.7 What it leaves
 
-Two things are deliberately not built, and both are recorded rather than
-half-done:
+Two things are deliberately not built **by this increment**, and both are
+recorded rather than half-done:
 
 * **semantic extraction** from ordinary conversation — it needs a model call or a
   change to the awareness prompt, either of which is a separate increment with its
-  own evidence;
+  own evidence. **It has since been built**, as a *second write path* rather than
+  a change to this one: see §64 (and AgentMD §54.7). The explicit-only rule above
+  is still the rule for this path; the automatic path adds slots and refusals of
+  its own, and never weakens this one.
 * **memory for a referenced person other than the anchor** — the block follows
   `ctx.anchor_id()`, so a batch that is *about* somebody other than its anchor
-  does not yet surface that person's memory.
+  does not yet surface that person's memory. This remains unbuilt.
 
 The quality effect is a prompt-content change the deterministic benchmark cannot
 score. What is measured here is that the block is *delivered*, *bounded* and
-*isolated*; whether answers got better is a question for a live probe.
+*isolated*; whether answers got better is a question for a live probe — and for
+the automatic path that probe still has not been run (§64.10).
+
+<a id="s64"></a>
+
+## 64. Four sources, and the one that learns on its own
+
+### 64.1 Four things that are not one thing
+
+The conversational layer reads four sources, and the first design decision is
+that they stay four. Merging them into one "context" would make each one's cost
+invisible and each one's failure fatal:
+
+| Source | The question it answers | Lifecycle | Scope |
+| --- | --- | --- | --- |
+| Conversation History | what was recently said | one hour | the room |
+| Awareness | what is happening around Nexus now | current, debounced | the room |
+| State | what this interaction is trying to accomplish | not built (increment X) | the interaction |
+| Long-Term Memory | what is worth remembering about this person | months | `(chat_id, user_id)` |
+
+They are complementary rather than layered. A room window says what was said; the
+awareness reading says who was answering whom and what the message being answered
+actually refers to; memory says that this person programs in Python and prefers
+short answers; state — when it exists — will say what the current task is. The
+composition takes the **minimum relevant combination**, and each source
+contributes its own bounded block. Memory's contribution is one block, bounded by
+`NEXUS_MEMORY_ITEMS` rows and `NEXUS_MEMORY_CHARS` characters, and it is the only
+one of the four that outlives the hour.
+
+### 64.2 A second write path, and why it is a *second* one
+
+W v1 stored a clause only when somebody explicitly asked. The obvious next
+question — "why not learn it from ordinary conversation?" — has a cheap answer
+and an expensive one. The cheap answer is a model call per message; the expensive
+answer is a rule set narrow enough to be trusted. The design here takes the
+expensive one, because the failure mode of the cheap one is a *wrong belief about
+a real person*, which is the failure this project is built to avoid.
+
+So the automatic layer is a closed vocabulary of **slots** (`memory.SLOTS`),
+matched by deterministic rules over the message the person typed. A slot is the
+memory's identity: `identity.programming`, `interest.gaming`, `preference.answers`,
+`humor.adult`. Because the slot is the key, a new value **replaces** the old one —
+"more with JavaScript" then "switched to Python" is one row that says Python.
+Create, update, replace, merge and deduplicate are therefore not four algorithms;
+they are what a slot-scoped upsert *is*. And because the vocabulary is closed and
+small, a person's automatic memories are bounded by the vocabulary rather than by
+how much they type: the table stays a fact set, never a log.
+
+### 64.3 What is refused, and how
+
+Four refusals run before any rule does, and each is a whole-message refusal
+rather than a filter:
+
+* **a transient state** — «امروز خسته‌ام» cannot become "tired: yes";
+* **a question** — a message ending in a question mark states nothing;
+* **a request** — «جواب کوتاه بده» is an instruction for one reply, not a
+  preference, so the answer-preference rule demands an actual preference marker;
+* **somebody else** — "my brother is a programmer" is refused at the opening, and
+  a captured value that carries a possessive relative is refused again. The
+  third-party test runs on the value **as written**, before a leading "my " is
+  stripped, because stripping first would hide the word that gives it away.
+
+The remaining rules read *what* somebody is, never how they feel. There is no
+rule that turns "I am smart" or "I am tired" into a memory, and no rule that
+infers a personality from writing style. What is stored is either a
+closed-vocabulary token (a language, a role) or a phrase the person actually
+wrote next to a first-person marker — and the role rule is what makes
+"a programmer" safe while "tired" is not: the captured phrase must end in a word
+from the role vocabulary.
+
+### 64.4 Behaviour is counted, humour is stated
+
+A repeated *behaviour* is different from a stated fact, so it is treated
+differently. `style.playful` and `preference.style` are only remembered after
+`NEXUS_MEMORY_SIGNAL_THRESHOLD` observations, in a separate bounded table
+(`user_memory_signal`) that holds a **number** and never a message, and the
+counters decay by age — demonstrate it again or lose the label. One playful
+message is not a personality.
+
+Humour is the sharpest case, and the design is deliberately narrow. The brief
+allows a compact style flag for adult humour. The one honest way to learn that
+without classifying the content of anybody's jokes is to read the preference the
+person **states** — «شوخی‌های بزرگسال دوست دارم» — so the humour slots are reached
+only by a statement rule. The material is never stored; what is stored is a flag.
+And the flag is not permission: it changes no safety rule, authorises no content
+and grants nothing. A test asserts that the joke itself is absent from the store.
+
+### 64.5 The model seam, off and isolated
+
+For the narrow remainder — a sentence that plainly states something durable in a
+phrasing no rule anticipated — `app/memory_extract.py` can ask a model to
+*structure* it. Three things must all be true before a provider is touched: the
+operator's switch (`NEXUS_MEMORY_EXTRACT_MODEL`), an account in the isolated
+`memory` workload, and a message that looks like self-information and that the
+deterministic layer did not already answer.
+
+The workload is its own end to end: its own key slots, models, timeout, retries,
+backoff, circuit breaker, daily allowance and counters. The module imports nothing
+from chat, awareness, intent, moderation, search, transcription or voice, so a
+memory backlog cannot spend, delay or exhaust the request somebody is waiting on
+an answer to. And its output is **untrusted data**: `memory.validate_candidate`
+re-checks the slot against the closed vocabulary and the value against the same
+rejections, including on the value as the model wrote it. A hallucinated slot, a
+link, an oversized value or somebody else's attribute is dropped there, so there
+is exactly one place where a candidate becomes a memory.
+
+On this host the seam is unexercised — there is no `GEMINI_MEMORY_API_KEY` — which
+is the state the repository ships in.
+
+### 64.6 Off the answer path
+
+The hard requirement is that memory never makes a person wait. So
+`main._schedule_memory_observation` schedules `memory.observe` as a background
+task, and nothing in a handler awaits it. Extraction, the counters, the bounded
+write, the gated provider call and every failure happen off the answer path; the
+worst case is that a memory is not learned. `memory.observe` is written never to
+raise, so there is no result to await and no failure to report.
+
+The **only** synchronous work memory adds to a chat turn is the bounded read and
+render in the context composition: **0.074 ms p50 / 0.176 ms p95** measured
+against **0.0004 ms** with the feature off. That is the whole synchronous delta.
+
+### 64.7 Memory is not a dependency of awareness
+
+Awareness is an optional source. The memory block reaches an addressed answer
+through the room reading when that reading exists — the `user_memory` source is
+one of its blocks — and through `main._memory_context` when awareness is switched
+off, the message is not in the window, or the reading cannot be built. The
+fallback is guarded by `if not reading`, so the block is never duplicated.
+
+The effect is the one the four-source architecture is for: turning awareness off,
+or losing it, no longer takes the person's own memory with it. Regression tests
+drive the real conversational path with awareness off, with the reading forced to
+fail, and with memory empty, and assert that the turn is still answered and the
+memory still arrives.
+
+### 64.8 Retrieval is relevance-first
+
+The whole collection is never injected. Relevance is a deterministic lexical
+overlap between the topic — the message being answered — and the row's label,
+value and a small per-slot hint table, plus a constant for the rows that describe
+**the person** rather than a subject: explicit, identity, preference, style and
+humour. An **interest** is a subject, so it must be mentioned to be shown.
+
+That asymmetry is what makes the two requirements coexist: the brief's own
+example — a Persian question about a Python project — surfaces the programming
+memory even though no lexical overlap can bridge «پایتونم» to "Python", while a
+favourite game stays out of an answer about a programming project. Relevance is a
+lexical hint, not an inference, and the hint table is small and auditable.
+
+### 64.9 The numbers
+
+From `python3 tools/eval_memory.py`, deterministic and offline:
+
+* explicit extraction precision **1.0** / recall **1.0** (12 pos / 13 neg), 0 FP;
+* automatic extraction precision **1.0** / recall **1.0** (16 pos / 15 neg), 0 FP;
+* gate: of 18 ordinary messages, 5 answered by the rules, **1 (5.6%)** reached the
+  seam, **0 provider calls**;
+* storage: 90 000 rows **16.91 MB**, **197 bytes/row**, projected **16.91 MB** at
+  3000 members against the 200 MB budget; write 0.293 ms p50 / 0.678 ms p95;
+* lifecycle over a scripted conversation: 8 accepted / 4 rejected, 2 duplicates,
+  6 replacements, **5 rows** at the end;
+* sync cost: read+render **0.074 ms p50 / 0.176 ms p95** vs **0.0004 ms** disabled;
+* retrieval 0.049 ms p50 / 0.128 ms p95; block mean/max **145** chars (budget 300);
+* suite 3314 → **3417 passed, 0 failed**.
+
+### 64.10 What it leaves
+
+* **The live probe is not run.** It cannot be: there is no `GEMINI_MEMORY_API_KEY`
+  here, so the model seam is disabled and no provider is ever contacted. The
+  numbers above measure the *server's* contribution — what is extracted, stored,
+  rendered and what it costs — and they are **not** evidence that answers got
+  better. The probe methodology is recorded in AgentMD §54.7 and the claim is
+  left unmade.
+* **State is not built.** Continuity across turns is still the conversation
+  window's job; memory must not be asked to do state's work. That is increment X.
+* **Relevance is lexical.** An interest stored in one script may not match a topic
+  written in another unless the hint table covers it.
+* **The global prune is a whole-table statement** (266 ms measured at 90 k rows)
+  that runs every `PRUNE_EVERY` recordings once the table is over
+  `NEXUS_MEMORY_MAX`. It is off the answer path, but it is the number to revisit
+  first at scale.

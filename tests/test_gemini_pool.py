@@ -1021,22 +1021,25 @@ def test_only_the_workloads_that_need_a_ceiling_have_one():
     ``intent`` needs one because its caller is a group-message handler that must
     answer in bounded time. ``chat`` and ``awareness`` need one because their
     failover walk can legitimately run for minutes, so without a bound a slow
-    provider holds the reply path or the sweep indefinitely. The rest are
-    bounded by their own attempt counts and are left alone.
+    provider holds the reply path or the sweep indefinitely. ``memory`` needs one
+    for a different reason: its caller is a background task, so nothing is
+    waiting on it, but a degraded pool must still not hold that task — and the
+    worker behind it — open indefinitely. The rest are bounded by their own
+    attempt counts and are left alone.
     """
     specs = {spec["workload"]: spec for spec in config.GEMINI_POOLS}
 
     with_ceiling = {
         name for name, spec in specs.items() if spec.get("time_budget", 0) > 0
     }
-    assert with_ceiling == {"intent", "chat", "awareness"}
+    assert with_ceiling == {"intent", "chat", "awareness", "memory"}
 
 
 def test_the_built_pools_carry_the_ceiling_only_where_it_was_asked_for():
     built = gemini_pool.build_pools()
 
     with_ceiling = {name for name, pool in built.items() if pool.time_budget > 0}
-    assert with_ceiling == {"intent", "chat", "awareness"}
+    assert with_ceiling == {"intent", "chat", "awareness", "memory"}
 
 
 def test_the_transient_cooldown_outlasts_the_longest_deadline_it_can_be_stamped_by():
