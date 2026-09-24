@@ -276,29 +276,32 @@ The point of this file is that the project does not have to be re-explained.
 ## 10. Current state
 
 Update this section after each meaningful change. The facts below were verified
-against the repository when this file was created.
+against the repository when this file was created, and re-verified against the
+repository on **2026-09-24** (after the Admin Control Center's M2) — treat any
+hash, count or status here as a claim to re-check, not as evidence.
 
-- **Branch:** `main` is the production state; the Nexus intelligence evolution
-  lives on `develop/nexus-intelligence-evolution` (unmerged, undeployed).
-  **Tip:** run `git log -1` and `git branch --show-current`. Do not trust a
-  hard-coded hash — read `git log`. The history is long now (captcha, media
-  moderation, flood, awareness, VPN handover, the coding-agent bridge, pool
-  rotation); read the last few commits rather than a list copied into this file.
+- **Branch:** `main` is the production state and the only live branch; the Nexus
+  intelligence evolution was **merged into it** as `25ddee8` (2026-09-24) and
+  deployed, so `develop/nexus-intelligence-evolution` is history, not work in
+  progress. **Tip:** run `git log -1` and `git branch --show-current`. Do not
+  trust a hard-coded hash — read `git log`. The history is long now (captcha,
+  media moderation, flood, awareness, VPN handover, the coding-agent bridge, pool
+  rotation, the Nexus evolution, the Admin Control Center); read the last few
+  commits rather than a list copied into this file.
 - **What is done:**
-  - **Nexus intelligence evolution** (`develop/nexus-intelligence-evolution`,
-    unmerged, undeployed): increments R, S, T, W, the W extension, X and **Y**
-    are done. Y is the deterministic context-composition layer
-    (`app/context_plan.py`) — an addressed reply now consumes the **minimum
-    relevant combination** of Conversation, Awareness, State and Memory, with a
-    fast path (no room window) for simple messages, no second model call and no
-    new table. Measured: 27/27 labelled cases in `tools/eval_context.py`, corpus
-    context 29.1 % smaller, real-path context 11.3 % smaller
-    (`tools/bench_context_real.py`), assembly p50 ~16 → ~11 ms (host-dependent);
-    suite **3568 passed / 0 failed**. Rollback base `main ==
-    release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709`,
-    untouched and an ancestor of the branch. See `AgentMD.md` §54.9. Next: **U**
-    (adaptive awareness scheduling, same 200-request allowance), then V (not
-    scoped).
+  - **Nexus intelligence evolution** — **merged into `main`** as `25ddee8`
+    (2026-09-24) and **deployed**; increments R, S, T, W, the W extension, X, Y
+    and **U** are in. Y is the deterministic context-composition layer
+    (`app/context_plan.py`) — an addressed reply consumes the **minimum relevant
+    combination** of Conversation, Awareness, State and Memory, with a fast path
+    (no room window) for simple messages, no second model call and no new table —
+    27/27 labelled cases in `tools/eval_context.py`, corpus context 29.1 %
+    smaller and real-path context 11.3 % smaller (`tools/bench_context_real.py`).
+    U is the adaptive awareness scheduler (`app/awareness_schedule.py`), measured
+    at **44.6 % → 67.6 % useful passes at the same 200-request allowance** —
+    coverage bought with scheduling, not with spend. **V is not scoped**: its
+    evidence base (`tools/eval_chat_quality.py`) exists, but its live run has not
+    been made. See `AgentMD.md` §54, the checkpoints from §54.9 onward.
   - **Text moderation** — the moderation AI's verdict on a group text message,
     turned into an action by `app/mod_policy.py`. Off by default
     (`MODERATION_TEXT_ENABLED=0`). Only `MODERATION_DELETABLE_CLASSES`
@@ -329,15 +332,27 @@ against the repository when this file was created.
     dependencies (`nudenet`, `transformers`, `torch`), the CPU-torch Dockerfile
     step and `HF_HOME`, the media evidence reports, and the tests dedicated to
     them. Media is no longer downloaded or inspected for content.
-  - Full suite green: `python -m pytest -q` (1845 passed at the time of this
-    removal). There is no model in the image, so a light venv can run the
-    suite.
+  - **The Admin Control Center (the dashboard)** — stages **M1** (`app/web`: the
+    aiohttp app, scrypt password, signed session cookie, CSRF, the dark RTL
+    shell, login/logout, `/healthz`) and **M2** (authorization through `rbac`:
+    one configured operator, a fail-closed permission gate, and the panel's own
+    append-only `dashboard_audit` trail) are **built, tested and committed**
+    (`e50ec5c`, `3fb63fa`) and **not deployed**. M3…M8 are planned. It is a
+    second compose service over the **same image and the same `./data` volume**,
+    so it cannot disturb Telegram polling. See `AgentMD.md` §53.13 and §54.26.
+  - Full suite green: `python -m pytest -q` — **3843 passed / 0 failed** at the
+    panel's M2 (it was 1845 when the media pipeline was removed). There is no
+    model in the image, so a light venv can run the suite.
 - **What is not done / not present:**
   - No visual / media content moderation of any kind, by design.
   - No ban and no permanent punishment; the only member action is a timed
     restriction.
-  - No raid detection, no dashboard, no hash whitelist/blacklist, no shadow
-    mode, no statistics.
+  - No raid detection, no hash whitelist/blacklist, no shadow mode, no
+    statistics in the bot.
+  - **No dashboard is deployed.** The panel's M1 and M2 are built and committed,
+    but no dashboard container runs and none of its `.env` settings
+    (`DASHBOARD_SECRET`, a password, `DASHBOARD_OPERATOR_ID`) are set. Starting
+    it is a deploy and needs the owner's go-ahead.
   - No CI pipeline.
   - No real-Telegram end-to-end run of every path: behaviour is proven by the
     test suite and Docker runtime checks, not by a live flood or a live
@@ -346,8 +361,13 @@ against the repository when this file was created.
   hash whitelist/blacklist, admin review, better sticker support, shadow mode,
   statistics, raid protection. The visual media-moderation pipeline is **not**
   planned for return; do not reintroduce it unless the owner explicitly asks.
-- **Next:** owner verification on real traffic, then the next named stage — one
-  at a time, only when asked.
+- **The active staged program is the Admin Control Center** (`AgentMD.md` §54.24):
+  M1 and M2 are done, **M3 (Overview) is next**, then M4 (AI control +
+  credentials) … M8 (security / performance / deploy). Each stage is tests →
+  secret-scan → commit → push → verify, and **no stage is pre-built**.
+- **Next:** the panel's **M3 — Overview**, only when the owner asks. The panel
+  **deploy** stays blocked until the owner gives the go-ahead *and*
+  `DASHBOARD_SECRET`, a password and `DASHBOARD_OPERATOR_ID` are set.
 
 ---
 
