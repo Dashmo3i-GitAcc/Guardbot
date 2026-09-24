@@ -4896,14 +4896,14 @@ compose up -d`. To resume: verify `git status` (clean), `git rev-parse HEAD`,
 
 ---
 
-### 54.20 Checkpoint (2026-09-24, **room boundary + tenant isolation**) — resume here (supersedes §54.19)
+### 54.20 Checkpoint (2026-09-24, **room boundary + tenant isolation**) — superseded by §54.21 (deploy)
 
 **CHECKPOINT STATUS.** Date **2026-09-24 ~21:10Z**. Branch **`main`**, base
-**`7968c06`** (both remotes). This work is **committed and pushed but NOT
-DEPLOYED** — the owner's instruction was explicit: implement, test, commit and
-push, and **do not deploy unless explicitly requested afterwards**. The deployed
-image remains **`84583581d0dd`** (the §54.19 build); nothing here changes the
-running container.
+**`7968c06`** (both remotes). This work was **committed and pushed** at this
+point (`a511ce3` code+tests, `69690a0` docs); at the time it was **NOT
+DEPLOYED**. **It was deployed later the same evening — see §54.21**, which
+supersedes the deploy status below. The implementation narrative that follows is
+still authoritative for *what* was built.
 
 **The owner's definitive correction.** The security boundary is the **ROOM, not
 the SPEAKER**. Nexus MUST chat with **all normal members** inside an explicitly
@@ -4986,6 +4986,63 @@ answered with the owner amendment; `/registergroup` / `/unregistergroup` /
 `docker tag guardbot-guardbot:pre-owner-group guardbot-guardbot:latest && docker
 compose up -d`. To resume: verify `git status` (clean), `git rev-parse HEAD`,
 `git ls-remote` on both remotes.
+
+---
+
+### 54.21 Checkpoint (2026-09-24, **room boundary + tenant isolation DEPLOYED**) — resume here (supersedes §54.20)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~21:19Z**. Branch **`main`**, commit
+**`69690a0`** on **both remotes** (`git ls-remote` confirmed), working tree
+clean. The §54.20 work is now **DEPLOYED and live-probed**. This is the first
+checkpoint in this feature that describes the *running* system.
+
+**Deploy.** Rollback image tagged **`guardbot-guardbot:pre-room-boundary`**
+(built from `84583581d0dd`, the §54.19 image). New image
+**`5769e3678e0f`** built and brought up with `docker compose build && docker
+compose up -d`. Container recreated, **Up**, **`RestartCount=0`**. Boot log:
+`group allowlist seeded from GROUP_IDS: 2 room(s)`; `Nexus state: online
+rooms=2 observe_admins=on names=2`; `GuardBot started. Groups:
+[-1003587640764, -1001299527312]`. The running container was verified to contain
+the new code (`app/groups.py`, `nexus.accepts_in_group`, the `groups.is_authorized`
+gate, the two operations, the three commands, the `chat_id` scoping). Production
+`authorized_groups` holds exactly the **2** seeded enabled rooms. Real owner
+traffic was served in `-1001299527312` within a minute of the restart (chat
+reply, `turns=1`/`turns=3`, `sent=True`).
+
+**Live probe (self-cleaning, in-container, real config/DB/rbac/model).**
+`docker exec -w /srv -e PYTHONPATH=/srv guardbot python
+/tmp/probe_room_boundary.py`. Synthetic ids `REG=-1009000000001`,
+`UNREG=-1009000000002`, `CMD=-1009000000003`, `MEMBER=900000042`,
+`STRANGER=900000043`; two turns ran the **real** model. Results:
+* **Room boundary fails closed** — unregistered **member** and unregistered
+  **owner** both: **0** model calls / **0** awareness captures / **0** identity
+  writes. Revoked room: **0/0/0**. (The boundary is the room, not the speaker.)
+* **Registered room is open to every member** — member addressed: **1** model
+  call, `caller=900000042`, no owner amendment. Member **unaddressed**: **0**
+  model calls but awareness+remember still fired (observed, not answered).
+* **Owner tone** — owner turn: `caller=6931339207`, `owner_amendment=true`;
+  member turn: `owner_amendment=false`. Both real replies scanned clean
+  (`honorifics=[]`, `filler=[]`).
+* **Private chat unchanged** — stranger **0/0/0**; owner answered with the
+  amendment.
+* **Commands** — `/groups` lists the two real rooms + the probe room;
+  `/registergroup` → authorized, `/unregistergroup` → not authorized; a
+  **non-owner** `/registergroup` is refused (`⛔️ این کار رو نمی‌تونی انجام بدی.`).
+* **Cleanup** — all created rows deleted; **residue sweep across every table and
+  every synthetic id = 0**. `chat_usage`/`gemini_daily` deliberately untouched
+  (two real turns stay visible). One cleanup gap was found and fixed: the probe
+  had not deleted its `admin_requests` ledger rows (6); they were removed by
+  hand and the probe's cleanup list now includes that table.
+
+**Architecture preserved.** No Pool, credential, isolation, rate-limit, breaker,
+cooldown, failover, context-assembly, Awareness-allocation or acquisition
+change; V remains **inactive**; the `--arm context` probe stays frozen; no Phase
+Two. Rollback: `docker tag guardbot-guardbot:pre-room-boundary
+guardbot-guardbot:latest && docker compose up -d`.
+
+**NEXT STEP.** None required for this feature — it is live. Do **not** redeploy
+without the owner's go-ahead. To resume: `git status` (clean),
+`git rev-parse HEAD` (= `69690a0`), `git ls-remote` on both remotes.
 
 ---
 
