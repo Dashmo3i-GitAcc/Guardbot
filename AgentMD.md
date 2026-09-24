@@ -2715,3 +2715,85 @@ increment to change the **runtime path**.
 it), `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
 (`5904791…` or later).
+
+### 54.5 Checkpoint (2026-09-24, after Phase Zero of the W→V mission) — resume here (supersedes §54.4)
+
+**State, verified against the repository (Phase Zero).** Branch
+`develop/nexus-intelligence-evolution`, HEAD
+`ec3b29ea05143b7598358a596f52b5ec3627124a` (T docs commit; T code is
+`5904791459b699a5b9bc4ee1a773e21caa5f70a7`), pushed to both remotes (`origin` =
+mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc). Working tree **clean**. `main`
+and the annotated tag `release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
+(the tag is local-only; neither remote carries tags). Suite **3266 passed, 0
+failed**. Corpus **141 cases, version 18**. **Not merged, not deployed.**
+
+**T is VERIFIED, not reimplemented.** The invariant holds in the code as
+committed: `main._room_reading` (app/main.py:2628) builds
+`awareness_context.build_ctx(...)` for the answered message and renders
+`awareness_context.blocks(ctx, skip=awareness_context.CONVERSATION_SKIP)`
+(awareness_context.py:690/729); `awareness.room_block` takes `messages`
+(awareness.py:1075) so the window is read **once** and handed to both the
+transcript and the reading; the T commit touched **no `app/db.py`** (no
+migration); the reading adds no Gemini call and is bounded by the same 1500
+ceiling; it is context, never authority. Nothing to fix.
+
+**What this checkpoint adds.** Phase Zero's second deliverable: the durable
+roadmap now formally scopes the three new increments, in dependency order
+**T → W → X → Y → U → V**, with the rationale for why W/X/Y precede U/V:
+
+* **W — long-term User Memory** (roadmap §5/W). Bounded, structured, durable
+  facts/preferences per user; NOT history, NOT Awareness, NOT Intent. Likely the
+  first genuinely-needed new **table** (the memory is not derivable from what is
+  already stored) — additive only, migration test, drop-table rollback. Start by
+  BENCHMARKING the bounded model (items/user, categories, retention, growth at
+  ~3000 members / ≤200 MB), not by copying the brief's 20–50.
+* **X — Stateful Long-term Nexus** (roadmap §5/X). Bounded conversational STATE
+  (active topic/referent, pending question/action, continuity), explicitly
+  distinct from Memory; scoped by (chat_id, user_id) or (chat_id, task), never a
+  global state. Fresh explicit input wins over stale state; ambiguity stays
+  ambiguous.
+* **Y — Chat Quality / Context Intelligence** (roadmap §5/Y). Only after W and
+  X: the addressed path consumes the MINIMUM relevant combination of Intent +
+  referents + Awareness + Memory + State + history (+ search), fast path for
+  simple messages. Requires a controlled **live-probe** evaluation — "the
+  deterministic benchmark is still green" is explicitly NOT evidence of better
+  answers.
+* **U** (adaptive scheduling, fixed 200-request allowance, no new calls) and
+  **V** (model routing, only if Y's quality measurement justifies it) come last
+  because U spends the rationed request budget and V needs an answer-quality
+  measurement that does not exist until Y.
+
+**Why Phase Zero and not implementation.** This session reached the context
+ceiling the brief's own rules set (~90%): "do not start broad new work; finish
+the smallest safe checkpoint." W is a DB-bearing stage and must not be started
+without room to test and measure it. The repository is coherent and the next
+step is unambiguous.
+
+**Exact next step.** INCREMENT **W** — long-term User Memory. FIRST: inspect the
+existing storage architecture for a suitable bounded mechanism; if none exists,
+design the additive table and BENCHMARK the bounded model from real data before
+writing it. Read roadmap §5/W and §4.3, then `app/db.py`'s `_ensure_column`
+convention and `151b1e1`. **Do NOT start W without the owner's explicit
+go-ahead.** Do not skip to X, Y, U or V.
+
+**Note on the mission brief.** The brief's Phase U tail arrived truncated
+("spend reques…"); the U/V requirements must be re-stated in full before those
+phases are attempted. W, X and Y were specified completely.
+
+**Rollback.** Every increment is independently revertable: `git revert <sha>` on
+this branch. Phase Zero added **documentation only** (no code, no schema), so it
+reverts with a docs revert. The whole evolution reverts by leaving the branch
+unmerged — `main` at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production
+state and is an **ancestor** of the branch. **No lettered increment (A–T) changed
+the DB schema**; the only DB change on the branch is the foundation's `151b1e1`
+(two ADDITIVE `awareness_state` columns via `_ensure_column`). W would be the
+first lettered increment to add a table and must carry its own forward/backward
+proof and rollback procedure.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§5 for W/X/Y/U/V, §7 for the continuation
+point), then verify: `git status` (clean), `git rev-parse HEAD` (`ec3b29e…` or
+later), `git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
+(`ec3b29e…` or later). Then begin W.

@@ -755,6 +755,107 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              candidates; 0 exceed the pass reading or the ceiling; ~0.6 ms/reply;
              +1 DB read (roles); 0 Gemini calls. See §1.2d and reference §62.
 
+  ── WHY W, X AND Y COME BEFORE U AND V ────────────────────────────────────
+  The dependency order is not arbitrary. U (adaptive scheduling) spends a
+  *rationed* currency — Awareness requests — to choose which room the next pass
+  reads; choosing well needs to know what is worth reading, which is state (X)
+  and memory (W). V (model routing) may only be attempted once a measurement of
+  *answer quality* exists, and that measurement is built by Y. Doing U or V
+  first would spend effort and requests on a system whose inputs are not yet
+  assembled, and V in particular would be choosing a cheaper model with no way
+  to tell whether the answers got worse. So the order is W → X → Y → U → V, and
+  each stage's evidence is a prerequisite for the next.
+
+  INCREMENT W — "what the server may remember about a person"
+  ------------------------------------------------------------------------------
+  Purpose:   A bounded, structured LONG-TERM USER MEMORY — durable facts and
+             preferences about a person, so Nexus knows something about a
+             member who has never addressed it. NOT conversation history, NOT
+             Awareness, NOT Intent, NOT raw messages. A separate layer with its
+             own storage, budgets and retention.
+  Files:     a new reader/writer module (app/memory.py) with the same
+             "evidence, never authority" shape as the other readers; a store
+             (app/db.py, additive only — see below); the retrieval hook in
+             app/awareness_context.py (one more `Source`) and/or
+             app/main.py's conversation context; tests.
+  Runtime:   YES.
+  Gemini:    0 expected for the retrieval path. Extraction, if any, must not add
+             a call on the ordinary path — see the evidence rule below.
+  DB:        A table is likely genuinely necessary here (unlike T), because the
+             memory is *not* derivable from anything already stored. If so it
+             must be additive and new-table (not a rewrite of an existing one),
+             with safe defaults, a migration test, and a documented rollback
+             (drop the table; no existing data is touched). The `151b1e1`
+             precedent (additive, never destructive) governs.
+  Evidence:  FIRST establish the bounded model from the real architecture: how
+             many items per user, which categories, which retention. The brief's
+             "20–50 items" is a starting point to BENCHMARK, not a number to
+             copy. Measure: DB reads/writes per message, storage growth at the
+             owner's scale (~3000 members, ~200–300 active, ≤200 MB), retrieval
+             latency, context chars added, and that retrieval is RELEVANCE-based
+             (a user must never see another user's memory; a group must never
+             inherit another group's; private state must not leak into a group).
+  Depends:   T (the reading must already reach both consumers before a third
+             input is added to the conversation).
+  Stop rule: if the existing storage architecture already has a suitable bounded
+             mechanism, USE IT and do not add a table; document why.
+
+  INCREMENT X — "what is happening right now"
+  ------------------------------------------------------------------------------
+  Purpose:   STATEFUL LONG-TERM NEXUS — bounded conversational STATE: active
+             topic, active referent, pending question, pending action, recent
+             intent, relevant entity, continuity markers. Memory answers "what
+             durable thing do I know about this user"; state answers "what is
+             happening in this ongoing interaction". Different layer, different
+             lifecycle, different scope.
+  Files:     a new state module (app/state.py) with an explicit ownership
+             boundary; a store (additive) if the state must survive a restart
+             (it must, for the multi-step-task case); the render-back in
+             app/awareness_context.py / app/main.py; tests.
+  Runtime:   YES.
+  Gemini:    0 expected.
+  DB:        If persisted, additive and bounded, keyed by (chat_id, user_id) or
+             (chat_id, task) — NEVER a global Nexus state. A row from before the
+             change must read as empty, and code from before must ignore it.
+  Evidence:  Explicit ownership (Intent = what the user is trying to do;
+             Awareness = what is happening in the room; Memory = durable facts;
+             State = the active interaction). Bounded lifecycle: creation,
+             update, continuation, resolution, expiry, compression, invalidation.
+             Fresh explicit user input MUST win over stale state; ambiguity MUST
+             stay ambiguous. Tests for continuation, topic switch, stale state,
+             referent continuation, unresolved/resolved questions, multiple
+             conversations/users/groups, restart, duplicates, near-simultaneous
+             messages, storage/retrieval failure, bounded state.
+  Depends:   W (memory and state are distinct and must not be conflated; W
+             establishes the bounded-store pattern X reuses).
+
+  INCREMENT Y — "the minimum relevant combination"
+  ------------------------------------------------------------------------------
+  Purpose:   CHAT QUALITY / CONTEXT INTELLIGENCE. Only after W and X. Make the
+             addressed conversation consume the MINIMUM relevant combination of
+             Intent + referents + Awareness + Memory + State + history (+ search
+             when policy requires), with a simple-message fast path and a
+             deeper path only when the message is genuinely hard.
+  Files:     app/main.py (the context assembly), app/awareness_context.py (the
+             priority/budget selection), tests, and a controlled live-probe
+             harness (the deterministic benchmark cannot score a model answer).
+  Runtime:   YES.
+  Gemini:    NO increase per message on the simple path. The existing
+             repetitive-response retry must be benchmarked (how often it fires,
+             whether it helps, its latency and extra calls) before being kept,
+             changed or removed.
+  DB:        None expected (reads only).
+  Evidence:  A context PRIORITY strategy, and that the combined context stays
+             within the hard ceiling (`NEXUS_AWARENESS_CONTEXT_CHARS = 1500`
+             where it applies) with Memory and State on their own budgets.
+             Deterministic compression/drop of lower-value context, never random
+             truncation. A controlled before/after evaluation of answer quality,
+             referent correctness, ambiguity handling, latency P50/P95, Gemini
+             calls/message, prompt size, memory/state DB reads. "The deterministic
+             benchmark is still green" is NOT evidence of better answers.
+  Depends:   W and X (there is nothing to prioritise until memory and state
+             exist).
+
   INCREMENT U — "the room that should go next"
   ------------------------------------------------------------------------------
   Purpose:   Intelligent / adaptive Awareness scheduling (items 10 and 11).
@@ -861,13 +962,19 @@ Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           CONVERSATION_SKIP) and app/awareness.py (`room_block` gained
           `messages`). NO DB change anywhere in A–T; the only DB change on the
           branch is the foundation's 151b1e1 (two additive columns).
-Next:     INCREMENT U — "the room that should go next" (adaptive Awareness
-          scheduling, items 10/11). FIRST resolve the open design question in
-          §4.3: the seam that does not violate "`awareness.due` cannot see
-          messages" (its signature is asserted by a test). Then measure
-          coverage/priority at a FIXED 200-request allowance, assert no room is
-          starved, keep the per-room brake and debounce, and take a live probe.
-          Do NOT start U without the owner's explicit go-ahead. Do NOT start V.
+Next:     INCREMENT W — "what the server may remember about a person"
+          (long-term User Memory). The remaining order is W → X → Y → U → V:
+          W (bounded structured memory), X (bounded conversational state),
+          Y (chat context intelligence), U (adaptive scheduling), V (model
+          routing, only if Y's quality measurement justifies it). U and V come
+          last because U spends the rationed request budget and V needs an answer
+          -quality measurement that does not exist until Y. See §5 for the full
+          scoping and the dependency rationale.
+          FIRST for W: establish the bounded model from the real architecture
+          (items/user, categories, retention, storage growth at ~3000 members /
+          ≤200 MB) and decide whether a new additive table is genuinely needed.
+          Do NOT start W without the owner's explicit go-ahead. Do NOT skip to
+          U or V.
 Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.4 (the checkpoints).
                  docs/reference/nexus-awareness.md §52–§62 (the narrative).
                  This file.
