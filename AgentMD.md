@@ -1496,6 +1496,28 @@ reference file is stale and this list is the one to fix first.
   from a refund. `0` means unlimited. The charge stays in `note_request` and is
   refunded — **never** moved to after the call.
 
+**The group boundary (2026-09-24).** A Telegram group is served only if the
+**server-side configuration** says so — `config.GROUP_IDS`, read by
+`main.authorized_group()`. This is the *room* boundary, and it is **fail-closed**:
+with no configured groups, nothing is authorized.
+
+* Being **added** to a group, or made an **administrator** in it, is a Telegram
+  fact and is **not** application authorization. Neither is the group's title or
+  username, a member's display name, a member's claim, or a client-provided
+  flag. `authorized_group` reads `GROUP_IDS` and nothing else.
+* The boundary is enforced **before any Chat/AI work**: `on_group_chat` checks it
+  first, before the identity write, the awareness capture and every model call,
+  so an unregistered room produces **no** `chat.reply` and **no** Gemini request.
+  `_awareness_run_room` checks it too, so a stale awareness row for a room that
+  was removed from `GROUP_IDS` is not read. `on_transcribe_command` checks it in
+  groups as well, because transcription is AI work.
+* The room boundary and the **speaker** boundary (`rbac` / `nexus.accepts`) are
+  separate and **both required** — neither implies the other. The owner is the
+  speaker with the most authority, and is still refused in an unregistered room.
+* Authorization is **server-side and deterministic**; the model never decides
+  whether a group or a member is authorized, and an AI verdict is never an
+  authorization decision.
+
 ### 53.6 The audit trail and identity
 
 * `_record()` coerces anything unrecognised to `python`; nothing else may invent
@@ -2341,8 +2363,29 @@ asserted in `tests/test_chat.py`:
   credentials, the public-figure-from-search-only rule, the injection defence,
   the no-system-message rule — and the existing persona tests still pass. The
   restoration changed the words, not the wiring: `_generation_config` still sets
-  the persona plus the appended context, `temperature=0.8`,
+  the   persona plus the appended context, `temperature=0.8`,
   `max_output_tokens=1024`, and a test asserts exactly that.
+
+**The owner-aware tone (2026-09-24).** When the person being answered is the
+owner, `chat.OWNER_AMENDMENT` is **prepended to the trusted context** — and so
+lands in the system instruction immediately after the persona. It is a **tone**
+amendment, not an authority one.
+
+* Ownership is decided **only** by the server, from the configured id:
+  `main._answer_conversationally` calls `rbac.is_owner(user.id)` and nothing
+  else. It is never read from a username, a display name, a Telegram admin
+  status, a role, or anything the speaker wrote — and the model is never asked to
+  work out who the owner is.
+* The amendment forbids **honorifics and ceremonial address** — «قربان»,
+  «سرور», «جناب», «بنده» and bowing phrasing — and tells the model to show that
+  it knows the owner through **tone and continuity**, not a title. It must not
+  announce the ownership and must never state or hint at the id.
+* Everything else is unchanged: the same brevity, honesty, joking-around rules
+  and boundaries as with anyone else. Being the owner does not make the
+  conversation a different kind of conversation, and it **bypasses no gate** —
+  every authority check (including the group boundary above) has already run.
+* The base persona contains **no** honorific, so an ordinary member never
+  receives that register either.
 
 ### 53.9 The coding-agent bridge
 
@@ -4726,6 +4769,58 @@ docker compose up -d`). To resume: verify `git status` (clean), `git rev-parse
 HEAD` (this checkpoint's commit), `git ls-remote` on both remotes, `docker ps`
 (image `a976bb4c2a7a`, Up, `RestartCount=0`), and `[pool] chat: accounts=7` /
 `[pool] awareness: accounts=5` in the startup log.
+
+---
+
+### 54.19 Checkpoint (2026-09-24, **owner tone + group authorization**) — resume here (supersedes §54.18)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~19:55Z**. Branch **`main`**,
+base/rollback **`660e27c`** (the Chat-personality deploy checkpoint). Two
+features implemented and tested, in the owner's order. **NOT DEPLOYED** — the
+repository's established workflow does not require a deploy at commit time; the
+running container is still `a976bb4c2a7a` and does **not** yet contain these two
+features. Deployment needs the owner's go-ahead.
+
+**Feature One — owner-aware tone.** Files: `app/chat.py`, `app/main.py`,
+`tests/test_owner_personality.py`.
+* `chat.OWNER_AMENDMENT` (exported) is a **tone** amendment: warmer and more
+  familiar, and it forbids honorifics («قربان», «سرور», «جناب», «بنده») and any
+  ceremonial address, forbids announcing the ownership, and forbids revealing the
+  id. It is prepended to the trusted context by `main._answer_conversationally`
+  **only** when `rbac.is_owner(user.id)` is true — ownership is read from the
+  configured id and nothing else (never a username, display name, Telegram admin
+  status, role, or a claim). The base persona contains no honorific. The
+  amendment grants no capability and bypasses no gate.
+
+**Feature Two — the group boundary.** Files: `app/main.py`,
+`tests/test_group_authorization.py`.
+* `main.authorized_group(chat_id)` reads `config.GROUP_IDS` and nothing else, and
+  is fail-closed. It is enforced at the **top of `on_group_chat`** — before the
+  identity write, the awareness capture and any model call — so an unregistered
+  room produces no `chat.reply` and no Gemini request. It is also enforced in
+  `_awareness_run_room` (a stale row for a de-registered room is not read) and in
+  `on_transcribe_command` for groups. The room boundary and the speaker boundary
+  (`rbac`/`nexus.accepts`) are separate and both required; the owner is refused in
+  an unregistered room. Being added to a group, or made admin there, does not
+  authorize it. See §53.5.
+
+**Tests actually run.** New files: `tests/test_owner_personality.py` (12) +
+`tests/test_group_authorization.py` (12) = **24 passed**. Regression
+`test_nexus` + `test_awareness` + `test_private_boundary` + `test_web_search` +
+`test_chat` + `test_chat_activation` + `test_conversation_media` = **483 passed**.
+Full suite **3716 passed / 0 failed** (272.17 s; was 3692, +24).
+
+**Architecture preserved.** No Pool, credential, isolation, rate-limit, breaker,
+cooldown, failover, context-assembly, persistence or deployment change. V remains
+**inactive**; the `--arm context` probe stays frozen; Awareness allocation
+unchanged; no acquisition change; no new workload; no Phase Two.
+
+**Unresolved / next.** Nothing blocking. The two features are committed but not
+live; the next step is the owner's go-ahead to **deploy** (then a self-cleaning
+live probe), and after that the **broader integration test**. Rollback remains
+`docker tag guardbot-guardbot:pre-chat-personality guardbot-guardbot:latest &&
+docker compose up -d`. To resume: verify `git status` (clean), `git rev-parse
+HEAD` (this checkpoint's commit), `git ls-remote` on both remotes.
 
 ---
 
