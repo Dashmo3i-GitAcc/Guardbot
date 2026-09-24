@@ -17,7 +17,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from app import discourse, entities, room_state, temporal
+from app import discourse, entities, objects, room_state, temporal
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -477,6 +477,46 @@ def test_the_referent_block_check_is_not_vacuous():
     assert m["wrong_confident"] == 0
 
 
+# ── The object line, scored against the block printed beside it ───────────
+def test_the_object_line_never_denies_a_person_the_block_names():
+    """A request can act on a thing *and* carry an explicit source for a person.
+
+    A reply edge, a stated id and a name are facts, and ``referents`` keeps them
+    for exactly this case — they identify who the thing belongs to. So the object
+    line must not order the model to ignore the block beside it. The corpus
+    carries the shape once per explicit source.
+    """
+    m = result()
+    assert m["object_denies_a_person_cases"] == 0
+    shaped = [
+        r["id"]
+        for r in m["detail"]
+        if r["got_object_kind"] not in ("", objects.CLASS_PERSON)
+        and r["referents_prose"].startswith("Who ")
+    ]
+    assert len(shaped) >= 3, shaped
+
+
+def test_the_object_denial_check_is_not_vacuous():
+    """Putting the order back brings the defect back.
+
+    The check reads the two rendered blocks, so it stays true after the fix — the
+    shape is still in the corpus and only the sentence changed. This reconstructs
+    the unfixed line by string, which is the point: the check is on the prose the
+    model reads, not on the reader's internals.
+    """
+    original = objects.render
+    try:
+        objects.render = lambda state: original(state).replace(
+            "The thing is not a member of the room.",
+            "Do not read it as aimed at anybody in the room.",
+        )
+        unfixed = eval_intent.evaluate(eval_intent.load_cases())
+    finally:
+        objects.render = original
+    assert unfixed["object_denies_a_person_cases"] >= 3
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 def test_the_context_is_assembled_for_every_case():
     m = result()
@@ -804,22 +844,27 @@ def test_the_person_reading_is_never_lost():
 
 
 def test_the_residual_person_lead_is_driven_to_zero():
-    """The number the previous increment existed to drive to zero — and it is zero.
+    """The *guess* is gone; the explicit half survives and is right.
 
     ``referents`` used to offer a person for a request whose object is a thing:
     the clitic on a content verb («پاکش کن»), and the bare demonstrative with one
-    («اینو پاک کن»). The guard scopes the guessing away, so the lead is gone and
-    this pins the result. The floor is stated as a floor as well, so a change that
-    made the labelled set shrink — rather than the lead disappear — fails here
-    instead of reading as a win.
+    («اینو پاک کن»). The guard scopes the guessing away, so no *wrong* lead
+    remains and this pins the result. The floor is stated as a floor as well, so a
+    change that made the labelled set shrink — rather than the lead disappear —
+    fails here instead of reading as a win.
 
-    The three corpus-wide leads that *remain* are all explicit: a name, a stated
-    id and a reply edge identify the thing's author and must survive, which
-    ``tests/test_referents.py`` asserts directly.
+    The leads that *do* remain are all explicit, and the corpus now carries them:
+    a reply edge, a stated id and a name identify who the thing belongs to and
+    must survive — ``tests/test_referents.py`` asserts that directly, and
+    ``object-media-reply-author`` / ``object-link-reply-author`` /
+    ``object-media-named-author`` are the labelled shape. Before those existed the
+    assertion could be ``== 0`` only because the corpus never rendered the two
+    blocks together, which is the blind spot the object block's order lived in.
     """
     m = result()
     assert m["object_thing_cases"] >= 8
-    assert m["object_person_offered_for_a_thing"] == 0
+    assert m["object_person_offered_for_a_thing_wrong"] == 0
+    assert m["object_person_offered_for_a_thing"] >= 3
 
 
 def test_the_object_block_stays_small():

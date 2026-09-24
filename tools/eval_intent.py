@@ -120,6 +120,10 @@ def _span_contradicts(line: str) -> bool:
 
 # The entity block's header, which is the claim the two checks below are about.
 _POINTER_HEADER = "Things this message may point at"
+# The object line's denial of people, and the sentence the harness checks for: it
+# is the one prose claim in that block, and it is false whenever an *explicit*
+# source names somebody.
+_OBJECT_DENIES_A_PERSON = "aimed at anybody in the room"
 
 
 def _entity_claims_a_pointer(block: str, state) -> bool:
@@ -154,11 +158,33 @@ def _entity_gives_an_order(block: str) -> bool:
     model to disregard the block above it, and it is the opposite of what that
     block exists for.
 
-    The order belongs to the block that knows the side. ``app/objects.py`` states
-    it when the verb decides the object, and is silent when the verb is
-    unclassified — which is exactly when the resolver's people are still live.
+    The order was moved to the block that knows the side, and that reasoning held
+    only half: ``app/objects.py`` knows the **object** side, not the people side.
+    It said "do not read it as aimed at anybody in the room" whenever the object
+    was a room-held thing — including when an *explicit* source had already named
+    somebody, which is exactly the case ``app/referents.py`` keeps those sources
+    for. See ``_object_denies_a_person``: the order was removed rather than moved
+    again.
     """
     return "do not" in block.lower()
+
+
+def _object_denies_a_person(object_block: str, resolution) -> bool:
+    """Whether the object line denies a person the referent block names.
+
+    The object block's thing branch ended "Do not read it as aimed at anybody in
+    the room" — an order, and a false one on the shape it was never rendered
+    against: a request that acts on a thing *and* carries an explicit source for
+    a person. A reply edge, a stated id and a name are facts, and
+    ``app/referents.py`` keeps them for this case precisely because they identify
+    who the thing belongs to; the block beside the order then names that person,
+    often as ``confident``.
+
+    Two blocks, one prompt, opposite claims. It is the same defect the entity
+    block's order was, one block over, and the same rule fixes it: a block states
+    what its reader found and stops.
+    """
+    return _OBJECT_DENIES_A_PERSON in object_block and bool(resolution.candidates)
 
 
 # ── The thread's content words ────────────────────────────────────────────
@@ -574,6 +600,12 @@ def evaluate(cases: dict) -> dict:
                 "object_surface": target.surface,
                 "object_why": target.why[0] if target.why else "",
                 "object_chars": len(object_block),
+                # The object line scored as prose, against the block printed
+                # beside it: the class comparison above cannot see an order the
+                # reader never made.
+                "object_denies_a_person": _object_denies_a_person(
+                    object_block, resolution
+                ),
                 "block_chars": len(block),
                 # The block as the model reads it, scored against the verdict
                 # above: the harness must not score a resolution the prompt
@@ -970,6 +1002,18 @@ def _metrics(detail: list[dict]) -> dict:
         # corrects it in words; driving this to zero is its own change.
         "object_thing_cases": len(object_thing),
         "object_person_offered_for_a_thing": len(object_person_offered),
+        # …split by whether the lead is the one the corpus labels. The guess is
+        # what the resolver's guard removed; the *explicit* half — a reply edge, a
+        # stated id, a name — identifies who the thing belongs to and must
+        # survive, so a lead that matches the label is not a residual.
+        "object_person_offered_for_a_thing_wrong": sum(
+            1
+            for r in object_person_offered
+            if r["got_referent"] != r["expected_referent"]
+        ),
+        "object_denies_a_person_cases": sum(
+            1 for r in detail if r["object_denies_a_person"]
+        ),
         "object_chars_max": max((r["object_chars"] for r in detail), default=0),
         "object_us_mean": (
             statistics.fmean([r["object_us"] for r in detail]) if detail else 0.0
@@ -1150,6 +1194,10 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"{m['object_person_offered_for_a_thing']} / {m['object_thing_cases']} "
         "(the resolver's guard scopes the guessing; an explicit name, id or "
         "reply edge still identifies the thing's author)",
+        f"  …of which the wrong person {m['object_person_offered_for_a_thing_wrong']} "
+        "(should be 0 — the explicit leads are the labelled ones)",
+        f"  the line, scored           {m['object_denies_a_person_cases']} deny a "
+        "person the referent block names (should be 0)",
         f"  block chars max            {m['object_chars_max']}",
         "",
         f"referent resolution ({m['answerable']} answerable of {m['needs_resolution']} open)",
@@ -1208,6 +1256,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or r["entity_claims_a_pointer"]
         or r["entity_offers_things_for_a_person"]
         or r["entity_gives_an_order"]
+        or r["object_denies_a_person"]
         or r["anchor_clitic_words"] or r["shared_clitic_words"]
         or r["act_copula_directive"]
         or not r["media_ok"] or not r["link_ok"]

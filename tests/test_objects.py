@@ -181,12 +181,42 @@ def test_the_person_reading_says_it_is_not_a_thing():
     assert "not on a thing" in out
 
 
-def test_the_thing_reading_warns_it_is_not_a_person():
-    """This is the correction the resolver's person-candidates need: acting on a
-    person when the message was about a photograph is the worst mistake here."""
+def test_the_thing_reading_says_what_the_object_is_and_stops():
+    """The correction the resolver's person-candidates need — and no more.
+
+    Acting on a person when the message was about a photograph is the worst
+    mistake here, so the line says "a thing, not a person". It used to add an
+    order — "Do not read it as aimed at anybody in the room" — which is false
+    whenever an *explicit* source names somebody: a reply edge, a stated id and a
+    name are facts, and ``app/referents.py`` keeps them for exactly the case where
+    the request acts on a thing, because they identify who the thing belongs to.
+    The block printed beside this one then names that person, often as
+    ``confident``, and the model has to choose which to believe.
+
+    The block that knows the object side does not know the people side, so it
+    states its own half and stops — the rule the entity block's closing line was
+    already corrected to.
+    """
     out = O.render(O.read_object("پاکش کن", ROOM, anchor("پاکش کن")))
     assert "not a person" in out
-    assert "anybody" in out
+    assert "anybody" not in out
+    assert "Do not" not in out
+
+
+@pytest.mark.parametrize(
+    "text,room",
+    [
+        ("پاکش کن", ROOM),                    # a media row the room holds
+        ("این لینک رو حذف کن", ROOM_LINK),     # a named link
+    ],
+)
+def test_a_thing_object_and_a_named_person_can_be_true_together(text, room):
+    """The two halves are not in conflict, so the line must not make them be."""
+    state = O.read_object(text, room, anchor(text))
+    assert state.kind not in ("", O.CLASS_PERSON)
+    out = O.render(state)
+    assert "not a person" in out
+    assert "aimed at anybody" not in out
 
 
 def test_an_unknown_kind_says_so_rather_than_naming_one():

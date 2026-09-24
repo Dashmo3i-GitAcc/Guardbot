@@ -1624,6 +1624,14 @@ reference file is stale and this list is the one to fix first.
   unambiguous instruction render as *"could not tell the top candidates apart,
   ask"*. The exclusion is for the role **inference**, not for the explicit
   facts: a name, a stated id and a reply edge still name whoever they name.
+* A block **states what its reader found and does not order the model about a
+  fact its reader does not hold**. Two of the prompt's orders were replaced by
+  evidence for this reason: the entity block's closing line (§54) and
+  `objects.render`'s "Do not read it as aimed at anybody in the room" (§59). The
+  object line knows the **object** side only, and it was denying people that
+  `referents`' **explicit** sources — the reply edge, a stated id, a name — had
+  already named beside it, because those sources are kept *precisely* for the case
+  where the request acts on a thing.
 * The **benchmark scores the resolution the prompt renders**. `evaluate` resolves
   with the same `messages` (window **+ anchor**) and the same `roles`
   (`awareness.roles_for`) the renderer passes, and the harness's world is built
@@ -2214,11 +2222,11 @@ the invariant set; this section is the **state**, not a rule, and is meant to be
 replaced as the work advances.
 
 **Where the work is.** Branch `develop/nexus-intelligence-evolution`, HEAD
-`66a1e94` plus increment P (pushed to both remotes `origin`/`dashmo3i`). `main`
-and the rollback base are untouched at `00c5d1d`. Increments A–P are done; the
-deterministic benchmark in `tools/eval_intent.py` is clean over 134 cases
+`5c1f0b6` plus increment Q (pushed to both remotes `origin`/`dashmo3i`). `main`
+and the rollback base are untouched at `00c5d1d`. Increments A–Q are done; the
+deterministic benchmark in `tools/eval_intent.py` is clean over 137 cases
 (`tests/test_intent_eval.py` holds the floor) and the full suite is
-**3236 passed / 0 failed**. **No merge, no deploy** without the owner's explicit
+**3240 passed / 0 failed**. **No merge, no deploy** without the owner's explicit
 go-ahead.
 
 **Increment O — `66a1e94`, "the copula is not a clitic".** The act reader's
@@ -2291,16 +2299,45 @@ not the number, and P is not sold as a speed-up. 0 Gemini calls, no DB change, n
 source/budget/runtime-path change; the only production file touched is
 `app/referents.py`.
 
-**Next increment (Q), in priority order.** The owner's list still stands
-(1–5 intent/Awareness understanding, 10–12 scheduling/adaptivity/integration, 13
-model routing only if benchmarks prove it, 14 verification only where
-measurable). The concrete threads P leaves:
+**Increment Q — "the object line ordered the model to ignore the block beside
+it".** §54 moved the entity block's order to "the block that knows the side", and
+that reasoning held only half: `app/objects.py` knows the **object** side, not the
+people side. It said "Do not read it as aimed at anybody in the room" whenever the
+object was a room-held thing — including when an explicit source (reply edge,
+stated id, name) had already named somebody, which is exactly the case
+`app/referents.py` keeps those sources for. On the reachable shape the two blocks
+disagreed inside one prompt: the object line denied people, and four lines below,
+the referent block said *"The server is confident in the first candidate"*.
 
-1. The **rendered prose** is now scored for the referent block only. The other
-   rendered blocks — the object's "the verb decides", the room-state graph's
-   "converged on", the act block's quoted directive — are scored only where they
-   move a labelled verdict (§55.5). Extending the same "score the product, not
-   the reading" discipline to the **act block's prose** is the next measured step.
+**Zero of the 134 cases had both halves**, so the corpus could not see it — the
+same blind spot §54 found, one level down. The fix: `objects.render`'s room-held
+branches state their own half and stop ("The thing is not a member of the room"),
+which keeps the half-truth the line exists for (the object is a thing, not a
+person) and drops the claim about people. Corpus gained the shape once per explicit
+source (`object-media-reply-author`, `object-link-reply-author`,
+`object-media-named-author`), v16 → v17, 134 → 137 cases. Harness gained
+`object_denies_a_person_cases` (reads both rendered blocks) and
+`object_person_offered_for_a_thing_wrong` (splits the surviving explicit lead from
+the guess).
+
+Measured: `object_denies_a_person_cases` **3 → 0**; object exact (class·source)
+1.0; resolution top-1 / ambiguity precision 1.0; wrong-but-confident 0; a person
+offered for a thing-object request 0 of 8 → **3 of 11, 0 wrong**; object block
+chars mean/max 60.4/123 → 59.0/123; assembled context 923.7/1498 unchanged;
+`objects.render` 1.085 → 1.064 µs/case (noise); 0 Gemini calls, no DB change, no
+source/budget/runtime-path change; the only production file touched is
+`app/objects.py`. Suite 3236 → **3240 passed, 0 failed**. Non-vacuity: the unfixed
+renderer reads 3, reconstructed by string in `tests/test_intent_eval.py`.
+
+**Next increment (R), in priority order.** The owner's list still stands (1–5
+intent/Awareness understanding, 10–12 scheduling/adaptivity/integration, 13 model
+routing only if benchmarks prove it, 14 verification only where measurable). What
+Q leaves:
+
+1. Two prose claims still have nothing checking them: the **room-state graph's
+   "converged on"** wording and the **act block's "why" wording** beyond
+   `act_copula_directives`. Both need a corpus case that renders them beside a
+   block that can contradict them — that is what made Q findable.
 2. `role-two-admins` stays ambiguous by design; check whether the corpus should
    carry a case where the room's reply convergence *should* break the tie.
 

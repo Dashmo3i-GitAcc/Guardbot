@@ -30,6 +30,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [56. A config is not a person](#s56)
 - [57. The copula is not a clitic](#s57)
 - [58. The benchmark scored a different reading than the prompt showed](#s58)
+- [59. The object line ordered the model to ignore the block beside it](#s59)
 
 ---
 
@@ -3658,4 +3659,111 @@ touched is `app/referents.py`.
 The harness now scores the referent block the model reads. The other rendered
 blocks — the object's "the verb decides", the room-state graph's "converged on",
 the referent ranking's own reason strings — are still scored only where they
-happen to move a labelled verdict, not as prose (§55.5).
+happen to move a labelled verdict, not as prose (§55.5). The object block's one
+prose claim is scored as of §59.
+
+## 59. The object line ordered the model to ignore the block beside it
+
+### 59.1 The claim
+
+The prompt is assembled from several sources, and two of them can make claims
+about the same message. §54.3 found that once already: the entity block's closing
+line ordered the model to disregard the resolver's ranked people, and the fix
+moved the order to the block that "knows the side" — `app/objects.py` says "Do not
+read it as aimed at anybody in the room" exactly when the verb decides the object,
+and says nothing when the verb is unclassified, which is when the resolver's people
+are still live.
+
+That reasoning held only half. `app/objects.py` knows the **object** side. It does
+not know the people side, and `app/referents.py` keeps the **explicit** sources —
+the reply edge, a stated id, a name — *precisely* for the case where the request
+acts on a thing, because they identify who the thing belongs to. On a message that
+is both, the two blocks disagreed inside one prompt:
+
+```
+The request acts on a media message — a thing, not a person. Do not read it as aimed at anybody in the room.
+
+Who «اینو» may mean (server-built candidates, strongest first — evidence, not a decision):
+- مهدی (55), 1.00 — the message is a reply to them
+The server is confident in the first candidate. Use its id, and do not substitute a name from an earlier exchange.
+```
+
+One line orders the model not to read the message as aimed at anybody. Four lines
+below it, the server says it is **confident** who it is aimed at. The model has to
+choose which to believe, and the block that is wrong is the one that was supposed
+to be the correction.
+
+### 59.2 Why nothing could see it
+
+The shape needs both halves at once: a thing the room holds (so the object reading
+is `media`, `link` or `message` — the branches that carried the order) *and* an
+explicit source for a person. **Zero of the 134 cases had both.** The corpus could
+carry the order or the reply edge, never the two together, so the class comparison
+on `objects` scored 100% while the prompt contradicted itself — the same blind spot
+§54 found, one level down: the two blocks had never been rendered side by side.
+
+The reachable shapes are ordinary. A reply edge is the most common way a
+moderation request names its target, and "the object is a file and the target is
+whoever posted it" is the shape the object reading exists for.
+
+### 59.3 The fix
+
+`objects.render`'s room-held branches state their own half and stop:
+
+> The request acts on a media message — a thing, not a person. The thing is not a
+> member of the room.
+
+The half-truth the line exists for is intact — the object is a thing, not a person,
+which is the join the model used to make itself. What is gone is the claim about
+*people*, which this block never read and cannot support. The block that knows the
+object side says the object side; the block that knows the people side is printed
+beside it. The `CLASS_THING` branch already worked this way and was never a
+problem.
+
+The corpus gained the shape, once per explicit source — `object-media-reply-author`,
+`object-link-reply-author`, `object-media-named-author` — and the harness gained
+`object_denies_a_person_cases`: a case where the object line carries the denial
+*and* the referent block names a candidate. It reads both rendered blocks, so it
+cannot pass by agreeing with a mistake inside either reader.
+
+### 59.4 The numbers
+
+| | before | after |
+|---|---|---|
+| corpus cases | 134 | 137 (v17) |
+| `object_denies_a_person_cases` | **3** | **0** |
+| object block chars mean / max | 60.4 / 123 | 59.0 / 123 |
+| assembled context chars mean / max | 923.7 / 1498 | 923.7 / 1498 |
+| object exact (class · source) | 1.0 | 1.0 |
+| resolution top-1 / ambiguity precision | 1.0 / 1.0 | 1.0 / 1.0 |
+| wrong-but-confident | 0 | 0 |
+| a person offered for a thing-object request | 0 of 8 | 3 of 11, **0 wrong** |
+| `objects.render` µs/case (median / min) | 1.085 / 0.448 | 1.064 / 0.438 |
+| suite | 3236 | **3240 passed, 0 failed** |
+
+The "before" is the metric's own baseline, measured by reconstructing the unfixed
+line by string over the same corpus — `tests/test_intent_eval.py` does exactly that
+so the check cannot go vacuous. Non-vacuity: the unfixed renderer reads **3**.
+
+The 3 leads that remain are the labelled ones, and the harness now separates them
+from the guess: `object_person_offered_for_a_thing_wrong` is **0**, and
+`object_person_offered_for_a_thing` is asserted to be **≥ 3** so a corpus that
+quietly lost the explicit shapes fails instead of reading as a win. Before §59 the
+first number could be asserted `== 0` only because the corpus never rendered the
+two blocks together.
+
+Latency is a string swap and lands in the noise; the block is one character shorter
+per case and the assembled prompt is unchanged. 0 Gemini calls, no DB change, no
+source/budget change, no runtime-path change; the only production file touched is
+`app/objects.py`.
+
+### 59.5 What it leaves
+
+The rule the last two increments keep re-learning: **a block may state what its
+reader found and must not order the model about a fact its reader does not hold.**
+Two of the four orders the prompt used to carry are now evidence (the entity
+block's closing line, §54; this one). The remaining prose claims nothing checks
+are the room-state graph's "converged on" wording and the act block's "why"
+wording beyond `act_copula_directives` (§55.5, §58.5) — both candidates for the
+same treatment, both needing a corpus case that renders them beside a block that
+can contradict them.

@@ -1,5 +1,5 @@
 {
-  "version": 16,
+  "version": 17,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -6264,6 +6264,177 @@
         "entities": {
           "newest_media": "",
           "has_link": false
+        }
+      }
+    },
+    {
+      "id": "object-media-reply-author",
+      "category": "object",
+      "note": "The object is a thing and an explicit source names a person: the anchor is a reply to the sender of the photograph, and the reply edge is the answer. The object line must say what the object is without ordering the model to ignore the reply edge beside it — the thing is not a member of the room, but the person the reply names is real.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین این چیه",
+          "at": 980,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 11,
+        "reply_message_id": 0,
+        "reply_name": "رضا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": ""
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        },
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        }
+      }
+    },
+    {
+      "id": "object-link-reply-author",
+      "category": "object",
+      "note": "The same shape one class over: the room's thing is a link, not a media row, and the reply edge still names its sender. The object reading is a thing and the referent is a person, and both are true of the same message.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "لینک https://example.com",
+          "at": 980,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 22,
+        "reply_message_id": 0,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": ""
+        },
+        "object": {
+          "kind": "link",
+          "source": "pointed"
+        },
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
+      }
+    },
+    {
+      "id": "object-media-named-author",
+      "category": "object",
+      "note": "No reply edge: the person is named in the message instead. «رضا اینو پاک کن» acts on a photograph and names the person who sent it, so the resolver settles on them at 0.80 and the object line must not deny that they exist.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین این چیه",
+          "at": 980,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": ""
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        },
+        "state": {
+          "edges": [],
+          "focus": 0
         }
       }
     }

@@ -304,9 +304,22 @@ def render(state: Object) -> str:
             f"The request acts on {label} — a thing, not a person. The message does "
             "not say which thing; the transcript does.\n"
         )
+    # The room-held branches used to end "Do not read it as aimed at anybody in
+    # the room" — an order, and a false one on a shape the corpus could not see
+    # until it carried it: a request that acts on a thing *and* carries an
+    # explicit source for a person. A reply edge, a stated id and a name are
+    # facts, and ``app/referents.py`` keeps them for exactly this case, because
+    # they identify who the thing belongs to — so the block printed beside this
+    # one names that person, often as ``confident``. Two blocks, one prompt,
+    # opposite claims.
+    #
+    # The block that knows the object side does not know the people side, so it
+    # states its own half and stops. That is the same rule the entity block's
+    # closing line was corrected to (see ``_entity_gives_an_order`` in the
+    # harness): the sentence is evidence framing, not an instruction.
     return (
-        f"The request acts on {label} — a thing, not a person. Do not read it as "
-        "aimed at anybody in the room.\n"
+        f"The request acts on {label} — a thing, not a person. The thing is not a "
+        "member of the room.\n"
     )
 
 
