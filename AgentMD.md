@@ -5201,6 +5201,177 @@ checkpoint's commit on top of `6bdebab`), `git ls-remote` on both remotes.
 
 ---
 
+### 54.24 Checkpoint (2026-09-24, **Admin Control Center — A-to-Z audit + staged plan**) — audit DONE, implementation NOT STARTED
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~22:16Z**. Branch **`main`**, working
+tree clean. The **A-to-Z system audit is complete**; the **dashboard itself has
+not been written yet** — this checkpoint exists so the audit and the plan survive
+the context window, per §55. The deployed GuardBot is untouched and verified
+(§54.23): commit `6bdebab`, image `f36e60bf3971`, `RestartCount=0`.
+
+**Audit method.** Repository + AgentMD inspection, live-DB inspection, secret
+scan, migration inspection, and the full test suite. Evidence:
+
+| Check | Result |
+|---|---|
+| Full suite (A-to-Z baseline) | **3757 passed / 0 failed** (245.4 s) |
+| Live Chat acceptance probe | **10/10** (§54.23, unchanged) |
+| Deployed code vs HEAD | 76 py files, **0 mismatches** |
+| Tracked secrets | **none** — every match is a synthetic test fixture (`AIzaSyFAKE…`, the public example token `123456789:AAHdq…`, a fake RSA header) used to test the redactor |
+| `.gitignore` | correct: `.env`, `.env.*` (but `!.env.example`), `data/`, `*.db`, `*.log` |
+| Runtime data tracked | **no** (`git ls-files data/` empty) |
+| Migrations | idempotent: `CREATE TABLE IF NOT EXISTS` + `_ensure_column` (PRAGMA → `ALTER TABLE`); WAL + `synchronous=NORMAL` |
+| Live DB | **33 tables** (list below) |
+| Lint/type config | **none** (dev deps = `pytest` only); static checking = `py_compile` + the suite |
+| Web layer in GuardBot | **none** — no aiohttp/FastAPI/Flask/uvicorn anywhere in `app/` |
+
+**A–U coverage (what actually exists).**
+
+* **A Auth/sessions** — Telegram-bot side only. `rbac.resolve/authorize` (6 roles:
+  owner, senior_admin, admin, moderator, helper, guest; `ROLE_PERMISSIONS`),
+  `admin_service.execute` as the single authority boundary, `admin_audit` +
+  `admin_requests` + `admin_pending_ops`. **No dashboard identity, session,
+  cookie or CSRF layer exists.**
+* **B Bot lifecycle** — **single bot** (`BOT_TOKEN`, one
+  `telegram.ext.Application`). There is **no bot registry, no multi-token model,
+  no token-rotation path**. "Add another bot" is **not present in the
+  architecture** and must not be invented silently.
+* **C Chat** — complete and verified (§53.8, §54.22/§54.23). One persona,
+  `OWNER_NOTE` as data, reactive tone. **Must not be touched.**
+* **D DB integrity/migrations** — complete; 33 tables; per-group scoping and
+  per-group retention ceilings (§53.6).
+* **E Errors/retries/idempotency** — complete: `admin_requests` (content-hash
+  request ids), `admin_pending_ops`, `vpn_pending_ops`, pool retry/backoff.
+* **F Feature flags** — complete: `config.py` env-driven flags (`GEMINI_*_ENABLED`,
+  `NEXUS_*_ENABLED`, `ADMIN_AI_ENABLED`, `GEMINI_SEARCH_ENABLED`, …).
+* **G Groups/room authorization** — complete and DB-authoritative
+  (`authorized_groups`, `app/groups.py`); register/revoke/list via
+  `/registergroup`, `/unregistergroup`, `/groups`.
+* **H Health/runtime** — boot log, `nexus_state`, `awareness_control`,
+  `search_control`, `gemini_*` tables. **No HTTP health endpoint** (`/healthz`
+  does not exist in GuardBot).
+* **I AI workload isolation** — complete: chat / intent / awareness / moderation /
+  transcribe / live_voice / search each have their own keys, counters, windows,
+  breakers and clients.
+* **J Jobs/workers** — `apscheduler` ticks (awareness deadline, sweeps),
+  `agent_poller`; `agent_tasks` + spool.
+* **K Providers/credentials/quotas** — `gemini_accounts`, `gemini_models`,
+  `gemini_daily`, `gemini_events`, `gemini_discovery`, plus the runtime credential
+  store `app/key_store.py` (`add`/`remove`/`entries`/`slots_for`, actor-audited).
+  Quotas/caps/breakers live in `gemini_pool` + `config`.
+* **L Logging/privacy/secrets** — complete: `agent_bridge.redact`, no key in logs
+  (asserted by tests), masked fingerprints (`****gxYw`).
+* **M Memory/context/history/awareness** — complete: `memory`, `room_state`,
+  `state`, `conversation_state`, `user_memory`, `awareness*`, `context_plan`.
+* **N Personality/moderation/injection** — complete (§53.8; moderation via
+  `ai_moderation`/`moderation`/`mod_policy`; injection defence asserted in tests).
+* **O Owner/admin authority** — complete: `rbac` + `admin_service`; owner by id.
+* **P Pools/limits/breakers** — complete: `gemini_pool` per workload.
+* **Q Quality/regression/live acceptance** — complete: 3757-test suite,
+  `tools/probe_chat_personality.py`, `tools/probe_room_boundary.py`,
+  `tools/eval_*`.
+* **R Room/tenant boundaries** — complete (§53.6, §54.21).
+* **S Search** — complete: `web_search` (Tavily), `search_control`, its own key
+  and budget, separate from chat/intent.
+* **T Media/voice/duplicates/malformed** — complete: `media`, `transcribe`,
+  `voice_live/`, `seen_updates` (dedupe), `text_filters`.
+* **U Users/identities/permissions/audit** — complete: `users`, `identities`,
+  `identity_resolutions`, `people`, `admins`, `admin_audit`.
+* **Beyond U** — VPN-bot integration (`vpnbot`, `vpn_service`,
+  `service_adapters`, `vpn_pending_ops`; internal API on `127.0.0.1:8099`);
+  agent bridge (`agent_bridge`, `agent_data`, `agent_service`, `agent_poller`,
+  `agent_spool`, `tools/agent_runner.py`); `burst`, `decision`, `discourse`,
+  `entities`, `intent`, `referents`, `responses`, `temporal`, `classifier`,
+  `addressing`, `net`, `requests`, `objects`, `persian_calendar`.
+
+**Audit conclusion.** The backend is healthy and complete for everything it
+claims; the full suite is green; secret hygiene is correct. **No critical or high
+defect was found in the existing system, so no fix or new regression test was
+required by the audit.** The one genuine gap is that **the Admin Control Center
+does not exist** — GuardBot has no web layer, no dashboard identity/session, and
+no multi-bot registry.
+
+**Convention source (visual identity + stack).** `/opt/vpn-bot` already ships a
+mature dashboard and is the reference for both: **aiohttp + Jinja2 templates +
+`app/web/static`**, route modules with `register(app)`, a `queries` data layer,
+`copy` (Persian), `jalali`, and **`hashlib.scrypt` password hashing with a signed
+stateless session cookie** (`HttpOnly`, audience-scoped, CSRF token, password
+epoch), plus `ops/*.service`, `ops/nginx-dashboard.conf.example`,
+`ops/dashboard_passwd.py`, and `tests/test_web_dashboard.py`. The GuardBot
+dashboard must follow these conventions and the same dark visual family
+(`static/app.css`, `theme.css`, `logo.svg`) — **not** a generic admin template.
+
+**Architecture decisions (proposed, to confirm before M1).**
+1. **Stack** — aiohttp + Jinja2 + static, mirroring `/opt/vpn-bot`; no new
+   compiled dependency (`scrypt` from stdlib).
+2. **Placement** — a **second process** (`python -m app.web`) sharing the same
+   `./data` SQLite volume; either a second compose service or a second systemd
+   unit on the host. It must **not** run inside the bot's event loop, so a
+   dashboard restart can never disturb Telegram polling. Decision needed:
+   compose service vs systemd (the VPN bot uses systemd).
+3. **Identity** — a dashboard admin identity **separate** from Telegram
+   membership, reusing `rbac` for authorization (`config.manage` etc.). A
+   Telegram group admin is **not** a dashboard admin (requirement §10).
+4. **Data** — new tables only (`dashboard_sessions`/`dashboard_credentials`/
+   `dashboard_audit` as needed) via `CREATE TABLE IF NOT EXISTS` +
+   `_ensure_column`; **no destructive rewrite** of history.
+5. **Multi-bot** — **GuardBot is single-bot today.** "Add another bot" is a real
+   architecture change (registry + per-bot Application/credentials/workloads).
+   It is **out of scope until the owner explicitly approves**; the first
+   dashboard release should surface and manage the **existing** single bot
+   (health, webhook/polling status, usage, errors, audit) and **not** pretend a
+   multi-bot capability exists.
+6. **Untouchable** — Chat persona/architecture, credentials, pools, rate limits,
+   breakers, context ownership, tenant isolation, workload boundaries
+   (requirement §2). The dashboard reads through existing modules; it must not
+   bypass `rbac`, `admin_service`, `groups`, or `key_store`.
+
+**Staged plan (each stage = tests → secret-scan → commit → push → verify).**
+* **M1 — Foundation.** `app/web/` package: `server.py` (aiohttp app), `auth.py`
+  (scrypt + signed cookie + CSRF + password epoch, audience-scoped), `jinja.py`,
+  `render.py`, `labels.py`, `jalali.py`, `copy.py`, `static/` + `templates/`
+  (dark theme from the VPN-bot family). Login/logout, `/healthz`, session
+  expiry/rotation, brute-force rate limit. Tests: auth, session fixation, CSRF,
+  cookie flags.
+* **M2 — Authorization + audit.** Dashboard identity ↔ `rbac`; every mutation
+  server-authorized; `dashboard_audit` append-only; IDOR/cross-group tests.
+* **M3 — Overview.** Real metrics only, from existing tables
+  (`*_usage`, `gemini_daily`, `gemini_events`, `admin_audit`, `authorized_groups`,
+  `nexus_state`, `awareness_control`, `search_control`), with
+  today/7d/30d/custom and DB-layer aggregation + pagination.
+* **M4 — AI Control Center + providers/credentials.** Per-workload view over
+  `gemini_pool`/`gemini_accounts`/`key_store`; add/replace/rotate/disable with
+  validate → activate → verify → rollback, secrets masked (fingerprint only).
+* **M5 — Groups.** Read-only first (list/detail/usage/audit), then
+  register/disable/re-enable through `admin_service`, never cross-group leakage.
+* **M6 — Bot management.** The existing single bot: health, polling/webhook
+  status, groups, usage, errors, audit. Token rotation done **safely** (validate
+  new token via `getMe` → confirm it is the expected bot → persist → audit
+  without the secret → activate → verify health → rollback on failure → retire
+  the old token only after success).
+* **M7 — Usage/analytics + audit log pages.** Filters, charts, pagination,
+  export-free (no bulk dumps).
+* **M8 — Security & performance pass.** The §18 test list, the §19 measurements,
+  responsive/keyboard/accessibility pass, then deploy + post-deploy verification
+  (image/code identity, health, dashboard smoke, security smoke, live Chat probe,
+  regressions, ERROR/CRITICAL scan, restart count, drift, migrations, audit
+  events, secret-leak check, rollback path).
+
+**Known limitations / risks to record now.** (a) No multi-bot support (see
+decision 5). (b) No lint/type tooling exists, so "static checks" are limited to
+`py_compile` + the suite. (c) The dashboard adds an HTTP surface that must be
+firewalled/behind nginx like the VPN bot's; it must not be publicly exposed
+without TLS. (d) SQLite is single-writer: analytics must aggregate at the DB
+layer and paginate, not pull rows into the app.
+
+**NEXT STEP (exact).** Confirm the two open decisions — **(1) placement** (second
+compose service vs systemd unit) and **(2) whether multi-bot is in scope** — then
+implement **M1** (`app/web/` foundation + auth + dark shell + tests), commit and
+push, and continue M2…M8 from the repository. Do **not** modify Chat, pools,
+credentials, limits, breakers, tenant isolation or workload boundaries.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or
