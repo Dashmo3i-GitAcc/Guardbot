@@ -1926,14 +1926,18 @@ reference file is stale and this list is the one to fix first.
   mistake the split exists to prevent: a guessed *person* for a message about a
   file is the worst direction available here.
 * The object line renders into the **same source as the act and the direction**
-  (`anchor_act`, budget 420 — the longest block the corpus produces is 297), and
+  (`anchor_act`, budget 420 — the longest block the corpus produces is 350 at
+  137 cases), and
   the two lines that contradict a naive reading come **first**: `_clip` keeps
   whole lines from the front, so what survives a tight budget is the warning, not
   the claim it warns about.
-* `tools/eval_intent.py` reports **`object_person_offered_for_a_thing`** — the
-  residual wrong lead, a thing-object request for which `referents` still lists a
-  person — rather than hiding it, and `tests/test_intent_eval.py` **pins** it at 0
-  after the resolver guard below drove it from 5. "A thing" there is the labelled
+* `tools/eval_intent.py` reports **`object_person_offered_for_a_thing`** — a
+  thing-object request for which `referents` still lists a person — and its
+  **`…_wrong`** split, the leads that are not the person the corpus labels. The
+  resolver guard below drove the *guess* from 5 to 0, and
+  `tests/test_intent_eval.py` pins `…_wrong == 0` **and** `… >= 3`: the surviving
+  leads are the explicit ones (reply edge, stated id, name), and a corpus that
+  quietly lost those shapes must fail rather than read as a win. "A thing" there is the labelled
   classes, and the **abstention is not one of them**: a case whose expected class
   is `""` says the server has no reading of what the request acts on, so a person
   offered there is the resolver doing its ordinary job, not a thing-lead.
@@ -2343,3 +2347,85 @@ Q leaves:
 
 **Constraints carried:** speed-first (no unnecessary Gemini calls; benchmark
 latency before/after every change), rollback safety, no merge, no deploy.
+
+### 54.1 Checkpoint (2026-09-24, after Q) — resume here
+
+**State, verified against the repository.** Branch
+`develop/nexus-intelligence-evolution`, HEAD
+`a0e4f3bb4701981b3f656b521f43442339ca744e` (increment Q), pushed to both remotes
+(`origin` = mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc) and confirmed with
+`git ls-remote`. 25 commits on the branch. `main` and the annotated tag
+`release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**.
+Suite **3240 passed, 0 failed**. Corpus **137 cases, version 17**. Benchmark
+clean: top-1 / ambiguity precision / ambiguity recall 1.0, `wrong_confident == 0`,
+`act_accuracy == 1.0`, `object_accuracy == 1.0`, `expression_accuracy == 1.0`,
+`edges_exact == cases`, `request_false_affirmative == 0`,
+`when_prose_contradictions == 0`, `entity_gives_an_order_cases == 0`,
+`object_denies_a_person_cases == 0`, assembled context mean/max 940/1498 under
+the 1500 ceiling. **Not merged, not deployed.**
+
+**The roadmap.** `docs/intent-awareness-roadmap.txt` is the durable, standalone
+plan: completed increments A–Q with their measurements, the partially-completed
+and unfixed findings, everything not yet implemented grounded in the repository,
+the open threads, the remaining increments R–V with files / runtime-path /
+Gemini / evidence / dependencies, and the end-state definition. Read it before
+starting anything; it is written for an agent with no chat history.
+
+**What Q leaves, recorded so it is not re-discovered:**
+
+1. The "score the rendered product" programme covers 5 of 7 rendered blocks. Not
+   scored: the **room-state graph's "converged on"** wording and the **act
+   block's `why[0]`** wording. → increment **R**.
+2. `objects.Object.source` (`named`/`pointed`/`verb`) is computed and scored by
+   the harness but **never rendered in the prompt** — the same "dead field" tell
+   K found in `entities.pointing`. Open design question, not a defect.
+3. `requests.render` hardcodes ONE reason for the two different routes to
+   `polarity == ""` ("a later negated directive" vs "a negation elsewhere"); the
+   accurate reason is in `request.why` and unused. Weak, unfixed, unmeasured.
+4. `objects.render`'s `CLASS_THING` branch duplicates its noun: "The request acts
+   on a thing — a thing, not a person." Cosmetic, unfixed.
+5. Two stale claims in §53.7 were corrected in this checkpoint: the residual-lead
+   floor (`…_wrong == 0` **and** `… >= 3`, not "pinned at 0") and the act block's
+   longest corpus output (**350**, not 297).
+
+**The open thread carried from P — `role-two-admins`.** The case reads
+`ambiguous: true` **by design**: the resolver refuses to pick between two people
+who genuinely hold the role. `_about_focus` fires only on a unanimous, repeated
+reply signal (≥ 2 replies all aimed at one person) and only for **anaphoric**
+expressions (far demonstrative or the object clitic); «ادمینه» is a **role**
+expression, so convergence does not run for it. Open question: should the
+room's reply convergence be able to break a **role** tie? Needs evidence, not an
+opinion — either the corpus gains the case and `app/referents.py` changes, or the
+case stays ambiguous and the reason is written down. → increment **S**. No
+increment has started this.
+
+**Exact next step.** INCREMENT R — "the graph's word and the act's why". Start
+with the **baseline**: render `room_state.render_graph`'s block and
+`discourse.render_act`'s block for every corpus case and READ THE SENTENCES,
+exactly as J, K, L, M, O, P and Q did. If neither sentence claims more than its
+reader found, record that finding with a should-be-zero metric **and a
+non-vacuity proof**, then STOP — do not invent a change. Do not start S, T, U or
+V. Do not merge. Do not deploy.
+
+**Rollback.** Every increment is independently revertable: `git revert <sha>` on
+this branch, or reset to the previous increment's SHA. The whole evolution is
+revertable by leaving the branch unmerged — `main` at
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state, and it is an
+**ancestor** of the branch (`git merge-base --is-ancestor main HEAD` = yes), so
+leaving the branch unmerged is a complete revert. **No lettered increment (A–Q)
+changed the DB schema or the runtime path**: verified per file against main,
+`app/main.py`, `app/chat.py`, `app/awareness.py`, `app/db.py` and `app/config.py`
+are unchanged by A–Q, and the only runtime-adjacent file they touch is
+`app/awareness_context.py` (one `Source` entry per reader — the documented seam).
+The ONE DB change on the branch is the foundation's `151b1e1` (two ADDITIVE
+`awareness_state` columns via `_ensure_column`, which also touched main/chat/
+awareness); no data rollback is involved. Increment T would be the first DB
+change since it, and must carry its own forward/backward proof and rollback
+procedure.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt`, then verify: `git status` (clean),
+`git rev-parse HEAD` (a0e4f3b…), `git rev-parse main` (00c5d1d…), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
+(a0e4f3b…). Then start R's baseline.

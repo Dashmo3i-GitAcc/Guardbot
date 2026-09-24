@@ -1,0 +1,684 @@
+INTENT / AWARENESS EVOLUTION — ROADMAP
+================================================================================
+Generated: 2026-09-24
+Repository: /root/guardbot
+Branch:     develop/nexus-intelligence-evolution
+HEAD:       a0e4f3bb4701981b3f656b521f43442339ca744e  ("objects: the object line
+            is not an order about people", increment Q)
+Rollback:   main == release-base/nexus-intel ==
+            00c5d1dd412e033c6ac15599b28bc0fbcb54d709  (untouched)
+Remotes:    origin (mo3iiibest77-hub) and dashmo3i (Dashmo3i-GitAcc), both at HEAD
+Merge/deploy status: NOT merged to main, NOT deployed. Awaiting the owner's
+            explicit go-ahead.
+Suite:      3240 passed, 0 failed  (.venv-test/bin/python -m pytest -q, ~2m10s)
+Benchmark:  tools/eval_intent.py over tools/eval_cases.json, 137 cases (v17),
+            116 report keys, 96 per-case detail fields. Floors asserted in
+            tests/test_intent_eval.py.
+
+This file is written so another coding agent can continue without chat history.
+Everything in it was read out of the repository at the commit above. Where a
+fact comes from the owner's brief rather than the repo, it says so explicitly.
+
+--------------------------------------------------------------------------------
+0. GROUND RULES (the owner restates these every increment — do not drift)
+--------------------------------------------------------------------------------
+
+* ROLLBACK-FIRST. Never develop on main. One dedicated branch. Small,
+  independently rollbackable commits. No DB migration without a forward and a
+  backward story. At the end main must be intact and the branch independent.
+* DO NOT MERGE main. DO NOT DEPLOY. Report the SHA and wait.
+* The process for every increment: baseline measurement -> focused
+  implementation -> targeted benchmark -> regression tests -> security/privacy
+  tests -> commit -> push to BOTH remotes -> verify the remote SHAs with
+  `git ls-remote` (never trust `git push` output) -> report.
+* Report for every increment: baseline, new measurement, false-positive rate,
+  false-negative rate where measurable, latency, context/token overhead,
+  Gemini/provider calls, budget impact, regression results, exact commit SHA.
+* SPEED-FIRST: no unnecessary Gemini calls; benchmark latency before/after every
+  change. Every increment so far has added ZERO model calls.
+* Keep the boundaries: Intent is not authority; Awareness is not authority; AI
+  output is data, never an executable privileged action; Gemini workload
+  isolation; no unlimited history; cross-user/cross-group/cross-private
+  isolation; no message content in logs.
+* Keep changes narrow and conservative. Do not pre-build later stages. Fail
+  open, high thresholds, no overclaiming. Diagnose before changing; never raise
+  a limit to green a metric.
+* Secret-scan `git diff --cached` before every push.
+* Context discipline: at ~70% usage start persisting state; at ~80% write a
+  checkpoint before new work; at ~90% stop broad work and leave the repo
+  self-contained. After any compaction, re-read AgentMD.md §54 and this file,
+  then verify git status, branch, HEAD and the remotes before proceeding.
+
+--------------------------------------------------------------------------------
+1. COMPLETED
+--------------------------------------------------------------------------------
+
+1.1 FOUNDATION (7 commits, before the A–Q lettering)
+--------------------------------------------------------------------------------
+The referent resolver and the benchmark that measures it.
+
+  9f6731c  feat(referents): rank who «این» may mean, without ever choosing
+           -> app/referents.py: a candidate ranker that reports `confident` /
+              `ambiguous` and NEVER picks. Evidence, never a decision.
+  96e32d8  feat(awareness): show the model who «این» may mean, as candidates
+           -> the referent block wired into the awareness prompt.
+  7a7d47c  feat(referents,eval): the object clitic, and the benchmark that
+           measures it
+           -> tools/eval_intent.py + tools/eval_cases.json: the deterministic
+              benchmark. This is the number behind every later claim.
+  43cc448  fix(addressing): a quotation about Nexus is not a call to it
+  593d4f6  feat(referents): an anaphoric «همون» is settled by a unanimous room
+  151b1e1  feat(awareness): record what the pass understood, not just what it said
+           -> awareness_state.intent / about_user_id (additive, via _ensure_column)
+  c35cfa9  docs(nexus): the referent resolver, and the numbers behind it
+
+1.2 INCREMENTS A–Q (17 lettered increments + 1 docs commit)
+--------------------------------------------------------------------------------
+Each line: commit, what it actually changed, key measured result. Latency and
+"0 Gemini calls" are recorded where the increment measured them; unless stated
+otherwise every increment made 0 model calls, changed no DB schema, and changed
+no runtime path (the readers are pure modules surfaced as prompt sources).
+
+  A  a426921  app/discourse.py — the act + open questions.
+              Closed act vocabulary (question | instruction | correction |
+              social | report, abstention `unknown`), precedence
+              correction > report > instruction > social > question.
+              `open_questions` uses the reply edge and nothing else.
+              Sources `anchor_act`, `open_questions`.
+              Also fixed a real act false positive: «چند دقیقه پیش فرستادم» no
+              longer reads as a question.
+
+  B  db2ef45  app/temporal.py — what a time word points at.
+              Direction + granularity, never a date; `now` is passed in.
+              TEMPORAL_NOUNS shared by three readers. Source `anchor_when`.
+
+  C  2e70d1b  app/room_state.py — who is talking to whom, and whether this is
+              still the same thread. Reply graph (stored column, exact) + focus
+              + continuation reading (content-word overlap, abstains on a short
+              anchor). Sources `reply_graph`, `thread`.
+
+  D  b0c4afd  app/entities.py — what a demonstrative points at when it is NOT a
+              person. Media from the stored `kind` column, links by regex, the
+              reply-target row only when the anchor names a message. Source
+              `entities`. Corpus 82 -> 90 (v6, every case labelled).
+              Also fixed a real wrong lead: a demonstrative immediately followed
+              by a thing word is no longer read as a person pointer.
+
+  E  4fd43ad  THE TOKENIZER FIX, across discourse/entities/referents/room_state.
+              The Arabic block's punctuation («؟» U+061F, «،» U+060C, «؛»
+              U+061B) sits inside \u0600-\u06ff, so the [^\w\u0600-\u06ff]
+              split kept it glued to the word before it; every lexicon lookup on
+              a message's last word was failing. Corpus 90 -> 96 (v7).
+
+  F  a13c74d  app/requests.py — the polarity reader. «بنش کن» and «بنش نکن»
+              read identically before this; the room's message PROTECTING
+              somebody reached the model as an instruction to act.
+              Reports the directive (quoted), polarity (affirmative | negated |
+              ""), manner (command | request). The claim rule is tight, the
+              downgrade rule is broad (safe direction).
+              Measured: exact 0/16 -> 16/16; negated recall 0/6 -> 100%;
+              forbidden-read-as-asked-for 6/6 -> 0. Corpus 96 -> 107 (v8).
+              Suite 3026.
+
+  G  6202475  app/objects.py — what the request acts on. Closed class
+              (person | media | link | message | thing) + the surface word + how
+              it knows (named | pointed | verb). THE VERB DECIDES THE SIDE AND
+              THE SHAPE CANNOT, so `discourse` owns the split beside the lexicon
+              it splits and exposes acts_on() -> person | thing | "" (the third
+              answer is load-bearing). Renders into the same source as the act
+              (anchor_act, budget 320 -> 420). Corpus 107 -> 120 (v9).
+              Baseline measured before any code: object stated 0/13; a person
+              still offered for 5/10 thing-object requests (pinned, not hidden).
+              Suite 3100.
+
+  H  353f84d  referents guard — no person offered when the request acts on a
+              thing. Scopes ONLY the heuristic sources (_about_scores,
+              _about_focus, _recent_scores); the explicit sources (reply edge,
+              stated id, name, role) always run. Fires only when >=1 directive
+              exists, none acts on a person, >=1 acts on a thing, so
+              «پاکش کن، بنش کن» keeps every source. When it fires with no
+              explicit source, render() returns "" (silence, not "found nobody").
+              Measured: labelled residual lead 5/10 -> 0/8; corpus-wide 13 -> 3,
+              all explicit; top-1 / ambiguity recall / precision 100%;
+              wrong-confident 0; guard ~42 us/msg. Corpus v10. Suite 3110.
+
+  I  539c213  addressing — talking about Nexus is not talking to it.
+              `_complement` demotes a name that is the object of a preposition
+              (closed grammatical class, one token wide). «to»/«for» deliberately
+              absent. A demotion is not a silencing: `mentioned` is untouched.
+              Measured: addressing accuracy 99.2% -> 100.0%; corpus mismatches
+              1 -> 0; ZERO pinned calls demoted. Corpus 120 -> 123 (v11).
+              Cost +10.2 us/message. Suite 3119. Benchmark clean for the first
+              time.
+     c6991f5  docs — the preposition rule's cost, measured rather than asserted.
+
+  J  866db1f  temporal — the reading was right and the sentence was wrong.
+              Every offset was worded with `_ago`, so «فردا» reached the model
+              as "...points forwards... about 1 day(s) ago" — a line whose halves
+              cancel. 8 of 94 phrases did this. THE HARNESS NOW SCORES THE
+              SENTENCE, not just the reading (when_prose /
+              when_prose_contradicts). Measured: self-contradicting phrases
+              8/94 -> 0/94; harness contradictions 3 -> 0. Corpus 123 -> 127
+              (v12). Suite 3131.
+
+  K  66d4d70  entities — the block's correction now needs the evidence for it.
+              The header and the closing line are CLAIMS ABOUT THE MESSAGE and
+              neither was gated. `Entities.pointing` had been computed since the
+              module was written and READ BY NOTHING. Two rules added to
+              `offered`; the second found only by printing the assembled prompt
+              and reading it. Both narrow the RENDERING only.
+              Measured: +60 us/call unconditional vs +7.6 us/call conditional.
+
+  L  e738898  eval — assemble the prompt, and fix the block that never reached
+              it. `_context(cases)` builds a real Ctx per case and calls
+              awareness_context.blocks(), the same call production makes. First
+              honest number: `referent_candidates` rendered on 0/127 cases — it
+              had been dead since D and NO PRIOR INCREMENT COULD SEE IT.
+              Fix: the entity block's closing line went from an order to
+              evidence. Measured: referent_candidates 0/127 -> 26/127; entity
+              block giving an order 9 -> 0; assembled context mean/max
+              unmeasured -> 949/1498 (ceiling 1500). Suite 3151 -> 3157.
+
+  M  411d13f  room_state — a clitic is not a content word. The fold turns ZWNJ
+              into a space, so «ها» became a content word and two messages
+              sharing any plural noun "continued" each other.
+              `_CLITIC` filtered beside `_STOP`; only the bare clitic token is
+              dropped (no suffix-stripping). Measured: anchors carrying a clitic
+              as a content word 2/127 -> 0/127. Corpus v12 -> v13. Suite 3171.
+
+  N  28c81e2  entities — a config is not a person. `thing_word(token)` = the
+              union the RESOLVER needs (room-held kinds + a closed list of
+              domain nouns: کانفیگ, سرور, تنظیمات, اشتراک, اکانت, پنل, ...).
+              `thing_kind`, KINDS and the entity block are unchanged.
+              Measured: domain expressions read as a person 8/8 -> 0/8;
+              expression false positives 3/130 -> 0/130; expression accuracy
+              97.7% -> 100.0%. Corpus v13 -> v14 (127 -> 130). Suite 3189.
+
+  O  66a1e94  discourse — the copula is not a clitic. `_CLITICS` wrongly held
+              «ه», so «ادمینه کیه؟» folded to «ادمین» + «کی» and read as an
+              INSTRUCTION; the prompt quoted the copula as the word that asked
+              for the ban. Removed, and the colloquial question words that
+              genuinely take a copula were listed explicitly in _QUESTION_WORDS.
+              Measured: act_copula_directives 7/134 -> 0/134; act accuracy
+              97.0% -> 100.0%; claimed precision 96.4% -> 100.0%; recall
+              97.2% -> 100.0%; false positives 1 -> 0. Corpus v14 -> v15
+              (130 -> 134). Suite 3232.
+
+  P  5c1f0b6  referents — the speaker is not the referent, and the benchmark
+              scored a resolution the prompt does not render.
+              (1) evaluate() resolved with messages=window (no anchor, no roles)
+              while the renderer resolves with window+anchor and roles.
+              (2) the role signal counted the anchor's own speaker, so the
+              person GIVING «ادمینه رو محدود کن» was offered as a candidate for
+              «ادمینه» and an unambiguous instruction rendered as "ask".
+              Fixes: the role signal skips the anchor's own user; evaluate()
+              resolves with the renderer's inputs; the harness's world is built
+              from every row the corpus labels (roles_for overrides a row's own
+              role field). One label corrected (state-anchor-is-reply, null ->
+              11). Corpus v15 -> v16.
+              Measured: ambiguity precision 0.571 -> 1.000; confident-and-
+              correct 0.556 -> 0.649; top-1 1.000; ambiguity recall 1.000;
+              wrong-confident 0. Latency within noise (73.7 vs 72.3 us/case).
+              Suite 3236. Only production file touched: app/referents.py.
+              Also fixed a PRE-EXISTING FLAKE unrelated to P:
+              tests/test_identity.py::test_the_handle_is_not_derived_from_the_
+              telegram_id asserted `"500" not in handle`, which tests a property
+              of uuid4().hex (contains that substring ~0.6% of the time).
+
+  Q  a0e4f3b  objects — the object line is not an order about people. §54 moved
+              the entity block's order to "the block that knows the side", and
+              that held only half: app/objects.py knows the OBJECT side, not the
+              people side. It said "Do not read it as aimed at anybody in the
+              room" whenever the object was a room-held thing — including when
+              an explicit source (reply edge, stated id, name) had already named
+              somebody, which is exactly the case referents keeps those sources
+              for. On the reachable shape the two blocks disagreed inside ONE
+              prompt. ZERO of the 134 cases had both halves.
+              Fix: the room-held branches state their own half and stop ("The
+              thing is not a member of the room"). Corpus gained the shape once
+              per explicit source (object-media-reply-author,
+              object-link-reply-author, object-media-named-author),
+              v16 -> v17, 134 -> 137 cases. Harness gained
+              object_denies_a_person_cases and
+              object_person_offered_for_a_thing_wrong.
+              Measured: object_denies_a_person_cases 3 -> 0; a person offered
+              for a thing-object request 0 of 8 -> 3 of 11, 0 wrong; object exact
+              1.0; top-1 / ambiguity precision 1.0; wrong-confident 0; object
+              block chars 60.4/123 -> 59.0/123; assembled context 923.7/1498
+              unchanged; objects.render 1.085 -> 1.064 us/case (noise).
+              Suite 3240. Only production file touched: app/objects.py.
+
+1.3 ARCHITECTURAL / SECURITY BOUNDARIES PRESERVED (verified in AgentMD §53.7)
+--------------------------------------------------------------------------------
+* Readers are EVIDENCE, NEVER A DECISION. Nothing branches on any reader; none
+  can send, delete, restrict, ask a model or authorise. Each is pure at import
+  time (only re / unicodedata / dataclasses) and a test asserts the import set.
+* `awareness_context` stays the ONLY importer of the readers; it may import
+  nothing that could send/delete/restrict/ask a model (asserted structurally).
+  It is imported by app/main.py and by the gated voice_live bridge.
+* NO DB CHANGE IN A–Q. No schema migration, no new table. (The ONE DB change on
+  this branch is in the foundation, before the lettering: commit `151b1e1`
+  added `awareness_state.intent` and `about_user_id` ADDITIVELY through
+  `_ensure_column`, so a row written before it reads as ''/0 and code from before
+  it never reads them. That commit also touched app/main.py, app/chat.py and
+  app/awareness.py — it is the only commit on the branch that did.)
+* NO RUNTIME-PATH CHANGE IN A–Q. Verified per file against main: app/main.py,
+  app/chat.py, app/awareness.py, app/db.py and app/config.py are UNCHANGED by
+  every lettered increment. The only runtime-adjacent file A–Q touch is
+  app/awareness_context.py, and only to add one `Source` entry per reader — the
+  documented extensible seam ("adding a context source is adding a `Source` to
+  SOURCES; neither `blocks` nor its caller changes").
+* Zero Gemini calls added by any increment.
+* Context is bounded: hard ceiling NEXUS_AWARENESS_CONTEXT_CHARS = 1500, each
+  source has its own budget, `_clip` keeps whole lines from the front so the
+  lines that contradict a naive reading survive a tight budget.
+* The benchmark is the number behind any claim: tools/eval_intent.py over
+  tools/eval_cases.json, floors asserted in tests/test_intent_eval.py
+  (wrong_confident == 0, top-1 and ambiguity recall AND precision,
+  provided_before < provided_after). A lexicon change moves the numbers ON
+  PURPOSE by editing the corpus — never by loosening a floor.
+* `awareness.due` CANNOT SEE MESSAGES — its signature is asserted. Any
+  content-aware scheduling must respect this.
+* The window is keyed by chat_id alone, carries the sender id and a
+  SERVER-DERIVED role, and applies both a count and a character bound.
+* Nothing may fake the observation capability; no message content in logs
+  (PassTrace logs durations only).
+* OFF means off on every path; awareness has its own credential, allowance,
+  breaker, model and instruction.
+
+--------------------------------------------------------------------------------
+2. PARTIALLY COMPLETED
+--------------------------------------------------------------------------------
+
+2.1 THE "SCORE THE RENDERED PRODUCT" PROGRAMME — 5 of 7 blocks scored
+--------------------------------------------------------------------------------
+Started in J, extended by K, L, M, O, P and Q. The method: re-derive the check
+from the rendered prose, independent of the reader's internals, so the check
+cannot pass by agreeing with a mistake inside the reader. It has found a real
+defect EVERY time it was applied.
+
+  SCORED: the time sentence (J, when_prose), the entity block's two claims
+          (K/L, entity_claims_a_pointer / entity_offers_things_for_a_person /
+          entity_gives_an_order), the thread's named evidence words (M,
+          thread_shared_clitic_cases), the act block's quoted directive (O,
+          act_copula_directives), the referent block (P, referents_prose),
+          the object line against the block beside it (Q,
+          object_denies_a_person_cases).
+  NOT SCORED: the ROOM-STATE GRAPH's "converged on" wording, and the ACT
+          BLOCK's remaining "why" wording beyond the quoted-directive floor.
+          Named as the next thing in §55.5, §58.5 and §59.5.
+
+2.2 A DISCOVERED, UNFIXED DEAD FIELD: objects.Object.source
+--------------------------------------------------------------------------------
+`objects.read_object` computes `source` (named | pointed | verb) and the harness
+scores it (object_source_accuracy == 1.0), but the PROMPT never renders it. This
+is exactly the tell K found in `entities.pointing` (a field computed and read by
+nothing). Not a defect yet — the line is true without it — but it is the same
+shape, and it is a candidate for the act-block-prose increment. Unresolved
+design question: does the model need "how the server knows", or is the class
+enough?
+
+2.3 A WEAK, UNFIXED WORDING FINDING: requests.render's "could not scope"
+--------------------------------------------------------------------------------
+`requests.read_request` reaches `polarity == ""` by two different routes: a later
+negated directive ("the message carries two directions") and a negation
+elsewhere ("the server cannot tell what it scopes"). `requests.render` hardcodes
+ONE reason for both: "also carries a negation the server could not scope". For
+the first route the reader DID scope it (to the other directive). The accurate
+reason is computed in `request.why` and not used. Found while investigating Q,
+judged too weak to fix inside Q, recorded here. Not yet measured.
+
+2.4 A COSMETIC, UNFIXED DUPLICATION
+--------------------------------------------------------------------------------
+`objects.render`'s CLASS_THING branch produces "The request acts on a thing — a
+thing, not a person." (the label is interpolated and the sentence repeats it).
+Cosmetic; changes the rendered string; not fixed to keep Q narrow.
+
+2.5 TWO STALE CLAIMS IN AgentMD §53.7 (documentation drift, no behaviour)
+--------------------------------------------------------------------------------
+* §53.7 says tests/test_intent_eval.py "pins it at 0" for
+  object_person_offered_for_a_thing. Since Q it asserts
+  object_person_offered_for_a_thing_wrong == 0 and
+  object_person_offered_for_a_thing >= 3. (Corrected in the checkpoint.)
+* §53.7 says the anchor_act block's longest corpus output is 297 chars. Measured
+  at this commit: request_chars_max 155 + object_chars_max 123 + the act
+  sentence, whole block max 350 (budget 420). (Corrected in the checkpoint.)
+
+--------------------------------------------------------------------------------
+3. NOT YET IMPLEMENTED
+--------------------------------------------------------------------------------
+
+3.1 PROVENANCE NOTE
+--------------------------------------------------------------------------------
+The owner's original brief carried a numbered priority list (items 1–14). It is
+NOT recorded anywhere in the repository — it exists only in the conversation.
+For durability it is transcribed here, and each item is then grounded in what
+the repository actually shows:
+
+   1–5  intent semantic understanding / structured intent / contextual
+        resolution / ambiguity-confidence / conversational state
+    6   temporal and context reasoning
+    7   entity and referent resolution
+    8   room-state understanding
+    9   thread detection
+   10   intelligent Awareness scheduling
+   11   adaptive Awareness
+   12   Intent <-> Awareness integration
+   13   model/Gemini routing — ONLY if benchmarks prove it
+   14   verification — ONLY where measurable
+
+3.2 WHAT THE REPOSITORY SHOWS IS DONE FROM THAT LIST
+--------------------------------------------------------------------------------
+* 6  temporal/context reasoning — advanced in B and J. The reading was already
+     right in B; J fixed the sentence. Score: when_prose_contradictions == 0.
+* 7  entity and referent resolution — both halves done (D/N entities, the
+     foundation + H/P referents). expression_accuracy 100%, object exact 100%,
+     ambiguity precision/recall 1.0, wrong-confident 0.
+* 8  room-state understanding — C, plus M's clitic fix.
+* 9  thread detection — C, plus M.
+* 14 verification where measurable — advanced in J, K, L, M, N, O, P, Q (the
+     rendered product is scored from the sentence to the assembled prompt).
+
+3.3 WHAT REMAINS, GROUNDED IN THE REPOSITORY
+--------------------------------------------------------------------------------
+
+(a) THE LAST TWO UNSCORED PROSE CLAIMS  (the tail of 2.1 / item 14)
+    - The room-state graph's "converged on" wording. `room_state.render_graph`
+      states a convergence; the VERDICT is scored (`focus_accuracy`,
+      `edges_exact`) but the SENTENCE is not. `RoomState.converged()` is the
+      field behind it.
+    - The act block's "why" wording: `discourse.render_act` interpolates
+      `act.why[0]`. O scored only the QUOTED DIRECTIVE
+      (act_copula_directives). The reason string itself is unscored.
+    - Evidence needed: a corpus case that renders the block beside a block that
+      can contradict it. That is what made K and Q findable.
+
+(b) CONVERSATIONAL STATE (item 5) — the half that does not exist
+    What exists: `room_state` (reply graph + thread, per window), and the
+    `awareness_state` row (topic, summary, participants, intent, about_user_id,
+    passes, relevant). What does NOT exist: any state that carries a
+    conversation ACROSS passes beyond that row — no record of what the server
+    itself read, no unresolved-question lifecycle, no "the room was asked X and
+    has not answered" across windows. `open_questions` is window-scoped by
+    construction (it tests the reply edge in the batch).
+
+(c) INTENT <-> AWARENESS INTEGRATION (item 12) — a concrete, verified gap
+    `awareness.record` stores ONLY the model's decision fields (relevant, topic,
+    summary, intent, about). NONE of the deterministic readers' output is
+    recorded. So after a pass the server cannot answer "what did *I* read in
+    that message?" — the act, the polarity, the object, the time direction, the
+    entity, the referent verdict are rendered into the prompt and then thrown
+    away. The recorded `about_user_id` is rendered back as "About then: ..." in
+    `memory_block`, which is the one place the two halves touch.
+    This is the largest remaining piece and it is the one the owner's item 12
+    names. It touches the RUNTIME PATH.
+
+(d) INTELLIGENT / ADAPTIVE AWARENESS SCHEDULING (items 10 and 11)
+    What exists: a derived gap (remaining allowance vs seconds left in the API
+    day, floored at the minimum interval), a PER-ROOM brake, a debounce
+    (NEXUS_AWARENESS_DEBOUNCE_SECONDS = 8), a max wait
+    (NEXUS_AWARENESS_MAX_WAIT_SECONDS = 45), a tick
+    (NEXUS_AWARENESS_TICK_SECONDS = 15), NEXUS_AWARENESS_MIN_INTERVAL_SECONDS =
+    20, NEXUS_AWARENESS_MAX_CHATS_PER_TICK = 2, and a daily allowance of 200
+    requests (the owner keeps it at 200 and declined to trade spend for cadence;
+    REQUESTS, not tokens, are the rationed currency).
+    What does NOT exist: any use of the READERS' evidence to decide which room
+    gets the next pass. And there is a hard design constraint: the invariant
+    "`awareness.due` cannot see messages — its signature is asserted" means
+    content-aware scheduling cannot be bolted onto `due`. It would need a
+    different seam (e.g. the pass records a cheap hint that a later scheduling
+    decision reads, without `due` ever seeing a message). That seam does not
+    exist and is an OPEN DESIGN QUESTION, not a scoped change.
+    Touches the RUNTIME PATH.
+
+(e) MODEL / GEMINI ROUTING (item 13)
+    Not started, and deliberately so: the standing rule is "only if benchmarks
+    prove it". No benchmark in this repo measures model quality (the benchmark
+    is deterministic by construction and never pretends to measure the model's
+    judgement). There is also an invariant against dropping to a smaller model.
+    Evidence required before this can even be scoped: a measurement of the
+    model's judgement, which does not exist.
+
+(f) EVALUATION WORK NOT YET DONE (item 14)
+    - The corpus is 137 hand-labelled cases. `context_sources` shows
+      `remembered_people` and `admin_activity` render 0 times — by design
+      (DB-backed, excluded by name in `_CONTEXT_DB_BACKED`), but they have no
+      end-to-end coverage at all.
+      `provided_before` 0.425 / `provided_after` 1.0.
+    - No latency budget is asserted for the READER LAYER as a whole (per-reader
+      means are reported: resolver ~74-90 us/case, when ~46 us, entity ~40 us,
+      polarity ~58 us, object ~120-220 us, all in-process and noisy).
+    - The benchmark scores no model behaviour. Every "Nexus understands better"
+      claim rests on the deterministic layer plus the invariant that the model
+      receives it. There is no live-probe harness for the prompt's EFFECT on the
+      model. The owner's standing preference (see the deploy-with-live-probe
+      memory) is a live end-to-end probe over "tests pass" — that has not been
+      built for this work.
+
+--------------------------------------------------------------------------------
+4. OPEN QUESTIONS / THREADS
+--------------------------------------------------------------------------------
+
+4.1 THE role-two-admins TIE-BREAK THREAD  (carried since P, still open)
+    Corpus case `role-two-admins` («ادمینه رو محدود کن» with two admins in the
+    room) reads `ambiguous: true` BY DESIGN — the resolver refuses to pick
+    between two people who genuinely hold the role. Open question: should the
+    corpus carry a case where the room's REPLY CONVERGENCE should legitimately
+    break that tie? `_about_focus` fires only on a unanimous, repeated signal
+    (>= 2 replies, all aimed at one person) and is scoped to ANAPHORIC
+    expressions (far demonstrative or the object clitic); «ادمینه» is a ROLE
+    expression, so `_about_focus` does not run for it. Deciding this needs
+    evidence, not an opinion: either the corpus gains the case and the resolver
+    is changed to let convergence break a role tie, or the case is left
+    ambiguous and the reason is recorded. NO INCREMENT HAS STARTED THIS.
+
+4.2 UNRESOLVED CORPUS / MEASUREMENT QUESTIONS
+    * §2.3 the requests.render reason wording (two routes, one sentence).
+    * §2.2 objects.Object.source is unrendered — does the model need it?
+    * Whether `remembered_people` / `admin_activity` need any end-to-end
+      coverage (they are excluded from the render-coverage assertion by name).
+    * The 137-case corpus is the whole labelled set; its growth is deliberate
+      (a new case per newly-defensible reading). No case is currently known to
+      be mislabelled.
+
+4.3 ARCHITECTURE DECISIONS THAT STILL NEED EVIDENCE
+    * (c) Whether the readers' output should be RECORDED with the pass, and if
+      so in what shape and with what retention. This is a DB change, so it needs
+      a forward/backward story and a rollback procedure — the first DB change
+      since the foundation's `151b1e1`, and the first in the lettered
+      increments. The `151b1e1` pattern is the precedent: additive columns via
+      `_ensure_column`, never a `CREATE TABLE` change.
+    * (d) The seam for content-aware scheduling that does not violate
+      "`awareness.due` cannot see messages".
+    * (e) Whether any model-routing change is measurable at all with the
+      current evidence base.
+
+4.4 DOCUMENTATION DRIFT (see §2.5) — corrected in the AgentMD checkpoint.
+
+--------------------------------------------------------------------------------
+5. FINAL ROADMAP — THE REMAINING INCREMENTS
+--------------------------------------------------------------------------------
+Ordered by dependency and by measured value. Do NOT start a later one early.
+Do NOT invent stages. An increment is accepted only on the evidence named.
+
+  INCREMENT R — "the graph's word and the act's why"
+  ------------------------------------------------------------------------------
+  Purpose:   Finish the prose-scoring programme (2.1). Score the two remaining
+             rendered claims — the room-state graph's "converged on" sentence
+             and `discourse.render_act`'s interpolated `act.why[0]` — the way
+             J/K/L/M/O/P/Q scored the others: re-derive the check from the
+             rendered sentence, independent of the reader's internals.
+  Files:     tools/eval_intent.py, tools/eval_cases.json,
+             tests/test_intent_eval.py (+ tests/test_room_state.py and
+             tests/test_discourse.py if a reader defect is found).
+             Production ONLY if a defect is found: app/room_state.py
+             (render_graph) and/or app/discourse.py (render_act).
+  Runtime:   NO.
+  Gemini:    0 expected.
+  Evidence:  A corpus case that renders the block beside something that can
+             contradict it; a should-be-zero metric per claim; a non-vacuity
+             test that reconstructs the unfixed sentence by string; the
+             full suite green; before/after prose counts, block chars,
+             latency, 0 Gemini calls.
+  Depends:   nothing. This is the smallest, most-proven next step.
+  Stop rule: if neither sentence is found to claim more than its reader found,
+             record the finding (a should-be-zero metric that stays 0 with a
+             non-vacuity proof) and STOP — do not invent a change.
+
+  INCREMENT S — "the tie the resolver refuses to break"
+  ------------------------------------------------------------------------------
+  Purpose:   Resolve thread 4.1 with evidence. Decide whether the room's reply
+             convergence should be able to break a ROLE tie, and either
+             implement it or record why not.
+  Files:     tools/eval_cases.json (the case), app/referents.py (only if the
+             decision is to change the reading), tests/test_referents.py,
+             tests/test_intent_eval.py, docs/reference/nexus-awareness.md.
+  Runtime:   NO (the resolver is a pure reader).
+  Gemini:    0 expected.
+  Evidence:  The baseline FIRST (what does the case read today, and what would
+             the corpus say it should read); if changed, ambiguity precision and
+             recall must stay 1.0, wrong-confident must stay 0, and
+             confident-and-correct must not fall. If NOT changed, the metric
+             stays as it is and the reason is recorded in the docs.
+  Depends:   R is not a prerequisite, but R is cheaper and already scoped.
+  Note:      This increment may legitimately END with "no change" — that is an
+             acceptable, evidence-based outcome.
+
+  INCREMENT T — "what the server read, kept"
+  ------------------------------------------------------------------------------
+  Purpose:   Intent <-> Awareness integration (item 12 / §3.3(c)). Make the
+             deterministic reading survive the pass instead of being rendered
+             and discarded: record the readers' output (or a bounded subset)
+             with the awareness row, and render it back where it helps.
+  Files:     app/awareness.py (record), app/db.py (an ADDITIVE
+             _ensure_column only), app/awareness_context.py or
+             app/main.py (the render-back), tests for all of them.
+  Runtime:   YES — this is the first increment that touches the runtime path.
+  Gemini:    0 expected (it records what the deterministic layer read; it does
+             not add a model call).
+  Evidence:  A forward/backward compatibility proof for the column (a row from
+             before the change must read as empty, and code from before must
+             ignore it) AND a documented rollback procedure, per the standing
+             rule for DB changes. Follow the `151b1e1` precedent: additive
+             `_ensure_column`, never a `CREATE TABLE` change. Plus: the added characters to the prompt
+             (context_chars_mean/max must stay under the 1500 ceiling), the
+             added latency, and a live probe — this is the first change where
+             "tests pass" is not enough.
+  Depends:   R (finish scoring the prompt before changing what the prompt
+             carries). Not S.
+
+  INCREMENT U — "the room that should go next"
+  ------------------------------------------------------------------------------
+  Purpose:   Intelligent / adaptive Awareness scheduling (items 10 and 11).
+             Use the readers' evidence to prioritise which room the next pass
+             reads, WITHIN the existing 200-request allowance.
+  Files:     app/awareness.py (due / the gap), app/main.py (the pass loop),
+             app/config.py (only if a knob is genuinely needed),
+             tests/test_awareness_latency.py and friends.
+  Runtime:   YES.
+  Gemini:    NO NEW CALLS — this increment must not raise the allowance. The
+             owner keeps it at 200 and declined to trade spend for cadence;
+             the currency is REQUESTS.
+  Evidence:  FIRST resolve the open design question in §4.3: the seam that does
+             not violate "`awareness.due` cannot see messages" (its signature is
+             asserted by a test). Then: measured coverage/priority change at a
+             FIXED allowance, the assertion that no room is starved, the
+             per-room brake and debounce preserved, and a live probe.
+  Depends:   T (a scheduling decision wants the recorded reading).
+
+  INCREMENT V — "only if the numbers say so"
+  ------------------------------------------------------------------------------
+  Purpose:   Model / Gemini routing (item 13). NOT SCOPED. There is currently
+             NO measurement of model quality anywhere in this repo, and an
+             invariant against dropping to a smaller model. This increment
+             cannot be planned until an evidence base exists; the honest first
+             step would be to BUILD that evidence base, not to change routing.
+  Files:     unknown.
+  Runtime:   would be YES.
+  Gemini:    by definition.
+  Evidence:  a measurement that does not exist yet.
+  Depends:   T and U.
+
+--------------------------------------------------------------------------------
+6. END STATE — WHAT "COMPLETE" MEANS FOR THIS PROJECT
+--------------------------------------------------------------------------------
+Grounded in the actual architecture, not in ambition. The evolution is complete
+when ALL of the following hold:
+
+ 1. THE DETERMINISTIC LAYER IS COMPLETE AND SCORED. Every reader (addressing,
+    referents, discourse, temporal, room_state, entities, requests, objects)
+    reports its reading as evidence, never a decision, pure at import time, and
+    every sentence the prompt renders from them is scored against the reader's
+    own finding — with a non-vacuity proof for each check. No block may order
+    the model about a fact its reader does not hold.
+
+ 2. THE BENCHMARK IS THE ARBITER. tools/eval_intent.py over a labelled corpus
+    is clean: top-1 accuracy, ambiguity recall and precision, wrong-but-
+    confident == 0, act claimed precision and false positives == 0, object exact,
+    edges exact, every should-be-zero metric at zero, and every floor asserted
+    in tests/test_intent_eval.py. The corpus grows by one case per newly
+    defensible reading; floors move on purpose by editing the corpus.
+
+ 3. THE PROMPT IS BOUNDED AND HONEST. The assembled context stays under the
+    1500-character ceiling with per-source budgets; every source that can render
+    does render in the benchmark (or is excluded by name and justified); the
+    calendar renders first; nothing claims more than its reader found.
+
+ 4. THE PASS REMEMBERS WHAT IT READ (T). The readers' output survives the pass
+    in a bounded, additive, rollback-safe form, so the server can answer "what
+    did I read in that message?" without re-deriving it — and the model's
+    structured understanding (intent, about) and the server's deterministic
+    reading are joined rather than merely printed beside each other.
+
+ 5. SCHEDULING SPENDS THE RATIONED CURRENCY WELL (U). Within the SAME 200
+    requests, the pass goes to the rooms that most warrant it, using evidence —
+    without violating "awareness.due cannot see messages", without starving any
+    room, and without adding a model call.
+
+ 6. EVERY BOUNDARY IN §1.3 AND AgentMD §53.7 STILL HOLDS. Readers are evidence;
+    awareness_context is the only importer; Intent and Awareness are not
+    authority; no message content in logs; OFF means off on every path; the
+    window stays bounded; identity comes from the Telegram id and nothing else;
+    Gemini workload isolation intact; cross-user/cross-group/cross-private
+    isolation intact.
+
+ 7. IT IS VERIFIED ON THE RUNTIME, NOT ONLY IN TESTS. Every runtime-path
+    increment (T, U, and anything after) has a self-cleaning live end-to-end
+    probe with before/after numbers, per the owner's standing preference.
+
+ 8. main IS INTACT AND THE BRANCH IS INDEPENDENT. The rollback base
+    00c5d1dd412e033c6ac15599b28bc0fbcb54d709 is untouched AND is an ancestor of
+    the branch (verified with `git merge-base --is-ancestor`), so the whole
+    evolution reverts by leaving the branch unmerged; every increment is also
+    individually revertable; nothing is merged or deployed without the owner's
+    explicit instruction.
+
+Explicitly NOT part of "complete": dropping to a smaller model, adding keyword
+detectors, replying to everything, trading a security property for coverage,
+running concurrent passes, unbounded history, or any change to model routing
+that is not proven by a measurement.
+
+--------------------------------------------------------------------------------
+7. CONTINUATION POINT
+--------------------------------------------------------------------------------
+Branch:   develop/nexus-intelligence-evolution
+HEAD:     a0e4f3bb4701981b3f656b521f43442339ca744e
+Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
+Suite:    3240 passed, 0 failed
+Corpus:   137 cases, version 17
+Runtime-adjacent files A–Q touch: app/awareness_context.py only (one Source
+          entry per reader — the documented seam). The only DB change on the
+          branch is the foundation's 151b1e1 (two additive columns).
+Next:     INCREMENT R — "the graph's word and the act's why".
+          Start with the BASELINE: render the room-state graph block and the act
+          block for every corpus case and read the sentences, exactly as J, K,
+          L, M, O, P and Q did. If neither claims more than its reader found,
+          record the finding with a non-vacuity proof and stop.
+Durable context: AgentMD.md §53.7 (invariants) and §54 (the running checkpoint).
+                 docs/reference/nexus-awareness.md §52–§59 (the narrative).
+                 This file.
+
+To resume: re-read AgentMD.md §53.7 and §54 and this file, then verify
+`git status`, `git rev-parse HEAD`, `git rev-parse main`, and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
+doing anything else.
