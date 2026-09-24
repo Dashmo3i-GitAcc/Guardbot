@@ -60,6 +60,14 @@ LOGIN_NOT_CONFIGURED = (
     "<code>DASHBOARD_PASSWORD_HASH</code> رو پر کن و سرویس داشبورد رو "
     "دوباره راه بنداز."
 )
+LOGIN_NO_OPERATOR = (
+    "رمز ورود تنظیم شده، ولی پنل نمی‌دونه به اسم کی باید وارد بشی. توی "
+    "<code>.env</code> مقدار <code>DASHBOARD_OPERATOR_ID</code> (یا "
+    "<code>OWNER_USER_ID</code>) رو با شناسه‌ی عددی تلگرامت پر کن و سرویس "
+    "داشبورد رو دوباره راه بنداز. تا اون موقع، هیچ صفحه‌ای باز نمی‌شه — و این "
+    "عمدیه: پنل فقط یه هویت رو قبول می‌کنه، و اون هویت از تنظیمات میاد، نه از "
+    "عضویت تلگرام."
+)
 
 # ── Flash messages ────────────────────────────────────────────────────────
 # A flash travels as a *key* in the query string, never as text, so a caller
@@ -75,6 +83,8 @@ HOME_READY_BODY = (
     "اضافه می‌شه توی همین قالب می‌شینه."
 )
 HOME_UPTIME = "از وقتی بالا اومده"
+HOME_ROLE = "نقش پنل"
+HOME_PERMISSIONS = "دسترسی"
 HOME_SESSION = "این نشست تا"
 HOME_NEXT_TITLE = "الان چیزی از اینجا مدیریت نمی‌شه"
 HOME_NEXT_BODY = (
@@ -113,12 +123,22 @@ CSRF_EXPIRED = (
     "این فرم قدیمی شده بود و برای امنیت قبول نشد. صفحه رو دوباره باز کن و "
     "از نو امتحان کن."
 )
+# A signed-in operator whose rbac principal does not hold what the page needs.
+# Distinct from FORBIDDEN_BODY, which is about not being signed in at all: the
+# two need different next steps, so they get different sentences.
+FORBIDDEN_PERMISSION = (
+    "وارد شدی، ولی این صفحه کاری رو می‌خواد که حسابت اجازه‌ش رو نداره. "
+    "دسترسی پنل با دسترسی مدیریت گروه یکیه نیست: پنل فقط هویتی رو قبول می‌کنه "
+    "که توی تنظیمات مشخص شده. اگه فکر می‌کنی باید دسترسی داشته باشی، "
+    "<code>DASHBOARD_OPERATOR_ID</code> رو توی <code>.env</code> چک کن."
+)
 
 _FLASH = {
     "logged_out": (LOGOUT_DONE, False),
     "session_expired": (SESSION_EXPIRED, True),
     "csrf": (CSRF_EXPIRED, True),
     "forbidden": (FORBIDDEN_BODY, True),
+    "forbidden_permission": (FORBIDDEN_PERMISSION, True),
     "not_found": (NOT_FOUND_BODY, True),
     "error": (ERROR_BODY, True),
 }

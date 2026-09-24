@@ -32,6 +32,11 @@ from app.web.server import create_app
 
 PASSWORD = "correct-horse-battery"
 USERNAME = "owner"
+# The Telegram identity the panel is bound to. M2 made the session carry it, so
+# every test needs one configured — and it is deliberately a different id from
+# any administrator these tests create, because "a Telegram admin is not a
+# dashboard admin" is the property M2 exists to hold.
+OPERATOR_ID = 424242
 
 
 class DashboardTestCase(unittest.IsolatedAsyncioTestCase):
@@ -58,6 +63,12 @@ class DashboardTestCase(unittest.IsolatedAsyncioTestCase):
         auth.DASHBOARD_PASSWORD_HASH = ""
         auth.DASHBOARD_SECURE_COOKIES = False
 
+        # The panel's authority model: an owner (so `rbac.authorize` has somebody
+        # to answer for) and the operator the panel is bound to.
+        self._saved_ids = (config.OWNER_USER_ID, config.DASHBOARD_OPERATOR_ID)
+        config.OWNER_USER_ID = OPERATOR_ID
+        config.DASHBOARD_OPERATOR_ID = OPERATOR_ID
+
         auth.throttle.clear()
         self._saved_throttle = (auth.throttle.max_failures, auth.throttle.window)
 
@@ -76,6 +87,7 @@ class DashboardTestCase(unittest.IsolatedAsyncioTestCase):
         ) = self._saved_auth
         auth.throttle.max_failures, auth.throttle.window = self._saved_throttle
         auth.throttle.clear()
+        config.OWNER_USER_ID, config.DASHBOARD_OPERATOR_ID = self._saved_ids
         config.DASHBOARD_CREDENTIALS_PATH = self._saved_path
         credentials.reset_cache_for_tests()
         self._tmp.cleanup()

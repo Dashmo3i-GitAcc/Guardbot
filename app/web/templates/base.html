@@ -33,15 +33,18 @@
       {% endfor %}
     </nav>
 
+    {# Only when there is an operator. An error page reached without a session —
+       a public path that failed, say — has nobody to name and nothing to sign
+       out of, and a logout button with no session is a button that cannot work. #}
+    {% if operator %}
     <div class="sidebar__foot">
-      {% if operator %}
       <div class="who"><span class="who__dot" aria-hidden="true"></span>{{ operator }}</div>
-      {% endif %}
       <form method="post" action="/logout">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="btn btn--sm btn--block" type="submit">{{ copy.NAV_LOGOUT }}</button>
       </form>
     </div>
+    {% endif %}
   </aside>
 
   <div class="main">

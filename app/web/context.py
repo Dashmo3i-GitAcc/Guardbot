@@ -9,8 +9,9 @@ from aiohttp import web
 # Per-request
 SESSION = web.RequestKey("session")
 AUDIENCE = web.RequestKey("audience")
+PRINCIPAL = web.RequestKey("principal")
 
 # Per-application
 STARTED_AT = web.AppKey("started_at", float)
 
-__all__ = ["AUDIENCE", "SESSION", "STARTED_AT"]
+__all__ = ["AUDIENCE", "PRINCIPAL", "SESSION", "STARTED_AT"]

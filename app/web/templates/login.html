@@ -40,9 +40,17 @@
       <span class="flash__icon" aria-hidden="true">⚠️</span>
       <span>{{ copy.LOGIN_NOT_CONFIGURED|safe }}</span>
     </div>
+    {% elif not operator_configured %}
+    {# A password with no operator bound to it. The form is hidden for the same
+       reason: accepting the password would sign somebody in to a panel that
+       refuses every page. #}
+    <div class="flash flash--error" role="status">
+      <span class="flash__icon" aria-hidden="true">⚠️</span>
+      <span>{{ copy.LOGIN_NO_OPERATOR|safe }}</span>
+    </div>
     {% endif %}
 
-    {% if configured %}
+    {% if configured and operator_configured %}
     <form method="post" action="/login">
       <input type="hidden" name="next" value="{{ next_path }}">
       <div class="field">

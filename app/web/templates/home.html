@@ -9,6 +9,10 @@
         <span class="kv__key">{{ copy.HOME_UPTIME }}</span>
         <span class="kv__value">{{ uptime_seconds|duration }}</span>
       </div>
+      <div class="kv">
+        <span class="kv__key">{{ copy.HOME_ROLE }}</span>
+        <span class="kv__value">{{ role_label }} · {{ permission_count|fa }} {{ copy.HOME_PERMISSIONS }}</span>
+      </div>
       {% if session_expires %}
       <div class="kv">
         <span class="kv__key">{{ copy.HOME_SESSION }}</span>

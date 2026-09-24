@@ -28,7 +28,55 @@ def _ensure_column(table: str, column: str, declaration: str) -> None:
     _conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
-def init() -> None:
+def ensure_dashboard_audit() -> None:
+    """Create the Admin Control Center's own audit table. Idempotent.
+
+    Two callers on purpose: :func:`init`, so a fresh install has the table from
+    the bot's migration path, and the dashboard at startup, so the panel can
+    write its own events even when the bot has not booted since the deploy. They
+    cannot race — ``CREATE TABLE IF NOT EXISTS`` is a no-op when the table is
+    there, and SQLite serializes the two writers.
+
+    It is the panel's *own* table rather than rows in ``admin_audit``, and that
+    is a deliberate separation, not duplication. The panel's actor is a
+    configured operator with a password, not a Telegram user, and its events —
+    logins, refusals, logouts — are not administrative actions inside a chat.
+    Writing them into ``admin_audit`` would also put them in front of the bot's
+    own audit view, which would be a change to the bot's behaviour; the panel
+    must be additive (AgentMD §53.13).
+
+    Append-only, like ``admin_audit``: nothing here updates or deletes a row
+    except the retention sweep, and the only reason that exists is that a table
+    which grows forever eventually stops being written to.
+    """
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS dashboard_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            actor_id INTEGER NOT NULL DEFAULT 0,
+            permission TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            client_ip TEXT NOT NULL DEFAULT '')"""
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dashboard_audit_at ON dashboard_audit(at)"
+    )
+    _conn.commit()
+
+
+def connect() -> None:
+    """Open the connection and set its per-connection pragmas. No schema.
+
+    Split out of :func:`init` so the Admin Control Center can open the same
+    database **without** running the bot's migrations. The panel must never
+    migrate (AgentMD §53.13): it would race the bot's boot, and the race that
+    actually bites is :func:`_ensure_column` — two processes that both see a
+    column missing both issue the ``ALTER TABLE``, and the second one raises.
+    """
     global _conn
     _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
     # WAL, and NORMAL within it. Measured on this host, not assumed.
@@ -75,6 +123,10 @@ def init() -> None:
     # so this degrades to the old behaviour rather than failing to start.
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")
+
+
+def init() -> None:
+    connect()
     _conn.execute(
         """CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER, user_id INTEGER,
@@ -932,6 +984,7 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_admin_pending_expires "
         "ON admin_pending_ops(expires_at)"
     )
+    ensure_dashboard_audit()
     _conn.commit()
 
 
@@ -1738,6 +1791,106 @@ def audit_prune(keep_seconds: int) -> int:
         cur = _conn.execute("DELETE FROM admin_audit WHERE at < ?", (cutoff,))
         _conn.commit()
         return cur.rowcount
+
+
+# ── The Admin Control Center's own audit trail ────────────────────────────
+# Written by ``app/web/audit.py`` and read by the panel's activity page (M7).
+# Nothing in the bot reads or writes these rows, which is the point: the panel's
+# events do not appear in the bot's audit view.
+_DASHBOARD_AUDIT_COLS = (
+    "at, action, outcome, actor, actor_id, permission, role, detail, client_ip"
+)
+
+
+def dashboard_audit_write(
+    action: str,
+    *,
+    outcome: str,
+    actor: str = "",
+    actor_id: int = 0,
+    permission: str = "",
+    role: str = "",
+    detail: str = "",
+    client_ip: str = "",
+) -> None:
+    """Append one panel event.
+
+    Written for refusals as well as successes: "who tried" is the question asked
+    after an incident. Every field is truncated rather than trusted — these
+    values include things a caller supplied (a username, an address), and a
+    column that can be made arbitrarily long is a column that can be used to
+    grow the database from outside.
+    """
+    _exec(
+        "INSERT INTO dashboard_audit (at, action, outcome, actor, actor_id, "
+        "permission, role, detail, client_ip) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            int(time.time()),
+            str(action)[:40],
+            str(outcome)[:24],
+            str(actor)[:64],
+            int(actor_id or 0),
+            str(permission)[:64],
+            str(role)[:32],
+            str(detail)[:300],
+            str(client_ip)[:64],
+        ),
+    )
+
+
+def _dashboard_audit_row(r) -> dict:
+    return {
+        "at": int(r[0]),
+        "action": r[1],
+        "outcome": r[2],
+        "actor": r[3] or "",
+        "actor_id": int(r[4] or 0),
+        "permission": r[5] or "",
+        "role": r[6] or "",
+        "detail": r[7] or "",
+        "client_ip": r[8] or "",
+    }
+
+
+def dashboard_audit_recent(limit: int = 20) -> list[dict]:
+    """The newest panel events, newest first."""
+    with _lock:
+        rows = _conn.execute(
+            f"SELECT {_DASHBOARD_AUDIT_COLS} FROM dashboard_audit "
+            "ORDER BY id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [_dashboard_audit_row(r) for r in rows]
+
+
+def dashboard_audit_count() -> int:
+    with _lock:
+        return int(
+            _conn.execute("SELECT COUNT(*) FROM dashboard_audit").fetchone()[0]
+        )
+
+
+def dashboard_audit_prune(keep_seconds: int) -> int:
+    """Drop panel events older than the retention window. Returns rows removed.
+
+    Called by the dashboard on its own writes, for the same reason ``audit_prune``
+    is called on the administrative path: a rule that only runs when somebody
+    remembers is not a rule.
+    """
+    if keep_seconds <= 0:
+        return 0
+    cutoff = int(time.time()) - int(keep_seconds)
+    with _lock:
+        cur = _conn.execute("DELETE FROM dashboard_audit WHERE at < ?", (cutoff,))
+        _conn.commit()
+        return cur.rowcount
+
+
+def dashboard_audit_reset() -> None:
+    """Empty the panel's trail. For tests and for an operator starting over."""
+    with _lock:
+        _conn.execute("DELETE FROM dashboard_audit")
+        _conn.commit()
 
 
 # ── Administrative request idempotency ────────────────────────────────────

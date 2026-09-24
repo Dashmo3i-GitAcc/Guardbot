@@ -159,6 +159,28 @@ def is_configured() -> bool:
     )
 
 
+def operator_id() -> int:
+    """The Telegram identity the panel is bound to. Read from config every time.
+
+    This is the *whole* of the panel's authority model: the dashboard authorizes
+    this id and nobody else, and it comes from configuration — never from the
+    ``admins`` table, never from ``CONFIG_ADMINS``, never from a request. A
+    Telegram group administrator is therefore not a dashboard administrator.
+    See AgentMD §53.13.
+    """
+    return int(config.DASHBOARD_OPERATOR_ID or 0)
+
+
+def operator_configured() -> bool:
+    """Whether the panel has an operator to authorize at all.
+
+    Without one every page would be refused by ``rbac`` as ``no_owner``, which is
+    the right answer but a confusing one to arrive at *after* a successful login.
+    The login page checks this first so the operator is told what is missing.
+    """
+    return operator_id() != 0
+
+
 def verify_credentials(username: str, password: str) -> bool:
     """Constant-time check of both fields.
 
@@ -325,6 +347,11 @@ def create_session(
     session = {
         "aud": audience,
         "u": identity or DASHBOARD_USERNAME,
+        # The Telegram identity this panel session acts as. Stamped at mint time
+        # and re-checked on every read, so re-pointing `DASHBOARD_OPERATOR_ID` at
+        # a different id retires every session that existed before it — the same
+        # shape as the password epoch below, for the same reason.
+        "pid": operator_id(),
         "iat": now,
         "exp": now + session_seconds(),
         "csrf": secrets.token_urlsafe(24),
@@ -346,13 +373,24 @@ def create_session(
 def _identity_is_valid(session: dict, audience: str) -> bool:
     """Is the identity in this payload still entitled to be here?
 
-    For a password session that means the configured operator: there is no
-    external list to re-check, so changing ``DASHBOARD_USERNAME`` (and
-    restarting) is what revokes it.
+    Two things must both hold, and they are different questions:
+
+    * the **username** must still be the configured operator, so renaming the
+      operator (and restarting) revokes the sessions that named the old one;
+    * the **bound Telegram id** must still be the configured one, so pointing the
+      panel at a different identity revokes the sessions minted under the old
+      one. Without this, an operator id change would leave live sessions acting
+      as the previous identity — which is the one way a cookie edit could
+      re-point the panel's authority.
     """
     if audience != AUDIENCE_ADMIN:
         return False
-    return (session.get("u") or "") == DASHBOARD_USERNAME
+    if (session.get("u") or "") != DASHBOARD_USERNAME:
+        return False
+    try:
+        return int(session.get("pid") or 0) == operator_id()
+    except (TypeError, ValueError):
+        return False
 
 
 def read_session(token: str | None, *, audience: str = AUDIENCE_ADMIN) -> dict | None:
@@ -471,12 +509,19 @@ class LoginThrottle:
             else window_seconds
         )
         self._failures: dict[str, deque] = {}
+        # Addresses already reported as blocked in the current window. See
+        # `should_audit_block`.
+        self._blocked_notified: set[str] = set()
 
     def _prune(self, key: str) -> deque:
         now = time.time()
         bucket = self._failures.setdefault(key, deque())
         while bucket and now - bucket[0] > self.window:
             bucket.popleft()
+        if not bucket:
+            # The window has emptied, so the next block is a new event worth
+            # reporting rather than a continuation of the one already reported.
+            self._blocked_notified.discard(key)
         return bucket
 
     def retry_after(self, key: str) -> int:
@@ -486,14 +531,31 @@ class LoginThrottle:
             return 0
         return max(1, int(self.window - (time.time() - bucket[0])) + 1)
 
+    def should_audit_block(self, key: str) -> bool:
+        """True the first time this address is seen blocked in the current window.
+
+        The brake is on the *address*, not on the guess, so a blocked caller can
+        keep knocking. Auditing every knock would turn a brute-force attempt into
+        a way to grow the audit table from outside, so only the first blocked
+        request in a window is recorded — bounded by construction at
+        ``max_failures + 1`` rows per address per window.
+        """
+        self._prune(key)
+        if key in self._blocked_notified:
+            return False
+        self._blocked_notified.add(key)
+        return True
+
     def record_failure(self, key: str) -> None:
         self._prune(key).append(time.time())
 
     def reset(self, key: str) -> None:
         self._failures.pop(key, None)
+        self._blocked_notified.discard(key)
 
     def clear(self) -> None:
         self._failures.clear()
+        self._blocked_notified.clear()
 
 
 throttle = LoginThrottle()
@@ -508,8 +570,21 @@ def client_ip(request: web.Request) -> str:
 
 
 # ── Middlewares ───────────────────────────────────────────────────────────
-def _is_public(path: str) -> bool:
-    return path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES)
+def is_public(path: str) -> bool:
+    """Whether a path may be used without a session.
+
+    The prefix comparison also accepts the prefix *without* its trailing slash,
+    so ``/static`` is public for the same reason ``/static/app.css`` is. It is
+    not a hole: the static resource itself answers it — with a redirect or a 404
+    — and treating it as protected instead would answer a public URL with a
+    login redirect.
+    """
+    if path in PUBLIC_PATHS:
+        return True
+    return any(
+        path == prefix.rstrip("/") or path.startswith(prefix)
+        for prefix in PUBLIC_PREFIXES
+    )
 
 
 def audience_for_path(path: str) -> str:
@@ -544,7 +619,7 @@ async def session_middleware(request: web.Request, handler):
 
     # Public paths are never rotated: there is nothing to protect on them, and
     # returning early keeps the cookie unchanged for the login page.
-    if _is_public(request.path):
+    if is_public(request.path):
         return await handler(request)
 
     if session is None:
@@ -569,7 +644,7 @@ async def session_middleware(request: web.Request, handler):
 @web.middleware
 async def csrf_middleware(request: web.Request, handler):
     """Every state-changing request must carry the session's CSRF token."""
-    if request.method in ("GET", "HEAD", "OPTIONS") or _is_public(request.path):
+    if request.method in ("GET", "HEAD", "OPTIONS") or is_public(request.path):
         return await handler(request)
 
     session = request.get(context.SESSION)
@@ -606,7 +681,10 @@ __all__ = [
     "csrf_middleware",
     "hash_password",
     "is_configured",
+    "is_public",
     "needs_rotation",
+    "operator_configured",
+    "operator_id",
     "password_problems",
     "read_session",
     "rotate_session",

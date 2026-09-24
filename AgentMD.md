@@ -2647,8 +2647,34 @@ non-negotiable for every stage:
 * The panel **reads and writes through the existing modules** — `rbac`,
   `admin_service`, `groups`, `key_store`. It must never bypass them, and must
   never reimplement an authority check of its own.
-* The panel **never applies migrations**. The bot owns the schema and migrates at
-  boot; a second process running them concurrently would race it.
+* **The panel's authority is `rbac`'s authority.** A session resolves to an
+  `rbac.Principal` and a route is allowed only if `rbac.authorize` allows it.
+  The panel must **never append to `rbac.PERMISSIONS`**: that tuple is also the
+  wire format of the bot's promotion-dialog bitmask, so adding to it adds a tick
+  box to the bot's own UI — a change to the bot's behaviour, which the panel
+  must not make. The panel expresses its gates with the vocabulary that already
+  exists (`config.manage`).
+* **The panel authorizes exactly one identity, and it comes from configuration.**
+  `DASHBOARD_OPERATOR_ID` (default `OWNER_USER_ID`), and nothing else — never the
+  `admins` table, never `CONFIG_ADMINS`, never a request. A Telegram group
+  administrator is **not** a dashboard administrator. The bound id is stamped
+  into the session and re-checked on every read, so re-pointing the panel at a
+  different identity retires the sessions minted under the old one.
+* **A route that declares no permission is refused, not opened.** The permission
+  is declared on the handler (`@authz.requires`) and enforced by a middleware, so
+  a new page cannot forget it; and a route-inventory test enumerates the router
+  so the omission fails in the suite rather than in production.
+* **The panel never applies migrations**, and it must **tolerate their absence**:
+  it creates only its own table, and a resolution that fails because the bot's
+  overlay is not there is a **guest, not a crash** (`rbac.resolve_many`'s rule,
+  applied to `authz.principal`).
+* **The panel's trail is its own table.** `dashboard_audit` — append-only,
+  written by `app/web/audit.py`, read by the panel alone. Panel events must
+  **never** be written to `admin_audit`: that would put logins in front of the
+  bot's own audit view, which is a change to the bot's behaviour. A caller
+  supplied value is truncated before it reaches a column, and an address that is
+  blocked may add **at most one row per window**, so the login form cannot be
+  used to grow the table from outside.
 * **One image, two processes.** The dashboard must not introduce a second image,
   a second base, or a second data volume. Its own dependencies live in
   `requirements-dashboard.txt`, in their own Docker layer.
@@ -5539,6 +5565,146 @@ uses (`admin_service`), add the append-only `dashboard_audit` table via
 `CREATE TABLE IF NOT EXISTS` + `_ensure_column` (no destructive rewrite), and add
 the IDOR / cross-group tests. Then M3 (Overview) … M8 (security, performance,
 deploy). Do **not** deploy the dashboard without the owner's go-ahead, and do
+**not** modify Chat, pools, credentials, limits, breakers, tenant isolation or
+workload boundaries.
+
+---
+
+### 54.26 Checkpoint (2026-09-24, **M2 — authorization + audit**) — M2 DONE, NOT DEPLOYED, M3 NEXT
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~23:05Z**. Branch **`main`**. Base /
+rollback commit **`e50ec5c`** (M1 — the panel's foundation). M2 of the Admin
+Control Center (§54.24/§54.25) is **implemented, tested and committed**. The
+dashboard is still **defined but not started**: the running bot is untouched
+(`guardbot`, image `f36e60bf3971`, `RestartCount=0`, verified before and after
+the rebuild). Nothing in Chat, the pools, the credentials, the limits, the
+breakers, tenant isolation or the workload boundaries was modified.
+
+**What M2 ships.**
+
+| Piece | File |
+|---|---|
+| the panel's authority: `rbac.resolve` + fail-closed middleware + `@requires` | **`app/web/authz.py`** (new) |
+| the panel's own trail: writer, prune, never raises | **`app/web/audit.py`** (new) |
+| `dashboard_audit` table, `connect()` split out of `init()`, truncating writer, retention | `app/db.py` |
+| the bound operator: `pid` in the session, re-checked on every read, `operator_id()/operator_configured()` | `app/web/auth.py` |
+| `DASHBOARD_OPERATOR_ID`, `DASHBOARD_AUDIT_RETENTION_SECONDS` | `app/config.py` |
+| login / failed / throttled / logout auditing, the unconfigured-operator refusal | `app/web/routes/auth_routes.py` |
+| the permission declaration + the resolved role on the landing page | `app/web/routes/home.py` |
+| the 403 sentence that distinguishes "not signed in" from "not allowed" | `app/web/copy.py`, `app/web/server.py`, `app/web/templates/*` |
+| `PRINCIPAL` request key | `app/web/context.py` |
+| the panel audit counter in the shared test fixture | `tests/conftest.py` |
+| **31 new tests**: identity, gate, trail, IDOR, cross-group | **`tests/test_web_dashboard_authz.py`** (new) |
+
+**Decisions taken during M2 (all reversible, none touching the bot).**
+
+* **The permission vocabulary is the bot's, not a second one.** The panel's pages
+  require `config.manage` and nothing else, and the panel **does not append to
+  `rbac.PERMISSIONS`** — that tuple is also the wire format of the bot's
+  promotion-dialog bitmask, so adding to it would add a tick box to the bot's own
+  UI. A test asserts `PANEL_PERMISSION in rbac.PERMISSION_SET` and
+  `AUTHENTICATED not in rbac.PERMISSION_SET`.
+* **One configured operator id, stamped into the session.** `DASHBOARD_OPERATOR_ID`
+  (default `OWNER_USER_ID`) is the only identity the panel authorizes; it is
+  stamped as `pid` at mint time and re-checked on **every** read, so re-pointing
+  the panel at a different id retires the sessions minted under the old one —
+  the same shape as the password epoch, for the same reason. The id is never read
+  from `admins`, `CONFIG_ADMINS`, or anything a client sends.
+* **Declaration + fail-closed middleware, not per-handler checks.** The permission
+  is an attribute on the handler (`@authz.requires`); the middleware refuses a
+  protected route that declares nothing. A **route-inventory test** walks
+  `app.router.routes()` and fails if any non-public route declares no permission
+  or declares a name that is not real, so the omission fails in the suite rather
+  than in production.
+* **A separate `dashboard_audit` table, not rows in `admin_audit`.** The panel's
+  actor is a configured operator with a password, not a Telegram user, and its
+  events are logins/refusals/logouts — not administrative actions inside a chat.
+  Writing them into `admin_audit` would put them in front of the bot's own audit
+  view, which would be a change to the bot's behaviour. Proven live: in scenario C
+  the panel's trail had the login row while the bot's `admin_audit` had **0 rows**.
+* **`db.connect()` was split out of `db.init()`.** The panel opens the same
+  database but runs **no** migrations (AgentMD §53.13); the split is what makes
+  that possible. The table is new, so `_ensure_column` was **not** needed —
+  `CREATE TABLE IF NOT EXISTS` plus an index is the whole migration, and it is
+  idempotent from either process.
+* **The throttle audits one row per blocked window per address, not one per
+  knock.** The brake is on the address, so a blocked caller can keep knocking;
+  a row per request would make a brute-force attempt a way to grow the table from
+  outside. Bounded by construction at `max_failures + 1` rows per address per
+  window, and a test asserts it (6 blocked requests → 1 row).
+* **No mutation exists yet, and none is claimed.** M2 makes every route
+  server-authorized through one boundary; the panel's only state-changing routes
+  today are `/login` and `/logout`. The first real mutation arrives in M3 and will
+  go through `admin_service` — the same boundary the bot uses — not through a
+  second path. §54.25's NEXT STEP named `admin_service` here; that is deferred,
+  not dropped, and this checkpoint says so rather than implying a mutation path
+  that does not exist.
+
+**A bug the live probe found and the suite did not.** Container smoke scenario B
+(panel bound to a non-owner id, on a database where the bot had never run) returned
+**500 on `POST /login`**. Cause: the login audit row asks for the operator's role
+→ `authz.principal` → `rbac.resolve` → `db.admin_get` → the `admins` table does
+not exist, and `rbac.resolve` (unlike `rbac.resolve_many`) does not tolerate that.
+Fixed in `app/web/authz.py`: an authority that cannot be read is **no authority**
+(`rbac.guest(pid)`, logged), which is the rule `rbac.resolve_many` already stated
+— so the panel refuses with the permission sentence instead of falling over. A
+regression test (`test_an_unreadable_authority_is_a_refusal_not_a_crash`) drives
+the same path end-to-end. This is the second time a live probe found something the
+suite could not (§54.25's lesson, repeated).
+
+**Verification (all measured, none assumed).**
+
+| Check | Result |
+|---|---|
+| `tests/test_web_dashboard_authz.py` (new) | **31 passed**, 14 subtests |
+| Both dashboard suites | **86 passed**, 36 subtests (5.2 s) |
+| Full suite | **3843 passed / 0 failed** (244.5 s) — was 3812, so **+31** |
+| `py_compile` on every changed module | clean |
+| Secret scan of the staged diff | clean (16 files; no key, token or `.env` value) |
+| **Smoke A** — operator = the owner (`424242`) | `/healthz` 200; `/` 302 → login; `POST /login` 303 + `gb_admin` cookie; `/` **200**, role **«مالک»**; `POST /logout` 303. Trail: `login\|ok\|424242\|owner`, `logout\|ok\|424242\|owner`. **0 tracebacks** |
+| **Smoke B** — operator `555555`, bot's schema absent | `/healthz` 200; `POST /login` **303** (was the 500); `/` **403** with the permission sentence; `POST /logout` 303. Trail: `login\|ok\|555555\|guest`, `authz.refused\|refused\|555555\|guest\|not_admin`, `logout\|ok\|555555\|guest`. The panel created **only** `dashboard_audit` |
+| **Smoke C** — operator `555555` granted `senior_admin` in the bot's own table | `/healthz` 200; `POST /login` 303; `/` **200**, role **«مدیر ارشد»**; **0 tracebacks**. Panel trail: `login\|ok\|555555\|senior_admin`. The bot's `admin_audit`: **0 rows** — the two trails are separate |
+| Bot container before/after the rebuild | `guardbot` still `f36e60bf3971`, `RestartCount=0`, no restart |
+
+**Measured image / layer report (the owner's hard requirement, continued).**
+
+| Item | Measured |
+|---|---|
+| Shared image | `guardbot:latest` = **`9fd5fd927dc8`**, **1.15 GB** (unchanged from M1's `7768f5dc0053`) |
+| New layers | **none** — M2 adds no dependency, so the `requirements-dashboard.txt` layer (12.3 kB) and the `pip install` layer (1.48 MB) are **cache hits** |
+| `COPY app ./app` | **6.43 MB → 6.47 MB = +40 kB** (M2's source only) |
+| `COPY app ./app` vs the running bot's image | 6.18 MB → 6.47 MB = **+0.29 MB** (M1 + M2 together) |
+| `app/web` on disk | **126 kB → 268 kB** (+142 kB: `authz.py`, `audit.py`, and the edits) |
+| Reused unchanged | the 457 MB `ffmpeg` layer and the 259 MB `pip install -r requirements.txt` layer (the build took **4 s**, which is the proof) |
+| Extra persistent data | **none** — the same `./data` volume. The panel writes rows to its own table, which the bot never reads |
+| Extra persistent logs | the same `json-file` ceiling as the bot: `10m` × 3 files |
+| Disk on `/` before vs after | **2.5 GB free / 88 %** both before and after (no measurable change) |
+
+**Known limitations / risks to carry forward.** (a) The dashboard is **not
+deployed**: `docker compose up -d dashboard` has not been run, and doing so is a
+deploy that needs the owner's go-ahead (a deploy means deploy *and* a live probe).
+(b) `DASHBOARD_SECRET` and a password are **not set** in the host `.env`, so a
+started panel would log everyone out on restart and refuse every login; setting
+both is part of the M8 deploy. (c) `DASHBOARD_SECURE_COOKIES` is off by default
+and **must be turned on with the nginx TLS proxy** — it is the only thing that
+keeps the session cookie off plain HTTP. (d) A configured operator who is **not**
+the owner needs an rbac principal that holds `config.manage` (a `senior_admin`
+row, or a `CONFIG_ADMINS` entry); otherwise the panel accepts the login and
+refuses every page. That is fail-closed and deliberate, but it is the one
+misconfiguration that reads as "the panel is broken" — smoke B is exactly that
+state, and the 403 sentence names `DASHBOARD_OPERATOR_ID` to make it diagnosable.
+(e) Still no multi-bot support (§54.24 decision 5); the seam arrives with the bot
+page in M6. (f) SQLite is still single-writer: every later analytics page must
+aggregate at the DB layer and paginate.
+
+**NEXT STEP (exact).** Implement **M3 — Overview**: the panel's first *read*
+pages over the existing modules — bot/service status, the groups it serves, the
+workload/pool health — with the permission each page needs declared through
+`@authz.requires`, every query scoped and paginated at the DB layer, no new
+permission added to `rbac.PERMISSIONS`, and no mutation (the first mutation is
+M4/M5 and goes through `admin_service`). Add `app/web/labels.py` when the first
+page has a status to label (§54.25 deferred it for exactly that reason). Then
+M4 … M8. Do **not** deploy the dashboard without the owner's go-ahead, and do
 **not** modify Chat, pools, credentials, limits, breakers, tenant isolation or
 workload boundaries.
 

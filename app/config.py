@@ -3119,3 +3119,24 @@ DASHBOARD_CREDENTIALS_PATH = (
     os.getenv("DASHBOARD_CREDENTIALS_PATH", "").strip()
     or "/data/dashboard_credentials.json"
 )
+# The Telegram identity the panel operator is bound to.
+#
+# This is the whole of the panel's authority model, so it is worth stating
+# plainly: the dashboard authorizes **this one id** and nobody else, and the id
+# comes from configuration only — never from the `admins` table, never from
+# CONFIG_ADMINS, and never from a request. A Telegram group administrator is
+# therefore **not** a dashboard administrator; being promoted in a chat grants
+# nothing here. See AgentMD §53.13.
+#
+# It defaults to the owner because the owner is the only identity guaranteed to
+# hold every permission, and it fails closed: if this is 0 (no owner configured
+# and no override), `rbac.authorize` answers `no_owner` and every protected page
+# is refused.
+DASHBOARD_OPERATOR_ID = _int("DASHBOARD_OPERATOR_ID", OWNER_USER_ID)
+# How long the panel's own audit trail is kept. The panel writes its events to
+# `dashboard_audit` — its own table, deliberately separate from `admin_audit`, so
+# dashboard logins do not appear in the bot's audit view and the bot's behaviour
+# is unchanged. Pruned by the dashboard process on its own writes.
+DASHBOARD_AUDIT_RETENTION_SECONDS = _int(
+    "DASHBOARD_AUDIT_RETENTION_SECONDS", 90 * 86400
+)

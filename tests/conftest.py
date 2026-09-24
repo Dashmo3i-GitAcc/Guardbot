@@ -56,6 +56,7 @@ def fresh_nexus_state():
         vpn_service,
         web_search,
     )
+    from app.web import audit as dashboard_audit
 
     # The schema, for every test rather than for whichever test happened to need
     # it first. ``db._conn`` is a module global, so a test that reaches
@@ -74,6 +75,12 @@ def fresh_nexus_state():
     # state.
     db.authorized_groups_reset()
     groups.reset_state()
+    # The Admin Control Center's audit retention counter. It decides *when* the
+    # next whole-table prune runs, so a value carried over from one test would
+    # make the next test's first panel write prune for a reason that is not in
+    # that test. The trail itself lives in the per-test in-memory database and
+    # needs no clearing.
+    dashboard_audit.reset_state()
     awareness.reset_timers()
     awareness.reset_switch()
     # The search workload's rate window, breaker and cached client. Left behind,
