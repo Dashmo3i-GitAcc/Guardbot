@@ -1076,3 +1076,140 @@ def test_a_time_word_is_not_rendered_as_a_person_reference():
     assert awareness_context._wants_referents(ctx) is True
     assert awareness_context._render_referent_candidates(ctx) == ""
     assert "at the present moment" in awareness_context._render_anchor_when(ctx)
+
+
+# ── The conversation borrows the reading (increment T) ────────────────────
+def _conv(ctx) -> str:
+    """The reading the addressed conversation borrows: ``blocks`` with skips."""
+    return awareness_context.blocks(ctx, skip=awareness_context.CONVERSATION_SKIP)
+
+
+def _enable_awareness(monkeypatch):
+    """The switch the addressed path is gated on, on."""
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ENABLED", True)
+    awareness.reset_switch()
+
+
+def test_the_conversation_reading_drops_what_the_conversation_already_states():
+    """The date and the room are in the chat prompt already; a copy is waste."""
+    awareness_context.note_room(CHAT, "Guard Group", "supergroup")
+    message = _msg(MEMBER, message_id=1)
+    ctx = ctx_of([message], anchor=message, now=1_700_000_000)
+    full = awareness_context.blocks(ctx)
+    conv = _conv(ctx)
+    date = awareness_context._render_calendar(ctx)
+    room = awareness_context._render_room(ctx)
+    assert date and date in full
+    assert room and room in full
+    assert date not in conv
+    assert room not in conv
+
+
+def test_the_conversation_reading_drops_the_database_backed_room_memory():
+    """Room memory is the pass's job; the conversation pays for nothing new."""
+    for name in ("remembered_people", "admin_activity", "referenced_people"):
+        assert name in awareness_context.CONVERSATION_SKIP, name
+
+
+def test_the_conversation_reading_keeps_the_readings_of_the_window():
+    """What it takes is the part that answers what this message is, and who."""
+    keep = (
+        "anchor_act", "open_questions", "reply_graph", "thread",
+        "entities", "anchor_when", "referent_candidates",
+    )
+    for name in keep:
+        assert name not in awareness_context.CONVERSATION_SKIP, name
+        assert any(s.name == name for s in awareness_context.SOURCES), name
+
+
+def test_the_conversation_reading_is_never_larger_than_the_pass_reading():
+    messages = [
+        _msg(MEMBER, "سلام", message_id=1),
+        _msg(ADMIN, "اینو بن کن", role="admin", message_id=2),
+    ]
+    ctx = ctx_of(messages, anchor=messages[-1], now=1_700_000_000)
+    conv = _conv(ctx)
+    assert 0 < len(conv) <= len(awareness_context.blocks(ctx))
+
+
+def test_the_conversation_reading_obeys_the_same_ceiling(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_CHARS", 120)
+    messages = [
+        _msg(MEMBER, "یک پیام نسبتا طولانی برای پر کردن بودجه", message_id=i)
+        for i in range(1, 12)
+    ]
+    ctx = ctx_of(messages, anchor=messages[-1], now=1_700_000_000)
+    assert len(_conv(ctx)) <= 120
+
+
+def test_a_skipped_source_is_the_only_difference():
+    """The reading is the pass's reading minus the named blocks, not a re-render."""
+    messages = [
+        _msg(MEMBER, "سلام", message_id=1),
+        _msg(ADMIN, "اینو بن کن", role="admin", message_id=2),
+    ]
+    ctx = ctx_of(messages, anchor=messages[-1], now=1_700_000_000)
+    full = awareness_context.blocks(ctx)
+    conv = _conv(ctx)
+    for source in awareness_context.SOURCES:
+        if source.name in awareness_context.CONVERSATION_SKIP:
+            continue
+        block = awareness_context._rendered(source, ctx, source.budget)
+        if block:
+            assert block in conv, source.name
+            assert block in full, source.name
+
+
+def test_the_room_reading_carries_the_resolvers_candidates(monkeypatch):
+    """An addressed anaphor is resolved, not left to the model over raw text."""
+    _enable_awareness(monkeypatch)
+    messages = [
+        _msg(OTHER, "من کاربرم", message_id=1),
+        _msg(MEMBER, "باشه", message_id=2, reply_user_id=OTHER, reply_name="Other"),
+        _msg(TARGET, "چشم", message_id=3, reply_user_id=OTHER, reply_name="Other"),
+        _msg(ADMIN, "همون کاربر رو بن کن", role="admin", message_id=4),
+    ]
+    out = main._room_reading(CHAT, message_id=4, messages=messages)
+    assert "points back at them" in out, out
+    assert f"({OTHER})" in out, out
+
+
+def test_the_room_reading_is_empty_when_the_message_is_not_in_the_window(monkeypatch):
+    """Nothing to read it against, so nothing is invented."""
+    _enable_awareness(monkeypatch)
+    messages = [_msg(MEMBER, message_id=1)]
+    assert main._room_reading(CHAT, message_id=99, messages=messages) == ""
+
+
+def test_the_room_reading_is_empty_when_the_layer_is_off(monkeypatch):
+    """OFF means off on this path too: no reading, no cost."""
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ENABLED", False)
+    awareness.reset_switch()
+    messages = [_msg(MEMBER, message_id=1)]
+    assert main._room_reading(CHAT, message_id=1, messages=messages) == ""
+
+
+def test_the_room_reading_fails_soft(monkeypatch):
+    """A reading is context, and context is never worth a failed answer."""
+    _enable_awareness(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("no reading today")
+
+    monkeypatch.setattr(awareness_context, "blocks", _boom)
+    messages = [_msg(MEMBER, message_id=1)]
+    assert main._room_reading(CHAT, message_id=1, messages=messages) == ""
+
+
+def test_the_room_reading_does_not_make_an_ambiguous_case_confident(monkeypatch):
+    """Two holders of a role must read as a question, not as an answer."""
+    _enable_awareness(monkeypatch)
+    monkeypatch.setattr(config, "CONFIG_ADMINS", [f"{ADMIN}:admin", f"{OTHER}:admin"])
+    messages = [
+        _msg(ADMIN, "الف", role="admin", message_id=1),
+        _msg(OTHER, "ب", role="admin", message_id=2),
+        _msg(OWNER, "ادمینه رو محدود کن", role="owner", message_id=3),
+    ]
+    out = main._room_reading(CHAT, message_id=3, messages=messages)
+    assert "could not tell the top candidates apart" in out, out
+    assert "is confident in the first candidate" not in out, out

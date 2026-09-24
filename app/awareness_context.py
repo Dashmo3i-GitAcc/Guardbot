@@ -672,6 +672,26 @@ SOURCES: tuple[Source, ...] = (
 )
 
 
+# What the *addressed conversation* leaves out when it borrows the reading.
+#
+# The conversation path (``main._answer_conversationally``) answers one message
+# and already carries the room's name and type in its trusted context and the
+# date in ``_today_block`` — so ``calendar`` and ``room`` would be a second copy
+# of a fact the prompt already states.
+#
+# The other three are **database-backed room memory**, not readings of the
+# window: ``remembered_people`` reads ``awareness_state``, ``admin_activity``
+# reads the audit log, and ``referenced_people`` runs an identity lookup per
+# person. The awareness pass pays for those on every pass, which is where room
+# memory belongs; the conversation reads the window it already read and pays for
+# nothing new. What it *does* take is the part that answers "what is this
+# message doing, and who does «همون» mean" — the act, the reply graph, the
+# thread, the entities, the time reading and the resolver's candidates.
+CONVERSATION_SKIP = frozenset(
+    {"calendar", "room", "remembered_people", "admin_activity", "referenced_people"}
+)
+
+
 # ── Assembly ──────────────────────────────────────────────────────────────
 def build_ctx(
     chat_id: int,
@@ -706,7 +726,7 @@ def build_ctx(
     )
 
 
-def blocks(ctx: Ctx) -> str:
+def blocks(ctx: Ctx, *, skip: frozenset[str] = frozenset()) -> str:
     """Render every source this batch calls for, within the pass-wide ceiling.
 
     Tier order, then declaration order, and the first tier to be exhausted stops
@@ -714,12 +734,20 @@ def blocks(ctx: Ctx) -> str:
     predicate is false is not rendered at all, and a source that raises is
     logged and skipped — a pass that loses a context block still understands the
     room, while a pass that dies loses the room entirely.
+
+    ``skip`` names sources this caller already carries. The awareness pass skips
+    nothing; the addressed conversation skips ``CONVERSATION_SKIP`` — the date
+    and the room it already states, and the database-backed room memory it does
+    not pay for. A skipped source is not rendered and not counted against the
+    ceiling, so a borrower gets the same reading for less.
     """
     total = max(0, int(config.NEXUS_AWARENESS_CONTEXT_CHARS))
     deep = bool(config.NEXUS_AWARENESS_CONTEXT_DEEP)
     out: list[str] = []
     used = 0
     for source in SOURCES:
+        if source.name in skip:
+            continue
         if source.tier != TIER_ALWAYS and not deep:
             continue
         if not _wanted(source, ctx):

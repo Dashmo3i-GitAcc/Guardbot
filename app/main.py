@@ -2625,6 +2625,49 @@ def _today_block(now: float) -> str:
     )
 
 
+def _room_reading(
+    chat_id: int, *, message_id: int, messages: list[dict]
+) -> str:
+    """The server's reading of the message being answered, for the conversation.
+
+    The awareness pass has always been handed this — ``_awareness_context``
+    renders ``awareness_context.blocks`` for the anchor. The addressed path was
+    handed the transcript and nothing else, so a message that *is* a reading
+    problem («همون رو بن کن», «اینو محدود کن») reached the model as raw text with
+    no resolution, while the same room read by a pass got the resolver's
+    candidates, the act, the reply graph and the thread. This hands the
+    conversation the same reading of *its own* message.
+
+    It is derived from the window the caller already read — the anchor is the
+    row for the message being answered, and the reading is pure Python over that
+    window and the roles — so it adds no database query beyond the one the roles
+    need, and no model call. ``CONVERSATION_SKIP`` drops the blocks the
+    conversation already carries (the date, the room) and the database-backed
+    room memory it does not pay for. The ceiling is the same hard one the pass
+    obeys.
+
+    Returns ``""`` when the message is not in the window (nothing to read it
+    against), when the layer is off, or on any failure: a reading is context,
+    and context is never worth failing an answer over.
+    """
+    if not awareness.enabled() or not message_id:
+        return ""
+    anchor = next(
+        (row for row in messages if int(row.get("message_id") or 0) == int(message_id)),
+        None,
+    )
+    if anchor is None:
+        return ""
+    try:
+        ctx = awareness_context.build_ctx(
+            chat_id, messages=messages, anchor=anchor
+        )
+        return awareness_context.blocks(ctx, skip=awareness_context.CONVERSATION_SKIP)
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the room reading for an addressed reply")
+        return ""
+
+
 async def _answer_conversationally(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -2756,9 +2799,28 @@ async def _answer_conversationally(
     # in the system instruction, never the user turn, because the transcript is
     # full of text people typed and text people typed must not be presented to
     # the model as a statement the server is making.
-    context = (context or "") + awareness.room_block(
-        room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
-    )
+    #
+    # The window is read **once** and handed to both the transcript and the
+    # reading beside it. The reading is the server's understanding of the
+    # message being answered — the same ``awareness_context.blocks`` a pass
+    # renders — so an addressed «همون رو بن کن» is resolved by the resolver
+    # rather than left to the model over raw text. Both are gated on the layer
+    # being on, so switching awareness off still gives the speed back.
+    room_window: list[dict] = []
+    if awareness.enabled():
+        room_window = awareness.window(
+            room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
+        )
+        context = (context or "") + awareness.room_block(
+            room.id,
+            limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES)),
+            messages=room_window,
+        )
+        context = context + _room_reading(
+            room.id,
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+            messages=room_window,
+        )
 
     # The server's own date, so the model can date what it reads instead of
     # treating the newest claim in the room or on a page as today. Appended here,

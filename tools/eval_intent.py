@@ -402,6 +402,8 @@ def _context(cases: list[dict]) -> dict:
 
     rendered: dict[str, int] = {}
     sizes: list[int] = []
+    conv_sizes: list[int] = []
+    conv_resolves = 0
     for case in cases:
         window = [_row(row) for row in case.get("window") or ()]
         anchor = _row(case["anchor"])
@@ -412,10 +414,21 @@ def _context(cases: list[dict]) -> dict:
                 EVAL_CHAT, messages=rows, anchor=anchor, now=now
             )
             text = awareness_context.blocks(ctx)
+            # The reading the *addressed conversation* borrows (increment T):
+            # the same blocks, minus the date and the room the chat prompt
+            # already states and minus the database-backed room memory it does
+            # not pay for. Measured beside the pass reading so the delta is a
+            # number rather than a claim.
+            conversation = awareness_context.blocks(
+                ctx, skip=awareness_context.CONVERSATION_SKIP
+            )
         except Exception:  # noqa: BLE001 - one case is never worth the run
             log.exception("could not assemble the context for %s", case["id"])
             continue
         sizes.append(len(text))
+        conv_sizes.append(len(conversation))
+        if "may mean" in conversation:
+            conv_resolves += 1
         for source in awareness_context.SOURCES:
             if not awareness_context._wanted(source, ctx):
                 continue
@@ -432,6 +445,24 @@ def _context(cases: list[dict]) -> dict:
         "context_sources": {name: rendered.get(name, 0) for name in names},
         "context_sources_rendered": [name for name in names if name in rendered],
         "context_sources_dead": [name for name in names if name not in rendered],
+        # ── The reading the addressed conversation borrows (T) ────────────
+        "conversation_reading_cases": len(conv_sizes),
+        "conversation_reading_chars_mean": (
+            statistics.fmean(conv_sizes) if conv_sizes else 0.0
+        ),
+        "conversation_reading_chars_max": max(conv_sizes, default=0),
+        # The cases where the borrowed reading carries the resolver's ranked
+        # candidates — the part of the reading that answers "who does «همون»
+        # mean", which the addressed path used to answer from raw text alone.
+        "conversation_reading_resolves_cases": conv_resolves,
+        # A borrowed reading can never exceed the pass reading it is drawn from
+        # — it is a subset of the same blocks. Should be 0.
+        "conversation_reading_over_reading_cases": sum(
+            1 for a, b in zip(conv_sizes, sizes) if a > b
+        ),
+        "conversation_reading_over_ceiling_cases": sum(
+            1 for a in conv_sizes if a > int(config.NEXUS_AWARENESS_CONTEXT_CHARS)
+        ),
     }
 
 
@@ -1364,6 +1395,17 @@ def report(result: dict, *, verbose: bool = False) -> str:
             )
             or "none"
         ),
+        # The reading the addressed conversation borrows (T): the same blocks a
+        # pass renders, minus what the chat prompt already states and minus the
+        # database-backed room memory it does not pay for. It is a subset, so it
+        # can never exceed the pass reading it is drawn from (should be 0).
+        f"the addressed reading       {m['conversation_reading_cases']} cases; "
+        f"chars mean / max {m['conversation_reading_chars_mean']:.0f} / "
+        f"{m['conversation_reading_chars_max']}; "
+        f"{m['conversation_reading_resolves_cases']} carry the resolver's candidates; "
+        f"{m['conversation_reading_over_reading_cases']} exceed the pass reading "
+        "(should be 0); "
+        f"{m['conversation_reading_over_ceiling_cases']} exceed the ceiling (should be 0)",
         "",
         "cost",
         # ``block_chars`` is the **referent candidates** block and nothing else —

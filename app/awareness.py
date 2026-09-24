@@ -1072,7 +1072,13 @@ def memory_block(chat_id: int) -> str:
     return "".join(lines)
 
 
-def room_block(chat_id: int, *, limit: int = 0, budget: int = 0) -> str:
+def room_block(
+    chat_id: int,
+    *,
+    limit: int = 0,
+    budget: int = 0,
+    messages: list[dict] | None = None,
+) -> str:
     """The room transcript, labelled, for the system instruction.
 
     Used by the *direct* answer path, where the user turn is the message being
@@ -1086,10 +1092,15 @@ def room_block(chat_id: int, *, limit: int = 0, budget: int = 0) -> str:
     the layer off would otherwise still pay for a rendered room window on every
     addressed reply, still spend the tokens to carry it, and still have no way
     to tell that the switch had not done what it said.
+
+    ``messages`` is the window the caller already read, passed through to
+    ``render`` for the same reason it exists there: the addressed path reads the
+    room once and hands the same rows to the transcript and to the reading it
+    borrows beside it, so a reply costs one window query rather than two.
     """
     if not enabled():
         return ""
-    body = render(chat_id, limit=limit, budget=budget)
+    body = render(chat_id, limit=limit, budget=budget, messages=messages)
     if not body:
         return ""
     return (

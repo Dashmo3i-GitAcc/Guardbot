@@ -657,6 +657,34 @@ def test_the_role_focus_check_is_not_vacuous():
     assert broken["role_focus_used_cases"] >= 1
 
 
+# ── The reading the addressed conversation borrows (increment T) ──────────
+def test_the_addressed_reading_is_a_bounded_subset_of_the_pass_reading():
+    """It is drawn from the same blocks, so it can never be larger.
+
+    The addressed path borrows the pass's reading minus what the chat prompt
+    already states and minus the database-backed room memory. If it ever
+    exceeded the pass reading, it would be rendering something the pass did not
+    — a second reading rather than the same one.
+    """
+    m = result()
+    assert m["conversation_reading_cases"] == m["context_cases"]
+    assert m["conversation_reading_over_reading_cases"] == 0
+    assert m["conversation_reading_over_ceiling_cases"] == 0
+    assert m["conversation_reading_chars_mean"] < m["context_chars_mean"]
+    assert m["conversation_reading_chars_max"] <= m["context_chars_max"]
+
+
+def test_the_addressed_reading_carries_the_resolver_where_it_matters():
+    """The part that answers "who does this mean" must reach the conversation.
+
+    Non-vacuity: the count is over the corpus, and at least one case renders the
+    resolver's ranked candidates into the borrowed reading — so the check is not
+    "the string is never built".
+    """
+    m = result()
+    assert m["conversation_reading_resolves_cases"] >= 1
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 def test_the_context_is_assembled_for_every_case():
     m = result()
