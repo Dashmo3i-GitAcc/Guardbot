@@ -5134,6 +5134,73 @@ checkpoint's commit on top of `f3688e3`), `git ls-remote` on both remotes.
 
 ---
 
+### 54.23 Checkpoint (2026-09-24, **Chat rebuild — explicit deploy + verification**) — resume here (supersedes §54.22)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~22:08Z**. Branch **`main`**, deployed
+commit **`6bdebab`**, working tree clean. This is the authoritative record of what
+is **running**; §54.22's image reference (`0b259c42ff33`) is superseded.
+
+**Deployed commit / image.**
+
+| | value |
+|---|---|
+| Deployed commit | **`6bdebab`** (HEAD; `3476eea` → `f3688e3` → `fcc51c0` → `6bdebab`) |
+| Deployed image | **`f36e60bf3971`** |
+| Rollback tags | `guardbot-guardbot:pre-fcc51c0` = `0b259c42ff33` (the first rebuilt image); `guardbot-guardbot:pre-chat-rebuild` = `5769e3678e0f` (pre-rebuild) |
+| Container | `Up`, **`RestartCount=0`**, started `22:02:18Z` |
+
+**The commit actually tested is the app code that is running.** `app/` and
+`tests/` at HEAD are **byte-identical** to the tested commit `3476eea` (proved by
+`git diff 3476eea HEAD -- app/ tests/` = empty); the commits after it are docs and
+the probe tool only. Every `app/*.py` and `tools/*.py` in the container matches
+`HEAD` (76 files, **0 mismatches**). The running module has `OWNER_NOTE` and no
+`OWNER_AMENDMENT`; the persona is 5640 chars.
+
+**Tests.** Full suite **3757 passed / 0 failed** — run once on the tested code
+and **re-run post-deploy** (242.97 s) with the same result. Focused: 88 chat /
+owner / behaviour-contract; related regression: 484.
+
+**Live acceptance probe** (`tools/probe_chat_personality.py`, run from the
+**deployed** copy against the real model): **10/10, 0 violations.** Highlights:
+failure class «نخند حرومزاده» → «نخندیدم. تو حالت خوب نیست و کلافهای…»;
+owner → «سلام، ممنون. روزت بخیر.» (familiar, no honorifics); user-initiated
+humour/teasing answered in register without canned laughter; user-initiated adult
+joke declined contextually; an innocent message drew no sexual register; normal /
+serious / slang turns stayed in register. Residue sweep for the probe ids = **0**;
+`chat_usage`/`gemini_daily` deliberately untouched.
+
+**Deviations (recorded, none are behaviour changes).**
+1. **Probe checker false positive.** The first deployed run scored 9/10: the
+   adult-joke answer contained «یه بنده خدایی» — the idiom "some poor guy", not
+   the servile vocative «بنده» — and the naive substring check flagged it. The
+   behaviour was correct; the checker was fixed (match «بنده» only when not
+   followed by «خدا», tolerating ZWNJ, commit `6bdebab`) and the probe re-run to
+   10/10. No app code changed.
+2. **Soft observation (no action taken).** In one of the live runs, two teased
+   turns volunteered self-description («من هوش مصنوعی هستم…», «من فقط چندتا خط کد
+   و الگوریتمم…») instead of staying in register. It is a soft deviation from the
+   persona's "do not announce it / do not describe yourself", not a banned-token
+   violation, and it is model variance (the same scenarios did not do it on the
+   other run). **No behaviour change was made during deployment**, per the
+   instruction; it is noted for a future owner-approved pass if wanted.
+
+**Health / drift.** `ERROR`/`CRITICAL`/`Traceback` in the container log: **0**.
+`RestartCount=0`. Boot: `Nexus state: online rooms=2`, `GuardBot started. Groups:
+[-1003587640764, -1001299527312]`, `Conversational AI active: model=
+gemini-flash-lite-latest … history_turns=8`, `Authorization: owner=6931339207`,
+`AI ADMIN MODE: AVAILABLE`. Runtime flags unchanged (`GEMINI_CHAT_ENABLED=True`,
+`ADMIN_AI_ENABLED=True`, `NEXUS_AWARENESS_ENABLED=True`, `NEXUS_ACTORS_ONLY=False`,
+`GEMINI_SEARCH_ENABLED=True`); `GROUP_IDS` unchanged; `authorized_groups` still
+holds its **2** rooms; `.env` untouched (mtime 18:52). No Pool, credential,
+rate-limit, breaker, tenant-isolation or configuration change.
+
+**NEXT STEP.** Nothing outstanding. The Dashboard work has **not** been started
+(explicitly out of scope for this task). Do **not** redeploy without the owner's
+go-ahead. To resume: `git status` (clean), `git rev-parse HEAD` (this
+checkpoint's commit on top of `6bdebab`), `git ls-remote` on both remotes.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or
