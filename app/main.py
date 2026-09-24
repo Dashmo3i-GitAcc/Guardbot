@@ -915,6 +915,25 @@ def _mentions_alias(text: str, alias: str) -> bool:
 _nexus_visibility: dict[int, str] = {}
 
 
+def authorized_group(chat_id: int) -> bool:
+    """Whether this chat is a group this deployment is registered to serve.
+
+    The **only** source of truth is the server-side configuration
+    (``GROUP_IDS``). Nothing else is read here, and nothing else may be used to
+    decide it: not the bot's Telegram admin status, not the bot merely being a
+    member, not the group's title or username, not a member's display name, and
+    not anything a member claims. Being *added* to a group — even promoted to
+    administrator in it — is a Telegram fact, and a Telegram fact is **not**
+    application authorization.
+
+    It is fail-closed: with no configured groups, nothing is authorized. This is
+    the *room* boundary; the *speaker* boundary is ``rbac`` / ``nexus.accepts``.
+    They are separate and both are required — this says the room is ours, the
+    other says the person may be answered, and neither implies the other.
+    """
+    return int(chat_id) in config.GROUP_IDS
+
+
 def _nexus_can_observe(chat_id: int) -> bool:
     """Whether the bot is an administrator here, and so sees every message.
 
@@ -1542,6 +1561,12 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
     """
     chat_id = int(row.get("chat_id") or 0)
     if not chat_id or chat_id in _awareness_inflight:
+        return False
+    if not authorized_group(chat_id):
+        # A room this deployment is not registered to serve is not read, even if
+        # a stale awareness row survives from a configuration that once listed
+        # it. The group boundary is the same one the handlers apply, and it is
+        # applied here too so no path can read a room the handlers would refuse.
         return False
     if not nexus.is_online():
         return False
@@ -3294,6 +3319,14 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not msg or not room or not user or user.is_bot:
         return
+    # The group boundary, first and before anything else. A room that is not in
+    # the server-side configuration is not served at all — no identity write, no
+    # awareness capture, no model call. Being added to a group, or made an
+    # administrator in it, does not register it; only ``GROUP_IDS`` does. Every
+    # gate below this one is about the *speaker*; this one is about the *room*,
+    # and both are required.
+    if not authorized_group(room.id):
+        return
     if was_deleted(room.id, getattr(msg, "message_id", 0)):
         return
 
@@ -3476,6 +3509,11 @@ async def on_transcribe_command(
     msg = update.effective_message
     room = update.effective_chat
     if not msg or not room:
+        return
+    # The transcription interface is AI functionality, so in a group it stands
+    # behind the same group boundary as the conversation: an unregistered room
+    # is not served. A private chat is the owner's own and is unaffected.
+    if getattr(room, "type", "") != "private" and not authorized_group(room.id):
         return
     ref = media.describe(msg)
     if ref is None or not ref.is_transcribable:
