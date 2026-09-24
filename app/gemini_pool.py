@@ -1154,7 +1154,9 @@ class Pool:
             max(0, self.daily_budget - a.daily_calls(now)) for a in self.accounts
         )
 
-    def models_for(self, account: Account, now: float) -> list[str]:
+    def models_for(
+        self, account: Account, now: float, *, ignore_cooldown: bool = False
+    ) -> list[str]:
         """The models to try for one account. Preference order, or rotation.
 
         Filtered four ways: the model must be capable of this workload, it must
@@ -1162,6 +1164,14 @@ class Pool:
         a streaming-only model unless this workload speaks the Live API, and —
         when discovery has answered for this credential — the provider must
         actually list it.
+
+        ``ignore_cooldown`` drops only the per-model cooldown test, and it exists
+        for exactly one caller: telling "this credential has no model that fits
+        this workload" (a configuration fact) apart from "every model that fits
+        is cooling down" (a provider wobble). The first is worth taking the
+        account out of rotation for; the second is not, because the models' own
+        cooldowns already keep them out of the walk and they lapse on their own
+        schedule — a much shorter one than an account cooldown.
 
         With ``rotate_models`` the surviving names are re-ordered by
         ``_rotation_key``: the models that have actually answered, rotated
@@ -1182,7 +1192,7 @@ class Pool:
         discovered = self._discovery.get(account.fingerprint, "unknown")
         out: list[str] = []
         for name in self.models:
-            if not account.model_usable(name, now):
+            if not ignore_cooldown and not account.model_usable(name, now):
                 continue
             caps = capabilities_of(name)
             if caps is None or not self.capabilities <= caps:
@@ -1627,6 +1637,68 @@ async def generate(
             and (time.monotonic() - started) >= pool.time_budget
         )
 
+    # The breakdown of one logical request, so the report can say *where* the
+    # model stage went instead of only how long it was. Three numbers, and the
+    # distinction is the one that matters: choosing an account/model is ours and
+    # should be microseconds, the provider call is Google's, and the backoff
+    # sleeps are ours again and are the only part of a retry we can remove.
+    # Emitted once per request that actually failed something — a clean
+    # single-attempt request has nothing to explain and would only add a line
+    # per provider call to the log. See ``_log_request``.
+    # Seconds, like every ``time.monotonic()`` delta in this function. They are
+    # converted to milliseconds only where the line is rendered, so the field
+    # name and the number cannot disagree — the first cut of this line held
+    # seconds in variables named ``_ms`` and printed them as if they were
+    # milliseconds, which is a measurement that lies by a factor of a thousand.
+    select_s = 0.0
+    provider_s = 0.0
+    retry_s = 0.0
+    failures = 0
+    attempts = 0
+    tried_slots: set[str] = set()
+
+    async def _timed_call(account: Account, model: str):
+        """One provider call, with its wall clock added to ``provider_s``."""
+        nonlocal provider_s
+        moment = time.monotonic()
+        try:
+            return await _call(
+                pool, account, model, types, build_contents, build_config
+            )
+        finally:
+            provider_s += time.monotonic() - moment
+
+    async def _backoff_sleep(attempt: int) -> None:
+        """Sleep before a retry, with the wait added to ``retry_s``."""
+        nonlocal retry_s
+        moment = time.monotonic()
+        await asyncio.sleep(_backoff(pool, attempt))
+        retry_s += time.monotonic() - moment
+
+    def _log_request(outcome: str) -> None:
+        """One line per request that had something to fail over from.
+
+        Durations only, and a masked account at most — never a credential and
+        never a payload. ``select_ms`` and ``retry_ms`` are the parts this
+        module owns; ``provider_ms`` is the provider's own time. A request with
+        no failures logs nothing, because its ``gemini_ms`` on the caller's line
+        is already exactly the provider's time.
+        """
+        if not failures:
+            return
+        log.info(
+            "[pool] request workload=%s outcome=%s attempts=%d accounts=%d "
+            "failures=%d select_ms=%.1f provider_ms=%.1f retry_ms=%.1f",
+            pool.workload,
+            outcome,
+            attempts,
+            len(tried_slots),
+            failures,
+            select_s * 1000.0,
+            provider_s * 1000.0,
+            retry_s * 1000.0,
+        )
+
     # The retention sweep rides the request path, every
     # ``GEMINI_POOL_PRUNE_EVERY`` requests. Here rather than inside the attempt
     # loop, so one logical request costs at most one counter increment and the
@@ -1638,8 +1710,10 @@ async def generate(
 
     # Discovery is best-effort and must never block a request that would
     # otherwise succeed, so a failure here simply means "do not filter".
+    _select_started = time.monotonic()
     for account in pool.accounts:
         await pool.discover(account)
+    select_s += time.monotonic() - _select_started
 
     attempts_per_model = pool.retries + 1
     # A hard ceiling on total provider calls for one logical request. Without it
@@ -1663,14 +1737,46 @@ async def generate(
     # fewer attempts than its share, hands the difference to the ones behind it.
     accounts = pool.ordered_accounts(now)
     account_count = len(accounts)
+    select_s += time.monotonic() - _select_started
 
     last: PoolUnavailable = PoolUnavailable("no_attempt")
     tried_any = False
     out_of_time = False
+    # Set when an account was skipped because every model it could use is
+    # cooling down. It is not a failure and not a configuration problem, so the
+    # kind raised when the whole walk is skipped has to be able to say so.
+    cooling = False
 
     for position, account in enumerate(accounts):
+        _select_started = time.monotonic()
         candidates = pool.models_for(account, now)
+        select_s += time.monotonic() - _select_started
         if not candidates:
+            # Two different facts reach this branch, and conflating them is how a
+            # provider wobble becomes an outage. "Every capable model is cooling
+            # down" is a fact about the models, and their own cooldowns already
+            # keep them out of the walk — so the account stays in rotation and
+            # the next request re-checks it. "No model fits this workload at all"
+            # is a fact about the configuration, and taking the account out for
+            # the model cooldown is the right answer to it.
+            #
+            # The old reading benched the account for
+            # ``GEMINI_POOL_MODEL_COOLDOWN`` (120s) in both cases — four to five
+            # times longer than the cooldown that caused the first one. On a
+            # small pool that is a transient 429 turning into an empty pool:
+            # reproduced against the real pool on 2026-09-24 with one account and
+            # three models, where the second request found every model cooling
+            # and the third found no usable account at all.
+            if pool.models_for(account, now, ignore_cooldown=True):
+                pool.record(
+                    "models_cooling",
+                    slot=account.slot,
+                    reason="all capable models cooling",
+                    detail="account stays in rotation",
+                    now=now,
+                )
+                cooling = True
+                continue
             account.mark(
                 "UNAVAILABLE", reason="no_compatible_model", now=now,
                 cooldown=int(config.GEMINI_POOL_MODEL_COOLDOWN),
@@ -1715,13 +1821,13 @@ async def generate(
                 allowance -= 1
                 budget -= 1
                 tried_any = True
+                attempts += 1
+                tried_slots.add(account.slot)
                 now = time.time()
                 account.note_request(now)
                 state.note_request(now)
                 try:
-                    response = await _call(
-                        pool, account, model, types, build_contents, build_config
-                    )
+                    response = await _timed_call(account, model)
                 except asyncio.CancelledError:
                     raise
                 except PoolUnavailable as exc:
@@ -1731,6 +1837,7 @@ async def generate(
                         raise
                     failure = Failure("timeout", SCOPE_TRANSIENT, retryable=True,
                                       detail=exc.detail)
+                    failures += 1
                     last = PoolUnavailable(failure.kind, failure.detail)
                     account.note_failure(failure, now)
                     state.note_failure(failure, now)
@@ -1761,14 +1868,27 @@ async def generate(
                     if _bench_repeated_failures(pool, account, model, now):
                         account_dead = True
                         break
-                    if attempt + 1 < attempts_per_model:
-                        await asyncio.sleep(_backoff(pool, attempt))
+                    # Sleep only for a retry that can actually run. The next
+                    # iteration aborts immediately when the account's share or
+                    # the global ceiling is spent, so sleeping first spent
+                    # 1.5-1.9s of the caller's time on a call that was never
+                    # going to be made — the backoff of a retry that cannot
+                    # happen. Measured on the live deployment on 2026-09-24,
+                    # where most chat accounts get a one-attempt share and a 503
+                    # therefore paid a full backoff before being abandoned.
+                    if (
+                        attempt + 1 < attempts_per_model
+                        and allowance > 0
+                        and budget > 0
+                    ):
+                        await _backoff_sleep(attempt)
                         continue
                     break
                 except BaseException as exc:  # noqa: BLE001 - the SDK raises widely
                     failure = classify_error(exc)
                     account.note_failure(failure, now)
                     state.note_failure(failure, now)
+                    failures += 1
                     last = PoolUnavailable(failure.kind, failure.detail)
                     # ``detail`` is logged because ``kind`` alone does not say
                     # what the provider actually did, and the difference is the
@@ -1812,10 +1932,17 @@ async def generate(
                         # The payload is wrong; every account would answer the
                         # same way, and spending the rest of the pool on it
                         # would be pure waste.
+                        _log_request("bad_request")
                         raise last
-                    # transient
-                    if attempt + 1 < attempts_per_model and failure.retryable:
-                        await asyncio.sleep(_backoff(pool, attempt))
+                    # transient. The backoff is slept only when the retry it is
+                    # waiting for can actually run — see the timeout branch.
+                    if (
+                        attempt + 1 < attempts_per_model
+                        and failure.retryable
+                        and allowance > 0
+                        and budget > 0
+                    ):
+                        await _backoff_sleep(attempt)
                         continue
                     break  # next model
                 else:
@@ -1830,6 +1957,7 @@ async def generate(
                             now=now,
                         )
                     _record_pool_health(pool, now)
+                    _log_request("ok")
                     return _extract(response, extract)
             if account_dead or out_of_time:
                 break
@@ -1847,6 +1975,7 @@ async def generate(
             detail=f"ceiling={pool.time_budget:.0f}s last={last.kind}",
             now=time.time(),
         )
+        _log_request("time_budget")
         raise PoolUnavailable(
             "time_budget",
             f"{last.kind}:{last.detail}" if last.detail else last.kind,
@@ -1854,10 +1983,21 @@ async def generate(
 
     if not tried_any:
         health = pool.health()
-        raise PoolUnavailable(
-            "pool_empty" if health["empty"] else "no_compatible_model",
-            f"usable={health['usable']}/{health['accounts']}",
-        )
+        # Three different facts can end the walk with nothing tried, and the kind
+        # is what the log reader and the caller act on. An empty pool is an
+        # outage. Every capable model cooling is a provider wobble that lapses on
+        # its own schedule. Only "no model fits this workload" is a configuration
+        # problem — and reporting the wobble as the configuration problem is the
+        # exact conflation this branch was rewritten to end.
+        if health["empty"]:
+            outcome = "pool_empty"
+        elif cooling:
+            outcome = "models_cooling"
+        else:
+            outcome = "no_compatible_model"
+        _log_request(outcome)
+        raise PoolUnavailable(outcome, f"usable={health['usable']}/{health['accounts']}")
+    _log_request("failed")
     raise last
 
 
@@ -1992,6 +2132,34 @@ def _bench_repeated_failures(pool, account, model, now) -> bool:
     """
     if not account.should_bench():
         return False
+
+    # The floor: never let the breaker make the pool empty. An account that has
+    # failed three times in a row is a worse bet than a healthy one, but it is
+    # not a *certain* failure — and when it is the last account left, benching it
+    # is exactly that. Measured on the live deployment on 2026-09-24: the
+    # awareness pool (three accounts) reached ``pool_empty`` twice and the chat
+    # pool once, because every account in a small pool had tripped the same
+    # breaker and the next request had nothing left to walk.
+    #
+    # ``usable`` is asked with the same predicate ``ordered_accounts`` uses, so
+    # "one left" means one account the walk would actually have tried. A state
+    # of INVALID is terminal and never reaches here — a revoked credential is a
+    # fact, not a wobble, and the floor is about wobbles.
+    if len([a for a in pool.accounts if a.usable(now)]) <= 1:
+        # Give the account the fresh run ``trip`` would have given it when the
+        # cooldown lapsed, so the same failure does not re-run this check on
+        # every attempt for the rest of the cooldown window.
+        account.consecutive_failures = 0
+        pool.record(
+            "bench_withheld",
+            slot=account.slot,
+            model=model,
+            reason="last_usable_account",
+            detail=f"usable=1/{len(pool.accounts)}",
+            now=now,
+        )
+        return False
+
     failure = Failure(
         "repeated_failures",
         SCOPE_ACCOUNT,

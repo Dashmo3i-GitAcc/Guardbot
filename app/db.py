@@ -1721,7 +1721,22 @@ def pool_account_save(
     columns = ["workload", "slot", "fingerprint", "masked", *clean]
     params = [str(workload), str(slot), str(fingerprint), str(masked), *clean.values()]
     placeholders = ",".join("?" for _ in columns)
-    updates = ",".join(f"{c}=excluded.{c}" for c in ("fingerprint", "masked", *clean))
+    # Identity is written **only** when it is actually supplied. The counter
+    # updates (``note_request``/``note_success``/``note_failure``) call this with
+    # neither argument, and letting the excluded defaults through overwrote the
+    # stored fingerprint and masked tail with the empty string on every attempt.
+    # Measured on the live database on 2026-09-24: every actively-used account
+    # had ``masked=''`` while the idle ones kept theirs, which is the reverse of
+    # useful — the accounts an operator wants to recognise are the busy ones.
+    updates = ",".join(f"{c}=excluded.{c}" for c in clean)
+    if fingerprint:
+        updates += ("," if updates else "") + "fingerprint=excluded.fingerprint"
+    if masked:
+        updates += ("," if updates else "") + "masked=excluded.masked"
+    if not updates:
+        # A no-op upsert must still be valid SQL. There is no field to write, so
+        # write the key back to itself.
+        updates = "workload=excluded.workload"
     _exec(
         f"""INSERT INTO gemini_accounts ({",".join(columns)})
             VALUES ({placeholders})

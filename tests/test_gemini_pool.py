@@ -445,6 +445,29 @@ def test_a_recovering_account_comes_back_active(provider):
     assert make_pool().accounts[0].state == "ACTIVE"
 
 
+def test_a_counter_update_keeps_the_stored_identity(provider):
+    """A counter write must not blank the account's own fingerprint/masked.
+
+    ``note_request``/``note_success``/``note_failure`` call the upsert with
+    counters only. Letting the excluded defaults through overwrote the stored
+    identity with the empty string on every attempt, so every *busy* account
+    lost its masked tail while the idle ones kept theirs — measured on the live
+    database on 2026-09-24.
+    """
+    db.pool_account_save(
+        "intent", "1",
+        fingerprint=gemini_pool.fingerprint(KEY_A),
+        masked=gemini_pool.mask(KEY_A),
+    )
+    # A counter-only write, exactly as ``Account.note_request`` makes it.
+    db.pool_account_save("intent", "1", last_request=123, requests=1)
+
+    row = [r for r in db.pool_accounts("intent") if r["slot"] == "1"][0]
+    assert row["fingerprint"] == gemini_pool.fingerprint(KEY_A)
+    assert row["masked"] == gemini_pool.mask(KEY_A)
+    assert row["last_request"] == 123
+
+
 # ══ MODEL TESTS ═══════════════════════════════════════════════════════════
 def test_the_primary_model_is_preferred(provider):
     provider.answers(KEY_A, "primary")
@@ -969,6 +992,262 @@ def test_the_breaker_is_per_workload(provider, monkeypatch):
     # The same credential, in its own pool: its own account, its own streak.
     assert chat.accounts[0].state == "ACTIVE"
     assert chat.accounts[0].consecutive_failures == 0
+
+
+# ══ THE MINIMUM-USABLE-ACCOUNT FLOOR ══════════════════════════════════════
+# The breaker above is right about an account and wrong about a *pool*. When it
+# trips the last usable account, the next request has nothing to walk and fails
+# outright — a certain failure in place of a bad bet. Measured on the live
+# deployment on 2026-09-24: awareness (three accounts) reached ``pool_empty``
+# twice and chat once, every time because a small pool's accounts had all
+# tripped the same breaker. These tests pin the floor that ends that.
+def test_the_breaker_never_empties_a_pool(provider, monkeypatch):
+    """A single-account pool keeps its one account rather than going empty."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 2)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    pool = make_pool(keys=(("1", KEY_A),))
+
+    with pytest.raises(gemini_pool.PoolUnavailable):
+        call(pool)
+
+    account = pool.accounts[0]
+    assert account.state == "ACTIVE", "the last usable account must not be benched"
+    assert account.usable(time.time()) is True
+    # The floor is recorded, so the withheld bench is visible rather than silent.
+    recorded = events("bench_withheld")
+    assert [e["kind"] for e in recorded] == ["bench_withheld"]
+    assert recorded[0]["reason"] == "last_usable_account"
+    assert recorded[0]["slot"] == "1"
+
+
+def test_the_floor_leaves_a_second_account_to_bench(provider, monkeypatch):
+    """With two usable accounts the breaker still trips the unwell one."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 2)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    assert call(pool) == "b"
+    assert pool.accounts[0].state == "UNAVAILABLE"
+    assert pool.accounts[1].state == "ACTIVE"
+    assert events("bench_withheld") == []
+
+
+def test_a_withheld_bench_gives_the_streak_a_fresh_start(provider, monkeypatch):
+    """The floor must not re-run its own check on every later failure."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 2)
+    pool = make_pool(keys=(("1", KEY_A),))
+    account = pool.accounts[0]
+    account.consecutive_failures = 2
+
+    benched = gemini_pool._bench_repeated_failures(
+        pool, account, TEXT_MODELS[0], time.time()
+    )
+
+    assert benched is False
+    assert account.state == "ACTIVE"
+    assert account.consecutive_failures == 0
+
+
+def test_a_benched_account_is_still_recovered_on_success(provider, monkeypatch):
+    """The floor must not stop the ordinary recovery path from working."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3)
+    pool = make_pool(keys=(("1", KEY_A),))
+    # A credential that tripped the breaker and whose cooldown has since lapsed:
+    # the state the floor deliberately leaves in the pool.
+    pool.accounts[0].state = "UNAVAILABLE"
+    pool.accounts[0].cooldown_until = 0
+    provider.answers(KEY_A, "back")
+
+    assert call(pool) == "back"
+    assert pool.accounts[0].state == "ACTIVE"
+    assert [e["kind"] for e in events("account_recovered")] == ["account_recovered"]
+
+
+# ══ COOLING MODELS ARE NOT A CONFIGURATION PROBLEM ════════════════════════
+# The floor above stops the breaker emptying a pool. This is the *other* way a
+# small pool emptied, and it was found by reproducing the floor fix against the
+# real pool: a 429 benches the model, not the account — correctly — but when
+# every model an account could use is cooling, ``models_for`` returned nothing
+# and the old code read that as "this credential has no compatible model" and
+# benched the account for ``GEMINI_POOL_MODEL_COOLDOWN`` (120s). That is four to
+# five times longer than the cooldown that caused it, so a one-minute wobble on
+# three models became a two-minute account outage. Measured 2026-09-24 against
+# one account and three models: the second request found every model cooling and
+# the third found no usable account at all.
+def test_a_cooling_model_does_not_bench_its_account(provider):
+    """All models 429, then all cooling: the account stays in the pool."""
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, rate_limited(model))
+    pool = make_pool(keys=(("1", KEY_A),))
+
+    # First request: every model answers 429 and takes a per-model cooldown.
+    with pytest.raises(gemini_pool.PoolUnavailable):
+        call(pool)
+    account = pool.accounts[0]
+    assert all(not account.model_usable(m, time.time()) for m in TEXT_MODELS)
+
+    # Second request: nothing is *tried* (the models are cooling), but that is a
+    # fact about the models, so the credential is not taken out for it.
+    with pytest.raises(gemini_pool.PoolUnavailable):
+        call(pool)
+
+    assert account.state == "ACTIVE", "a cooling model must not bench its account"
+    assert account.usable(time.time()) is True
+    assert [e["kind"] for e in events("models_cooling")] == ["models_cooling"]
+    assert events("no_compatible_model") == []
+
+
+def test_a_cooling_pool_is_not_reported_as_a_configuration_problem(provider):
+    """The raised kind must name the wobble, not the configuration."""
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, rate_limited(model))
+    pool = make_pool(keys=(("1", KEY_A),))
+
+    with pytest.raises(gemini_pool.PoolUnavailable):
+        call(pool)
+    with pytest.raises(gemini_pool.PoolUnavailable) as caught:
+        call(pool)
+
+    assert caught.value.kind == "models_cooling", (
+        "a transient cooldown must not read as 'no compatible model'"
+    )
+    assert caught.value.detail == "usable=1/1"
+
+
+def test_a_pool_with_no_compatible_model_still_benches_its_account(provider):
+    """The distinction must not have erased the configuration answer.
+
+    The counterpart to the two tests above: when the account genuinely has no
+    model that fits the workload, it is still taken out of rotation — unlike the
+    cooling case, which keeps it in. Benching the only account empties the pool,
+    so the walk reports ``pool_empty`` (the pre-existing precedence); what this
+    pins is that the account *is* benched and that the cooling path was not taken.
+    """
+    # An audio-in-only model offered to a text workload: no model fits, and no
+    # cooldown is involved.
+    pool = make_pool(models=["gemini-3.5-transcribe"])
+
+    with pytest.raises(gemini_pool.PoolUnavailable) as caught:
+        call(pool)
+
+    assert caught.value.kind != "models_cooling"
+    account = pool.accounts[0]
+    assert account.state == "UNAVAILABLE"
+    assert account.cooldown_until > 0
+    assert [e["kind"] for e in events("no_compatible_model")] == ["no_compatible_model"]
+    assert events("models_cooling") == []
+
+
+# ══ THE BACKOFF OF A RETRY THAT CANNOT RUN ════════════════════════════════
+def test_no_backoff_is_slept_for_a_retry_the_share_forbids(provider, monkeypatch):
+    """A transient failure must not pay a backoff for a retry that is skipped.
+
+    The retry loop checks the account's share at the *top* of the next
+    iteration, so a share of one means the retry never runs. Sleeping first
+    spent the whole backoff before abandoning the call — measured on the live
+    deployment, where most chat accounts get a one-attempt share and every 503
+    therefore paid a full backoff for nothing.
+    """
+    monkeypatch.setattr(config, "GEMINI_POOL_MAX_ATTEMPTS", 2)
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded())
+    provider.answers(KEY_B, "b")
+    # A backoff long enough that the bug would be unmistakable, and short enough
+    # that a regression fails the timing assertion rather than hanging the suite.
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)), retries=1, backoff=3.0)
+
+    started = time.monotonic()
+    assert call(pool) == "b"
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"a backoff was slept for a retry that never ran ({elapsed:.1f}s)"
+    assert provider.models_used(KEY_A) == [TEXT_MODELS[0]]
+
+
+def test_a_retry_that_can_run_still_backs_off(provider, monkeypatch):
+    """The guard must not remove the backoff from a retry that will happen."""
+    monkeypatch.setattr(config, "GEMINI_POOL_MAX_ATTEMPTS", 12)
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded(), "recovered")
+    pool = make_pool(retries=1, backoff=0.3)
+
+    started = time.monotonic()
+    assert call(pool) == "recovered"
+    elapsed = time.monotonic() - started
+
+    assert provider.models_used(KEY_A) == [TEXT_MODELS[0], TEXT_MODELS[0]]
+    assert elapsed >= 0.3, "the retry that ran must have backed off first"
+
+
+# ══ THE REQUEST BREAKDOWN LINE ════════════════════════════════════════════
+def test_a_walked_request_logs_its_breakdown(provider, caplog):
+    """One line, and only for a request that had something to fail over from."""
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    with caplog.at_level(logging.INFO, logger="guardbot.pool"):
+        call(pool)
+
+    lines = [r.getMessage() for r in caplog.records if "[pool] request" in r.getMessage()]
+    assert len(lines) == 1
+    line = lines[0]
+    for field in ("outcome=ok", "accounts=2", "select_ms=", "provider_ms=",
+                  "retry_ms=", "attempts=", "failures="):
+        assert field in line, f"{field} is part of the breakdown"
+    # Never a credential, and never a payload.
+    assert KEY_A not in line and KEY_B not in line
+
+
+def test_the_breakdown_is_in_milliseconds(provider, caplog):
+    """The three durations must be milliseconds, like every other timing line.
+
+    The first cut held *seconds* in variables named ``_ms`` and printed them
+    unchanged, so a 15-second walk logged ``provider_ms=14.1`` — a measurement
+    that lies by a factor of a thousand. The provider is made to sleep a known
+    amount, so the field can only pass if it is milliseconds.
+    """
+    import asyncio as _asyncio
+
+    real_generate = provider._generate
+
+    async def slow(key, model, contents, config):  # noqa: A002 - the SDK's name
+        await _asyncio.sleep(0.05)
+        return await real_generate(key, model, contents, config)
+
+    provider._generate = slow
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    with caplog.at_level(logging.INFO, logger="guardbot.pool"):
+        call(pool)
+
+    line = [r.getMessage() for r in caplog.records if "[pool] request" in r.getMessage()][0]
+    fields = {
+        part.split("=", 1)[0]: part.split("=", 1)[1]
+        for part in line.split()
+        if "=" in part
+    }
+    # Four provider calls of 50 ms each, so hundreds of milliseconds — never a
+    # fraction of one, which is what printing seconds would give.
+    assert float(fields["provider_ms"]) >= 100, (
+        f"provider_ms={fields['provider_ms']} is not a millisecond count"
+    )
+
+
+def test_a_clean_request_logs_no_breakdown(provider, caplog):
+    """A single-attempt request has nothing to explain, so it says nothing."""
+    provider.answers(KEY_A, "a")
+    pool = make_pool()
+
+    with caplog.at_level(logging.INFO, logger="guardbot.pool"):
+        call(pool)
+
+    assert [r for r in caplog.records if "[pool] request" in r.getMessage()] == []
 
 
 # ══ THE WALL-CLOCK BUDGET ═════════════════════════════════════════════════
