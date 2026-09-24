@@ -5009,9 +5009,11 @@ gate, the two operations, the three commands, the `chat_id` scoping). Production
 traffic was served in `-1001299527312` within a minute of the restart (chat
 reply, `turns=1`/`turns=3`, `sent=True`).
 
-**Live probe (self-cleaning, in-container, real config/DB/rbac/model).**
-`docker exec -w /srv -e PYTHONPATH=/srv guardbot python
-/tmp/probe_room_boundary.py`. Synthetic ids `REG=-1009000000001`,
+**Live probe (self-cleaning, in-container, real config/DB/rbac/model).** Source
+committed at **`tools/probe_room_boundary.py`** (commit `6a1e8c7`); run with
+`docker cp tools/probe_room_boundary.py guardbot:/tmp/ && docker exec -w /srv -e
+PYTHONPATH=/srv guardbot python /tmp/probe_room_boundary.py`. Synthetic ids
+`REG=-1009000000001`,
 `UNREG=-1009000000002`, `CMD=-1009000000003`, `MEMBER=900000042`,
 `STRANGER=900000043`; two turns ran the **real** model. Results:
 * **Room boundary fails closed** — unregistered **member** and unregistered
@@ -5032,7 +5034,8 @@ reply, `turns=1`/`turns=3`, `sent=True`).
   every synthetic id = 0**. `chat_usage`/`gemini_daily` deliberately untouched
   (two real turns stay visible). One cleanup gap was found and fixed: the probe
   had not deleted its `admin_requests` ledger rows (6); they were removed by
-  hand and the probe's cleanup list now includes that table.
+  hand and the probe's cleanup list now includes that table (committed in
+  `tools/probe_room_boundary.py`, `6a1e8c7`).
 
 **Architecture preserved.** No Pool, credential, isolation, rate-limit, breaker,
 cooldown, failover, context-assembly, Awareness-allocation or acquisition
@@ -5041,8 +5044,10 @@ Two. Rollback: `docker tag guardbot-guardbot:pre-room-boundary
 guardbot-guardbot:latest && docker compose up -d`.
 
 **NEXT STEP.** None required for this feature — it is live. Do **not** redeploy
-without the owner's go-ahead. To resume: `git status` (clean),
-`git rev-parse HEAD` (= `69690a0`), `git ls-remote` on both remotes.
+without the owner's go-ahead. To resume: `git status` (clean), `git rev-parse
+HEAD` (this checkpoint's commit on top of `6a1e8c7`), `git ls-remote` on both
+remotes. The feature's commit chain is `a511ce3` → `69690a0` → `312c07c` →
+`6a1e8c7`.
 
 ---
 
