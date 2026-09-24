@@ -751,8 +751,19 @@ the repository actually shows:
       `151b1e1` rule — additive, never destructive — which for a new table means
       `CREATE TABLE IF NOT EXISTS` and a `DROP TABLE` rollback, never a rewrite of
       an existing table.
-    * (d) The seam for content-aware scheduling that does not violate
-      "`awareness.due` cannot see messages".
+    * (d) RESOLVED (U). The seam is a **content-free, per-room priority hint
+      produced at capture time and consumed by the pass loop, never by
+      `awareness.due`**. The message is read once, where the text is already in
+      hand, by the project's existing `context_plan.read`, and reduced to one
+      word (`high` / `low`) stored as `chat_id -> (class, stamp)`. `due` is
+      untouched and still message-blind; the hint is consulted *after* `due` has
+      said a room is eligible, so it can only postpone a routine reading, never
+      admit a room or bypass a gate. The decision (`awareness_schedule.defer`)
+      is per-room, bounded by the retention window, and holds no message body.
+      The alternative the question implied — ordering the pending list — was
+      built and measured and has **zero** leverage: the scheduler is
+      event-driven per room, not batch-driven, so there is nothing to sort. See
+      §5/U RESULT.
     * (e) Whether any model-routing change is measurable at all with the
       current evidence base.
 
@@ -1259,6 +1270,66 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              FIXED allowance, the assertion that no room is starved, the
              per-room brake and debounce preserved, and a live probe.
   Depends:   T (a scheduling decision wants the recorded reading).
+  RESULT:    DONE. One mechanism shipped, two rejected by measurement, two
+             defects found by running the real path.
+             * THE SEAM (§4.3d, resolved). `app/awareness_schedule.py` holds one
+               word per room — `high` / `low` / none, the strongest class among
+               the room's UNREAD messages — as `chat_id -> (class, stamp)`. The
+               message is read once, at capture time, by the existing
+               `context_plan.read` (its `wants_awareness` boolean, reused so the
+               two layers cannot disagree about "needs the room"), and reduced to
+               a word before storage. `awareness.due` is NOT touched and is still
+               message-blind; its signature test is unchanged and still passes.
+             * THE MECHANISM. `defer(chat_id, waited, waiting, now)` is consulted
+               AFTER `due` says a room is eligible and BEFORE the allowance, on
+               the ordinary path only (the urgent path never asks). It returns
+               True only for a `low` room whose oldest unread message has waited
+               less than `NEXUS_AWARENESS_RETENTION_SECONDS`. It can only
+               postpone: no room is admitted, no gate bypassed, no action run.
+             * REJECTED, WITH NUMBERS. (1) ORDERING the pending list by class:
+               measured over 8 seeds it changes the outcome by EXACTLY ZERO
+               passes — the scheduler is event-driven per room, not batch-driven,
+               so at any instant there is about one candidate and nothing to
+               sort. Kept reproducible behind `--compare-ordering`. (2) Holding a
+               low room only while another room holds high work: strictly safe
+               but cross-room influence and worth ~1 point.
+             * MEASURED (`tools/eval_awareness_schedule.py`, 8-seed mean, same
+               arrivals, same 200-request allowance): useful passes 44.6 % ->
+               67.6 % (worst seed 41.5 -> 65.0); ordering-only 44.6 % (= baseline);
+               passes 200 -> 200; model calls == passes in both; starved rooms
+               1.0 -> 0.6; dependent messages unread 105.4 -> 59.1; max wait
+               5400 s -> 2732 s; p95 wait 2107 s -> 562 s; decide p95 < 0.1 ms.
+               Per shape: the hog `one_constant` 43 -> 14 passes, `busy_independent`
+               18 -> 11, while `sparse` 20 -> 27, `many_active` 73 -> 84,
+               `replies_anaphora` 9 -> 16, `addressed` 10 -> 16.
+             * DEFECT 1 (fallback direction). `read` fell back to LOW on a reader
+               error, which CAUSES a deferral — a broken reader would have
+               deferred every room in the deployment. Now falls back to NONE ("no
+               evidence"), which `note` refuses to store.
+             * DEFECT 2 (the confirmation). A confirmation «تأیید میکنم» is
+               self-contained, so LOW is correct — but the PASS is what consumes
+               it, so the naive rule postponed an owner's approved admin action by
+               up to an hour. Three `test_nexus.py` tests caught it. `defer` gained
+               `waiting` (from `db.admin_pending_waiting`) and a room the server is
+               waiting on is never deferred.
+             * FILES: `app/awareness_schedule.py` (new),
+               `app/main.py` (three edits: capture notes; run_room defers; the
+               `finally` forgets), `tools/eval_awareness_schedule.py` (new),
+               `tests/test_awareness_schedule.py` (35 tests incl. the A–P failure
+               matrix), `tests/test_awareness_schedule_eval.py` (16 tests incl. the
+               real path), `tests/conftest.py` (one reset).
+             * NO new table, NO config default changed, NO new model call.
+             * LIMITATION (recorded, not hidden): the mechanism trades timeliness
+               for coverage. A chatter room is not read for up to the retention
+               window; the exposure is exactly the classifier's false negatives.
+               The one the server can KNOW about (a pending confirmation) is
+               closed. A residual remains: a bare answer to the assistant's own
+               question («بله») has no room dependency and no server flag, so it
+               can be postponed like any other chatter — closing it needs an
+               "awaiting an answer" flag the server does not keep.
+             * LIVE PROBE: NOT RUN — U is not deployed and the brief forbids
+               deploying it, so a live probe would measure the previous build.
+             * Suite 3619 passed, 0 failed (was 3568). Not merged, not deployed.
 
   INCREMENT V — "only if the numbers say so"
   ------------------------------------------------------------------------------
@@ -1336,12 +1407,12 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     see AgentMD.md §54.9 (the after-Y checkpoint). The previous checkpoint
-          was §54.8 at the after-X docs commit; the Y commits sit on top of it.
+HEAD:     see AgentMD.md §54.10 (the after-U checkpoint). The previous checkpoint
+          was §54.9 at the after-Y docs commit; the U commits sit on top of it.
           Docs commits sit on top — a commit that names its own count would be
           wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3568 passed, 0 failed
+Suite:    3619 passed, 0 failed
 Corpus:   141 cases, version 18 (tools/eval_intent.py); 27 labelled cases
           (tools/eval_context.py — increment Y's deterministic context benchmark)
 Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
@@ -1367,23 +1438,29 @@ Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           branch: the foundation's 151b1e1 (two additive columns), **W's new
           `user_memory` table**, **the extension's new `user_memory_signal`
           table** and **X's new `conversation_state` table** — all additive,
-          new-table, rollback `DROP TABLE`. **Y adds no table at all.**
-Next:     INCREMENT U — "the room that should go next" (roadmap §5/U):
-          intelligent/adaptive Awareness scheduling WITHIN the existing
-          200-request allowance and with NO new model calls. It has an open
-          design question to resolve first (§4.3: the seam that does not violate
-          "`awareness.due` cannot see messages", whose signature a test asserts).
-          Y is DONE (see §5/Y RESULT) and V remains NOT SCOPED (it needs an
-          answer-quality measurement that does not exist). The remaining order is
-          U → V. See §5 for the full scoping and the dependency rationale. W, the
-          W extension, X and Y are DONE (see §5/W RESULT, §5/W-EXTENSION RESULT,
-          §5/X RESULT and §5/Y RESULT). Do NOT start U without the owner's
-          explicit go-ahead. Do NOT merge or deploy Y.
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.9 (the checkpoints).
-                 docs/reference/nexus-awareness.md §52–§65 (the narrative).
+          new-table, rollback `DROP TABLE`. **Y adds no table at all.** **U adds
+          the scheduler seam and no table**: app/awareness_schedule.py (new — the
+          per-room priority hint and the spend decision), app/main.py
+          (`_awareness_capture` notes the class, `_awareness_run_room` consults
+          `defer` after `due` and forgets the hint in its `finally`),
+          tools/eval_awareness_schedule.py (new benchmark). `awareness.due` is
+          **not** changed; no config default changes.
+Next:     INCREMENT V — "only if the numbers say so" (roadmap §5/V). **U is
+          DONE** (see §5/U RESULT): adaptive Awareness scheduling shipped as a
+          per-room spend-or-wait decision WITHIN the existing 200-request
+          allowance and with NO new model calls. V (model/Gemini routing) remains
+          **NOT SCOPED** — it needs an answer-quality measurement that does not
+          exist, and the honest first step would be to BUILD that evidence base,
+          not to change routing. The remaining order is V alone. Do NOT start V,
+          do NOT merge, do NOT deploy U, and do NOT raise the allowance. U's live
+          probe was NOT RUN (U is not deployed, and the brief forbids deploying
+          it). W, the W extension, X, Y and U are DONE (see §5/W RESULT,
+          §5/W-EXTENSION RESULT, §5/X RESULT, §5/Y RESULT, §5/U RESULT).
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.10 (the checkpoints).
+                 docs/reference/nexus-awareness.md §52–§66 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1–§54.9 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.10 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

@@ -2148,6 +2148,51 @@ reference file is stale and this list is the one to fix first.
   `context_plan`, and no decision it makes reaches a permission check. A memory or
   a role selected into the context is a sentence for the model to read, not an
   authority the server will honour.
+* **Increment U spends the rationed request, and the decision cannot see the
+  message.** `app/awareness_schedule.py` holds one word per room — the strongest
+  class seen among the room's **unread** messages — and nothing else. The content
+  is read **once**, at capture time, by the project's existing
+  `context_plan.read`, and reduced to `high` / `low` before it is stored.
+  `awareness.due` is not touched, is asked exactly as before, and its signature is
+  still asserted (`tests/test_awareness.py`); the deferral is applied *after*
+  `due` has said a room is eligible and *before* the allowance is consulted, and
+  the urgent path (`_awareness_promptly`) never consults it at all.
+* **A hint can only postpone a routine reading.** `defer` returns `True` only for
+  a room whose batch is `low` and whose oldest unread message has waited less than
+  `NEXUS_AWARENESS_RETENTION_SECONDS`. A room with **no** hint is never deferred
+  (an unknown room and a quiet room are read the same), a room whose batch says it
+  needs reading is never deferred, and a room the **server is waiting on** — a
+  pending admin confirmation, `db.admin_pending_waiting` — is never deferred. It
+  can never admit a room, bypass a cooldown, a brake, a breaker, the allowance or
+  the switch, or execute anything: every safety gate is *above* this decision.
+* **`wants_awareness` is not "the pass does not need to run".** A confirmation
+  («تأیید میکنم») is self-contained, so it is correctly `low`, and the pass is
+  nevertheless the thing that consumes it. This is the one place the mechanism can
+  be *wrong* rather than merely slow, and the server's own waiting flag is what
+  closes it. A residual remains and is recorded: a bare answer to the assistant's
+  own question carries no room dependency and no server flag, so it can be
+  postponed like any other chatter.
+* **A broken reader contributes nothing.** `read` never raises; on a reader error
+  the class is `P_NONE` (*no evidence*), which `note` refuses to store, so the
+  room is read exactly as before this module existed. The wrong fallback — `low`
+  — would defer every room whenever the reader broke: a deployment-wide slowdown
+  wearing a scheduling choice's clothes.
+* **The hint store is bounded, expiring and isolated.** `chat_id -> (class,
+  stamp)`, at most `MAX_ROOMS` entries evicted oldest-first, every entry expiring
+  at the retention window, and no read that does not name the room. It holds no
+  message body and no numeric score — three words and a float.
+* **The deferral bound is derived, not configured**: `_bound()` is
+  `NEXUS_AWARENESS_RETENTION_SECONDS`, the same window whose rows a hint
+  describes, so there is no second number to drift. A mis-set retention floors at
+  1 s rather than becoming "hold for ever".
+* **Ordering the pending list is not the mechanism, and the reason is
+  architectural.** The scheduler is event-driven per room, not batch-driven, so at
+  any instant there is about one candidate and nothing to sort; measured over
+  eight seeds, ordering changed the outcome by exactly zero passes. The shipped
+  mechanism is the per-room *spend-or-wait* decision; the rejected ordering is
+  kept behind `--compare-ordering` in `tools/eval_awareness_schedule.py` so the
+  negative result stays reproducible, and `tests/test_awareness_schedule_eval.py`
+  pins it.
 
 ### 53.8 The assistant
 
@@ -3435,5 +3480,142 @@ start U without the owner's explicit go-ahead.** Do not merge or deploy Y.
 **To resume after any context loss.** Re-read this section and
 `docs/intent-awareness-roadmap.txt` (§5 for W/W-extension/X/Y/U/V, §7 for the
 continuation point), then verify: `git status`, `git rev-parse HEAD`,
+`git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.
+
+### 54.10 Checkpoint (2026-09-24, after U) — resume here (supersedes §54.9)
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`. Increment
+**U** (adaptive awareness scheduling) sits on §54.9. `main` and the annotated tag
+`release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
+and is an ancestor of HEAD. Suite **3619 passed, 0 failed** (was 3568).
+**Not merged, not deployed.**
+
+**What U is, and what it is not.** U is a **scheduling** increment, not a
+semantic one. It answers exactly one question — *given a room that the existing
+policy has already said may be read, is this request worth spending now?* — and
+nothing else. There is deliberately **no** new reader, no new model call, no new
+table, no numeric score, no reordering of the pass loop, and **no change to
+`awareness.due`**, whose signature a test asserts. The 200-request allowance is
+untouched.
+
+**What U adds (DONE).**
+
+* **`app/awareness_schedule.py`** (new) — the seam and the decision. One word per
+  room (`high` / `low` / none), the strongest class seen among the room's
+  **unread** messages, stored as `chat_id -> (class, monotonic stamp)`. `read`
+  reuses the project's own `context_plan.read` for the single boolean
+  `wants_awareness` and returns a word; `note` stores the maximum and refreshes
+  the stamp; `priority` reads (dropping an expired entry); `forget` drops one
+  room; `defer(chat_id, *, waited, waiting, now)` is the whole increment. Bounded
+  by `MAX_ROOMS` (512, evicted oldest-first) and by `_bound()`, which is derived
+  from `NEXUS_AWARENESS_RETENTION_SECONDS` — one number, no new knob.
+* **`app/main.py`** — three small edits. `_awareness_capture` notes the class
+  where the text is already in hand; `_awareness_run_room` consults `defer`
+  **after** `due` and **before** the allowance, only on the ordinary path, and
+  drops the hint in its `finally` when a pass actually runs.
+* **`tools/eval_awareness_schedule.py`** (new) — the deterministic benchmark: ten
+  room shapes, 28 rooms, 684 messages, 204 hand-labelled dependent, one simulated
+  day at the real 200-request allowance, running the production `awareness.due`,
+  the production allowance-gap formula, both scheduling paths, and the production
+  `defer`. `--seeds N` aggregates; `--compare-ordering` reproduces the rejected
+  mechanism.
+* **`tests/test_awareness_schedule.py`** (35 tests) — the seam, the store, the
+  decision, and the **failure matrix A–P** (every way the seam is asked a
+  question it cannot answer, all resolving to *read*). The structural tests
+  assert `defer`'s signature and body cannot see a message, that `awareness` does
+  not import the scheduler, that no authorisation module imports it, and that no
+  model/HTTP/Telegram client is imported.
+* **`tests/test_awareness_schedule_eval.py`** (16 tests) — the floors under the
+  benchmark and the **real path**: `main._awareness_capture` →
+  `main._awareness_run_room` through the actual seam, with the transport stubbed.
+* **`tests/conftest.py`** — `awareness_schedule.reset()` added to the global
+  fixture. The hint store is process state keyed by chat id with a one-hour life;
+  without this reset, a hint noted by one test deferred the next test's room and
+  six `test_awareness_latency.py` tests failed as "awareness stopped reading".
+
+**The mechanism decision — made by measurement, not by argument.** The first
+candidate was **ordering** the pending list by class. Measured over eight seeds it
+changed the outcome by **exactly zero passes**, and the reason is architectural:
+the scheduler is **event-driven per room, not batch-driven** — each room is
+offered a pass on its own debounce deadline and admitted or refused by its own
+share of the allowance, so at any instant there is about one candidate and nothing
+to sort. The second candidate — defer a low room only while another room holds
+work that needs the room — is strictly safe but **cross-room** and worth about one
+point. The shipped mechanism is the per-room **spend-or-wait** decision, which is
+where the leverage actually is. Both rejected mechanisms are recorded in the
+benchmark (the ordering is reproducible via `--compare-ordering`).
+
+**Two defects found during verification** — both by running the real path, and
+both invisible from the benchmark:
+
+1. **The reader-error fallback was the wrong direction.** `read` fell back to
+   `P_LOW` on a reader exception, which *causes* a deferral: a reader broken on
+   every message would have deferred every room in the deployment, a
+   deployment-wide slowdown wearing a scheduling choice's clothes. The fallback is
+   now `P_NONE` (*no evidence*), which `note` refuses to store, so a broken reader
+   leaves the room read exactly as before U existed.
+2. **A deferred room delayed an owner's admin confirmation.** A confirmation
+   («تأیید میکنم») is self-contained, so the classifier is right to call it
+   `low` — but the pass is what *consumes* it, so the naive rule postponed the
+   owner's already-approved action by up to the retention window. Three
+   `test_nexus.py` confirmation tests caught it. `defer` gained `waiting`, the
+   caller supplies `db.admin_pending_waiting(chat_id)`, and **a room the server is
+   waiting on is never deferred**. This is the one place the mechanism can be
+   *wrong* rather than merely slow, and it is closed at the source.
+
+**Measured** (`python3 tools/eval_awareness_schedule.py`; deterministic, offline,
+no Telegram, no model). Eight seeds, mean, same arrivals and same allowance:
+
+* **useful passes**: **44.6 % → 67.6 %** (worst seed 41.5 % → 65.0 %); ordering
+  alone, on the same workload, is **44.6 %** — i.e. exactly the baseline.
+* **requests spent**: **200 → 200** (the allowance is not raised) and **model
+  calls == passes** in both runs (no extra call anywhere).
+* **fairness improved, not traded**: starved rooms **1.0 → 0.6** (worst 2 → 2);
+  dependent messages left unread **105.4 → 59.1**; max wait **5400 s → 2732 s**;
+  p95 wait **2107 s → 562 s**.
+* **where the passes moved** (default seed): the hog `one_constant` **43 → 14**,
+  `busy_independent` **18 → 11**, while `sparse` **20 → 27**, `many_active`
+  **73 → 84**, `replies_anaphora` **9 → 16**, `addressed` **10 → 16**.
+* **the decision's own cost**: `decide_ms_p95` **< 0.1 ms** (the test floor is
+  < 5 ms); the hint store is a dict lookup.
+
+**Live probe — NOT RUN, and why.** The brief's probe is a bounded, self-cleaning
+live run against Telegram; there is **no deployed container carrying U** (the
+increment is not deployed, and the brief forbids deploying it), so a live probe
+would measure the *previous* build. The measurements above are the policy's, not a
+model's, and are not evidence that any answer improved — claiming otherwise would
+be the overclaiming this project refuses. The live probe waits on the owner's
+go-ahead and a deploy.
+
+**Known limitations.** (1) The mechanism trades **timeliness for coverage**: a room
+whose batch reads as chatter is not read for up to `NEXUS_AWARENESS_RETENTION_SECONDS`
+(1 h). Nothing is lost content-wise — the window still holds the messages, and a
+message that changes the class raises the hint and the room is read on its next
+deadline — so the exposure is exactly the classifier's false negatives. (2) The
+**one false negative the server can know about** (a pending admin confirmation) is
+closed. A **residual remains**: a bare answer to the assistant's own question
+(«بله») carries no room dependency and no server flag, so it can be postponed like
+any other chatter. Closing it needs a "the assistant is awaiting an answer" flag
+the server does not currently keep; it is recorded rather than guessed at.
+(3) The class is one of two words from a deterministic reader; a dependency worded
+in an unanticipated way reads `low`, and the cost of that is a delayed reading,
+never a wrong action.
+
+**Rollback.** U is independently revertable: `git revert <sha>` on this branch. No
+table was added or altered, no config default changed, and `awareness.due` is
+untouched. The whole evolution reverts by leaving the branch unmerged; `main` at
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state and is an
+**ancestor** of the branch.
+
+**Exact next step.** **V** (model / Gemini routing) remains **NOT SCOPED**: it
+needs an answer-quality measurement that does not exist, and the honest first step
+would be to build that evidence base rather than to change routing. **Do NOT start
+V, do NOT merge, do NOT deploy U.** Do not raise the 200-request allowance.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§4.3(d) is now RESOLVED, §5 for U/V, §7 for
+the continuation point), then verify: `git status`, `git rev-parse HEAD`,
 `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.

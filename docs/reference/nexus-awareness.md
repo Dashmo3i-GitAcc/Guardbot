@@ -4484,3 +4484,163 @@ does not take the state with it.
 * **One task per person per room.** A person genuinely running two interleaved
   tasks keeps only the most recent; ambiguity is preserved by *not* guessing
   rather than by holding both.
+
+## 66. Which room the next request reads
+
+### 66.1 The question, and why it is not a relevance question
+
+The awareness allowance is rationed in **requests**: 200 a day for the whole
+deployment, and it is not going up. Every pass therefore has an opportunity cost,
+and until increment U the scheduler had no answer to the question that follows
+from it — *given several rooms with something unread, which one should the next
+pass spend itself on?* Each room was read on its own debounce deadline, at its own
+share of the allowance, so a room whose conversation never needed reading was read
+exactly as often as one whose conversation did.
+
+U answers that question and nothing else. It is **not** a second semantic reader,
+not a second model call and not a second classifier; it does not touch
+`awareness.due`; and it does not change the allowance. The request that would have
+gone to a room of idle chatter goes instead to a room that needs a fresh reading.
+
+### 66.2 The seam: the content is read once, at capture
+
+`awareness.due` decides *whether* a room may be read, and its signature is asserted
+by a test: it may see timestamps and nothing else, because a function that could
+see the words would inevitably start deciding whether the words matter. That
+boundary is respected rather than moved.
+
+So the content never reaches the decision. It is read **once**, at capture time —
+where the text is already in hand and a row is already being written — and reduced
+to a one-word class before it is stored:
+
+    a message arrives
+          |
+    awareness.capture(...)                 the existing write; unchanged
+          |
+          +--> awareness_schedule.note(chat_id, class)   <- the new seam
+          |
+    awareness.due(row, now=...)            unchanged, still blind
+          |
+    awareness_schedule.defer(chat_id, ...) <- spend, or wait?
+          |
+    the existing pass
+
+`app/awareness_schedule.py` holds `chat_id -> (class, monotonic stamp)` and
+nothing else. The class is the **strongest** seen among the room's *unread*
+messages, so one message that needs the room outweighs the chatter around it, and
+a weaker class still refreshes the stamp because the stronger message it refers to
+is still unread. The class is produced by the project's own `context_plan.read` —
+the single boolean `wants_awareness` — reused precisely so the two layers cannot
+disagree about what "needs the room" means. There is deliberately no numeric score
+and no weight table: two classes, chosen by measurement.
+
+The store is bounded three ways and holds nothing it should not: at most
+`MAX_ROOMS` (512) entries evicted oldest-first, every entry expiring at the
+retention window, and no read that does not name the room. There is no field a
+sentence could be written into.
+
+### 66.3 The decision: spend, or wait
+
+`defer(chat_id, *, waited, waiting, now)` returns `True` only when the room's hint
+is `low`, the oldest unread message has waited less than
+`NEXUS_AWARENESS_RETENTION_SECONDS`, and the server is not waiting on the room.
+It is consulted **after** `due` has said a room is eligible and **before** the
+allowance is checked, on the ordinary path only. It can only ever *postpone*: it
+cannot make an ineligible room eligible, cannot bypass a cooldown, a brake, a
+breaker, the allowance or the switch, and cannot cause a pass the policy would have
+refused. The urgent path — an administrator's actionable-looking message — never
+asks, so the hint can delay a routine reading and never a prompted one.
+
+Four refusals make it safe rather than merely clever:
+
+* **No hint is not low.** A room never classified, or whose hint has expired, or
+  captured through `awareness.capture` directly, is read exactly as before.
+* **The bound is real**, and it is *derived* — `_bound()` is the retention window,
+  the same window whose rows a hint describes — so there is no second number to
+  drift out of step and no knob to reason about.
+* **A room the server is waiting on is never deferred** (see 66.5).
+* **The urgent path always overrides.**
+
+### 66.4 The mechanism that was rejected, and why
+
+The obvious design was to **order** the pending list by class. It was built,
+measured, and removed, and the reason is a fact about the architecture rather than
+a matter of taste: the scheduler is **event-driven per room, not batch-driven**.
+Each room is offered a pass on its own debounce deadline and admitted or refused by
+its own share of the allowance, so at any instant there is about one candidate and
+nothing to sort. Measured over eight seeds of the benchmark's workload, ordering
+changed the outcome by **exactly zero passes**; the spend decision changed it by
+twenty-three percentage points. The honest implementation is the one that does the
+work, not the one that matches the sketch.
+
+A second candidate — defer a low room only while another room holds a message that
+needs the room — is strictly safer (it can only postpone while better work is
+pending) but it is **cross-room influence**, and it is worth about one point,
+because the rooms that need the room are not holding work most of the time. It is
+recorded in the benchmark rather than shipped.
+
+Both rejected mechanisms stay reproducible in
+`tools/eval_awareness_schedule.py` (`--compare-ordering`), and
+`tests/test_awareness_schedule_eval.py` pins the negative result: if ordering ever
+starts to matter, a test fails and the mechanism becomes worth reconsidering.
+
+### 66.5 Two defects the real path found
+
+Neither was visible from the benchmark, and both were caught by running the
+production functions:
+
+1. **The reader-error fallback pointed the wrong way.** `read` fell back to `low`
+   on a reader exception — and `low` is what *causes* a deferral. A reader broken
+   on every message would therefore have deferred every room in the deployment, a
+   deployment-wide slowdown wearing a scheduling choice's clothes. It now falls
+   back to `none` (*no evidence*), which `note` refuses to store, so a broken
+   reader leaves the room read exactly as it was before U existed.
+2. **A deferred room delayed an owner's admin confirmation.** A confirmation
+   («تأیید میکنم») is self-contained, so the classifier is right to call it `low`
+   — but the **pass** is what consumes it. The naive rule postponed an
+   already-approved admin action by up to the retention window, and three
+   `test_nexus.py` confirmation tests caught it. The lesson is the sharp edge of
+   this whole mechanism: *the message does not need the room* is not *the pass does
+   not need to run*. `defer` gained `waiting`, the caller supplies
+   `db.admin_pending_waiting(chat_id)`, and a room the server is waiting on is
+   never deferred.
+
+### 66.6 Measured
+
+`python3 tools/eval_awareness_schedule.py` — deterministic, offline, no Telegram,
+no model. Ten room shapes, 28 rooms, 684 messages, 204 hand-labelled dependent,
+one simulated day at the real 200-request allowance, running the production `due`,
+the production allowance-gap formula, both scheduling paths, and the production
+`defer`. Eight-seed mean, same arrivals and same allowance for both runs:
+
+* **useful passes** (a pass is useful when the batch it read contained a message
+  that cannot be understood without the room): **44.6 % → 67.6 %**; worst seed
+  **41.5 % → 65.0 %**; ordering alone, on the same workload, is **44.6 %**.
+* **requests spent: 200 → 200**; **model calls == passes** in both runs.
+* **fairness improved, not traded**: starved rooms **1.0 → 0.6**; dependent
+  messages left unread **105.4 → 59.1**; max wait **5400 s → 2732 s**; p95 wait
+  **2107 s → 562 s**.
+* **where the passes moved** (default seed): the hog `one_constant` **43 → 14**,
+  `busy_independent` **18 → 11**, while `sparse` **20 → 27**, `many_active`
+  **73 → 84**, `replies_anaphora` **9 → 16**, `addressed` **10 → 16**.
+* **the decision's own cost**: `decide_ms_p95` **< 0.1 ms**; the store is a dict
+  lookup and the class is computed where the message is already being written.
+
+### 66.7 What it leaves
+
+* **The live probe is not run.** U is not deployed (and the brief forbids
+  deploying it), so a live probe would measure the previous build. The numbers
+  above are the *policy's*, not a model's, and are not evidence that any answer
+  improved.
+* **The mechanism trades timeliness for coverage.** A room whose batch reads as
+  chatter is not read for up to the retention window (1 h). Nothing is lost
+  content-wise — the window still holds the messages, and a message that changes
+  the class raises the hint so the room is read on its next deadline — so the
+  exposure is exactly the classifier's false negatives.
+* **The one knowable false negative is closed; a residual remains.** A bare answer
+  to the assistant's own question («بله») carries no room dependency and no server
+  flag, so it can be postponed like any other chatter. Closing it would need an
+  "awaiting an answer" flag the server does not keep. Recorded, not guessed at.
+* **The class is two words from a deterministic reader.** A dependency worded in an
+  unanticipated way reads `low`; the cost of that is a delayed reading, never a
+  wrong action.
