@@ -487,6 +487,51 @@ def init() -> None:
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_people_last_seen ON people(last_seen)"
     )
+    # ── Nexus Memory: what the server may remember about ONE person ──
+    #
+    # A *new* table rather than a column on ``people``, and the distinction is
+    # the whole point. ``people`` is per-room identity metadata with a message
+    # count and, by its own docstring, no column able to hold a fact; this holds
+    # durable facts a person asked to be remembered. Folding them together would
+    # put remembered content in the table a name lookup scans, which is a
+    # disclosure the name path has no need to make.
+    #
+    # ``(chat_id, user_id)`` is the key, so a group can never inherit another
+    # group's memory and a private-chat memory can never render in a group —
+    # isolation is by construction rather than by a check that could be
+    # forgotten. ``key`` is derived from the remembered clause, so restating the
+    # same thing updates one row instead of growing the table, and
+    # ``updated_at`` orders both the read and the prune.
+    #
+    # Every column is bounded by the caller (``app/memory.py``): there is no
+    # column for a message body, and no path writes an unbounded value. This is
+    # additive and new, so rollback is ``DROP TABLE user_memory`` — no existing
+    # table is altered and no row outside it is touched.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_memory (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT '',
+            value TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            used_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id, key))"""
+    )
+    # The shape both the retrieval and the per-user prune ask for.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memory_user "
+        "ON user_memory(chat_id, user_id, updated_at)"
+    )
+    # And the shape the age prune asks for, so that statement is a range seek
+    # rather than a scan as the table grows.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memory_updated "
+        "ON user_memory(updated_at)"
+    )
     # ── Nexus Awareness: the bounded view of the room ──
     #
     # Two tables, and they are a *different thing* from ``chat_messages`` rather
@@ -2265,6 +2310,175 @@ def people_reset() -> None:
     """Forget every recorded person. For tests."""
     with _lock:
         _conn.execute("DELETE FROM people")
+        _conn.commit()
+
+
+def memory_remember(
+    chat_id: int,
+    user_id: int,
+    key: str,
+    *,
+    category: str = "",
+    value: str = "",
+    source: str = "",
+    confidence: float = 0.0,
+) -> bool:
+    """Record or refresh one remembered clause about one person.
+
+    An upsert on ``(chat_id, user_id, key)``, because the useful thing is the
+    latest statement of a thing: a person who says "remember I prefer short
+    answers" twice should have one memory, not two. ``created_at`` is set only on
+    the insert, so the first time a thing was remembered survives a restatement
+    while ``updated_at`` moves.
+
+    The value arrives already bounded — ``app/memory.py`` clips it — so there is
+    no path here that writes an unbounded string into the table.
+    """
+    now = int(time.time())
+    _exec(
+        """INSERT INTO user_memory
+               (chat_id, user_id, key, category, value, source, confidence,
+                created_at, updated_at, used_at)
+           VALUES (?,?,?,?,?,?,?,?,?,0)
+           ON CONFLICT(chat_id, user_id, key) DO UPDATE SET
+               category=excluded.category,
+               value=excluded.value,
+               source=excluded.source,
+               confidence=excluded.confidence,
+               updated_at=excluded.updated_at""",
+        (
+            int(chat_id),
+            int(user_id),
+            str(key),
+            str(category or ""),
+            str(value or ""),
+            str(source or ""),
+            float(confidence or 0.0),
+            now,
+            now,
+        ),
+    )
+    return True
+
+
+def memory_for(chat_id: int, user_id: int, *, limit: int = 0) -> list[dict]:
+    """One person's memories in one room, most recently updated first.
+
+    Scoped by BOTH ids on purpose: the caller cannot ask for "everything about
+    this user" across rooms, which is the query that would leak a private
+    memory into a group. ``limit`` of 0 means no bound from here — the caller
+    passes the configured retrieval bound.
+    """
+    sql = (
+        "SELECT chat_id, user_id, key, category, value, source, confidence, "
+        "created_at, updated_at, used_at FROM user_memory "
+        "WHERE chat_id=? AND user_id=? ORDER BY updated_at DESC"
+    )
+    args: tuple = (int(chat_id), int(user_id))
+    if limit:
+        sql += " LIMIT ?"
+        args = args + (int(limit),)
+    with _lock:
+        rows = _conn.execute(sql, args).fetchall()
+    return [
+        {
+            "chat_id": int(row[0]),
+            "user_id": int(row[1]),
+            "key": str(row[2] or ""),
+            "category": str(row[3] or ""),
+            "value": str(row[4] or ""),
+            "source": str(row[5] or ""),
+            "confidence": float(row[6] or 0.0),
+            "created_at": int(row[7] or 0),
+            "updated_at": int(row[8] or 0),
+            "used_at": int(row[9] or 0),
+        }
+        for row in rows
+    ]
+
+
+def memory_prune_user(chat_id: int, user_id: int, *, keep: int = 0) -> int:
+    """Drop one person's oldest memories in one room beyond ``keep``.
+
+    Per-person rather than whole-table on purpose: it is the indexed statement
+    (0.02 ms measured), it runs on the observation path right after the person
+    who overflowed was written, and it never scans the table. Returns how many
+    rows were dropped.
+    """
+    if not keep or keep <= 0:
+        return 0
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM user_memory WHERE chat_id=? AND user_id=? AND key NOT IN "
+            "(SELECT key FROM user_memory WHERE chat_id=? AND user_id=? "
+            " ORDER BY updated_at DESC LIMIT ?)",
+            (int(chat_id), int(user_id), int(chat_id), int(user_id), int(keep)),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def memory_prune(*, keep: int = 0, max_age: int = 0) -> int:
+    """The whole-table retention bounds. Returns how many rows were dropped.
+
+    Two bounds, and they are not alternatives. The age bound drops a fact nobody
+    has restated for months; the global bound is the backstop for many members.
+    Both are whole-table statements, so ``app/memory.py`` runs this rarely — the
+    hot path uses the indexed ``memory_prune_user`` above — and the global bound
+    is only attempted when the table is actually over its ceiling.
+    """
+    dropped = 0
+    if max_age and max_age > 0:
+        cutoff = int(time.time()) - int(max_age)
+        with _lock:
+            cur = _conn.execute(
+                "DELETE FROM user_memory WHERE updated_at < ?", (cutoff,)
+            )
+            _conn.commit()
+            dropped += cur.rowcount
+    if keep and keep > 0:
+        with _lock:
+            total = int(
+                _conn.execute("SELECT COUNT(*) FROM user_memory").fetchone()[0]
+            )
+        if total > int(keep):
+            with _lock:
+                cur = _conn.execute(
+                    "DELETE FROM user_memory WHERE (chat_id, user_id, key) NOT IN "
+                    "(SELECT chat_id, user_id, key FROM user_memory "
+                    " ORDER BY updated_at DESC LIMIT ?)",
+                    (int(keep),),
+                )
+                _conn.commit()
+                dropped += cur.rowcount
+    return dropped
+
+
+def memory_count() -> int:
+    with _lock:
+        return int(_conn.execute("SELECT COUNT(*) FROM user_memory").fetchone()[0])
+
+
+def memory_clear_user(chat_id: int, user_id: int) -> int:
+    """Forget one person's memories in one room. Returns how many were dropped.
+
+    The "forget me" path, and the reason it is scoped by both ids is the same
+    reason the read is: a person leaving one group must not take their memory in
+    every other room with them.
+    """
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM user_memory WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def memory_reset() -> None:
+    """Forget every remembered clause. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM user_memory")
         _conn.commit()
 
 

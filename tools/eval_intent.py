@@ -63,6 +63,7 @@ from app import (  # noqa: E402
     db,
     discourse,
     entities,
+    memory,
     objects,
     referents,
     requests,
@@ -387,6 +388,23 @@ def _world(cases: list[dict]) -> None:
         log.exception("could not open the harness database")
     awareness_context.reset_rooms()
     awareness_context.note_room(EVAL_CHAT, "Guard Group", "supergroup")
+    # Give every anchor a memory, so ``user_memory`` renders in the benchmark
+    # rather than being excluded as a block the model never sees. It is the same
+    # fix the referent candidates needed: the harness's world must hold the rows
+    # the runtime's does, or the block is scored on nothing. The clause is fixed
+    # so the measurement is reproducible.
+    try:
+        db.memory_reset()
+        for user_id in sorted(
+            {int((c.get("anchor") or {}).get("user_id") or 0) for c in cases} - {0}
+        ):
+            memory.remember(
+                {"id": user_id, "is_bot": False},
+                EVAL_CHAT,
+                "یادت باشه من برنامه‌نویس پایتونم",
+            )
+    except Exception:  # noqa: BLE001 - a missing schema is not a harness failure
+        log.exception("could not seed the harness memories")
 
 
 def _context(cases: list[dict]) -> dict:

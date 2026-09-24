@@ -61,6 +61,7 @@ from . import (
     discourse,
     entities,
     identity,
+    memory,
     objects,
     persian_calendar,
     referents,
@@ -518,6 +519,29 @@ def _identity_line(user_id: int, chat_id: int, now: int) -> str:
     return "- " + ", ".join(bits)
 
 
+def _render_user_memory(ctx: Ctx) -> str:
+    """What this person asked to be remembered, if anything. Tier 1.
+
+    Keyed on the person the batch is *about* — ``ctx.anchor_id()`` — and on the
+    room, never on the speaker merely because they spoke and never across rooms.
+    The retrieval is bounded twice: ``NEXUS_MEMORY_ITEMS`` rows and
+    ``NEXUS_MEMORY_CHARS`` characters, because this is context rather than a
+    dossier. It renders nothing for the many people who have asked for nothing,
+    which is the common case and costs one indexed read.
+
+    It is a *read*: the block reports what the person asked the server to
+    remember, in their own words, and grants nothing. Authority is resolved from
+    the Telegram id elsewhere and never from a memory.
+    """
+    user_id = ctx.anchor_id()
+    if not user_id:
+        return ""
+    rows = memory.about(ctx.chat_id, user_id, limit=int(config.NEXUS_MEMORY_ITEMS))
+    if not rows:
+        return ""
+    return memory.render(rows, budget=int(config.NEXUS_MEMORY_CHARS))
+
+
 def _wants_referents(ctx: Ctx) -> bool:
     """Whether this batch is one where a pronoun needs resolving.
 
@@ -604,6 +628,19 @@ SOURCES: tuple[Source, ...] = (
     Source("calendar", TIER_ALWAYS, 400, _render_calendar),
     Source("room", TIER_ALWAYS, 200, _render_room),
     Source("remembered_people", TIER_ALWAYS, 400, _render_remembered_people),
+    # What the person the batch is about asked the server to remember. Tier 0,
+    # beside ``remembered_people`` and for the same reason: it is a query that
+    # returns nothing for most people, and a query with no result spends no
+    # tokens — so there is no predicate that would usefully make it conditional,
+    # and a conditional source that fires on every batch would misreport the
+    # cost. It goes after ``remembered_people`` because that block describes who
+    # was in the room and this one describes one of them.
+    Source(
+        "user_memory",
+        TIER_ALWAYS,
+        config.NEXUS_MEMORY_CHARS,
+        _render_user_memory,
+    ),
     # What the batch is *doing*, and what the room has left unanswered. Both are
     # tier 0 because both are cheap — a scan of the window the pass already
     # read, no query — and because both are room state the model should not have
@@ -687,6 +724,13 @@ SOURCES: tuple[Source, ...] = (
 # nothing new. What it *does* take is the part that answers "what is this
 # message doing, and who does «همون» mean" — the act, the reply graph, the
 # thread, the entities, the time reading and the resolver's candidates.
+#
+# ``user_memory`` is the one database-backed source the conversation does NOT
+# skip, and the exception is deliberate. The other three are memory *about the
+# room*; this one is memory about **the person talking to Nexus**, and the
+# anchor on this path is the message being answered — so the block is about the
+# one person the turn is for. It is also the cheapest read of the four: one
+# indexed lookup (0.03 ms measured) that returns nothing for most people.
 CONVERSATION_SKIP = frozenset(
     {"calendar", "room", "remembered_people", "admin_activity", "referenced_people"}
 )

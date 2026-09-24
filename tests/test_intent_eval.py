@@ -728,6 +728,19 @@ def test_the_person_candidates_reach_the_model():
     assert m["context_sources"]["referent_candidates"] >= 1
 
 
+def test_the_remembered_person_reaches_the_model():
+    """Increment W's block, asserted by name.
+
+    What the person the batch is about asked to be remembered must reach the
+    prompt, not merely exist in a table. The harness seeds one memory per anchor
+    so this is a real render through the source registry rather than an exclusion
+    from it — a block that never renders is a block the model never sees.
+    """
+    m = result()
+    assert m["context_sources"]["user_memory"] >= 1
+    assert "user_memory" not in eval_intent._CONTEXT_DB_BACKED
+
+
 def test_the_context_stays_within_its_ceiling():
     m = result()
     assert m["context_chars_max"] <= m["context_ceiling"]

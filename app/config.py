@@ -911,6 +911,46 @@ NEXUS_PEOPLE_RETENTION = _int("NEXUS_PEOPLE_RETENTION", 90 * 86400)
 NEXUS_PEOPLE_MAX_CANDIDATES = _int("NEXUS_PEOPLE_MAX_CANDIDATES", 8)
 
 
+# ---------------- Nexus Memory: what the server may remember about a person ---
+# A bounded, structured long-term memory about ONE person, so Nexus knows
+# something durable about a member it has not met this hour. It is deliberately
+# NOT: conversation history, the room window, Awareness, Intent, or raw messages.
+#
+# What it may hold is narrow on purpose. It records only what a person explicitly
+# asked to be remembered — the clause they typed, bounded and verbatim — never a
+# fact the server inferred from ordinary conversation. That refusal is what keeps
+# the write path free: extracting a fact from ordinary talk would need a model
+# call or a change to the awareness prompt, and the evidence rule forbids both.
+# Nothing here grants anything: a memory is data the model may read, never a
+# permission, an authorisation or a gate. Authority stays in ``app/rbac.py``.
+NEXUS_MEMORY_ENABLED = _bool("NEXUS_MEMORY_ENABLED", True)
+
+# The per-person ceiling. Sized by MEASUREMENT, not by the brief's 20–50: storage
+# is 208 bytes/row, so 30 items x 3000 members is 17.9 MB — an order of magnitude
+# under the 200 MB budget, meaning disk is not what should choose this number. The
+# real bound is what can ever be *read*: the retrieval block is ~300 characters
+# and surfaces at most ~4 items, so 30 leaves a ~7x recall margin while keeping
+# the table a bounded fact set rather than a log. The least recently updated row
+# is dropped first when a person goes over.
+NEXUS_MEMORY_MAX_PER_USER = _int("NEXUS_MEMORY_MAX_PER_USER", 30)
+
+# A global ceiling and an age bound, both applied on the observation path because
+# this process has no scheduler. The global cap is enforced rarely — a
+# whole-table prune is the one expensive statement here — while the age delete is
+# indexed and cheap. Either way a table that only grows is a table that
+# eventually stops being written to.
+NEXUS_MEMORY_MAX = _int("NEXUS_MEMORY_MAX", 50000)
+NEXUS_MEMORY_RETENTION = _int("NEXUS_MEMORY_RETENTION", 180 * 86400)
+
+# How long a single remembered clause may be, and how many of a person's memories
+# one context block may show. Both are small because this is context, not a
+# dossier: the point is that the model knows a durable thing or two about the
+# person the batch is about, not that it can enumerate them.
+NEXUS_MEMORY_VALUE_CHARS = _int("NEXUS_MEMORY_VALUE_CHARS", 200)
+NEXUS_MEMORY_ITEMS = _int("NEXUS_MEMORY_ITEMS", 4)
+NEXUS_MEMORY_CHARS = _int("NEXUS_MEMORY_CHARS", 300)
+
+
 # ---------------- Nexus Awareness: the room, understood -----------------------
 # The observation layer. Everything above decides *who may talk to Nexus and what
 # it may do*; this decides *what Nexus understands about the room it is in*.

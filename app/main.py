@@ -50,6 +50,7 @@ from . import (
     gemini_pool,
     key_store,
     media,
+    memory,
     mod_policy,
     moderation,
     net,
@@ -3000,6 +3001,16 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 1. Who, resolved from Telegram's own id and this bot's own tables.
     principal = rbac.resolve(user.id)
     text = _message_text(msg)
+
+    # Long-term user memory, also before every gate and also free. It records a
+    # clause only when the person explicitly asked to be remembered — the match
+    # is a regex over text the handler already holds, so an ordinary message
+    # costs one failed match and no write. It grants nothing: a memory is a
+    # sentence for the model to read, and authority stays in ``rbac`` above.
+    # Scoped to the group path because that is where the observation already
+    # happens; the key is ``(chat_id, user_id)``, so a private chat's memory
+    # could never render here in any case.
+    memory.remember(user, room.id, text)
 
     # 1a. Is this aimed at Nexus? Computed once and used twice — by the capture,
     #     which records it as a hint for choosing the pass's anchor, and by the
