@@ -1895,7 +1895,7 @@ NEXUS_STATUS_TEXT = os.getenv(
     "آخرین تغییر: {changed}\n"
     "توسط: {changed_by}\n"
     "پایش پیام‌های مدیرها: {observe}\n"
-    "پاسخ‌دهی به: {actors_only}\n"
+    "پاسخ‌دهی به: {answer_scope}\n"
     "درک گفتگوی گروه: {awareness}\n"
     "سرچ وب: {search}\n"
     "{mode}",
@@ -1904,15 +1904,45 @@ NEXUS_STATE_ONLINE_LABEL = os.getenv("NEXUS_STATE_ONLINE_LABEL", "روشن (ONLI
 NEXUS_STATE_OFFLINE_LABEL = os.getenv("NEXUS_STATE_OFFLINE_LABEL", "خاموش (OFFLINE)")
 NEXUS_OBSERVE_ON_LABEL = os.getenv("NEXUS_OBSERVE_ON_LABEL", "فعال")
 NEXUS_OBSERVE_OFF_LABEL = os.getenv("NEXUS_OBSERVE_OFF_LABEL", "غیرفعال")
-# Reported in `/nexus status` so the owner can see, from inside the group, which
-# of the two "who gets answered" switches is in force. Without this line the
-# actor gate is invisible: a member who addresses Nexus and gets no reply cannot
-# tell whether the gate refused them or something further in failed, and the
-# owner asked to be able to verify exactly that. The two labels read as answers
-# to "پاسخ‌دهی به" ("answers to") and are deliberately distinct from the observe
-# labels above, so a rendered status says which switch is which.
+# Reported in `/nexus status` so the owner can see, from inside the group, who
+# gets answered. The boundary is the **room**, not the speaker: every member of
+# a registered group is answered, and an administrator is not a different kind
+# of member. The line is deliberately about the room, because the previous
+# "answers only administrators / everyone" line described a speaker gate that no
+# longer decides anything.
+NEXUS_ANSWER_SCOPE_LABEL = os.getenv(
+    "NEXUS_ANSWER_SCOPE_LABEL", "همهٔ اعضای گروه‌های ثبت‌شده"
+)
+# Kept for a deployment that still sets them: they no longer affect who is
+# answered, because group conversational eligibility is decided by the room
+# allowlist and not by the speaker. Read nowhere.
 NEXUS_ACTORS_ONLY_ON_LABEL = os.getenv("NEXUS_ACTORS_ONLY_ON_LABEL", "فقط مدیرها")
 NEXUS_ACTORS_ONLY_OFF_LABEL = os.getenv("NEXUS_ACTORS_ONLY_OFF_LABEL", "همه")
+
+# ── The group allowlist's typed commands ──────────────────────────────────
+# `/registergroup` and `/unregistergroup` register or revoke the room the
+# command is typed in; `/groups` lists them. The sentences are the operator's,
+# and they say what happened rather than "done", because "which room did I just
+# authorize?" is the question that matters when the answer is not what was
+# meant.
+GROUP_REGISTER_DONE_TEXT = os.getenv(
+    "GROUP_REGISTER_DONE_TEXT",
+    "این گروه ثبت شد. از این به بعد نکسوس در این گروه فعال است و به همهٔ اعضا پاسخ می‌دهد.",
+)
+GROUP_REGISTER_NOT_A_GROUP_TEXT = os.getenv(
+    "GROUP_REGISTER_NOT_A_GROUP_TEXT", "این دستور فقط داخل گروه کار می‌کند."
+)
+GROUP_REVOKE_DONE_TEXT = os.getenv(
+    "GROUP_REVOKE_DONE_TEXT",
+    "ثبت این گروه لغو شد. نکسوس دیگر در این گروه پاسخ نمی‌دهد.",
+)
+GROUP_LIST_TITLE = os.getenv("GROUP_LIST_TITLE", "گروه‌های ثبت‌شده:")
+GROUP_LIST_EMPTY = os.getenv("GROUP_LIST_EMPTY", "هیچ گروهی ثبت نشده است.")
+GROUP_LIST_LINE = os.getenv(
+    "GROUP_LIST_LINE", "{chat_id} — {state} — افزوده توسط {added_by}"
+)
+GROUP_STATUS_ENABLED_LABEL = os.getenv("GROUP_STATUS_ENABLED_LABEL", "فعال")
+GROUP_STATUS_DISABLED_LABEL = os.getenv("GROUP_STATUS_DISABLED_LABEL", "لغو‌شده")
 # The awareness line, reported for the same reason the actor gate is: "Nexus did
 # not react" and "Nexus is not reading the room at all" look identical from
 # inside a group, and only one of them is a bug.

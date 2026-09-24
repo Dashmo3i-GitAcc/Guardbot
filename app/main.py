@@ -50,6 +50,7 @@ from . import (
     decision,
     gemini_keys,
     gemini_pool,
+    groups,
     key_store,
     media,
     memory,
@@ -705,7 +706,7 @@ async def on_media_flood(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     if not msg or not chat or not user:
         return
-    if chat.id not in config.GROUP_IDS:
+    if not authorized_group(chat.id):
         return
     # Owner exemption only (WHITELIST_USER_IDS). Telegram admins are NOT exempt:
     # the anti-flood rule applies to them too. Telegram itself decides whether
@@ -918,20 +919,22 @@ _nexus_visibility: dict[int, str] = {}
 def authorized_group(chat_id: int) -> bool:
     """Whether this chat is a group this deployment is registered to serve.
 
-    The **only** source of truth is the server-side configuration
-    (``GROUP_IDS``). Nothing else is read here, and nothing else may be used to
-    decide it: not the bot's Telegram admin status, not the bot merely being a
-    member, not the group's title or username, not a member's display name, and
-    not anything a member claims. Being *added* to a group — even promoted to
-    administrator in it — is a Telegram fact, and a Telegram fact is **not**
-    application authorization.
+    The source of truth is the shared database — the ``authorized_groups``
+    allowlist (``app/groups.py``), seeded once from ``GROUP_IDS`` on the first
+    boot and thereafter authoritative. Nothing else is read here, and nothing
+    else may be used to decide it: not the bot's Telegram admin status, not the
+    bot merely being a member, not the group's title or username, not a member's
+    display name, and not anything a member claims. Being *added* to a group —
+    even promoted to administrator in it — is a Telegram fact, and a Telegram
+    fact is **not** application authorization.
 
-    It is fail-closed: with no configured groups, nothing is authorized. This is
-    the *room* boundary; the *speaker* boundary is ``rbac`` / ``nexus.accepts``.
-    They are separate and both are required — this says the room is ours, the
-    other says the person may be answered, and neither implies the other.
+    It is fail-closed: with no registered groups, nothing is authorized. This is
+    the *room* boundary, and it is the **only** thing that decides whether a
+    group is served. Member and administrator status do **not** decide
+    conversational eligibility — an authorized room is open to every member, and
+    the speaker is not consulted here or anywhere else on this path.
     """
-    return int(chat_id) in config.GROUP_IDS
+    return groups.is_authorized(chat_id)
 
 
 def _nexus_can_observe(chat_id: int) -> bool:
@@ -959,7 +962,7 @@ def _nexus_directed(msg, ctx) -> bool:
     return nexus.is_named(_message_text(msg))
 
 
-def _nexus_will_answer(msg, ctx, user) -> bool:
+def _nexus_will_answer(msg, ctx) -> bool:
     """Whether the conversational layer will actually answer this message.
 
     The acquisition pipeline has to know this in order to stand down, and it is
@@ -972,15 +975,16 @@ def _nexus_will_answer(msg, ctx, user) -> bool:
     trial by acquisition, which is the double-handling that comment forbids.
 
     The three conditions are the chat handler's own gates rather than a second
-    reading of them — it must be able to answer, the sender must be one it
-    accepts, and the message must be aimed at it. ``accepts`` is what keeps this
-    from over-reaching: an ordinary member is not accepted while
-    ``NEXUS_ACTORS_ONLY`` is on, so naming the assistant costs them nothing and
-    their trial offer still happens.
+    reading of them — it must be able to answer, the room must be authorized, and
+    the message must be aimed at it. The room is what decides eligibility, not
+    the sender: every member of a registered group is answered, so a member
+    naming the assistant must stand the acquisition offer down exactly as an
+    administrator does, or the one message would get both a reply and a trial.
     """
     if not _chat_active() or not _nexus_directed(msg, ctx):
         return False
-    return nexus.accepts(rbac.resolve(user.id))
+    chat_id = int(getattr(msg, "chat_id", 0) or 0)
+    return nexus.accepts_in_group(room_authorized=authorized_group(chat_id))
 
 
 def _nexus_observe(room, user, msg, text: str) -> bool:
@@ -1281,8 +1285,9 @@ async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
     exception. Only then is the response decision applied, and the two
     conditions on it are the existing security boundary rather than anything new:
 
-    * the speaker must be one Nexus answers at all (``nexus.accepts``), which is
-      where ``NEXUS_ACTORS_ONLY`` still means what it always meant; and
+    * the room must be one Nexus serves and the layer must be awake
+      (``nexus.accepts_in_group``) — the speaker does not decide eligibility,
+      because an authorized room is open to every member; and
     * if a write tool ran, the confirmation is sent regardless of what the model
       decided to say — an action that happened and was never acknowledged is the
       failure the addressed path already goes out of its way to avoid.
@@ -1332,7 +1337,6 @@ async def _awareness_read(
         return
 
     actor_id = int(speaker.get("user_id") or 0)
-    principal = rbac.resolve(actor_id)
     counters: dict = {"writes": 0}
     tools, context, on_tool = await _awareness_turn(
         ctx, chat_id, actor_id, speaker=speaker, counters=counters
@@ -1452,12 +1456,14 @@ async def _awareness_read(
     )
     if not wants_to_speak:
         return
-    if not nexus.accepts(principal):
-        # The existing gate, unchanged and unweakened: with ``NEXUS_ACTORS_ONLY``
-        # on, an ordinary member's message is understood and still not answered.
-        # Awareness observes; it does not widen who may talk to Nexus.
+    if not nexus.accepts_in_group(room_authorized=authorized_group(chat_id)):
+        # The room boundary, plus "the layer is awake". Awareness observes a
+        # room; it does not widen who may talk to Nexus, and it does not narrow
+        # it either — an authorized room is open to every member, so this only
+        # ever refuses when Nexus is off or the room is not ours.
         log.info(
-            "awareness stayed silent: speaker is not an actor chat=%s actor=%s",
+            "awareness stayed silent: room not served or Nexus offline chat=%s "
+            "actor=%s",
             chat_id,
             actor_id,
         )
@@ -1766,6 +1772,24 @@ async def awareness_sweep(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _nexus_state_request(operation: str, actor: rbac.Principal, chat_id: int):
     """One typed state-change request, stamped the way every other one is."""
+    return admin_service.AdminRequest(
+        operation=operation,
+        chat_id=chat_id,
+        actor_id=actor.user_id,
+        request_id=admin_service.new_request_id(),
+        interface=admin_service.INTERFACE_PYTHON,
+        at=int(time.time()),
+    )
+
+
+def _group_request(operation: str, actor: rbac.Principal, chat_id: int):
+    """One typed allowlist request for the room the command was typed in.
+
+    The subject is the *current room*, never an id parsed out of the message:
+    there is no argument a person could name a different group with, so
+    registering a room and being in it are the same act. Authority is decided in
+    ``app/admin_service.py`` and not here.
+    """
     return admin_service.AdminRequest(
         operation=operation,
         chat_id=chat_id,
@@ -2094,8 +2118,14 @@ async def _owner_voice_command(
     return True
 
 
-def _nexus_status_text() -> str:
-    """The operator's view of Nexus: the state, who changed it, and the mode."""
+def _nexus_status_text(*, chat_id: int | None = None) -> str:
+    """The operator's view of Nexus: the state, who changed it, and the mode.
+
+    The mode and switch lines describe the whole deployment — Nexus is either
+    online or not — but the awareness line is scoped to ``chat_id`` when given,
+    because the report is rendered inside a room and one room's activity must
+    not be readable from another.
+    """
     described = nexus.describe()
     changed_at = described["changed_at"]
     changed = (
@@ -2114,13 +2144,12 @@ def _nexus_status_text() -> str:
                 if described["observe_admins"]
                 else config.NEXUS_OBSERVE_OFF_LABEL
             ),
-            # Read from the live config rather than from ``described`` so the
-            # line and the gate can never disagree: ``accepts`` consults
-            # ``config.NEXUS_ACTORS_ONLY`` directly, and this is the same read.
-            actors_only=(
-                config.NEXUS_ACTORS_ONLY_ON_LABEL
-                if config.NEXUS_ACTORS_ONLY
-                else config.NEXUS_ACTORS_ONLY_OFF_LABEL
+            # Read from the live room allowlist rather than from a cached line,
+            # so the status can never claim a scope the gate does not hold: the
+            # boundary is the room, and every member of a registered room is
+            # answered.
+            answer_scope=(
+                f"{config.NEXUS_ANSWER_SCOPE_LABEL} ({groups.count()})"
             ),
             awareness=(
                 config.NEXUS_AWARENESS_ON_LABEL
@@ -2137,7 +2166,7 @@ def _nexus_status_text() -> str:
     # Where the deployment cannot actually see the room. Reported rather than
     # hidden, because "Nexus ignored what I said" and "Nexus never received what
     # I said" look identical from inside a group and only one of them is a bug.
-    blind = [str(c) for c in config.GROUP_IDS if not _nexus_can_observe(c)]
+    blind = [str(c) for c in groups.all_ids() if not _nexus_can_observe(c)]
     if blind:
         lines.append(
             config.NEXUS_VISIBILITY_WARNING.format(chat_id="، ".join(blind))
@@ -2148,7 +2177,7 @@ def _nexus_status_text() -> str:
     # describes. Neither can fail the command: a status report that raises is a
     # status report an operator cannot use.
     try:
-        lines.append(awareness.metrics_line())
+        lines.append(awareness.metrics_line(chat_id=chat_id))
     except Exception:  # noqa: BLE001 - a status line is never worth a crash
         log.exception("could not build the awareness metrics line")
     try:
@@ -2184,7 +2213,7 @@ async def _nexus_visibility_report(app) -> None:
     logged, and a group where it does not hold gets a warning rather than a
     silent degradation.
     """
-    for chat_id in config.GROUP_IDS:
+    for chat_id in groups.all_ids():
         status = "unknown"
         try:
             me = await app.bot.get_chat_member(chat_id, app.bot.id)
@@ -3309,22 +3338,25 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """The assistant, in a group. The Nexus gate, in order.
 
     Every step before the model is a lookup, and the order is the requirement
-    rather than a preference: identity, role, state, relevance, and only then an
-    AI call. An ordinary member is refused at the second step and their message
-    never reaches Gemini; an administrator who is not talking to Nexus is
-    recorded as context at the fourth and costs nothing either.
+    rather than a preference: the room boundary, then identity, state, relevance,
+    and only then an AI call. The boundary is the **room**: an unregistered group
+    is refused at the first step and its messages never reach Gemini, while an
+    ordinary member of a registered group is answered like anybody else — the
+    speaker does not gate ordinary conversation. A member who is not talking to
+    Nexus is left to the awareness layer and costs nothing.
     """
     msg = update.effective_message
     room = update.effective_chat
     user = update.effective_user
     if not msg or not room or not user or user.is_bot:
         return
-    # The group boundary, first and before anything else. A room that is not in
-    # the server-side configuration is not served at all — no identity write, no
-    # awareness capture, no model call. Being added to a group, or made an
-    # administrator in it, does not register it; only ``GROUP_IDS`` does. Every
-    # gate below this one is about the *speaker*; this one is about the *room*,
-    # and both are required.
+    # The group boundary, first and before anything else. A room without an
+    # enabled row in the server-side allowlist is not served at all — no identity
+    # write, no awareness capture, no model call. Being added to a group, or made
+    # an administrator in it, does not register it; only an explicit
+    # registration (the Owner, or a server-side administrative workflow) does.
+    # This gate is about the *room*; once it passes, every member of the room is
+    # eligible for ordinary conversation.
     if not authorized_group(room.id):
         return
     if was_deleted(room.id, getattr(msg, "message_id", 0)):
@@ -3397,10 +3429,12 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if await _owner_state_command(update, ctx, principal, text):
         return
 
-    # 3. Authorized, and awake. Both refusals are silent: an ordinary member is
-    #    not told they were ignored, and a switched-off assistant does not
-    #    announce itself every time somebody speaks.
-    if not nexus.accepts(principal):
+    # 3. Authorized, and awake. The room was gated at the top, so what remains
+    #    here is only "is the layer awake" — the speaker does not enter into it.
+    #    Both refusals are silent: an ordinary member is not told they were
+    #    ignored, and a switched-off assistant does not announce itself every
+    #    time somebody speaks.
+    if not nexus.accepts_in_group(room_authorized=True):
         return
 
     # 4. Aimed at Nexus, or left to the room. Only the first is understood
@@ -3439,12 +3473,13 @@ async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     """A private message to the bot. The owner's own channel, and only theirs.
 
     The private boundary is a *different* gate from the group one, not a
-    stricter setting of it. In a group, an administrator is answered because the
-    room is already public and moderating it is their job; a private chat has
-    exactly one reader, so the only defensible rule is that it belongs to the
-    owner. ``nexus.accepts_private`` is that rule, and it is deliberately not
-    reachable by ``NEXUS_ACTORS_ONLY``, by an administrator role, or by anything
-    written in the message.
+    stricter setting of it. In a group the boundary is the *room*: once it is
+    registered, every member is answered, because the room is already public and
+    the speaker is not what decides it. A private chat has exactly one reader, so
+    the only defensible rule is that it belongs to the owner.
+    ``nexus.accepts_private`` is that rule, and it is deliberately not reachable
+    by an administrator role, by the group room allowlist, or by anything written
+    in the message.
 
     Two consequences, both intended and both stated here so they are not
     rediscovered as bugs:
@@ -4063,8 +4098,115 @@ async def cmd_nexus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply_in_group(
         ctx,
         room.id,
-        f"{config.NEXUS_STATUS_TITLE}\n{_nexus_status_text()}",
+        f"{config.NEXUS_STATUS_TITLE}\n{_nexus_status_text(chat_id=room.id)}",
         reply_to=msg.message_id,
+    )
+
+
+async def cmd_register_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/registergroup` — authorize the room this command was typed in.
+
+    The typed interface to the room allowlist, and it is deliberately the only
+    interface: registering a group is a grant of access, so it needs a person
+    acting directly rather than a model proposing it, and a typed command is not
+    gated because a person typing is already the authority. Authority is decided
+    in ``app/admin_service.py`` (``config.manage`` — the owner and senior
+    admins), and the subject is always the current room.
+
+    It works inside a group that is not yet registered, which is the entire
+    point: the command handlers are not room-gated, so this is how a new room
+    becomes one.
+    """
+    await _group_command(update, ctx, "register_group")
+
+
+async def cmd_unregister_group(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/unregistergroup` — soft-revoke the room this command was typed in.
+
+    The row is kept and only disabled, so the room is fail-closed from the next
+    message on and can be registered again without losing the record of who
+    turned it off.
+    """
+    await _group_command(update, ctx, "unregister_group")
+
+
+async def _group_command(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE, operation: str
+) -> None:
+    """The shared body of the two allowlist commands."""
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    if getattr(room, "type", "") not in ("group", "supergroup"):
+        await _reply_in_group(
+            ctx, room.id, config.GROUP_REGISTER_NOT_A_GROUP_TEXT, reply_to=msg.message_id
+        )
+        return
+    actor = _actor(update)
+    result = await admin_service.execute(
+        _group_request(operation, actor, room.id),
+        TelegramGateway(ctx),
+        actor=actor,
+        bot_id=getattr(ctx.bot, "id", 0),
+    )
+    if not result.ok:
+        log.info(
+            "group command refused actor=%s op=%s outcome=%s reason=%s",
+            actor.user_id, operation, result.outcome, result.reason,
+        )
+        await _reply_in_group(
+            ctx, room.id, _refusal_text(result), reply_to=msg.message_id
+        )
+        return
+    await _reply_in_group(
+        ctx,
+        room.id,
+        config.GROUP_REGISTER_DONE_TEXT
+        if operation == "register_group"
+        else config.GROUP_REVOKE_DONE_TEXT,
+        reply_to=msg.message_id,
+    )
+
+
+async def cmd_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/groups` — list the registered rooms and their state.
+
+    Read-only, and gated on ``config.manage`` like the writes: which rooms the
+    deployment serves is operational detail, not something a stranger needs the
+    bot to recite.
+    """
+    msg = update.effective_message
+    room = update.effective_chat
+    if not msg or not room:
+        return
+    actor = _actor(update)
+    decision = rbac.authorize(actor, "config.manage")
+    if not decision:
+        _audit(actor.user_id, "group.list", decision.reason, chat_id=room.id)
+        await _reply_in_group(ctx, room.id, _deny_text(decision), reply_to=msg.message_id)
+        return
+    rows = groups.list_rows()
+    if not rows:
+        await _reply_in_group(ctx, room.id, config.GROUP_LIST_EMPTY, reply_to=msg.message_id)
+        return
+    lines = [config.GROUP_LIST_TITLE]
+    for row in rows:
+        lines.append(
+            config.GROUP_LIST_LINE.format(
+                chat_id=row["chat_id"],
+                state=(
+                    config.GROUP_STATUS_ENABLED_LABEL
+                    if row["enabled"]
+                    else config.GROUP_STATUS_DISABLED_LABEL
+                ),
+                added_by=row["added_by"] or "-",
+            )
+        )
+    await _reply_in_group(
+        ctx, room.id, "\n".join(lines), reply_to=msg.message_id
     )
 
 
@@ -4177,7 +4319,7 @@ async def cmd_pool(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         gemini_pool.status_report()
         + "\n\n"
         + "— AI administration —\n"
-        + admin_service.status_report(),
+        + admin_service.status_report(chat_id=room.id),
         reply_to=msg.message_id,
     )
 
@@ -4251,6 +4393,9 @@ def admin_command_handlers() -> tuple[tuple[str, object], ...]:
         ("pool", cmd_pool),
         (config.GEMINI_KEYS_COMMAND, cmd_keys),
         ("nexus", cmd_nexus),
+        ("groups", cmd_groups),
+        ("registergroup", cmd_register_group),
+        ("unregistergroup", cmd_unregister_group),
         ("agent", cmd_agent),
         ("promote", cmd_promote),
         ("demote", cmd_demote),
@@ -4298,6 +4443,9 @@ OWNER_COMMAND_LABELS = (
     (config.GEMINI_KEYS_COMMAND, "کلیدهای Gemini — افزودن، حذف و مصرف"),
     ("pool", "وضعیت استخر و حساب‌های Gemini"),
     ("nexus", "روشن یا خاموش کردن دستیار"),
+    ("groups", "لیست گروه‌های ثبت‌شده"),
+    ("registergroup", "ثبت این گروه برای پاسخ‌دهی نکسوس"),
+    ("unregistergroup", "لغو ثبت این گروه"),
     ("agent", "درخواست تغییر کد"),
     ("admins", "لیست مدیران"),
     ("promote", "ارتقای یک نفر به مدیر"),
@@ -5256,7 +5404,7 @@ async def on_group_text_moderation(
     user = update.effective_user
     if not msg or not chat or not user or user.is_bot:
         return
-    if chat.id not in config.GROUP_IDS:
+    if not authorized_group(chat.id):
         return
     if user.id in config.WHITELIST_USER_IDS:
         return
@@ -5397,7 +5545,7 @@ async def on_group_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     user = update.effective_user
     if not msg or not chat or not user or user.is_bot:
         return
-    if chat.id not in config.GROUP_IDS:
+    if not authorized_group(chat.id):
         return
     if user.id in config.WHITELIST_USER_IDS:
         return
@@ -5466,7 +5614,7 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not msg or not chat or not user or not msg.text:
         return
-    if user.is_bot or chat.id not in config.GROUP_IDS:
+    if user.is_bot or not authorized_group(chat.id):
         return
 
     # A message aimed at the bot is a conversation, not an intent. This is the
@@ -5480,7 +5628,7 @@ async def on_group_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # conversational layer will actually answer — see ``_nexus_will_answer`` for
     # the messages that used to fall through this line and get both.
     if _chat_active() and (
-        _addressed_to_bot(msg, ctx) or _nexus_will_answer(msg, ctx, user)
+        _addressed_to_bot(msg, ctx) or _nexus_will_answer(msg, ctx)
     ):
         return
 
@@ -5758,15 +5906,16 @@ async def post_init(app: Application) -> None:
     await _nexus_visibility_report(app)
     # The state, and what it means for who gets answered. One line, because
     # "the assistant is silent" has four different causes and this is the one
-    # that says which.
+    # that says which. Who is answered is decided by the room allowlist, not by
+    # an actor gate, so the line reports the registered rooms.
     log.info(
-        "Nexus state: %s actors_only=%s observe_admins=%s names=%d",
+        "Nexus state: %s rooms=%d observe_admins=%s names=%d",
         nexus.state(),
-        "on" if config.NEXUS_ACTORS_ONLY else "off",
+        groups.count(),
         "on" if config.NEXUS_OBSERVE_ADMINS else "off",
         len(nexus.names()),
     )
-    log.info("GuardBot started. Groups: %s", config.GROUP_IDS)
+    log.info("GuardBot started. Groups: %s", list(groups.all_ids()))
     # One line that makes the egress path a fact rather than an assumption. If
     # the AI ever starts timing out, this is what says whether an address family
     # was involved, instead of leaving it to be guessed at from a support report.
@@ -5990,6 +6139,12 @@ def main() -> None:
     # was switched off must come back up switched off, and a lazy read would let
     # the first message arrive while the state was still unknown.
     nexus.load()
+    # Read the room allowlist before anything can answer. This is also where a
+    # first boot against an empty table seeds it from ``GROUP_IDS``, so an
+    # existing deployment keeps serving its rooms with no downtime — and where a
+    # revocation survives a restart, because the seed is guarded by "the table
+    # has ever held a row" and not by "it is currently empty".
+    groups.load()
     # Before anything opens a socket, so every later AI call — classifier and
     # conversation alike — resolves through the IPv6-first ordering. Best
     # effort: on a host without global IPv6 it declines and the bot runs

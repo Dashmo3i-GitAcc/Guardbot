@@ -63,7 +63,6 @@ def awareness_env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(config, "GROUP_IDS", [CHAT])
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", True)
     monkeypatch.setattr(config, "NEXUS_OBSERVE_ADMINS", True)
     monkeypatch.setattr(config, "NEXUS_NAMES", ["nexus", "نکسوس"])
     monkeypatch.setattr(config, "NEXUS_PEOPLE_ENABLED", True)
@@ -718,23 +717,14 @@ def test_a_reply_that_failed_to_send_is_not_recorded():
 
 
 # ══ 5. The security boundary ══════════════════════════════════════════════
-def test_an_ordinary_member_is_understood_but_not_answered(monkeypatch):
-    """``NEXUS_ACTORS_ONLY`` still means what it meant: awareness is not a way in."""
-    bot = FakeBot()
-    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "نکسوس بیا")
-    install_awareness(
-        monkeypatch,
-        decision={"relevant": True, "respond": True, "message": "سلام!"},
-    )
-    asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
-    assert bot.messages == []
-    # Understood, though — the room is still read.
-    assert awareness.state(CHAT)
+def test_an_ordinary_member_is_answered_in_a_registered_room(monkeypatch):
+    """The room decides eligibility, not the speaker: a member is answered too.
 
-
-def test_turning_actors_only_off_restores_answering_members(monkeypatch):
-    """The switch still moves exactly what it moved before."""
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", False)
+    This is the room boundary rather than a loosening of it — the message is in
+    a registered room, so the awareness layer may speak. Understanding is still
+    not authority: a tool the member's role does not hold is refused by the
+    service exactly as before.
+    """
     bot = FakeBot()
     capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "نکسوس بیا")
     install_awareness(
@@ -743,6 +733,23 @@ def test_turning_actors_only_off_restores_answering_members(monkeypatch):
     )
     asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
     assert bot.messages == ["سلام!"]
+    assert awareness.state(CHAT)
+
+
+def test_the_awareness_pass_will_not_answer_an_unregistered_room(monkeypatch):
+    """The room boundary is the gate, and it is fail-closed for the pass too."""
+    from app import groups
+
+    groups.load()  # seed the allowlist, then revoke the room
+    groups.revoke(CHAT, actor_id=OWNER)
+    bot = FakeBot()
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "نکسوس بیا")
+    install_awareness(
+        monkeypatch,
+        decision={"relevant": True, "respond": True, "message": "سلام!"},
+    )
+    asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
+    assert bot.messages == []
 
 
 def test_an_ordinary_member_is_not_given_a_tool_surface(monkeypatch):
@@ -781,17 +788,24 @@ def test_a_privileged_action_from_awareness_still_goes_through_the_service(monke
 
 
 def test_a_member_cannot_get_an_action_through_awareness(monkeypatch):
-    """The same request from somebody without the permission does nothing."""
+    """The same request from somebody without the permission does nothing.
+
+    The room may answer the member — the boundary is the room — but the action
+    is re-authorised from the actor's id and refused, so nothing reaches
+    Telegram. Understanding is not authority.
+    """
     bot = FakeBot()
     capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "اون کاربر رو بن کن")
-    install_awareness(
+    passes = install_awareness(
         monkeypatch,
         decision={"relevant": True, "respond": True, "message": "بن شد."},
         call=("ban_member", {"target_user_id": STRANGER}),
     )
     asyncio.run(main._awareness_pass(ctx_for(bot), CHAT, pending_row()))
-    assert bot.actions == []
-    assert bot.messages == []
+    assert bot.actions == [], "a member's request reached Telegram"
+    # And the stronger guarantee underneath it: the member was offered no tool
+    # surface at all, so the request could not even be proposed.
+    assert passes[0]["tools"] is None
 
 
 def test_a_malformed_tool_call_is_refused_rather_than_repaired(monkeypatch):
@@ -1375,10 +1389,10 @@ def test_the_sweeper_is_not_registered_when_awareness_is_off():
     assert "NEXUS_AWARENESS_ENABLED" in source
 
 
-def test_capture_happens_before_every_gate():
-    """The room is understood whether or not anybody in it may talk to Nexus."""
+def test_capture_happens_before_the_answering_gate():
+    """The room is understood whether or not anybody is being answered."""
     source = inspect.getsource(main.on_group_chat)
-    assert source.index("_awareness_capture") < source.index("nexus.accepts")
+    assert source.index("_awareness_capture") < source.index("nexus.accepts_in_group")
 
 
 def test_the_status_report_shows_the_awareness_state(monkeypatch):

@@ -46,6 +46,7 @@ from . import (
     awareness,
     config,
     db,
+    groups,
     identity,
     nexus,
     rbac,
@@ -998,10 +999,11 @@ def build_context(
     )
     # The two gates are not the same question, and a model that is told only the
     # first one will promise an answer it cannot give. A private chat belongs to
-    # the owner alone; a group answers its administrators. Stating both is the
-    # same rule the rest of this block follows — say what the server knows, so
-    # the right answer is the easy one — and it grants nothing: the gate itself
-    # is in ``app/main.py`` and is not reachable from here.
+    # the owner alone; a group is answered because the *room* is registered, and
+    # every member of it is answered. Stating both is the same rule the rest of
+    # this block follows — say what the server knows, so the right answer is the
+    # easy one — and it grants nothing: the gate itself is in ``app/main.py`` and
+    # is not reachable from here.
     lines.append(
         "Actor may talk to Nexus in this chat: "
         + (
@@ -1009,7 +1011,7 @@ def build_context(
             if (
                 nexus.accepts_private(principal)
                 if chat_type == "private"
-                else nexus.accepts(principal)
+                else groups.is_authorized(chat_id)
             )
             else "no"
         )
@@ -1741,7 +1743,7 @@ async def run_read_tool(
         answer = {
             "chat_id": chat_id,
             "bot_id": bot_id,
-            "group_count": len(config.GROUP_IDS),
+            "group_count": groups.count(),
             "mute_minutes": int(config.MUTE_MINUTES),
             "nexus_online": nexus.is_online(),
         }
@@ -1768,7 +1770,9 @@ async def run_read_tool(
             # reported here as the effective state — configuration and the
             # owner's switch together — because that is what the gates act on.
             "awareness_reading_the_room": awareness.enabled(),
-            "answers_only_administrators": bool(config.NEXUS_ACTORS_ONLY),
+            # The boundary is the room, not the speaker: every member of a
+            # registered group is answered, so there is no actor gate to report.
+            "answers_all_members_in_registered_groups": True,
             "observes_administrators": bool(config.NEXUS_OBSERVE_ADMINS),
             "who_may_switch_it": "the owner only",
         }
@@ -1795,7 +1799,7 @@ async def run_read_tool(
     if name == "get_agent_status":
         request_id = str((args or {}).get("request_id", "") or "").strip()
         if request_id:
-            return agent_data.agent_task_view(request_id)
+            return agent_data.agent_task_view(request_id, chat_id=chat_id)
         return agent_status(chat_id=chat_id)
 
     # -- operational history: read-only, redacted, bounded -------------------
@@ -1898,6 +1902,10 @@ def agent_status(*, chat_id: int = 0, limit: int = 6) -> dict:
 
     No task bodies and no results. The model already has the conversation; what
     it does not have is the server's record of state, and that is all this is.
+
+    Scoped to the room the assistant is answering in: a task raised in one group
+    is not shown in another. The host runner and the owner's own status command
+    keep the deployment-wide view; this is the group-facing one.
     """
     from . import agent_bridge
 
@@ -1911,11 +1919,11 @@ def agent_status(*, chat_id: int = 0, limit: int = 6) -> dict:
             "danger": row.get("danger", ""),
         }
 
-    active = db.agent_task_active()
+    active = db.agent_task_active(chat_id=chat_id)
     waiting = [r for r in active if r.get("status") == "waiting_for_owner"]
     recent = [
         r
-        for r in db.agent_task_recent(limit=limit)
+        for r in db.agent_task_recent(limit=limit, chat_id=chat_id)
         if r.get("status") not in db.AGENT_ACTIVE_STATUSES
     ]
     return {

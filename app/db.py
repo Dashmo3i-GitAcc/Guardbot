@@ -200,6 +200,38 @@ def init() -> None:
             updated_at INTEGER NOT NULL,
             note TEXT NOT NULL DEFAULT '')"""
     )
+    # The authoritative allowlist of Telegram groups this deployment serves.
+    #
+    # This is the *room* boundary: a room is served only if it has an enabled
+    # row here, and nothing else — not the bot being added to it, not being made
+    # an administrator in it, not its title or username — makes a room
+    # authorized. The key is the canonical numeric Telegram chat id, which is
+    # globally unique (negative for groups), so a room cannot be named into or
+    # renamed into authorization.
+    #
+    # The row is the tenant record for the room: the id is the tenant key the
+    # rest of the schema scopes by, and the columns here are its lifecycle and
+    # audit metadata. It is deliberately **not** deleted on revoke — ``enabled``
+    # goes to 0 and ``revoked_by``/``revoked_at`` are stamped, because a row that
+    # vanished would let the one-time seed from ``GROUP_IDS`` resurrect a room
+    # the owner removed, and because "who turned this room off, and when" is the
+    # question asked afterwards.
+    #
+    # ``GROUP_IDS`` is the bootstrap: it seeds this table once, on the first boot
+    # against an empty table, so an existing deployment keeps its rooms with no
+    # downtime. After that the table is authoritative.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS authorized_groups (
+            chat_id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            title TEXT NOT NULL DEFAULT '',
+            added_by INTEGER NOT NULL DEFAULT 0,
+            added_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            revoked_by INTEGER NOT NULL DEFAULT 0,
+            revoked_at INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT '')"""
+    )
     # Every sensitive administrative decision, allowed or refused.
     #
     # Written for refusals as well as successes, because "who tried" is the
@@ -748,6 +780,11 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status "
         "ON agent_tasks(status, created_at)"
     )
+    # Defensive: the tenant column. A task is raised in a room, and the room is
+    # part of the task's identity so that two groups cannot collide on one
+    # request id or read each other's task text and result. Fresh installs get
+    # it from the CREATE above; this covers a database that predates it.
+    _ensure_column("agent_tasks", "chat_id", "INTEGER NOT NULL DEFAULT 0")
     # One row per Telegram update this bot has already handled.
     #
     # Telegram re-delivers an update whenever it is not certain the bot received
@@ -1377,6 +1414,130 @@ def _split_perms(value: str) -> list[str]:
     return [p for p in (value or "").split(",") if p]
 
 
+# ── Authorized groups (the room allowlist) ────────────────────────────────
+# The authoritative source for which Telegram rooms this deployment serves.
+# Every group-scoped gate reads this through ``app/groups.py`` and nothing else;
+# the row is also the tenant record the rest of the schema scopes by.
+_GROUP_COLS = (
+    "chat_id, enabled, title, added_by, added_at, updated_at, "
+    "revoked_by, revoked_at, note"
+)
+
+
+def _group_row(row) -> dict:
+    return {
+        "chat_id": int(row[0]),
+        "enabled": bool(row[1]),
+        "title": row[2] or "",
+        "added_by": int(row[3]),
+        "added_at": int(row[4]),
+        "updated_at": int(row[5]),
+        "revoked_by": int(row[6]),
+        "revoked_at": int(row[7]),
+        "note": row[8] or "",
+    }
+
+
+def authorized_group_get(chat_id: int) -> dict | None:
+    """One room's allowlist row, or None if it was never registered."""
+    with _lock:
+        row = _conn.execute(
+            f"SELECT {_GROUP_COLS} FROM authorized_groups WHERE chat_id=?",
+            (int(chat_id),),
+        ).fetchone()
+    return _group_row(row) if row is not None else None
+
+
+def authorized_group_list(*, enabled_only: bool = False) -> list[dict]:
+    """Every registered room, newest first. Revoked rows are retained."""
+    sql = f"SELECT {_GROUP_COLS} FROM authorized_groups"
+    if enabled_only:
+        sql += " WHERE enabled=1"
+    sql += " ORDER BY added_at DESC, chat_id"
+    with _lock:
+        rows = _conn.execute(sql).fetchall()
+    return [_group_row(r) for r in rows]
+
+
+def authorized_group_set(
+    chat_id: int, *, enabled: bool = True, added_by: int = 0,
+    title: str = "", note: str = "",
+) -> None:
+    """Register a room, or re-enable one that was revoked.
+
+    Upsert, and the same shape as ``admin_set``: the numeric ``chat_id`` is the
+    key, so registering a room that already exists is a state change rather than
+    a duplicate. ``added_by``/``added_at`` record who first registered it and are
+    kept across a re-enable; a re-enable clears ``revoked_by``/``revoked_at`` so
+    a live room is never stamped as revoked.
+    """
+    now = int(time.time())
+    _exec(
+        """INSERT INTO authorized_groups
+               (chat_id, enabled, title, added_by, added_at, updated_at,
+                revoked_by, revoked_at, note)
+           VALUES (?,?,?,?,?,?,0,0,?)
+           ON CONFLICT(chat_id) DO UPDATE SET
+               enabled=excluded.enabled,
+               title=excluded.title,
+               updated_at=excluded.updated_at,
+               revoked_by=0,
+               revoked_at=0,
+               note=excluded.note""",
+        (
+            int(chat_id), 1 if enabled else 0, str(title)[:200], int(added_by),
+            now, now, str(note)[:200],
+        ),
+    )
+
+
+def authorized_group_disable(chat_id: int, *, revoked_by: int = 0) -> int:
+    """Soft-revoke a room. Returns 1 if a row changed, 0 if it was unknown.
+
+    Never a delete: the row is the room's tenant record and its audit metadata,
+    and a vanished row would let the one-time ``GROUP_IDS`` seed resurrect a room
+    the owner removed.
+    """
+    now = int(time.time())
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE authorized_groups SET enabled=0, revoked_by=?, revoked_at=?, "
+            "updated_at=? WHERE chat_id=? AND enabled=1",
+            (int(revoked_by), now, now, int(chat_id)),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def authorized_group_ids() -> list[int]:
+    """The chat ids of every enabled room. The boundary's read."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT chat_id FROM authorized_groups WHERE enabled=1"
+        ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def authorized_group_any() -> bool:
+    """Whether the table has ever held a row. The one-time seed guard.
+
+    Asked before seeding from ``GROUP_IDS``: a revoked row keeps the table
+    non-empty, so a room the owner turned off is never resurrected by a restart.
+    """
+    with _lock:
+        row = _conn.execute(
+            "SELECT 1 FROM authorized_groups LIMIT 1"
+        ).fetchone()
+    return row is not None
+
+
+def authorized_groups_reset() -> None:
+    """Drop every allowlist row. For tests only — never called in production."""
+    with _lock:
+        _conn.execute("DELETE FROM authorized_groups")
+        _conn.commit()
+
+
 def audit_write(
     actor_id: int,
     action: str,
@@ -1452,13 +1613,22 @@ def _audit_row(r) -> dict:
     }
 
 
-def audit_recent(limit: int = 20) -> list[dict]:
-    """The newest audit rows, newest first. For the operator's own inspection."""
+def audit_recent(limit: int = 20, *, chat_id: int | None = None) -> list[dict]:
+    """The newest audit rows, newest first. For the operator's own inspection.
+
+    With no ``chat_id`` this is the owner's deployment-wide view. With one it is
+    scoped to that room, so a group-facing caller (``/pool``, a group's status)
+    can never read another group's administrative history.
+    """
+    sql = f"SELECT {_AUDIT_COLS} FROM admin_audit"
+    args: list = []
+    if chat_id is not None:
+        sql += " WHERE chat_id = ?"
+        args.append(int(chat_id))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(max(1, int(limit)))
     with _lock:
-        rows = _conn.execute(
-            f"SELECT {_AUDIT_COLS} FROM admin_audit ORDER BY id DESC LIMIT ?",
-            (max(1, int(limit)),),
-        ).fetchall()
+        rows = _conn.execute(sql, tuple(args)).fetchall()
     return [_audit_row(r) for r in rows]
 
 
@@ -2363,9 +2533,14 @@ def people_prune(*, keep: int = 0, max_age: int = 0) -> int:
 
     Both bounds are needed and they are not alternatives. The age bound drops
     somebody who has not been seen for months; the row bound drops the least
-    recently seen rows once the table is over its ceiling. A table with only the
+    recently seen rows once a room is over its ceiling. A table with only the
     first would still grow without limit in a busy group, and one with only the
     second would keep a person who left a year ago because nobody new arrived.
+
+    ``keep`` is a **per-room** ceiling: the rows are ranked within their own
+    ``chat_id``, so a busy group can never evict another group's people. The age
+    bound stays global, because "nobody has seen this person for months" is a
+    statement about the person, not about one room.
     """
     dropped = 0
     if max_age and max_age > 0:
@@ -2377,9 +2552,13 @@ def people_prune(*, keep: int = 0, max_age: int = 0) -> int:
     if keep and keep > 0:
         with _lock:
             cur = _conn.execute(
-                "DELETE FROM people WHERE (chat_id, user_id) NOT IN "
-                "(SELECT chat_id, user_id FROM people "
-                " ORDER BY last_seen DESC LIMIT ?)",
+                "DELETE FROM people WHERE (chat_id, user_id) NOT IN ("
+                "  SELECT chat_id, user_id FROM ("
+                "    SELECT chat_id, user_id,"
+                "           ROW_NUMBER() OVER ("
+                "             PARTITION BY chat_id ORDER BY last_seen DESC"
+                "           ) AS rn"
+                "    FROM people) WHERE rn <= ?)",
                 (int(keep),),
             )
             _conn.commit()
@@ -2508,10 +2687,14 @@ def memory_prune(*, keep: int = 0, max_age: int = 0) -> int:
     """The whole-table retention bounds. Returns how many rows were dropped.
 
     Two bounds, and they are not alternatives. The age bound drops a fact nobody
-    has restated for months; the global bound is the backstop for many members.
+    has restated for months; the row bound is the backstop for many members.
     Both are whole-table statements, so ``app/memory.py`` runs this rarely — the
-    hot path uses the indexed ``memory_prune_user`` above — and the global bound
-    is only attempted when the table is actually over its ceiling.
+    hot path uses the indexed ``memory_prune_user`` above — and the row bound is
+    only attempted when some room is actually over its ceiling.
+
+    ``keep`` is a **per-room** ceiling: rows are ranked within their own
+    ``chat_id``, so a busy group cannot evict another group's memories. The age
+    bound stays global, because a stale fact is stale regardless of the room.
     """
     dropped = 0
     if max_age and max_age > 0:
@@ -2524,15 +2707,21 @@ def memory_prune(*, keep: int = 0, max_age: int = 0) -> int:
             dropped += cur.rowcount
     if keep and keep > 0:
         with _lock:
-            total = int(
-                _conn.execute("SELECT COUNT(*) FROM user_memory").fetchone()[0]
-            )
-        if total > int(keep):
+            busiest = _conn.execute(
+                "SELECT COALESCE(MAX(c), 0) FROM ("
+                "  SELECT COUNT(*) AS c FROM user_memory GROUP BY chat_id)"
+            ).fetchone()[0]
+        if int(busiest) > int(keep):
             with _lock:
                 cur = _conn.execute(
-                    "DELETE FROM user_memory WHERE (chat_id, user_id, key) NOT IN "
-                    "(SELECT chat_id, user_id, key FROM user_memory "
-                    " ORDER BY updated_at DESC LIMIT ?)",
+                    "DELETE FROM user_memory "
+                    "WHERE (chat_id, user_id, key) NOT IN ("
+                    "  SELECT chat_id, user_id, key FROM ("
+                    "    SELECT chat_id, user_id, key,"
+                    "           ROW_NUMBER() OVER ("
+                    "             PARTITION BY chat_id ORDER BY updated_at DESC"
+                    "           ) AS rn"
+                    "    FROM user_memory) WHERE rn <= ?)",
                     (int(keep),),
                 )
                 _conn.commit()
@@ -2811,11 +3000,13 @@ def state_clear(
 
 
 def state_prune(*, keep: int = 0, max_age: int = 0) -> int:
-    """The global backstop and the age bound. Returns rows dropped.
+    """The per-room backstop and the age bound. Returns rows dropped.
 
     The age bound is the one that matters — a task idle past its TTL is over —
-    and it is indexed. The global bound is the same whole-table backstop
-    ``memory_prune`` uses, attempted only when the table is over its ceiling.
+    and it is indexed. The row bound is the backstop ``memory_prune`` uses,
+    attempted only when some room is over its ceiling, and it is a **per-room**
+    ceiling: rows are ranked within their own ``chat_id``, so a busy group
+    cannot evict another group's active state.
     """
     dropped = 0
     if max_age and max_age > 0:
@@ -2828,15 +3019,21 @@ def state_prune(*, keep: int = 0, max_age: int = 0) -> int:
             dropped += cur.rowcount
     if keep and keep > 0:
         with _lock:
-            total = int(
-                _conn.execute("SELECT COUNT(*) FROM conversation_state").fetchone()[0]
-            )
-        if total > int(keep):
+            busiest = _conn.execute(
+                "SELECT COALESCE(MAX(c), 0) FROM ("
+                "  SELECT COUNT(*) AS c FROM conversation_state GROUP BY chat_id)"
+            ).fetchone()[0]
+        if int(busiest) > int(keep):
             with _lock:
                 cur = _conn.execute(
-                    "DELETE FROM conversation_state WHERE (chat_id, user_id) NOT IN "
-                    "(SELECT chat_id, user_id FROM conversation_state "
-                    " ORDER BY updated_at DESC LIMIT ?)",
+                    "DELETE FROM conversation_state "
+                    "WHERE (chat_id, user_id) NOT IN ("
+                    "  SELECT chat_id, user_id FROM ("
+                    "    SELECT chat_id, user_id,"
+                    "           ROW_NUMBER() OVER ("
+                    "             PARTITION BY chat_id ORDER BY updated_at DESC"
+                    "           ) AS rn"
+                    "    FROM conversation_state) WHERE rn <= ?)",
                     (int(keep),),
                 )
                 _conn.commit()
@@ -3519,7 +3716,7 @@ def group_purge(ttl: int) -> int:
         return cur.rowcount
 
 
-def group_pending() -> list[dict]:
+def group_pending(chat_id: int | None = None) -> list[dict]:
     """Every room with a message the awareness pass has not yet read.
 
     One query, grouped by chat, and the numbers it returns are exactly what the
@@ -3527,6 +3724,10 @@ def group_pending() -> list[dict]:
     has been waiting), when the newest one arrived (whether the room has gone
     quiet), and the highest id (what to record as understood once the pass
     finishes).
+
+    With no ``chat_id`` this is the deployment-wide view (the awareness pass
+    walks every pending room). With one it reports only that room, so a group's
+    status can never be assembled from another group's unread traffic.
 
     A room with no ``awareness_state`` row is pending by definition, because
     ``COALESCE`` treats "never analysed" as "understood nothing".
@@ -3539,13 +3740,19 @@ def group_pending() -> list[dict]:
     that never ends and never stops spending the awareness allowance. Only a
     human speaking makes a room worth reading again.
     """
+    where = "WHERE g.role != 'nexus' AND g.id > COALESCE(a.seen_message_id, 0)"
+    args: tuple = ()
+    if chat_id is not None:
+        where += " AND g.chat_id = ?"
+        args = (int(chat_id),)
     with _lock:
         rows = _conn.execute(
             "SELECT g.chat_id, MIN(g.at), MAX(g.at), MAX(g.id), COUNT(*) "
             "FROM group_messages g "
             "LEFT JOIN awareness_state a ON a.chat_id = g.chat_id "
-            "WHERE g.role != 'nexus' AND g.id > COALESCE(a.seen_message_id, 0) "
-            "GROUP BY g.chat_id"
+            + where
+            + " GROUP BY g.chat_id",
+            args,
         ).fetchall()
     return [
         {
@@ -3677,22 +3884,34 @@ def awareness_reset() -> None:
         _conn.commit()
 
 
-def awareness_summary() -> dict:
-    """Aggregate awareness counters across every room.
+def awareness_summary(chat_id: int | None = None) -> dict:
+    """Aggregate awareness counters, across every room or one room.
 
     Derived from the per-room rows that already exist rather than from a second
     counter store: two places recording the same number is two places for them
     to disagree, and the per-room row is the thing a pass actually writes. One
     query, no model, cheap enough to call from a status command.
+
+    With no ``chat_id`` this is the deployment-wide view (the owner's). With one
+    it reports only that room, so a group's status can never be assembled from
+    other groups' activity.
     """
+    where = ""
+    args: tuple = ()
+    if chat_id is not None:
+        where = " WHERE chat_id=?"
+        args = (int(chat_id),)
     with _lock:
         row = _conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(passes),0), COALESCE(SUM(relevant),0), "
             "COALESCE(SUM(about_user_id != 0),0) "
-            "FROM awareness_state"
+            "FROM awareness_state" + where,
+            args,
         ).fetchone()
         replies = _conn.execute(
             "SELECT COUNT(*) FROM group_messages WHERE role='nexus'"
+            + (" AND chat_id=?" if chat_id is not None else ""),
+            args,
         ).fetchone()
     return {
         "rooms": int(row[0] or 0),
@@ -3708,12 +3927,20 @@ def awareness_summary() -> dict:
     }
 
 
-def group_role_counts() -> dict:
-    """How many captured messages each role has, as ``{role: count}``."""
+def group_role_counts(chat_id: int | None = None) -> dict:
+    """How many captured messages each role has, as ``{role: count}``.
+
+    Scoped to one room when ``chat_id`` is given, so a group's role breakdown
+    is its own; deployment-wide otherwise.
+    """
+    sql = "SELECT role, COUNT(*) FROM group_messages"
+    args: tuple = ()
+    if chat_id is not None:
+        sql += " WHERE chat_id=?"
+        args = (int(chat_id),)
+    sql += " GROUP BY role"
     with _lock:
-        rows = _conn.execute(
-            "SELECT role, COUNT(*) FROM group_messages GROUP BY role"
-        ).fetchall()
+        rows = _conn.execute(sql, args).fetchall()
     return {str(r[0] or "member"): int(r[1] or 0) for r in rows}
 
 
@@ -3896,8 +4123,15 @@ def agent_task_update(request_id: str, **fields) -> dict | None:
     return _agent_row(row) if row else None
 
 
-def agent_task_active(*, repository: str = "", actor_id: int = 0) -> list[dict]:
-    """Tasks that are still going, oldest first, optionally filtered."""
+def agent_task_active(
+    *, repository: str = "", actor_id: int = 0, chat_id: int = 0
+) -> list[dict]:
+    """Tasks that are still going, oldest first, optionally filtered.
+
+    ``chat_id`` scopes the read to one room. It is optional so the host runner,
+    which drives the whole deployment, can still see every task; a group-facing
+    caller passes the room it is answering in and sees only that room's tasks.
+    """
     placeholders = ",".join("?" for _ in AGENT_ACTIVE_STATUSES)
     sql = (
         f"SELECT {_AGENT_COLS} FROM agent_tasks WHERE status IN ({placeholders})"
@@ -3909,32 +4143,46 @@ def agent_task_active(*, repository: str = "", actor_id: int = 0) -> list[dict]:
     if actor_id:
         sql += " AND actor_id=?"
         args.append(int(actor_id))
+    if chat_id:
+        sql += " AND chat_id=?"
+        args.append(int(chat_id))
     sql += " ORDER BY created_at ASC, rowid ASC"
     with _lock:
         rows = _conn.execute(sql, tuple(args)).fetchall()
     return [_agent_row(r) for r in rows]
 
 
-def agent_task_running(*, repository: str = "") -> list[dict]:
+def agent_task_running(*, repository: str = "", chat_id: int = 0) -> list[dict]:
     """Tasks a runner has claimed and not finished."""
     sql = f"SELECT {_AGENT_COLS} FROM agent_tasks WHERE status='running'"
     args: list = []
     if repository:
         sql += " AND repository=?"
         args.append(str(repository)[:80])
+    if chat_id:
+        sql += " AND chat_id=?"
+        args.append(int(chat_id))
     sql += " ORDER BY started_at ASC, rowid ASC"
     with _lock:
         rows = _conn.execute(sql, tuple(args)).fetchall()
     return [_agent_row(r) for r in rows]
 
 
-def agent_task_recent(limit: int = 5, *, actor_id: int = 0) -> list[dict]:
+def agent_task_recent(
+    limit: int = 5, *, actor_id: int = 0, chat_id: int = 0
+) -> list[dict]:
     """The newest tasks, for a status report. Bounded."""
     sql = f"SELECT {_AGENT_COLS} FROM agent_tasks"
     args: list = []
+    clauses: list[str] = []
     if actor_id:
-        sql += " WHERE actor_id=?"
+        clauses.append("actor_id=?")
         args.append(int(actor_id))
+    if chat_id:
+        clauses.append("chat_id=?")
+        args.append(int(chat_id))
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
     args.append(max(1, min(int(limit), 50)))
     with _lock:
@@ -3942,7 +4190,7 @@ def agent_task_recent(limit: int = 5, *, actor_id: int = 0) -> list[dict]:
     return [_agent_row(r) for r in rows]
 
 
-def agent_task_waiting(*, actor_id: int = 0) -> list[dict]:
+def agent_task_waiting(*, actor_id: int = 0, chat_id: int = 0) -> list[dict]:
     """Tasks waiting for the owner's explicit confirmation, oldest first.
 
     ``started_at=0`` is the whole distinction between the two reasons a task
@@ -3960,6 +4208,9 @@ def agent_task_waiting(*, actor_id: int = 0) -> list[dict]:
     if actor_id:
         sql += " AND actor_id=?"
         args.append(int(actor_id))
+    if chat_id:
+        sql += " AND chat_id=?"
+        args.append(int(chat_id))
     sql += " ORDER BY created_at ASC, rowid ASC"
     with _lock:
         rows = _conn.execute(sql, tuple(args)).fetchall()

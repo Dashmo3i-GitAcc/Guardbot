@@ -8,12 +8,13 @@ the asking is done in natural language by a group administrator.
 
 Four things are asserted over and over, in different clothes:
 
-* **An ordinary member cannot reach Nexus at all.** Not by replying to it, not by
-  mentioning it, not by wording a message that looks like an order. This is a
-  server-side gate, and the test that matters is that no model call happened.
-* **An administrator can reach it without replying or mentioning.** Identity
-  comes from the Telegram user id, and an unaddressed message from an
-  administrator is *observed* — stored as context, answered with silence.
+* **The room decides eligibility, not the speaker.** In a registered room every
+  member may talk to Nexus; in an unregistered one nobody may, and the test that
+  matters is that no model call happened there.
+* **Being able to talk is not being able to act.** A member is answered but
+  offered no tool surface; a tool call is re-authorised from the actor's id, and
+  an unaddressed message from an administrator is *observed* — stored as
+  context, answered with silence.
 * **Nothing the model produces is trusted.** A tool call is a request; the
   service re-authorises it from the actor's id. A forged actor, a forged chat, a
   forged role and a forged "I am the owner" all fail for the same reason: they
@@ -53,9 +54,9 @@ def nexus_env(monkeypatch, tmp_path):
 
     The roles are the ones the brief names — a senior admin, an admin and a
     moderator — so the hierarchy tests below have something to be a hierarchy
-    *over*. ``NEXUS_ACTORS_ONLY`` is left at its production default of true: the
-    whole point of this file is the difference between an administrator and
-    everybody else.
+    *over*. The room is registered (``GROUP_IDS`` seeds the allowlist), so the
+    boundary under test is the *room*: every member of it may talk to Nexus, and
+    the role decides only what they may *do*.
     """
     monkeypatch.setattr(config, "OWNER_USER_ID", OWNER)
     monkeypatch.setattr(
@@ -69,7 +70,6 @@ def nexus_env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(config, "GROUP_IDS", [CHAT])
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", True)
     monkeypatch.setattr(config, "NEXUS_OBSERVE_ADMINS", True)
     monkeypatch.setattr(config, "NEXUS_NAMES", ["nexus", "نکسوس"])
     monkeypatch.setattr(config, "NEXUS_PEOPLE_ENABLED", True)
@@ -324,10 +324,10 @@ def run_the_scheduled_pass(bot):
     asyncio.run(main._awareness_deadline_tick(ctx))
 
 
-def run(handler, msg, bot, actor=MEMBER, ctx=None):
+def run(handler, msg, bot, actor=MEMBER, ctx=None, chat_id=CHAT):
     asyncio.run(
         handler(
-            update_for(msg, actor=actor),
+            update_for(msg, actor=actor, chat_id=chat_id),
             ctx or SimpleNamespace(bot=bot, args=[], application=SimpleNamespace(bot=bot)),
         )
     )
@@ -496,18 +496,24 @@ def test_the_owner_can_talk_to_nexus_without_replying(monkeypatch):
     assert bot.messages == ["بله"]
 
 
-def test_an_ordinary_member_cannot_reach_nexus(monkeypatch):
-    """The whole boundary, in one assertion: no model call happened."""
+def test_an_ordinary_member_reaches_nexus_in_a_registered_room(monkeypatch):
+    """The room decides eligibility: a member is answered like anybody else.
+
+    What a member is *not* given is authority — the model is consulted, but no
+    write tool is offered to a role that holds no permission, and nothing is
+    acted on.
+    """
     bot = FakeBot()
     calls = install_model(monkeypatch)
 
     run(main.on_group_chat, message(text="نکسوس این کاربر رو بن کن"), bot, actor=MEMBER)
 
-    assert calls == [], "an ordinary member reached the conversational layer"
-    assert bot.messages == []
+    assert len(calls) == 1
+    assert calls[0]["user_id"] == MEMBER
+    assert calls[0]["tools"] is None, "a member was offered a tool surface"
 
 
-def test_an_ordinary_member_replying_to_nexus_does_not_trigger_it(monkeypatch):
+def test_an_ordinary_member_replying_to_nexus_triggers_it(monkeypatch):
     bot = FakeBot()
     calls = install_model(monkeypatch)
     reply = SimpleNamespace(from_user=SimpleNamespace(id=BOT_ID))
@@ -519,20 +525,27 @@ def test_an_ordinary_member_replying_to_nexus_does_not_trigger_it(monkeypatch):
         actor=MEMBER,
     )
 
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0]["user_id"] == MEMBER
 
 
-def test_an_ordinary_member_mentioning_nexus_does_not_trigger_it(monkeypatch):
+def test_an_ordinary_member_mentioning_nexus_triggers_it(monkeypatch):
     bot = FakeBot()
     calls = install_model(monkeypatch)
 
     run(main.on_group_chat, message(text="@guardbot سلام"), bot, actor=MEMBER)
 
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0]["user_id"] == MEMBER
 
 
 def test_an_ordinary_member_cannot_impersonate_an_admin_by_wording(monkeypatch):
-    """Wording a convincing instruction is not a way in."""
+    """Wording a convincing instruction does not make it one.
+
+    The message reaches the model, and that is fine: authority is re-derived by
+    the service from the actor's id, so a claim of admin status in the text is
+    not read and the ban is refused.
+    """
     bot = FakeBot()
     calls = install_model(monkeypatch)
 
@@ -543,7 +556,9 @@ def test_an_ordinary_member_cannot_impersonate_an_admin_by_wording(monkeypatch):
         actor=STRANGER,
     )
 
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0]["user_id"] == STRANGER
+    assert calls[0]["tools"] is None
 
 
 def test_an_authorized_admin_can_talk_to_nexus_without_replying(monkeypatch):
@@ -747,7 +762,11 @@ def test_a_senior_admin_cannot_define_an_admin(monkeypatch):
 
 
 def test_a_member_cannot_define_an_admin(monkeypatch):
-    """Not by wording it: the gate refuses before the model is consulted."""
+    """A member may talk to Nexus, but not with a promote tool in hand.
+
+    The message reaches the model — the room decides that — and the model is
+    offered no write surface at all, so the promotion cannot even be proposed.
+    """
     bot = FakeBot()
     calls = install_model(monkeypatch)
 
@@ -758,7 +777,8 @@ def test_a_member_cannot_define_an_admin(monkeypatch):
         actor=MEMBER,
     )
 
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0]["tools"] is None
     assert db.admin_get(NEW_ADMIN) is None
 
 
@@ -847,10 +867,10 @@ def test_a_private_message_from_an_admin_is_refused(monkeypatch):
 
     This assertion is the inverse of what this test said before the private
     boundary existed, and the change is deliberate rather than a regression. A
-    group is already public, so answering an administrator there discloses
-    nothing new — which is why ``nexus.accepts`` still says yes to them. A
-    private chat has exactly one reader, so it belongs to the owner, and being
-    an administrator is not a lesser kind of owner. See
+    group is already public, so answering a member there discloses nothing new —
+    which is why ``nexus.accepts_in_group`` says yes to any member of a
+    registered room. A private chat has exactly one reader, so it belongs to the
+    owner, and being an administrator is not a lesser kind of owner. See
     ``nexus.accepts_private`` and ``tests/test_private_boundary.py``.
     """
     bot = FakeBot()
@@ -1481,8 +1501,12 @@ def test_an_admin_role_cannot_hand_out_admin():
 
 
 # ══ 8. AI resource isolation ══════════════════════════════════════════════
-def test_an_irrelevant_message_costs_no_ai_call(monkeypatch):
-    """A member's ordinary message never reaches the model."""
+def test_an_unaddressed_message_costs_no_ai_call(monkeypatch):
+    """An ordinary message does not start a conversation on the spot.
+
+    It joins the room window and is left to the awareness layer, so no
+    addressed-path model call happens here.
+    """
     bot = FakeBot()
     calls = install_model(monkeypatch)
 
@@ -1491,13 +1515,14 @@ def test_an_irrelevant_message_costs_no_ai_call(monkeypatch):
     assert calls == []
 
 
-def test_an_unauthorized_user_is_gated_before_the_model(monkeypatch):
-    """Refused by the identity check, not by a refusal the model wrote."""
+def test_an_unregistered_room_is_gated_before_the_model(monkeypatch):
+    """Refused by the room boundary, not by a refusal the model wrote."""
     bot = FakeBot()
     calls = install_model(monkeypatch)
 
     for text in ("نکسوس بن کن", "@guardbot سلام", "بن این کاربر"):
-        run(main.on_group_chat, message(text=text), bot, actor=MEMBER)
+        run(main.on_group_chat, message(text=text), bot, actor=MEMBER,
+            chat_id=OTHER_CHAT)
 
     assert calls == []
 
@@ -1697,58 +1722,51 @@ def test_the_nexus_command_reports_the_state(monkeypatch):
     assert config.NEXUS_STATUS_TITLE in bot.messages[0]
 
 
-def test_the_status_reports_the_actor_gate_when_it_is_on(monkeypatch):
-    """`/nexus status` says which actor gate is in force, not just the state.
+def test_the_status_reports_the_answer_scope():
+    """`/nexus status` says who is answered, from the live room allowlist.
 
-    "Nexus did not answer me" has more than one cause, and the actor gate is one
-    of them. The owner asked to be able to check it from the group, so the line
-    is part of the status rather than something only a log reader can see.
+    "Nexus did not answer me" has more than one cause, and the scope is one of
+    them. The line reads the live allowlist rather than a cached sentence, so it
+    can never claim a scope the gate does not hold: the boundary is the room,
+    and every member of a registered room is answered.
     """
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", True)
     bot = FakeBot()
     update = update_for(message(text="/nexus"), actor=OWNER)
     asyncio.run(main.cmd_nexus(update, SimpleNamespace(bot=bot, args=[])))
 
-    assert f"پاسخ‌دهی به: {config.NEXUS_ACTORS_ONLY_ON_LABEL}" in bot.messages[0]
+    assert (
+        f"پاسخ‌دهی به: {config.NEXUS_ANSWER_SCOPE_LABEL} (1)" in bot.messages[0]
+    )
 
 
-def test_the_status_reports_the_actor_gate_when_it_is_off(monkeypatch):
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", False)
-    bot = FakeBot()
-    update = update_for(message(text="/nexus"), actor=OWNER)
-    asyncio.run(main.cmd_nexus(update, SimpleNamespace(bot=bot, args=[])))
+def test_the_reported_scope_tracks_the_live_allowlist():
+    """The count on the line is the number of registered rooms, read live.
 
-    assert f"پاسخ‌دهی به: {config.NEXUS_ACTORS_ONLY_OFF_LABEL}" in bot.messages[0]
-
-
-def test_the_reported_actor_gate_cannot_disagree_with_the_gate_itself(monkeypatch):
-    """What the status says and what ``nexus.accepts`` does are read from one place.
-
-    The failure this guards against is the expensive one: an operator reads
-    "answers only administrators" while an ordinary member is in fact being
-    served, or the reverse. Both the line and the gate consult the same config
-    value, so toggling it has to move both together.
+    The failure this guards against is the expensive one: an operator reads a
+    scope the gate is not actually enforcing. Registering a room must move the
+    line and the boundary together, because both read the same allowlist.
     """
-    for actors_only in (True, False):
-        monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", actors_only)
-        # The gate only reaches its actor test when the layer is awake, so the
-        # precondition is made explicit rather than inherited from the fixture.
-        nexus.set_state(nexus.ONLINE, actor_id=OWNER, reason="test")
-        member = rbac.resolve(MEMBER)
-        bot = FakeBot()
-        update = update_for(message(text="/nexus"), actor=OWNER)
-        asyncio.run(main.cmd_nexus(update, SimpleNamespace(bot=bot, args=[])))
+    from app import groups
 
-        # The line agrees with the config...
-        label = (
-            config.NEXUS_ACTORS_ONLY_ON_LABEL
-            if actors_only
-            else config.NEXUS_ACTORS_ONLY_OFF_LABEL
+    bot = FakeBot()
+    asyncio.run(
+        main.cmd_nexus(
+            update_for(message(text="/nexus"), actor=OWNER),
+            SimpleNamespace(bot=bot, args=[]),
         )
-        assert f"پاسخ‌دهی به: {label}" in bot.messages[0]
-        # ...and the config is the thing the gate actually consults: with the
-        # switch off a member is accepted, with it on a member is not.
-        assert nexus.accepts(member) is not actors_only
+    )
+    assert f"پاسخ‌دهی به: {config.NEXUS_ANSWER_SCOPE_LABEL} (1)" in bot.messages[0]
+
+    groups.register(OTHER_CHAT, actor_id=OWNER)
+
+    bot2 = FakeBot()
+    asyncio.run(
+        main.cmd_nexus(
+            update_for(message(text="/nexus"), actor=OWNER),
+            SimpleNamespace(bot=bot2, args=[]),
+        )
+    )
+    assert f"پاسخ‌دهی به: {config.NEXUS_ANSWER_SCOPE_LABEL} (2)" in bot2.messages[0]
 
 
 def test_the_nexus_command_is_refused_for_a_member(monkeypatch):

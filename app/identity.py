@@ -80,15 +80,27 @@ def uuid_for(user_id: int) -> str:
     return str((row or {}).get("uuid") or "")
 
 
-def _names_for(user_id: int) -> dict:
-    """The name metadata recorded for this user across every room they spoke in.
+def _names_for(user_id: int, *, chat_id: int = 0) -> dict:
+    """The name metadata recorded for this user, in one room or across all.
 
     Read from ``people``, which stores names and nothing else. The most recent
     row wins for the primary name — Telegram lets a person rename themselves,
     and the latest is what somebody in the room would have seen.
+
+    ``chat_id`` scopes the read to one room, and that is the isolation rule: a
+    group's answer may only use the names this person used *there*. The list of
+    rooms a person has been seen in (``chats``) is group-specific membership, so
+    it is returned only on the unscoped path — an operator's view, never a
+    group's.
     """
     try:
-        rows = [r for r in db.people_rows(limit=0) if int(r.get("user_id") or 0) == int(user_id)]
+        rows = [
+            r
+            for r in (
+                db.people_rows(int(chat_id)) if chat_id else db.people_rows(limit=0)
+            )
+            if int(r.get("user_id") or 0) == int(user_id)
+        ]
     except Exception:  # noqa: BLE001
         log.exception("could not read the name metadata for an identity")
         rows = []
@@ -107,9 +119,12 @@ def _names_for(user_id: int) -> dict:
         ).strip()
         if full and full not in aliases:
             aliases.append(full)
-        chat_id = int(row.get("chat_id") or 0)
-        if chat_id and chat_id not in chats:
-            chats.append(chat_id)
+        # Membership is group-specific, so it is only ever assembled for the
+        # unscoped (operator) view.
+        if not chat_id:
+            cid = int(row.get("chat_id") or 0)
+            if cid and cid not in chats:
+                chats.append(cid)
     name = " ".join(
         p for p in (latest.get("first_name", ""), latest.get("last_name", "")) if p
     ).strip()
@@ -169,7 +184,7 @@ def describe(user_id: int, *, chat_id: int = 0) -> dict:
     if user_id <= 0:
         return {"error": "no user id supplied"}
     principal = rbac.resolve(user_id)
-    names = _names_for(user_id)
+    names = _names_for(user_id, chat_id=chat_id)
     identity = db.identity_get(user_id) or {}
     strikes = 0
     if chat_id:
@@ -183,7 +198,11 @@ def describe(user_id: int, *, chat_id: int = 0) -> dict:
         "name": names.get("name", ""),
         "username": names.get("username", ""),
         "aliases": names.get("aliases", []),
-        "chats_seen": names.get("chats", []),
+        # Group membership and the audit trail are group-specific facts. They
+        # are reported only on the unscoped (operator) view; a group's answer
+        # gets neither, so one room's answer can never name another room this
+        # person is in or read another room's history.
+        "chats_seen": names.get("chats", []) if not chat_id else [],
         "message_count": names.get("seen", 0),
         "first_seen": names.get("first_seen", 0),
         "last_seen": names.get("last_seen", 0),
@@ -195,7 +214,7 @@ def describe(user_id: int, *, chat_id: int = 0) -> dict:
         "permissions": sorted(principal.permissions),
         "role_source": principal.source,
         "strikes": strikes,
-        "recent_audit": _audit_for(user_id, chat_id=chat_id),
+        "recent_audit": _audit_for(user_id, chat_id=chat_id) if chat_id else [],
     }
 
 
@@ -276,7 +295,10 @@ def _resolve(query: str, *, chat_id: int = 0) -> dict:
 
     if _ID_RE.match(raw):
         user_id = int(raw)
-        known = db.identity_get(user_id) is not None or bool(_names_for(user_id)["chats"])
+        # "Has this id ever been seen" is a question about the canonical global
+        # identity, not about any one room, so it is answered from the global
+        # handle table rather than from the per-room name memory.
+        known = db.identity_get(user_id) is not None
         if not known:
             # A well-formed id nobody has ever seen. It is still a usable
             # target — Telegram will accept it — but the caller is told it is

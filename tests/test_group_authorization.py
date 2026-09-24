@@ -1,15 +1,17 @@
-"""The group boundary: a group is served only if the server says so.
+"""The room boundary: a group is served only if the server says so.
 
-A Telegram group does **not** become authorized because the bot was added to it,
-because the bot was made an administrator there, because of the group's title or
-username, because of a member's display name, or because of anything a member
-claims. The only source of truth is the server-side configuration
-(``GROUP_IDS``), and the boundary is enforced **before any Chat/AI work** — no
+The boundary is the **room**, not the speaker. A Telegram group does not become
+authorized because the bot was added to it, because the bot was made an
+administrator there, because of the group's title or username, because of a
+member's display name, or because of anything a member claims. The only source
+of truth is the server-side allowlist (``authorized_groups``, seeded once from
+``GROUP_IDS``), and the boundary is enforced **before any Chat/AI work** — no
 identity write, no awareness capture, no model call for an unregistered room.
 
-The two boundaries are separate and both required: the *room* boundary
-(``main.authorized_group``) and the *speaker* boundary (``rbac`` /
-``nexus.accepts``). Neither implies the other.
+Once a room is authorized, *every* member of it is eligible for ordinary
+conversation. Member and administrator status do not gate ordinary chat; they
+only decide what a person may *do* (``rbac``), never whether they may be
+answered.
 
 Nothing here talks to Telegram or to Google. ``chat.reply`` is replaced, so
 "no model call happened" is exact rather than inferred from a log.
@@ -19,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import chat, config, db, main, nexus, people, web_search
+from app import chat, config, db, groups, main, nexus, people, web_search
 
 OWNER = 999
 ADMIN = 556
@@ -37,7 +39,6 @@ def env(monkeypatch, tmp_path):
     # The one authorized room. ``OTHER_CHAT`` is deliberately *not* in here.
     monkeypatch.setattr(config, "GROUP_IDS", [CHAT])
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", True)
     monkeypatch.setattr(config, "NEXUS_OBSERVE_ADMINS", True)
     monkeypatch.setattr(config, "NEXUS_NAMES", ["nexus", "نکسوس"])
     monkeypatch.setattr(config, "NEXUS_PEOPLE_ENABLED", True)
@@ -57,6 +58,8 @@ def env(monkeypatch, tmp_path):
     db.people_reset()
     db.nexus_state_reset()
     db.awareness_reset()
+    db.authorized_groups_reset()
+    groups.reset_state()
     nexus.reset_state()
     people.reset_state()
     chat.reset_state()
@@ -76,6 +79,8 @@ def env(monkeypatch, tmp_path):
     db.people_reset()
     db.nexus_state_reset()
     db.awareness_reset()
+    db.authorized_groups_reset()
+    groups.reset_state()
     nexus.reset_state()
     people.reset_state()
     main._nexus_visibility.clear()
@@ -169,13 +174,15 @@ def run(handler, msg, bot, *, actor=MEMBER, chat_id=CHAT, chat_type="supergroup"
 
 
 # ── The helper is the boundary, and it is fail-closed ─────────────────────
-def test_authorized_group_reads_only_the_configured_list():
+def test_authorized_group_reads_only_the_registered_rooms():
     assert main.authorized_group(CHAT) is True
     assert main.authorized_group(OTHER_CHAT) is False
 
 
 def test_authorized_group_is_fail_closed_with_no_groups(monkeypatch):
     monkeypatch.setattr(config, "GROUP_IDS", [])
+    groups.reset_state()
+    db.authorized_groups_reset()
     assert main.authorized_group(CHAT) is False
     assert main.authorized_group(OTHER_CHAT) is False
 
@@ -220,14 +227,63 @@ def test_denial_happens_before_any_awareness_capture_or_model_call(monkeypatch):
     assert bot.messages == []
 
 
+def test_denial_happens_before_any_identity_write(monkeypatch):
+    """The room boundary comes before ``people.remember``, so nothing is stored."""
+    install_model(monkeypatch)
+    bot = FakeBot()
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
+        actor=MEMBER, chat_id=OTHER_CHAT)
+
+    assert db.people_rows(OTHER_CHAT) == []
+
+
 def test_the_owner_does_not_bypass_the_group_boundary(monkeypatch):
-    """Owner authorization is the *speaker* boundary; the room boundary is
+    """Owner status is about what a person may *do*; the room boundary is
     independent, so the owner is refused in an unregistered group too."""
     calls = install_model(monkeypatch)
     bot = FakeBot()
 
     run(main.on_group_chat, message(text="نکسوس سلام"), bot,
         actor=OWNER, chat_id=OTHER_CHAT)
+
+    assert calls == []
+
+
+def test_an_ordinary_member_of_an_unregistered_group_is_denied(monkeypatch):
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
+        actor=MEMBER, chat_id=OTHER_CHAT)
+
+    assert calls == []
+    assert bot.messages == []
+
+
+def test_a_telegram_admin_alone_does_not_authorize_a_room(monkeypatch):
+    """``get_chat_member`` says 'administrator'; the room is still not registered.
+
+    The handler never asks Telegram whether a room is ours — authority comes
+    from the server-side allowlist, and a Telegram admin fact is not it.
+    """
+    calls = install_model(monkeypatch)
+    bot = FakeBot()  # its get_chat_member returns "administrator" for everyone
+    main._nexus_visibility[OTHER_CHAT] = "administrator"
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
+        actor=ADMIN, chat_id=OTHER_CHAT)
+
+    assert calls == []
+
+
+def test_a_spoofed_owner_name_does_not_authorize_a_room(monkeypatch):
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
+        actor=MEMBER, chat_id=OTHER_CHAT,
+        username="owner", full_name="Owner Nexus")
 
     assert calls == []
 
@@ -240,8 +296,20 @@ def test_the_awareness_pass_will_not_read_an_unregistered_room(monkeypatch):
     assert ran is False
 
 
-# ── A registered room still enforces the speaker boundary ─────────────────
-def test_a_registered_group_with_an_authorized_member_is_answered(monkeypatch):
+# ── A registered room is open to every member ─────────────────────────────
+def test_a_registered_group_answers_an_ordinary_member(monkeypatch):
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
+        actor=MEMBER, chat_id=CHAT)
+
+    assert len(calls) == 1
+    assert calls[0]["chat_id"] == CHAT
+    assert calls[0]["user_id"] == MEMBER
+
+
+def test_a_registered_group_answers_an_admin(monkeypatch):
     calls = install_model(monkeypatch)
     bot = FakeBot()
 
@@ -249,47 +317,10 @@ def test_a_registered_group_with_an_authorized_member_is_answered(monkeypatch):
         actor=ADMIN, chat_id=CHAT)
 
     assert len(calls) == 1
-    assert calls[0]["chat_id"] == CHAT
+    assert calls[0]["user_id"] == ADMIN
 
 
-def test_a_registered_group_with_an_unauthorized_member_is_denied(monkeypatch):
-    calls = install_model(monkeypatch)
-    bot = FakeBot()
-
-    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
-        actor=MEMBER, chat_id=CHAT)
-
-    assert calls == []
-    assert bot.messages == []
-
-
-def test_telegram_admin_status_alone_does_not_authorize_a_member(monkeypatch):
-    """``get_chat_member`` says 'administrator'; the application still refuses.
-
-    The handler never asks Telegram who may be answered — authority comes from
-    ``rbac``, resolved from the Telegram id and the bot's own tables.
-    """
-    calls = install_model(monkeypatch)
-    bot = FakeBot()  # its get_chat_member returns "administrator" for everyone
-
-    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
-        actor=MEMBER, chat_id=CHAT)
-
-    assert calls == []
-
-
-def test_a_spoofed_username_or_display_name_does_not_authorize(monkeypatch):
-    calls = install_model(monkeypatch)
-    bot = FakeBot()
-
-    run(main.on_group_chat, message(text="نکسوس سلام"), bot,
-        actor=MEMBER, chat_id=CHAT,
-        username="owner", full_name="Owner Nexus")
-
-    assert calls == []
-
-
-def test_the_owner_is_answered_in_a_registered_group(monkeypatch):
+def test_a_registered_group_answers_the_owner(monkeypatch):
     calls = install_model(monkeypatch)
     bot = FakeBot()
 
@@ -297,6 +328,41 @@ def test_the_owner_is_answered_in_a_registered_group(monkeypatch):
         actor=OWNER, chat_id=CHAT)
 
     assert len(calls) == 1
+    assert calls[0]["user_id"] == OWNER
+
+
+def test_a_member_and_an_admin_are_answered_by_the_same_room_boundary(monkeypatch):
+    """The speaker does not enter into ordinary eligibility at all."""
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot, actor=MEMBER, chat_id=CHAT)
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot, actor=ADMIN, chat_id=CHAT)
+
+    assert [c["user_id"] for c in calls] == [MEMBER, ADMIN]
+
+
+# ── Disabling a previously authorized room restores fail-closed ───────────
+def test_disabling_a_registered_room_restores_the_boundary(monkeypatch):
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot, actor=MEMBER, chat_id=CHAT)
+    assert len(calls) == 1
+
+    groups.revoke(CHAT, actor_id=OWNER)
+    assert main.authorized_group(CHAT) is False
+
+    run(main.on_group_chat, message(text="نکسوس سلام"), bot, actor=MEMBER, chat_id=CHAT)
+    assert len(calls) == 1, "a revoked room still reached the model"
+
+
+def test_a_soft_revoked_room_cannot_be_resurrected_by_a_reseed(monkeypatch):
+    """The seed runs once; a disabled row keeps the table non-empty."""
+    groups.load()
+    groups.revoke(CHAT, actor_id=OWNER)
+    groups.reset_state()
+    assert main.authorized_group(CHAT) is False
 
 
 # ── Private chat is unchanged ─────────────────────────────────────────────

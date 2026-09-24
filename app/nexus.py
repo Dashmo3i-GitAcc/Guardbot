@@ -13,30 +13,34 @@ What this module owns, and what it deliberately does not:
   through ``app/admin_service.py`` like every other administrative request, and
   the permission it needs (``nexus.control``) is held by the owner and by
   nobody else.
-* **It owns the trigger policy.** Who is allowed to reach Nexus at all, whether
-  a message is aimed at Nexus or merely said in its presence, and whether an
-  unaddressed message is worth spending a model call on.
+* **It owns the trigger policy.** Whether the *room* is one Nexus serves,
+  whether a message is aimed at Nexus or merely said in its presence, and
+  whether an unaddressed message is worth spending a model call on.
 * **It owns the observation.** An authorized administrator's message that is not
   addressed to Nexus is recorded into *that administrator's own* bounded
   conversation context and answered with silence. This is the "watch without
   replying" requirement, and it costs no AI call at all.
-* **It does not own authority.** ``is_actor`` decides who may *talk* to Nexus;
-  it never decides who may *do* anything. Every action a conversation produces
-  is authorised again from the actor's Telegram id by ``app/admin_service.py``
+* **It does not own the room boundary.** Whether a group is authorized is the
+  database allowlist's decision (``app/groups.py``); this module reads it and
+  never widens it.
+* **It does not own authority.** ``is_actor`` says who holds a *role*; it never
+  decides who may *do* anything. Every action a conversation produces is
+  authorised again from the actor's Telegram id by ``app/admin_service.py``
   against ``app/rbac.py``. This module is not imported by either of them, so
   there is no path from here to a permission.
 
-The three states of a message, which are the whole policy in one place::
+The boundary for a group is the **room**, not the speaker. The three states of a
+message, which are the whole policy in one place::
 
-    ordinary member            → silence, and no AI call
-    administrator, unaddressed → stored as context, and no AI call
-    administrator, addressed   → a conversation, with tools if they hold them
+    any member of an unauthorized room → silence, and no AI call
+    any member, unaddressed           → left to the awareness layer
+    any member, addressed             → a conversation, with tools if they hold them
+    an administrator, unaddressed     → also stored as context, at no AI cost
 
-The gate order is the requirement, not an implementation detail: identity, then
-role, then state, then relevance, and only then the model. Every step before the
-last one is a dictionary lookup, which is what keeps a 3000-member room from
-spending the conversational allowance on traffic that was never going to be
-answered.
+The gate order is the requirement, not an implementation detail: the room, then
+state, then relevance, and only then the model. Every step before the last one is
+a lookup, which is what keeps a 3000-member room from spending the
+conversational allowance on traffic that was never going to be answered.
 """
 from __future__ import annotations
 
@@ -156,7 +160,6 @@ def describe() -> dict:
         "changed_at": int(row.get("changed_at", 0) or 0),
         "changed_by": int(row.get("changed_by", 0) or 0),
         "reason": str(row.get("reason", "") or ""),
-        "actors_only": bool(config.NEXUS_ACTORS_ONLY),
         "observe_admins": bool(config.NEXUS_OBSERVE_ADMINS),
         "names": len(names()),
     }
@@ -184,13 +187,18 @@ def is_actor(principal: rbac.Principal) -> bool:
     return bool(principal.is_admin)
 
 
-def accepts(principal: rbac.Principal) -> bool:
-    """Whether Nexus will process anything from this principal **in a group**.
+def accepts_in_group(*, room_authorized: bool) -> bool:
+    """Whether Nexus will process anything **in a group**.
 
-    Two conditions, and both are needed: the actor must be authorized, and the
-    layer must be awake. When ``NEXUS_ACTORS_ONLY`` is off an ordinary member is
-    also accepted — that switch exists only to restore the earlier
-    answer-anybody behaviour, and it never widens what an *action* requires.
+    Two conditions, and both are needed: the room must be authorized (the
+    database allowlist — see ``app/groups.py``), and the layer must be awake.
+
+    What is deliberately **not** here is the speaker. An authorized room is open
+    to every member: member and administrator status do not determine
+    conversational eligibility, because the security boundary for a group is the
+    *room* and not the *person*. An administrator is answered because the room
+    is ours, exactly as a brand-new member is, and neither is answered in a room
+    that is not.
 
     When Nexus is offline nobody is accepted, not even the owner: the offline
     state is the owner's own instruction, and the way back is an explicit
@@ -198,27 +206,24 @@ def accepts(principal: rbac.Principal) -> bool:
     is consulted.
 
     This is **not** the private-chat gate. A group has a room full of people who
-    can already see each other's messages, so answering an administrator there
+    can already see each other's messages, so answering any of them there
     discloses nothing that was not already public; a private chat has exactly
     one reader and no such argument applies. See ``accepts_private``.
     """
-    if not is_online():
-        return False
-    if is_actor(principal):
-        return True
-    return not config.NEXUS_ACTORS_ONLY
+    return is_online() and bool(room_authorized)
 
 
 def accepts_private(principal: rbac.Principal) -> bool:
     """Whether Nexus will answer **in a private chat**. The owner, and nobody else.
 
-    This is a second boundary rather than a stricter reading of ``accepts``, and
-    the difference is the whole point of having two functions:
+    This is a second boundary rather than a stricter reading of
+    ``accepts_in_group``, and the difference is the whole point of having two
+    functions:
 
-    * ``NEXUS_ACTORS_ONLY`` does not widen it. That switch restores the earlier
-      "answer anybody in the group" behaviour; it was never a statement about
-      private messages, and reading it as one would silently reopen this door
-      the first time an operator flipped it for an unrelated reason.
+    * A group boundary does not widen it. A room being authorized, and every
+      member of it being answered there, was never a statement about private
+      messages; reading it as one would silently reopen this door the first time
+      an operator registered a new group.
     * Being an administrator does not widen it. ``is_actor`` deliberately says
       yes to administrators, because a group's moderation is theirs to run — but
       a private chat with this bot is the owner's, and "an administrator" is not
@@ -230,8 +235,8 @@ def accepts_private(principal: rbac.Principal) -> bool:
     The owner is resolved from their Telegram id by ``app/rbac.py`` and never
     from anything in the message, so a claim of ownership in the text of a
     message cannot reach this. When Nexus is offline the owner is refused too,
-    for the same reason ``accepts`` refuses them: the offline state is the
-    owner's own instruction.
+    for the same reason ``accepts_in_group`` refuses them: the offline state is
+    the owner's own instruction.
     """
     if not is_online():
         return False

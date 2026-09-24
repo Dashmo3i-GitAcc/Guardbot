@@ -226,10 +226,13 @@ def resolve(name: str, *, chat_id: int = 0) -> dict:
     * ``unknown`` — nobody matches. The model asks for a reply or an id.
     * ``disabled`` — the identity memory is switched off.
 
-    ``chat_id`` is used only to order and annotate the candidates; identity is
-    global, because a Telegram user id is global. Filtering by room would make
-    the same person unresolvable in a second group, which is a bug rather than a
-    privacy property.
+    ``chat_id`` scopes the lookup to one room, and it is the isolation rule
+    rather than a nicety: a group's conversation may only be resolved against
+    the names recorded in *that* group. A name spoken in one room and a person
+    who only ever appeared in another are different facts, and matching them
+    would leak one group's membership into another's answer. The canonical
+    identity — the numeric Telegram user id — is global and stays global; it is
+    the *name memory* that is per room.
     """
     if not config.NEXUS_PEOPLE_ENABLED:
         return {"status": "disabled"}
@@ -242,7 +245,10 @@ def resolve(name: str, *, chat_id: int = 0) -> dict:
         }
 
     limit = max(1, int(config.NEXUS_PEOPLE_MAX_CANDIDATES))
-    rows = db.people_rows(limit=0)
+    # Scoped to the room when one is given. The unscoped read exists only for a
+    # caller that genuinely has no room (an operator's own tooling), and is never
+    # reached from a group's conversational path.
+    rows = db.people_rows(int(chat_id)) if chat_id else db.people_rows(limit=0)
     matches = [row for row in rows if query in _keys(row)]
 
     # One person, even if they were seen in several chats: deduplicate by user
@@ -272,9 +278,7 @@ def resolve(name: str, *, chat_id: int = 0) -> dict:
         }
 
     row = next(iter(unique.values()))
-    if chat_id and int(row.get("chat_id", 0) or 0) != int(chat_id):
-        # Seen elsewhere. Still the right person — the id is global — but the
-        # caller is told, because "they are in another group" is worth knowing
-        # before acting on somebody who is not in this room.
-        log.info("name resolved to a member of another chat")
+    # Scoped to the room, so the matched row is always from this room when a
+    # room was given. Nothing to annotate: a name that only exists in another
+    # group is simply not resolvable here, which is the isolation working.
     return {"status": "ok", **_public(row)}

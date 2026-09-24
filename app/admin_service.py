@@ -292,6 +292,43 @@ OPERATIONS: dict[str, Operation] = {
         requires_nexus_online=False,
         needs_confirmation=True,
     ),
+    # ── The room allowlist ────────────────────────────────────────────────
+    # Registering or revoking the room a command was typed in. The subject is
+    # the *current* room — ``request.chat_id`` — and there is no parameter for a
+    # different one, so "register a room" and "be in the room" are the same act
+    # and there is no id a model or a person could name to authorize a room they
+    # are not in.
+    #
+    # ``permission="config.manage"`` is held by the owner and by senior admins,
+    # which is exactly the owner's "an authorized administrator" — not the
+    # owner alone, and not every moderator. ``right=None`` because no Telegram
+    # call is made: this is an application-side state change, like the switches
+    # above it. ``requires_nexus_online=False`` so a room can be registered or
+    # revoked while the assistant is switched off, which is when an operator is
+    # most likely to be fixing exactly that.
+    #
+    # ``needs_confirmation=False`` and there is deliberately **no AI tool** for
+    # either: a grant of access is not something a model proposes. The
+    # confirmation step exists for operations the *model* can ask for; a typed
+    # command is a person acting directly, and a person acting directly is
+    # already the authority. Leaving the tools out is what makes "the model
+    # cannot register a group" structural rather than checked.
+    "register_group": _op(
+        "register_group",
+        "config.manage",
+        None,
+        "group.register",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
+    "unregister_group": _op(
+        "unregister_group",
+        "config.manage",
+        None,
+        "group.revoke",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+    ),
     # ── The coding agent ──────────────────────────────────────────────────
     # Asking the host's coding agent to work on one of this system's own
     # repositories. It is an operation here, rather than a separate front door,
@@ -1352,6 +1389,22 @@ async def _apply(
         from . import web_search
 
         web_search.set_running(True, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "register_group":
+        # Imported here rather than at module scope, for the same reason the
+        # awareness/search branches above are: ``app/groups.py`` is a peer, and a
+        # module-scope import would make "authorise a ban" depend on the room
+        # allowlist being importable.
+        from . import groups
+
+        groups.register(
+            request.chat_id, actor_id=request.actor_id, interface=request.interface
+        )
+    elif request.operation == "unregister_group":
+        from . import groups
+
+        groups.revoke(
+            request.chat_id, actor_id=request.actor_id, interface=request.interface
+        )
     elif request.operation == "codebuddy_task":
         # Imported here rather than at module scope: the bridge imports this
         # module's peers, and a cycle at import time would make ``admin_service``
@@ -1796,7 +1849,7 @@ _REFUSAL_OUTCOMES = frozenset({
 })
 
 
-def recent_refusals(limit: int = 5) -> list[dict]:
+def recent_refusals(limit: int = 5, *, chat_id: int | None = None) -> list[dict]:
     """Recent administrative requests that did not happen, newest first.
 
     Read from the audit table rather than kept in memory, because the question
@@ -1806,19 +1859,26 @@ def recent_refusals(limit: int = 5) -> list[dict]:
 
     The scan is bounded: the audit table is ordered by id, so a window of recent
     rows is enough, and it is the refusals inside that window that matter.
+
+    ``chat_id`` scopes the scan to one room, so a report shown inside a group
+    can only ever describe that group's own refusals and never another tenant's.
     """
     window = max(1, int(limit))
-    rows = db.audit_recent(window * 6)
+    rows = db.audit_recent(window * 6, chat_id=chat_id)
     return [r for r in rows if r.get("outcome") in _REFUSAL_OUTCOMES][:window]
 
 
-def status_report() -> str:
+def status_report(*, chat_id: int | None = None) -> str:
     """The operator's view of AI administration: the mode, and what was refused.
 
     Both halves are needed to tell the two failure shapes apart. "The assistant
     never answers" and "the assistant answers and is refused every time" look
     identical from inside a group and are completely different problems; the
     first is this mode line, the second is the refusal list.
+
+    The mode is deployment-wide (Nexus is either online or not), but the refusal
+    list is scoped to ``chat_id`` when given: the report is rendered inside a
+    room, and one room's administrative history must not appear in another's.
     """
     state = mode_status()
     if state["mode"] == "ai":
@@ -1838,7 +1898,7 @@ def status_report() -> str:
 
     lines = [mode_line(), headline]
 
-    refusals = recent_refusals()
+    refusals = recent_refusals(chat_id=chat_id)
     lines.append("")
     if not refusals:
         lines.append("No administrative refusals on record.")

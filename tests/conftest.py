@@ -48,6 +48,7 @@ def fresh_nexus_state():
         awareness_schedule,
         db,
         gemini_keys,
+        groups,
         main,
         memory,
         nexus,
@@ -65,6 +66,14 @@ def fresh_nexus_state():
     # than as a test that was never self-sufficient. ``init`` is idempotent.
     db.init()
     nexus.reset_state()
+    # The room allowlist, both the table and the process cache. A room a test
+    # registered (or revoked) must not be visible to the next test, and the
+    # one-time seed from ``GROUP_IDS`` must be free to run again — otherwise a
+    # test would inherit whichever rooms an earlier one happened to leave behind
+    # and the failure would read as an authorization bug rather than as leaked
+    # state.
+    db.authorized_groups_reset()
+    groups.reset_state()
     awareness.reset_timers()
     awareness.reset_switch()
     # The search workload's rate window, breaker and cached client. Left behind,
@@ -107,6 +116,12 @@ def fresh_nexus_state():
     awareness_schedule.reset()
     yield
     nexus.reset_state()
+    # Only the cache is cleared here, never the table: a module fixture's own
+    # teardown runs *before* this one and some of them close ``db._conn`` (see
+    # ``test_filter_pipeline``), so a table reset here would raise on a
+    # connection that is legitimately gone. The next test's setup resets the
+    # table anyway, which is what actually guarantees isolation.
+    groups.reset_state()
     awareness.reset_timers()
     awareness.reset_switch()
     gemini_keys.reset_pending()

@@ -97,7 +97,7 @@ def test_the_status_text_reports_metrics_and_integrations():
 
 
 def test_the_status_text_survives_a_broken_metric_read(monkeypatch):
-    def boom():
+    def boom(**_kwargs):
         raise RuntimeError("no database")
 
     monkeypatch.setattr(awareness, "metrics_line", boom)

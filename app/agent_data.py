@@ -226,9 +226,9 @@ def _model_events(*, since=0, limit=MAX_EVENTS):
     return out
 
 
-def _agent_events(*, actor_id=0, since=0, limit=MAX_EVENTS):
+def _agent_events(*, actor_id=0, chat_id=0, since=0, limit=MAX_EVENTS):
     out = []
-    for row in db.agent_task_recent(limit=limit):
+    for row in db.agent_task_recent(limit=limit, chat_id=chat_id):
         if int(row.get("created_at") or 0) < since:
             continue
         if actor_id and int(row.get("actor_id") or 0) != actor_id:
@@ -339,7 +339,9 @@ def search_events(
             elif name == SOURCE_MODEL:
                 events += _model_events(since=start, limit=cap)
             elif name == SOURCE_AGENT:
-                events += _agent_events(actor_id=actor_id, since=start, limit=cap)
+                events += _agent_events(
+                    actor_id=actor_id, chat_id=chat_id, since=start, limit=cap
+                )
             elif name == SOURCE_AWARENESS:
                 events += _awareness_events(chat_id=chat_id)
             elif name == SOURCE_MODERATION:
@@ -388,7 +390,9 @@ def nexus_diagnostics(chat_id: int = 0) -> dict:
         # it off with a message.
         "search_enabled": web_search.enabled(),
         "observe_admins": bool(getattr(config, "NEXUS_OBSERVE_ADMINS", False)),
-        "actors_only": bool(getattr(config, "NEXUS_ACTORS_ONLY", False)),
+        # The boundary is the room, not the speaker: every member of a registered
+        # group is answered, so there is no actor gate to report.
+        "answers_all_members_in_registered_groups": True,
         "reasons": [],
     }
 
@@ -401,9 +405,7 @@ def nexus_diagnostics(chat_id: int = 0) -> dict:
     if chat_id:
         try:
             state = db.awareness_get(chat_id) or {}
-            pending = [
-                row for row in db.group_pending() if int(row.get("chat_id") or 0) == chat_id
-            ]
+            pending = db.group_pending(chat_id)
             out["awareness"] = {
                 "passes": int(state.get("passes") or 0),
                 "relevant": int(state.get("relevant") or 0),
@@ -464,8 +466,13 @@ def nexus_diagnostics(chat_id: int = 0) -> dict:
     return out
 
 
-def agent_task_view(request_id: str) -> dict:
-    """One coding-agent task, as the owner may see it. Redacted, bounded."""
+def agent_task_view(request_id: str, *, chat_id: int = 0) -> dict:
+    """One coding-agent task, as the owner may see it. Redacted, bounded.
+
+    ``chat_id`` scopes the read to one room when given: a task raised in another
+    group is not readable here, so a group's assistant cannot be used to pull
+    another group's task text or result.
+    """
     request_id = (request_id or "").strip()[:64]
     if not request_id:
         return {"error": "no task id supplied"}
@@ -475,6 +482,8 @@ def agent_task_view(request_id: str) -> dict:
         log.exception("could not read an agent task")
         return {"error": "the task could not be read"}
     if not row:
+        return {"error": "no such task", "request_id": request_id}
+    if chat_id and int(row.get("chat_id") or 0) != int(chat_id):
         return {"error": "no such task", "request_id": request_id}
     from . import agent_bridge
 

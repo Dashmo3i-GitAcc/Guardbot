@@ -469,31 +469,34 @@ def test_the_assistant_does_not_run_on_ordinary_group_text():
     """The boundary, asserted where it lives.
 
     Two gates, and both are required. `_nexus_directed` decides whether the
-    message is aimed at Nexus; `nexus.accepts` decides whether the sender may
-    reach it at all. A group message that is neither addressed nor an
-    instruction from an administrator is recorded as context and answered with
-    silence — the "watch without replying" requirement.
+    message is aimed at Nexus; `nexus.accepts_in_group` decides whether the
+    *room* is one it serves at all — the speaker is not consulted, because an
+    authorized room is open to every member. A group message that is not
+    addressed is left to the awareness layer and answered with silence — the
+    "watch without replying" requirement.
     """
     from app import main
 
     source = inspect.getsource(main.on_group_chat)
     assert "_nexus_directed" in source
-    assert "nexus.accepts" in source
+    assert "nexus.accepts_in_group" in source
     # The gate must come before the answer, and the answer before any model call.
-    assert source.index("nexus.accepts") < source.index("_answer_conversationally")
+    assert source.index("nexus.accepts_in_group") < source.index(
+        "_answer_conversationally"
+    )
     assert source.index("_nexus_directed") < source.index("_answer_conversationally")
 
 
-def test_the_assistant_is_gated_on_the_sender_before_anything_is_spent():
-    """Identity and role are resolved before the relevance gate and the model."""
+def test_the_assistant_is_gated_on_the_room_before_anything_is_spent():
+    """The room is decided before the relevance gate and the model."""
     from app import main
 
     source = inspect.getsource(main.on_group_chat)
-    resolve = source.index("rbac.resolve")
-    accepts = source.index("nexus.accepts")
+    room = source.index("authorized_group(room.id)")
+    accepts = source.index("nexus.accepts_in_group")
     actionable = source.index("nexus.looks_actionable")
     answer = source.index("_answer_conversationally")
-    assert resolve < accepts < actionable < answer
+    assert room < accepts < actionable < answer
 
 
 def test_the_four_workloads_have_four_separate_switches():

@@ -28,13 +28,15 @@ class _User:
         self.first_name = "Someone"
 
 
-def _msg(text, *, reply_author_id=None, reply_author_is_bot=False):
+def _msg(text, *, reply_author_id=None, reply_author_is_bot=False, chat_id=-100):
     replied = None
     if reply_author_id is not None:
         replied = SimpleNamespace(
             from_user=_User(reply_author_id, reply_author_is_bot)
         )
-    return SimpleNamespace(text=text, reply_to_message=replied, message_id=1)
+    return SimpleNamespace(
+        text=text, reply_to_message=replied, message_id=1, chat_id=chat_id
+    )
 
 
 def _ctx():
@@ -102,11 +104,11 @@ def test_the_acquisition_handler_yields_when_the_assistant_is_on(monkeypatch):
 # test only ``_addressed_to_bot`` — the Telegram-native signals — so exactly
 # those messages were answered by the assistant *and* offered a trial by
 # acquisition, which is the double-handling the guard exists to prevent.
-def _accepting(monkeypatch, *, named=True, accepts=True, active=True):
+def _accepting(monkeypatch, *, named=True, room=True, active=True):
     monkeypatch.setattr(main.chat, "is_enabled", lambda: active)
     monkeypatch.setattr(main.nexus, "is_named", lambda text: named)
-    monkeypatch.setattr(main.nexus, "accepts", lambda principal: accepts)
-    monkeypatch.setattr(main.rbac, "resolve", lambda uid: object())
+    # The room is the eligibility boundary; the speaker is not consulted.
+    monkeypatch.setattr(main, "authorized_group", lambda chat_id: room)
 
 
 def test_a_name_addressed_message_is_one_the_assistant_will_answer(monkeypatch):
@@ -115,19 +117,19 @@ def test_a_name_addressed_message_is_one_the_assistant_will_answer(monkeypatch):
 
     assert main._addressed_to_bot(msg, _ctx()) is False, "not a native address"
     assert main._nexus_directed(msg, _ctx()) is True
-    assert main._nexus_will_answer(msg, _ctx(), _User()) is True
+    assert main._nexus_will_answer(msg, _ctx()) is True
 
 
-def test_naming_the_assistant_costs_a_member_nothing(monkeypatch):
+def test_naming_the_assistant_in_an_unregistered_room_costs_nothing(monkeypatch):
     """The wider boundary must not over-reach.
 
-    While ``NEXUS_ACTORS_ONLY`` is on an ordinary member is not accepted, so a
-    member naming the assistant gets no reply — and suppressing their trial
-    offer would be a loss with nothing gained.
+    In a room that is not registered Nexus will not answer, so naming the
+    assistant there gets no reply — and suppressing the trial offer would be a
+    loss with nothing gained.
     """
-    _accepting(monkeypatch, accepts=False)
+    _accepting(monkeypatch, room=False)
 
-    assert main._nexus_will_answer(_msg("نکسی سلام"), _ctx(), _User()) is False
+    assert main._nexus_will_answer(_msg("نکسی سلام"), _ctx()) is False
 
 
 def test_the_assistant_being_off_does_not_suppress_a_name_addressed_lead(
@@ -135,7 +137,7 @@ def test_the_assistant_being_off_does_not_suppress_a_name_addressed_lead(
 ):
     _accepting(monkeypatch, active=False)
 
-    assert main._nexus_will_answer(_msg("نکسی سلام"), _ctx(), _User()) is False
+    assert main._nexus_will_answer(_msg("نکسی سلام"), _ctx()) is False
 
 
 def test_an_ordinary_message_is_not_something_the_assistant_will_answer(
@@ -143,7 +145,7 @@ def test_an_ordinary_message_is_not_something_the_assistant_will_answer(
 ):
     _accepting(monkeypatch, named=False)
 
-    assert main._nexus_will_answer(_msg("سلام بچه‌ها"), _ctx(), _User()) is False
+    assert main._nexus_will_answer(_msg("سلام بچه‌ها"), _ctx()) is False
 
 
 def test_the_acquisition_guard_asks_the_same_question_as_the_handler():
@@ -156,7 +158,7 @@ def test_the_acquisition_guard_asks_the_same_question_as_the_handler():
     import inspect
 
     source = inspect.getsource(main.on_group_text)
-    guard = source.index("_nexus_will_answer(msg, ctx, user)")
+    guard = source.index("_nexus_will_answer(msg, ctx)")
     classify = source.index("classifier.classify")
     assert guard < classify, "the boundary must come before classifying"
 

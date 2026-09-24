@@ -1,11 +1,11 @@
 """The private-chat boundary: the owner's channel, and only the owner's.
 
 A private chat with this bot is not a smaller group. A group has a room full of
-people who can already read each other's messages, so answering an administrator
-there discloses nothing new — which is why ``nexus.accepts`` says yes to an
-administrator. A private chat has exactly one reader, so the only defensible
-rule is that it belongs to the owner, and that is what ``nexus.accepts_private``
-is.
+people who can already read each other's messages, so once the room is
+registered, answering *any* member there discloses nothing new — which is why
+``nexus.accepts_in_group`` says yes to a room and never looks at the speaker. A
+private chat has exactly one reader, so the only defensible rule is that it
+belongs to the owner, and that is what ``nexus.accepts_private`` is.
 
 The assertions that matter here are the *negative* ones, and they are negative in
 two places rather than one:
@@ -44,7 +44,6 @@ def private_env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(config, "GROUP_IDS", [CHAT])
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", True)
     monkeypatch.setattr(config, "NEXUS_NAMES", ["nexus", "نکسوس"])
     monkeypatch.setattr(config, "NEXUS_OBSERVE_ADMINS", True)
     monkeypatch.setattr(config, "NEXUS_PEOPLE_ENABLED", True)
@@ -157,32 +156,30 @@ async def run_private(update, ctx):
 
 
 # ── The unit-level boundary ───────────────────────────────────────────────
-def test_an_administrator_is_an_actor_but_not_a_private_actor():
+def test_the_group_gate_ignores_the_speaker_and_private_does_not():
     """The two gates must disagree about an administrator, by design.
 
-    If this ever stops being true, the private boundary has been folded back
-    into the group one and an administrator can read the owner's channel again.
+    The group gate is about the *room*: once a room is registered, any member is
+    answered, and the speaker is not consulted. The private gate is about the
+    *person*: only the owner. If this ever stops being true, the private
+    boundary has been folded back into the group one and an administrator can
+    read the owner's channel again.
     """
     admin = rbac.resolve(ADMIN)
     owner = rbac.resolve(OWNER)
 
-    assert nexus.accepts(admin) is True, "a group administrator must still be an actor"
+    assert nexus.accepts_in_group(room_authorized=True) is True
     assert nexus.accepts_private(admin) is False, "an administrator is not the owner"
-
-    assert nexus.accepts(owner) is True
     assert nexus.accepts_private(owner) is True
 
 
-def test_actors_only_off_does_not_open_private_chat(monkeypatch):
-    """``NEXUS_ACTORS_ONLY`` is a group switch and must not reach private chat.
+def test_the_group_boundary_does_not_open_private_chat():
+    """A room being open to every member says nothing about a private chat.
 
-    Turning it off restores "answer anybody in the group". Reading it as a
-    statement about private messages would silently reopen this door the first
-    time an operator flipped it for an unrelated reason.
+    Reading the group rule as a statement about private messages would silently
+    reopen the owner's channel to everyone the moment a room was registered.
     """
-    monkeypatch.setattr(config, "NEXUS_ACTORS_ONLY", False)
-
-    assert nexus.accepts(rbac.resolve(MEMBER)) is True
+    assert nexus.accepts_in_group(room_authorized=True) is True
     assert nexus.accepts_private(rbac.resolve(MEMBER)) is False
     assert nexus.accepts_private(rbac.resolve(ADMIN)) is False
 

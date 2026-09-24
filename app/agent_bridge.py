@@ -357,16 +357,21 @@ def status_label(status: str) -> str:
 
 
 # ── The task envelope ─────────────────────────────────────────────────────
-def new_request_id(actor_id: int, repository: str, task: str, *, now: float = 0.0) -> str:
+def new_request_id(
+    actor_id: int, repository: str, task: str, *, now: float = 0.0, chat_id: int = 0
+) -> str:
     """A stable, collision-resistant id for one task.
 
     Derived from the content rather than random, so the *same* request made
     twice inside the idempotency window produces the same id — which is what
     makes the second one a duplicate rather than a second agent run. The actor
-    is part of it, so two people asking the same thing are two tasks.
+    is part of it, so two people asking the same thing are two tasks, and so is
+    the **room**: the same actor asking the same thing in two groups is two
+    tasks, and folding the room out would let one group's task collide with —
+    and read — another's.
     """
     stamp = int(now or time.time())
-    raw = f"{int(actor_id)}|{repository}|{task}|{stamp // 60}"
+    raw = f"{int(chat_id)}|{int(actor_id)}|{repository}|{task}|{stamp // 60}"
     return "agent-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -467,7 +472,7 @@ def build_request(
 
     danger = danger_for(operation, body)
     return AgentRequest(
-        request_id=new_request_id(actor_id, name, body, now=now),
+        request_id=new_request_id(actor_id, name, body, now=now, chat_id=chat_id),
         actor_id=int(actor_id),
         chat_id=int(chat_id),
         repository=name,

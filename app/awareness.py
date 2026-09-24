@@ -1146,7 +1146,7 @@ def skip(chat_id: int, *, seen_message_id: int) -> None:
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────
-def metrics() -> dict:
+def metrics(*, chat_id: int | None = None) -> dict:
     """What the awareness layer has actually done, from the records it writes.
 
     The brief asks for measurable awareness quality. Every number here is
@@ -1169,6 +1169,10 @@ def metrics() -> dict:
     There is deliberately no "false positive rate": judging whether a reply was
     unwanted needs a human, and a number invented here would be a guess wearing
     a metric's clothes.
+
+    With ``chat_id`` the same numbers are read for one room only, which is what
+    a group's ``/nexus status`` must report: one tenant's activity is never
+    assembled from another tenant's rows.
     """
     out = {
         # The **effective** state, not the configuration: ``enabled()`` is
@@ -1188,25 +1192,29 @@ def metrics() -> dict:
         "window_messages": 0,
     }
     try:
-        out.update(db.awareness_summary())
+        out.update(db.awareness_summary(chat_id))
     except Exception:  # noqa: BLE001 - a metric read is never fatal
         log.exception("could not read the awareness summary")
     try:
-        pending = db.group_pending()
+        pending = db.group_pending(chat_id)
         out["pending_rooms"] = len(pending)
         out["pending_messages"] = sum(int(p.get("pending") or 0) for p in pending)
     except Exception:  # noqa: BLE001
         log.exception("could not read the pending rooms")
     try:
-        out["window_messages"] = sum(db.group_role_counts().values())
+        out["window_messages"] = sum(db.group_role_counts(chat_id).values())
     except Exception:  # noqa: BLE001
         log.exception("could not read the window size")
     return out
 
 
-def metrics_line() -> str:
-    """One line for ``/nexus status``. Counts only, never content."""
-    m = metrics()
+def metrics_line(*, chat_id: int | None = None) -> str:
+    """One line for ``/nexus status``. Counts only, never content.
+
+    Scoped to ``chat_id`` when given, so the line shown in a group is that
+    group's own activity.
+    """
+    m = metrics(chat_id=chat_id)
     state = "on" if m["enabled"] else "off"
     return (
         f"awareness[{state}]: rooms={m['rooms']} passes={m['passes']} "
