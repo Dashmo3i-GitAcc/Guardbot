@@ -1377,6 +1377,24 @@ reference file is stale and this list is the one to fix first.
   var.
 * The number of accounts is not hard-coded, and a shared-pool key is used only
   when that workload's own opt-in is on.
+* **Credential allocation is priority- and health-aware, never a fixed
+  percentage.** Chat and Awareness are the two highest-priority Gemini
+  workloads, and together they receive the dominant share of healthy capacity —
+  **Chat normally the larger share**, because it is the primary conversational
+  workload and a person is waiting on the reply. **Awareness must never be
+  starved, left empty, or given token capacity**: it is not optional and must not
+  be treated as disposable. The lower-priority workloads (`intent`, `moderation`,
+  `transcribe`, `tts`, `live_voice`, `search`, `memory`) keep the capacity they
+  genuinely require for their measured demand and for their isolation, but must
+  **not** consume healthy capacity that Chat or Awareness needs without evidence
+  of demand. When new keys are added, evaluate **every** reachable key by actual
+  health, quota/rate-limit state, recent failures, cooldown/bench state, workload
+  demand and isolation **before** assigning it — and **never** move a key that is
+  failing, cooling, benched or quota-exhausted merely to satisfy a count. If
+  runtime evidence shows a different split is right, follow the evidence rather
+  than a hard-coded number. **Never** revert to putting nearly every healthy key
+  into Chat while starving Awareness. See §54.15 for the 2026-09-24 rebalance
+  that established this.
 
 ### 53.4 Acquisition
 
@@ -4230,6 +4248,215 @@ still `00c5d1d`; the pre-deploy image and DB backup both retained.
 **To resume after any context loss.** Re-read this section, then verify
 `git status`, `git rev-parse main`, `git rev-parse HEAD`,
 `git ls-remote origin refs/heads/main`, and `docker ps` / `docker inspect guardbot`.
+
+---
+
+### 54.14 Checkpoint (2026-09-24, Phase One pool stabilisation) — resume here (supersedes §54.13 as the resume point; §54.13's deploy record stands)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~18:45Z**. Branch **`main`**, HEAD
+**`6a4810a`** (`= origin/main = dashmo3i/main`). Base/rollback is the **deployed**
+commit **`25ddee8`**; `6a4810a` is a **docs-only** commit on top of it, so the
+working tree's `app/` is functionally identical to what the running container
+loads. **The changes in this checkpoint are UNCOMMITTED and NOT DEPLOYED** — they
+exist only in the working tree. Current task: Phase One of the owner's brief —
+*stabilise, measure and optimise the existing Chat and Awareness Gemini
+infrastructure without breaking or redesigning it*. **Phase Two (Telegram
+group/member authorisation) is NOT started and must not be** — membership/admin
+status must never equal application authorisation.
+
+**Completed work.**
+1. **Root-caused three pool behaviours** against live DB evidence (see §54.13
+   and the measurements below): (a) a backoff slept for a retry the per-account
+   share forbids; (b) the account breaker emptying a small pool; (c) `models_for`
+   returning nothing when every capable model was merely *cooling*, which benched
+   the account for `GEMINI_POOL_MODEL_COOLDOWN` (120s) — four-to-five times the
+   cooldown that caused it.
+2. **Implemented the minimum-usable-account floor** in
+   `_bench_repeated_failures`: when the breaker would leave ≤1 usable account it
+   withholds the bench, resets the streak, and records `bench_withheld`
+   (`reason=last_usable_account`).
+3. **Split "cooling" from "no compatible model"** in `generate()`: a new
+   `ignore_cooldown` argument on `Pool.models_for` tells the two apart; the
+   cooling case records `models_cooling`, keeps the account in rotation, and the
+   walk's final kind is `models_cooling` rather than `no_compatible_model`.
+4. **Guarded the retry backoff** so it is slept only when the retry can actually
+   run (`attempt+1 < attempts_per_model and allowance > 0 and budget > 0`), in
+   both the timeout and the transient branch.
+5. **Fixed `db.pool_account_save`** so the stored `fingerprint`/`masked` are
+   written only when supplied — the counter updates were blanking them on every
+   attempt (measured live: `chat` 9/9 and `awareness` 3/3 had `masked=''`).
+6. **Improved the timing seam** (existing logging only, no new subsystem):
+   `chat timing` now logs `prepare_ms ctx_ms search_ms assemble_ms gemini_ms
+   model_ms pool_ms proc_ms send_ms total_ms`; the pool logs one
+   `[pool] request … select_ms provider_ms retry_ms attempts failures` line per
+   request that failed over.
+
+**Architecture decisions.** No new pool, credential manager, retry system,
+breaker or context system — every change is inside the existing modules. The
+floor is a *policy* on the existing breaker, not a second breaker. The cooling
+fix reuses the models' own cooldowns rather than adding a new timer. The timing
+work reuses the existing log lines. No deadline was raised, no ceiling changed,
+no fallback list trimmed, no credential touched. The new `models_cooling` kind is
+not in any caller's `_PERMANENT` set, so it is treated as transient exactly as
+`no_compatible_model` was.
+
+**Changed components/files.** `app/gemini_pool.py` (floor, `models_for`
+`ignore_cooldown`, cooling branch + kind, backoff guard, timing breakdown);
+`app/db.py` (`pool_account_save` identity); `app/chat.py` (`ChatReply.timing` +
+`pool_ms`); `app/main.py` (`_timing` decomposition, stage marks);
+`tests/test_gemini_pool.py` (+3 tests); `tests/test_chat_latency.py` (+2 tests).
+
+**Tests executed.** Full suite: **3681 passed / 0 failed** (265.37 s) with
+`.venv-test/bin/python -m pytest -q` (Python 3.10.12 test venv; production is
+3.12). Targeted: `test_gemini_pool.py` 146 passed; the chat/db/nexus/context_plan
+set 450 passed.
+
+**Benchmarks.** Deployed baseline (container `guardbot`, image `8d4c6fc63293`,
+~1 h of logs): **chat** `gemini_ms` p50 8799 / p90 26130 / p99 71274 / max 87173,
+`total_ms` p50 10108 / p90 34409 / p99 71525 — the model stage is **89 %** of the
+turn. **awareness** `gemini_ms` p50 10422 / p90 43793 / max 66746, `total_ms`
+p50 10590 / p90 43884; its non-model work is p50 **200 ms**. Local, deterministic
+measurements of the changes: a chat-like walk (9 accounts, 12 attempts, one 503
+then a healthy account) now logs `retry_ms=0.0` and returns in **0.003 s**, where
+the old path slept `_backoff()` = **1.5–1.875 s**; the one-account/all-models-429
+scenario now yields `models_cooling` on requests 2 and 3 with the account
+**ACTIVE** (before: `no_compatible_model` then `pool_empty`). Live DB at the
+checkpoint: chat 9/9 ACTIVE, awareness 3/3 ACTIVE; `pool_empty` 5 all-time (4 in
+the last 24 h), `pool_critical` 32 (8 in 24 h), `account_failover` 53 (all in
+24 h).
+
+**Known issues / blockers.**
+1. **The live "after" numbers do not exist** — the fix is not deployed, and the
+   owner has not authorised a deploy. The measured improvement is local and
+   deterministic; the production effect is **UNMEASURED** until a deploy.
+2. **Provider-side** free-tier `generate_content_free_tier` 429s and 503/504 on
+   chat and awareness remain; no pool change creates quota.
+3. Pre-existing, untouched: the dead `intent` primary `GEMINI_API_KEY`
+   (fp `7c707e1b`, 401) and the two credential collisions (§54.13 limitation 3).
+
+**Frozen items (unchanged).** V is not implemented, routed or activated; the
+`--arm context` probe stays **FROZEN**; the awareness allowance stays **200**;
+no credential is rotated, moved or deleted.
+
+**Explicitly prohibited.** Do not start Phase Two. Do not deploy, commit or push
+without the owner's explicit go-ahead. Do not raise a deadline or ceiling to
+green a metric. Do not restart the production container without authorisation.
+Do not delete `gemini_events` rows while the live process writes.
+
+**Pending verification.** A live end-to-end chat probe and a real-traffic
+`chat timing` line on the **deployed** build (to populate `pool_ms`/`proc_ms` and
+`[pool] request` from real traffic), and the awareness/chat `pool_empty` rate
+after deploy.
+
+**NEXT STEP.** Do **not** commit or deploy. Wait for the owner's go-ahead, then
+deploy via the documented path (§12: `docker compose build && docker compose up
+-d`) and take a **self-cleaning live probe** — one real addressed chat message
+through the deployed container — recording the new `pool_ms`/`proc_ms` and the
+`[pool] request` line against the baseline above, plus the `pool_empty`/
+`pool_critical` event counts before and after. If asked for the report first,
+present the Phase One report from the working tree; make no further code changes.
+
+**To resume after any context loss.** Re-read this section, then verify
+`git status` (six modified files), `git rev-parse HEAD` (`6a4810a`),
+`git rev-parse main`, `git ls-remote origin refs/heads/main`, and
+`docker ps` / `docker inspect guardbot` (image `8d4c6fc63293`, Up,
+`RestartCount=0`).
+
+---
+
+### 54.15 Checkpoint (2026-09-24, **DEPLOYED**) — Chat/Awareness credential rebalance — resume here (supersedes §54.14)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~19:10Z**. Branch **`main`**, HEAD
+**`6a4810a`** (the Phase One code + this rebalance are **uncommitted** in the
+working tree). **DEPLOYED**: image **`guardbot-guardbot:latest` =
+`0a0e4636a624`**, container `guardbot` recreated **`2026-09-24T19:03:23Z`**,
+`RestartCount=0`, no tracebacks. Rollback: image tag
+**`guardbot-guardbot:phase-one-deploy1` = `a7ccb4f88b97`** (the first Phase One
+build), **`pre-00c5d1d` = `1a3ccbe0b7af`** (pre-Nexus), and the pre-deploy DB
+backup `data/guardbot.db.bak-20260924-185354-pre-keyrebalance` plus
+`.env.bak-20260924-185254-pre-keyrebalance`.
+
+**The credential rebalance (owner-authorised).** Two healthy chat keys were moved
+to awareness by editing the host-only `.env` (gitignored; never in git):
+* moved **`GEMINI_CHAT_API_KEY_8` (fp `599a10724725`)** → `GEMINI_AWARENESS_API_KEY_3`
+* moved **`GEMINI_CHAT_API_KEY_9` (fp `5ff073eeebb1`)** → `GEMINI_AWARENESS_API_KEY_4`
+Selection: both were `ACTIVE`, not cooling, no quota events, and had the best
+observed success ratios (62 % / 54 %) among the low-load chat keys. **`chat`
+slot 5 (fp `24b5072536f6`) was deliberately NOT moved** — it is the pre-existing
+`chat:5 == awareness:2` collision, and moving it would have added no capacity.
+No value was printed, logged, committed or rotated.
+
+**Resulting runtime pools** (from the deployed startup line, `[pool]`):
+`chat accounts=7 usable=7` · `awareness accounts=5` (env1 `889fc071c248`, env2
+`24b5072536f6`, the two moved keys, + managed `k6d7861f7`) · `tts accounts=7`.
+**Side effect to remember: `tts` shares chat's key prefix, so it also went 9→7**
+— acceptable under the priority policy (tts demand is ~1 success/account) but it
+must be stated, not discovered. Verified with a throwaway container *before*
+touching production: chat fps = `[ad4bfbe4591c, 5148caba8f93, 23c19e3b642a,
+295c2a860dc2, 24b5072536f6, 2a52d9661c2a, 4a75741b5c55]`, awareness fps =
+`[889fc071c248, 24b5072536f6, 599a10724725, 5ff073eeebb1, 6d7861f7c2fc]`.
+
+**Allocation policy — now an invariant in §53.3.** Chat and Awareness are the
+two highest-priority workloads and together take the dominant share of healthy
+capacity, Chat normally the larger share; **Awareness must never be starved or
+left with token capacity**. Lower-priority workloads keep the capacity their
+measured demand needs and no more. New keys are evaluated by health, quota/limit
+state, recent failures, cooldown/bench state, demand and isolation before
+assignment; a failing/cooling/benched/quota-exhausted key is never moved merely
+to hit a count; the split follows evidence, not a hard-coded percentage.
+
+**Unit fix during this deploy.** The `[pool] request` breakdown held *seconds*
+in variables named `_ms` and printed them unchanged — a 15 s walk logged
+`provider_ms=14.1`, a factor-of-1000 lie. Renamed to `*_s` and converted to
+milliseconds at render (`app/gemini_pool.py`); pinned by
+`test_the_breakdown_is_in_milliseconds`.
+
+**Tests.** Full suite **3682 passed / 0 failed** (240.76 s) before the rebuild;
+relevant subset 473 passed before the first deploy.
+
+**Live probe (self-cleaning, inside the deployed container, real `chat.reply`).**
+Synthetic ids that provably had no history; deleted exactly the 6 rows it created
+and restored `chat_usage`. **3/3 answered**, all on `gemini-flash-lite-latest`:
+**12.8 s / 12.1 s / 19.8 s** wall. Breakdown: `provider_ms` **11 425 / 12 047 /
+19 743**, `retry_ms` **0.0** on all three, `select_ms` ≈ 0. The model stage is
+~the whole turn; **our own retry/selection overhead is now ~0**, and the residual
+(~1.3 s on the first call only) is the one-time `_load_sdk()` import. The backoff
+guard is confirmed live (`retry_ms=0.0` where the old code slept 1.5–1.9 s per
+transient-failing account). Accounts used spread across 5 of 7. Organic chat
+traffic was **quiet** in the window — the probe is the post-deploy measurement.
+
+**Post-deploy pool behaviour (first ~2 min).** 8 events: `model_failover`,
+`account_failover` (incl. awareness slot 3 = a moved key, benched on repeated
+503s with `usable=4/5` — the floor held), `account_recovered`. **No `pool_empty`
+since the deploy**; the one `pool_critical` in the 30-min window predates it. The
+identity fix is live: chat slots 1–7 now carry fingerprints (they were blank).
+
+**Known issues / limitations.** (1) Organic end-to-end latency is still
+unmeasured (no addressed message arrived). (2) Stale `gemini_accounts` rows
+remain for the two moved keys under `workload=chat` (slots 8/9) — harmless,
+not loaded, and **not** cleaned up (no destructive DB cleanup). (3) The
+pre-existing collisions (`chat:5==awareness:2` fp `24b5072536f6`,
+`live_voice:1==search:1` fp `20ed38996022`) remain and need the owner's
+instruction. (4) Provider free-tier 429s / 503-504 persist; no pool change
+creates quota. (5) The deployed image is built from an **uncommitted** tree.
+
+**Frozen / prohibited.** V untouched; `--arm context` probe frozen; awareness
+daily allowance unchanged at 200/account (the extra accounts raise the aggregate
+ceiling 600→1000, which is the point); no credential rotated or deleted; no
+destructive DB cleanup; no Phase Two.
+
+**NEXT STEP.** The owner's next phases are **Chat Personality restoration**, then
+the **broader integration test** — do **not** start them without the owner's
+word. Before any further change: decide whether to **commit** the working tree
+(the deploy is currently uncommitted) and whether to fix the two pre-existing
+credential collisions. To re-probe, use a self-cleaning script in the container
+(see §54.13's incident note: never delete `gemini_events` rows).
+
+**To resume after any context loss.** Re-read this section, then verify
+`git status` (7 modified files), `git rev-parse HEAD` (`6a4810a`),
+`git ls-remote origin refs/heads/main`, `docker ps` (image `0a0e4636a624`, Up,
+`RestartCount=0`), and that `[pool] chat: accounts=7` / `[pool] awareness:
+accounts=5` appear in the startup log.
 
 ---
 
