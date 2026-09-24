@@ -1,5 +1,5 @@
 {
-  "version": 15,
+  "version": 16,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -3456,7 +3456,7 @@
     {
       "id": "state-anchor-is-reply",
       "category": "room-state",
-      "note": "The anchor's own reply edge is in the graph even with no window, and there is nothing before it to continue.",
+      "note": "The anchor's own reply edge is in the graph even with no window, and there is nothing before it to continue. The reply target (11) is the referent, as in every other reply-anchor case; the label was null while the harness resolved the window without the anchor and saw no candidates.",
       "window": [],
       "anchor": {
         "user_id": 33,
@@ -3469,7 +3469,7 @@
       },
       "expect": {
         "expression_kind": "deictic",
-        "referent": null,
+        "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,
         "addressed": false,

@@ -57,6 +57,7 @@ sys.path.insert(0, str(ROOT))
 
 from app import (  # noqa: E402
     addressing,
+    awareness,
     awareness_context,
     config,
     db,
@@ -251,28 +252,43 @@ _CONTEXT_DB_BACKED = frozenset(
 )
 
 
-def _context(cases: list[dict]) -> dict:
-    """Render the assembled context for every case, and count what rendered.
+def _world(cases: list[dict]) -> None:
+    """Put the harness's world in the state the runtime's is in.
 
-    The context is built the way ``main._awareness_context`` builds it: the
-    window the pass read (which holds the anchor), the roles ``rbac`` answers
-    with, and the room the handler cached. The authority configuration comes from
-    the corpus's own labels, because a corpus that says a speaker is the owner
-    and a harness that gives its world no owner are measuring different systems.
+    The authority configuration comes from the corpus's own labels, because a
+    corpus that says a speaker is the owner and a harness that gives its world
+    no owner are measuring different systems. The database is opened and the
+    room cached under the one chat id so ``awareness.roles_for`` — which the
+    *renderer* calls — answers here the way it answers in production.
+
+    It is called by ``evaluate`` before the per-case loop, not only by
+    ``_context`` after it: the scored resolution has to be the one the prompt
+    renders, and the renderer resolves with the roles this world provides.
     """
+    # Every row the corpus labels, not only the anchors: ``roles_for`` answers
+    # from this configuration and *overrides* the row's own ``role`` field, so a
+    # window speaker the corpus calls an admin but the world calls a member is a
+    # different room than the corpus describes. (Before this the window's roles
+    # were read only by accident, through the resolver's row fallback, and only
+    # when no roles were passed at all.)
+    labelled = [
+        row
+        for c in cases
+        for row in [*(c.get("window") or ()), c["anchor"]]
+    ]
     owner_ids = sorted(
         {
-            int(c["anchor"].get("user_id") or 0)
-            for c in cases
-            if str(c["anchor"].get("role") or "") == "owner"
+            int(r.get("user_id") or 0)
+            for r in labelled
+            if str(r.get("role") or "") == "owner"
         }
         - {0}
     )
     admin_ids = sorted(
         {
-            int(c["anchor"].get("user_id") or 0)
-            for c in cases
-            if str(c["anchor"].get("role") or "") == "admin"
+            int(r.get("user_id") or 0)
+            for r in labelled
+            if str(r.get("role") or "") == "admin"
         }
         - {0}
     )
@@ -284,6 +300,18 @@ def _context(cases: list[dict]) -> dict:
         log.exception("could not open the harness database")
     awareness_context.reset_rooms()
     awareness_context.note_room(EVAL_CHAT, "Guard Group", "supergroup")
+
+
+def _context(cases: list[dict]) -> dict:
+    """Render the assembled context for every case, and count what rendered.
+
+    The context is built the way ``main._awareness_context`` builds it: the
+    window the pass read (which holds the anchor), the roles ``rbac`` answers
+    with, and the room the handler cached. The authority configuration comes from
+    the corpus's own labels, because a corpus that says a speaker is the owner
+    and a harness that gives its world no owner are measuring different systems.
+    """
+    _world(cases)
 
     rendered: dict[str, int] = {}
     sizes: list[int] = []
@@ -344,16 +372,31 @@ def evaluate(cases: dict) -> dict:
     """Run every case and return the metrics, plus the per-case detail."""
     config.NEXUS_NAMES = list(EVAL_NAMES)
     config.NEXUS_EXTRA_ACTION_WORDS = []
+    # The world first: the scored resolution must be the one the prompt renders.
+    _world(cases["cases"])
 
     detail: list[dict] = []
     for case in cases["cases"]:
         window = [_row(row) for row in case.get("window") or ()]
         anchor = _row(case["anchor"])
         expect = case["expect"]
+        # The renderer resolves with the window **including the anchor** (what
+        # ``main._awareness_pass`` hands in) and the roles the pass resolved. The
+        # harness scores that same resolution, not a cheaper one built from a
+        # different input — the two disagreed on five cases, and the prompt's
+        # reading is the one the model acts on. ``roles_for`` is outside the
+        # timer because the renderer pays it in ``build_ctx``, not in ``resolve``.
+        rows = [*window, anchor]
+        roles = awareness.roles_for(rows)
 
         started = time.perf_counter()
         expression = referents.find_expression(anchor["text"])
-        resolution = referents.resolve(anchor, messages=window)
+        resolution = referents.resolve(
+            anchor,
+            messages=rows,
+            roles=roles,
+            limit=max(1, int(config.NEXUS_AWARENESS_REFERENTS)),
+        )
         block = referents.render(resolution)
         elapsed_us = (time.perf_counter() - started) * 1_000_000
         addressed = addressing.detect(anchor["text"]).addressed
@@ -532,6 +575,10 @@ def evaluate(cases: dict) -> dict:
                 "object_why": target.why[0] if target.why else "",
                 "object_chars": len(object_block),
                 "block_chars": len(block),
+                # The block as the model reads it, scored against the verdict
+                # above: the harness must not score a resolution the prompt
+                # does not render.
+                "referents_prose": block.strip(),
                 "us": elapsed_us,
                 "when_us": when_us,
                 "entity_us": entity_us,

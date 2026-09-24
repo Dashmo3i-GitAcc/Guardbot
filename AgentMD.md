@@ -1617,6 +1617,21 @@ reference file is stale and this list is the one to fix first.
   have **all** been aimed at one person, and there is **more than one** of them
   (`_about_focus`). A split room, a single reply edge, a bare «این» and «قبلی»
   are **not** anaphoric and stay hints among hints.
+* The **speaker is not the referent**. The runtime hands the resolver the window
+  **including the anchor** — that is why `_recent_scores` skips the anchor's own
+  user — and the **role signal skips them too**: the owner who says «ادمینه رو
+  محدود کن» holds a role, and offering them as a candidate for «ادمینه» made an
+  unambiguous instruction render as *"could not tell the top candidates apart,
+  ask"*. The exclusion is for the role **inference**, not for the explicit
+  facts: a name, a stated id and a reply edge still name whoever they name.
+* The **benchmark scores the resolution the prompt renders**. `evaluate` resolves
+  with the same `messages` (window **+ anchor**) and the same `roles`
+  (`awareness.roles_for`) the renderer passes, and the harness's world is built
+  from **every row the corpus labels**, not only the anchors — `roles_for`
+  overrides a row's own `role` field, so a window speaker the corpus calls an
+  admin but the world calls a member is a different room than the corpus
+  describes. It used to resolve the window *without* the anchor and with no
+  roles; the two readings disagreed on five cases.
 * The resolver is **bounded** (`CANDIDATE_LIMIT`) and **cheap** — pure Python,
   no query — and the block it renders is capped and labelled "evidence, not a
   decision".
@@ -2191,3 +2206,103 @@ reference file is stale and this list is the one to fix first.
 * `/nexus` status shows the search switch next to awareness, and
   `agent_data.nexus_diagnostics` reports `search_enabled`; the credential is
   never shown by either.
+
+## 54. Nexus intelligence evolution — checkpoint (2026-09-24)
+
+A durable checkpoint for continuing the Intent/Awareness evolution. `§53.7` is
+the invariant set; this section is the **state**, not a rule, and is meant to be
+replaced as the work advances.
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`, HEAD
+`66a1e94` plus increment P (pushed to both remotes `origin`/`dashmo3i`). `main`
+and the rollback base are untouched at `00c5d1d`. Increments A–P are done; the
+deterministic benchmark in `tools/eval_intent.py` is clean over 134 cases
+(`tests/test_intent_eval.py` holds the floor) and the full suite is
+**3236 passed / 0 failed**. **No merge, no deploy** without the owner's explicit
+go-ahead.
+
+**Increment O — `66a1e94`, "the copula is not a clitic".** The act reader's
+`_CLITICS` wrongly held «ه», so «ادمینه کیه؟» folded to «ادمین» + «کی» and read
+as an *instruction*. Removed; the copula question words were listed explicitly
+in `_QUESTION_WORDS`. `act_copula_directives` 7/134 → 0/134, act accuracy
+97.0% → 100.0%, corpus v14 → v15.
+
+**Increment P — "the benchmark scores the resolution the prompt renders".** Two
+coupled divergences, both measured on the corpus:
+
+1. `tools/eval_intent.py` `evaluate()` resolved with
+   `referents.resolve(anchor, messages=window)` — the **window without the
+   anchor** and **no roles** — while the renderer
+   (`app/awareness_context.py` `_render_referent_candidates`) resolves with
+   `messages=ctx.messages` (window **+ anchor**, what `main._awareness_pass`
+   passes) and `roles=ctx.roles`. The scored verdict could differ from the block
+   the model reads. (That `_recent_scores` deliberately skips the anchor's own
+   user is evidence the intended input *includes* the anchor.)
+2. `app/referents.py` `resolve()`'s **role signal counted the anchor's own
+   speaker** — unlike `_recent_scores` — so the person *giving* «ادمینه رو محدود
+   کن» was offered as a candidate for «ادمینه», rendering an unambiguous case as
+   *"could not tell the top candidates apart, ask"*.
+
+Measured (A = harness as it was, B = the renderer's inputs, before the reader
+fix; same 134 cases):
+
+| | top-1 | ambiguity recall | ambiguity precision | wrong-confident | confident & correct | #ambiguous |
+|---|---|---|---|---|---|---|
+| A (harness) | 1.000 | 1.000 | 1.000 | 0 | 0.639 | 4 |
+| B (renderer inputs) | 1.000 | 1.000 | **0.571** | 0 | 0.556 | 7 |
+| after the reader fix | 1.000 | 1.000 | **1.000** | 0 | **0.649** | 4 |
+
+Five cases move between A and B (`role-single-admin`, `member-cannot-be-role`,
+`mixed-role-admin`, `role-two-admins`, `state-anchor-is-reply`); after the fix
+the three role cases are confident and correct again, the two-admin tie stays
+ambiguous, and the reply case names its target.
+
+Three fixes: the role signal skips the anchor's own speaker (the exclusion is
+for the role **inference**; a name, a stated id and a reply edge still name
+whoever they name); `evaluate()` resolves with the renderer's `messages` and
+`roles`; and the harness's world is built from **every row the corpus labels**,
+not only the anchors (`roles_for` *overrides* a row's own `role` field, so a
+window speaker the corpus calls an admin but the world calls a member was a
+different room than the corpus describes). One exposed label was corrected:
+`state-anchor-is-reply` had `referent: null` while its anchor is a reply to 11
+and every other reply-anchor case labels the reply target. Corpus v15 → v16.
+
+**What the suite caught, and what it did not.** Two failures, neither a
+regression of P's own logic:
+
+* `tests/test_awareness_context.py::test_the_candidates_are_read_from_the_context_not_the_database`
+  asserted that the anchor's **own speaker** appears as a candidate — the exact
+  reading P removes. The test's real claim (candidates come from the hand-made
+  window, not the database) is now made with a *different* configured admin in
+  the window, and it additionally asserts the speaker is **not** offered. This
+  is a regression test for the guard.
+* `tests/test_identity.py::test_the_handle_is_not_derived_from_the_telegram_id`
+  was a **pre-existing flake**, unrelated to P: `assert "500" not in handle`
+  tests a property of `uuid4().hex` (which contains the substring "500" about
+  0.6% of the time — 30 windows × 16⁻³), so the suite failed roughly once in 170
+  runs. It passes in isolation. Replaced with two deterministic checks: the
+  handle is not the id zero-padded to 32 in either decimal or hex.
+
+**Latency.** The guard only removes a candidate from the scoring loop; a clean
+interleaved A/B over the corpus puts it **within noise** (73.7 vs 72.3 µs per
+case median, 59.0 vs 59.8 minimum). An earlier reading of 65.3 vs 77.5 µs was
+taken with the full suite running on the same box and is noise-dominated — it is
+not the number, and P is not sold as a speed-up. 0 Gemini calls, no DB change, no
+source/budget/runtime-path change; the only production file touched is
+`app/referents.py`.
+
+**Next increment (Q), in priority order.** The owner's list still stands
+(1–5 intent/Awareness understanding, 10–12 scheduling/adaptivity/integration, 13
+model routing only if benchmarks prove it, 14 verification only where
+measurable). The concrete threads P leaves:
+
+1. The **rendered prose** is now scored for the referent block only. The other
+   rendered blocks — the object's "the verb decides", the room-state graph's
+   "converged on", the act block's quoted directive — are scored only where they
+   move a labelled verdict (§55.5). Extending the same "score the product, not
+   the reading" discipline to the **act block's prose** is the next measured step.
+2. `role-two-admins` stays ambiguous by design; check whether the corpus should
+   carry a case where the room's reply convergence *should* break the tie.
+
+**Constraints carried:** speed-first (no unnecessary Gemini calls; benchmark
+latency before/after every change), rollback safety, no merge, no deploy.

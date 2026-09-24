@@ -693,7 +693,18 @@ def resolve(
         add(user_id, SCORE_NAMED, f"named in the message ({name})")
 
     if expression.kind == KIND_ROLE:
+        # The speaker is not the referent: a message is *by* them, not *about*
+        # them. The owner who says «ادمینه رو محدود کن» holds a role, and
+        # without this guard the resolver offers them as a candidate for
+        # «ادمینه» — which made an unambiguous instruction read as "could not
+        # tell the top candidates apart, ask", and in a thin window could name
+        # the speaker as the person to act on. ``_recent_scores`` already skips
+        # the anchor's own user for exactly this reason; the role signal is the
+        # same kind of inference, so it skips them too.
+        anchor_user = int((anchor or {}).get("user_id") or 0)
         for user_id in people:
+            if user_id == anchor_user:
+                continue
             role = roles.get(user_id) or str(people[user_id].get("role") or "")
             if role in ("owner", "admin"):
                 add(user_id, SCORE_ROLE, f"holds the role {role}")

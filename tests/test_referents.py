@@ -760,3 +760,38 @@ def test_the_action_lexicon_is_borrowed_lazily_and_guarded():
         assert R.find_expression("اینو بن کن").kind == R.KIND_DEICTIC
     finally:
         R._action_words = original
+
+
+# ── The speaker is not the referent ───────────────────────────────────────
+def test_the_speaker_is_not_a_role_candidate():
+    """A message is *by* the speaker, not *about* them.
+
+    The runtime hands the resolver the window **including the anchor** — that is
+    why ``_recent_scores`` skips the anchor's own user. The role signal did not,
+    so the owner who said «ادمینه رو محدود کن» was offered as a candidate for
+    «ادمینه», and with one admin in the room the block read "could not tell the
+    top candidates apart, ask" for a case that is not ambiguous.
+    """
+    messages = [
+        row(33, "مالک", text="ادمینه رو محدود کن", role="owner"),
+        row(11, "رضا", at=990, role="member"),
+        row(44, "نیما", at=995, role="admin"),
+    ]
+    result = R.resolve(anchor("ادمینه رو محدود کن"), messages=messages)
+    assert 33 not in {c.user_id for c in result.candidates}
+    assert result.top().user_id == 44
+    assert result.confident is True
+    assert result.ambiguous is False
+
+
+def test_two_role_holders_stay_ambiguous_even_with_the_speaker_excluded():
+    """The exclusion narrows the candidates; it does not settle a real tie."""
+    messages = [
+        row(33, "مالک", text="ادمینه رو محدود کن", role="owner"),
+        row(44, "نیما", at=995, role="admin"),
+        row(66, "لیلا", at=997, role="admin"),
+    ]
+    result = R.resolve(anchor("ادمینه رو محدود کن"), messages=messages)
+    assert 33 not in {c.user_id for c in result.candidates}
+    assert result.ambiguous is True
+    assert result.confident is False

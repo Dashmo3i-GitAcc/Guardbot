@@ -29,6 +29,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [55. A clitic is not a content word](#s55)
 - [56. A config is not a person](#s56)
 - [57. The copula is not a clitic](#s57)
+- [58. The benchmark scored a different reading than the prompt showed](#s58)
 
 ---
 
@@ -3569,3 +3570,92 @@ a correction, a report or a social word; the corpus shows it did not — the
 because those lexicons already list their «ه» forms. The act block's remaining
 prose — the "why" wording — is still unscored beyond the `act_copula_directives`
 floor (§55.5).
+
+## 58. The benchmark scored a different reading than the prompt showed
+
+### 58.1 The claim
+
+`tools/eval_intent.py` is the evidence for every "Nexus understands better" claim
+in this stage. Its referent numbers — top-1 accuracy, ambiguity recall and
+precision, wrong-but-confident — were computed from a resolution that was **not
+the one the prompt renders**.
+
+### 58.2 The defect
+
+`evaluate` resolved with `referents.resolve(anchor, messages=window)` — the
+window **without the anchor**, and **no roles**. The renderer
+(`app/awareness_context.py` `_render_referent_candidates`) resolves with
+`messages=ctx.messages`, which is what `main._awareness_pass` hands in — the
+window **including the anchor** — and `roles=ctx.roles`. That
+`referents._recent_scores` deliberately skips the anchor's own user is the tell:
+the intended input *includes* the anchor.
+
+Underneath it sat a second defect, and the first was hiding it. The role signal
+in `resolve` loops over every speaker and adds `SCORE_ROLE` for anyone whose role
+is `owner`/`admin` — with **no guard for the anchor's own speaker**, unlike
+`_recent_scores`. So the person *giving* «ادمینه رو محدود کن» was offered as a
+candidate for «ادمینه», and the block read:
+
+```
+- نیما (44), 0.75 — holds the role admin; they spoke shortly before this message
+- مالک (33), 0.70 — holds the role owner
+The server could not tell the top candidates apart. If you must act on a person, ask which one is meant rather than choosing.
+```
+
+for a case the corpus labels unambiguous — because the owner (33) is the speaker.
+
+A third, smaller divergence sat in the harness's world: it built the authority
+configuration from the **anchors** only, while `roles_for` overrides a row's own
+`role` field. A window speaker the corpus called an admin but the world called a
+member was a different room than the corpus describes.
+
+### 58.3 The fix
+
+1. `app/referents.py`: the role signal skips the anchor's own speaker — a message
+   is *by* them, not *about* them, the rule `_recent_scores` already applies. The
+   exclusion is for the role **inference**; a name, a stated id and a reply edge
+   still name whoever they name.
+2. `tools/eval_intent.py`: `evaluate` resolves with the renderer's inputs (the
+   window plus the anchor, and `awareness.roles_for`), so the block the model
+   reads and the verdict the benchmark scores are the same object.
+3. `tools/eval_intent.py`: the harness's world is built from **every row the
+   corpus labels**, not only the anchors.
+
+The faithful harness also exposed one **under-labelled** case: `state-anchor-is-reply`
+had `referent: null` while its anchor is a reply to user 11 — and every one of
+the other fourteen reply-anchor cases labels the referent as the reply target.
+Its label was written while the harness saw an empty window. It is now `11`, so
+the reply rule is **scored** rather than merely not contradicted.
+
+### 58.4 The numbers
+
+A = the harness before the fix; B = the renderer's inputs, before the reader fix.
+
+| | A (harness) | B (renderer inputs) | after the reader fix |
+|---|---|---|---|
+| top-1 accuracy | 1.000 | 1.000 | 1.000 |
+| ambiguity recall | 1.000 | 1.000 | 1.000 |
+| ambiguity precision | 1.000 | **0.571** | **1.000** |
+| wrong-but-confident | 0 | 0 | 0 |
+| confident and correct | 0.639 | 0.556 | **0.649** |
+
+Five cases moved between A and B (`role-single-admin`, `member-cannot-be-role`,
+`mixed-role-admin`, `role-two-admins`, `state-anchor-is-reply`); after the reader
+fix the three role cases are confident and correct again, the two-admin tie stays
+ambiguous, and the reply case names its target. Corpus version 15 → 16 (one label
+corrected; 134 cases unchanged). Suite 3232 → 3236.
+
+Latency: the guard only removes a candidate from the scoring loop, and a clean
+interleaved A/B over the corpus puts it **within noise** — 73.7 vs 72.3 µs per
+case (median of 21 runs), 59.0 vs 59.8 (minimum). An earlier reading of 65.3 vs
+77.5 µs was taken while the full test suite was running on the same box and is
+noise-dominated; it is not the number, and the change is not sold as a speed-up.
+0 Gemini calls, no DB change, no source/budget change; the only production file
+touched is `app/referents.py`.
+
+### 58.5 What it leaves
+
+The harness now scores the referent block the model reads. The other rendered
+blocks — the object's "the verb decides", the room-state graph's "converged on",
+the referent ranking's own reason strings — are still scored only where they
+happen to move a labelled verdict, not as prose (§55.5).

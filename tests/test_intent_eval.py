@@ -437,6 +437,46 @@ def test_the_copula_check_is_not_vacuous():
     assert unfixed["act_accuracy"] < 1.0
 
 
+# ── The reading the prompt renders, not a cheaper one ─────────────────────
+def test_the_scored_verdict_is_the_one_the_block_renders():
+    """The harness must score the resolution the renderer renders.
+
+    It used to resolve with the window *without* the anchor and with no roles,
+    while ``_render_referent_candidates`` resolved with the anchor in the window
+    and the pass's roles. The two disagreed on five cases, and the prompt's
+    reading is the one the model acts on — so the block the model reads and the
+    verdict the benchmark scores have to be the same object.
+    """
+    m = result()
+    for r in m["detail"]:
+        prose = r["referents_prose"]
+        if not prose:
+            continue
+        if r["got_confident"]:
+            assert "is confident in the first" in prose, r["id"]
+        elif r["got_ambiguous"]:
+            assert "could not tell the top" in prose, r["id"]
+
+
+def test_the_referent_block_check_is_not_vacuous():
+    """The corpus carries the shape: a role expression with a role-holding
+    speaker, and the ambiguity the prompt must not over-report."""
+    cases = eval_intent.load_cases()["cases"]
+    shaped = [
+        c["id"]
+        for c in cases
+        if c["expect"]["expression_kind"] == "role"
+        and any(
+            str(r.get("role") or "") in ("owner", "admin")
+            for r in [*(c.get("window") or ()), c["anchor"]]
+        )
+    ]
+    assert len(shaped) >= 3, shaped
+    m = result()
+    assert m["ambiguity_precision"] == 1.0
+    assert m["wrong_confident"] == 0
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 def test_the_context_is_assembled_for_every_case():
     m = result()

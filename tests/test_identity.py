@@ -69,12 +69,25 @@ def test_two_people_get_different_handles():
 
 
 def test_the_handle_is_not_derived_from_the_telegram_id():
-    """A derived handle would be reversible, which defeats its purpose."""
+    """A derived handle would be reversible, which defeats its purpose.
+
+    What must not survive into the handle is the id itself, in either of the
+    shapes a derivation would take at the handle's own width: the decimal
+    digits zero-padded to 32, and the hex digits zero-padded to 32.
+
+    This test used to assert ``"500" not in handle``. That is a property of
+    the *random draw*, not of the derivation — ``uuid4().hex`` contains the
+    substring "500" about 0.6% of the time (30 windows × 16⁻³), so the suite
+    failed on an unrelated run roughly once in 170. The assertions below hold
+    for every draw, which is what makes them a regression test rather than a
+    coin flip.
+    """
     remember(500, "میلاد")
     handle = identity.uuid_for(500)
 
-    assert "500" not in handle
+    assert handle
     assert handle != f"{500:032d}"
+    assert handle != f"{500:032x}"
 
 
 def test_uuid_for_never_creates_a_row():

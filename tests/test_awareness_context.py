@@ -747,16 +747,26 @@ def test_the_candidate_list_is_bounded_by_config(monkeypatch):
     assert len(candidate_lines) == 2
 
 
-def test_the_candidates_are_read_from_the_context_not_the_database():
+def test_the_candidates_are_read_from_the_context_not_the_database(monkeypatch):
     """It reads the window the pass already read, so it costs no query."""
+    # TARGET is an administrator in the environment, and the only thing that
+    # makes them a candidate for «ادمینه» is the hand-made window row below.
+    monkeypatch.setattr(
+        config, "CONFIG_ADMINS", [f"{ADMIN}:admin", f"{TARGET}:admin"]
+    )
     anchor = _msg(ADMIN, "ادمینه رو محدود کن", role="admin", name="Admin", at=1000)
-    messages = [_msg(ADMIN, "سلام", role="admin", name="Admin", at=990)]
+    messages = [_msg(TARGET, "سلام", role="admin", name="Reza", at=990)]
     ctx = _referent_ctx(anchor, messages)
     # Built from a hand-made window and a hand-made anchor: if the source read
     # the database it would find nothing, because nothing was captured.
     out = awareness_context._render_referent_candidates(ctx)
     assert "ادمینه" in out
-    assert str(ADMIN) in out
+    # The id is asserted inside the rendered candidate line rather than as a
+    # bare substring: "43" also occurs inside a score like "0.43".
+    assert f"({TARGET})" in out
+    # And the speaker is not offered as the person they named — a message is
+    # *by* them, not *about* them.
+    assert f"({ADMIN})" not in out
 
 
 def test_the_referent_block_is_bounded_by_the_pass_ceiling(monkeypatch):
