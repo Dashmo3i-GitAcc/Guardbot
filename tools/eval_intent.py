@@ -160,6 +160,32 @@ def _entity_gives_an_order(block: str) -> bool:
     return "do not" in block.lower()
 
 
+# ── The thread's content words ────────────────────────────────────────────
+# The thread reading is the one heuristic in the room-state reader: whether the
+# anchor's *content words* overlap the words before it. Its verdict was scored;
+# the words it named as the overlap never were — and a word can be wrong while
+# the verdict still looks plausible. The ZWNJ fold splits a plural clitic off its
+# noun («بچهها» → «بچه ها»), so «ها» arrived as a content word: two messages
+# sharing any plural noun "continued" each other, and the reason rendered to the
+# model named «ها» beside the word that mattered.
+#
+# The list below is the *specification* of what a clitic is, kept apart from the
+# reader's own so the check cannot pass by agreeing with a mistake inside it.
+_CLITIC_FORMS = frozenset(
+    {
+        "ها", "های", "هایی",
+        "هام", "هات", "هاش", "هامان", "هاتان", "هاشان",
+        "هامون", "هاتون", "هاشون",
+        "هایم", "هایت", "هایش", "هایمان", "هایتان", "هایشان",
+    }
+)
+
+
+def _clitic_content_words(text: str | None) -> tuple[str, ...]:
+    """The clitics the reader treated as content words in ``text``."""
+    return tuple(t for t in room_state.content_tokens(text) if t in _CLITIC_FORMS)
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 # Every section above scores one reader. None of them scored the *assembly* —
 # which sources actually reach the model, in what order, within the ceiling — and
@@ -411,6 +437,12 @@ def evaluate(cases: dict) -> dict:
                 "got_relation": state.relation,
                 "graph_chars": len(graph_block),
                 "thread_chars": len(thread_block),
+                # The words the thread reading named, checked against the
+                # specification of a clitic. Both should be empty; both were not.
+                "anchor_clitic_words": _clitic_content_words(anchor["text"]),
+                "shared_clitic_words": tuple(
+                    t for t in state.shared if t in _CLITIC_FORMS
+                ),
                 "expected_newest_media": expected_newest_media,
                 "got_newest_media": newest_media,
                 "expected_has_link": expected_has_link,
@@ -711,6 +743,16 @@ def _metrics(detail: list[dict]) -> dict:
         },
         "graph_chars_max": max((r["graph_chars"] for r in detail), default=0),
         "thread_chars_max": max((r["thread_chars"] for r in detail), default=0),
+        # The content words the thread reading named, scored against the clitic
+        # specification. Both should be zero: a clitic is a bound morpheme, not
+        # a topic. `anchor_clitic_cases` counts the anchors whose content words
+        # included one at all; `thread_shared_clitic_cases` counts the ones that
+        # reached a *verdict* on it, which is the direction that puts a wrong
+        # word in the prompt beside a plausible "continues".
+        "anchor_clitic_cases": sum(1 for r in detail if r["anchor_clitic_words"]),
+        "thread_shared_clitic_cases": sum(
+            1 for r in detail if r["shared_clitic_words"]
+        ),
         "media_exact": sum(1 for r in detail if r["media_ok"]),
         "link_exact": sum(1 for r in detail if r["link_ok"]),
         "named_cases": len(named_cases),
@@ -928,6 +970,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
             if v["total"]
         ),
         f"  graph / thread chars max   {m['graph_chars_max']} / {m['thread_chars_max']}",
+        f"  the words, scored          {m['anchor_clitic_cases']} anchors carry a clitic as a "
+        f"content word; {m['thread_shared_clitic_cases']} reach a verdict on one (both should be 0)",
         "",
         f"the things a demonstrative may point at (class over {m['named_cases']} labelled)",
         f"  media exact                {m['media_exact']} / {m['cases']}",
@@ -1035,6 +1079,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or r["entity_claims_a_pointer"]
         or r["entity_offers_things_for_a_person"]
         or r["entity_gives_an_order"]
+        or r["anchor_clitic_words"] or r["shared_clitic_words"]
         or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])

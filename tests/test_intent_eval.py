@@ -335,6 +335,42 @@ def test_the_entity_order_check_is_not_vacuous():
     assert m["entity_items_offered_total"] >= 10, "no block renders the closing line"
 
 
+# ── The thread's content words ────────────────────────────────────────────
+def test_the_thread_never_claims_a_clitic_as_a_content_word():
+    """The thread reading names its evidence, and the evidence can be wrong.
+
+    The verdict was scored; the words it named as the overlap never were. The
+    ZWNJ fold splits a plural clitic off its noun («بچهها» → «بچه ها»), so «ها»
+    arrived as a content word — two messages that share any plural noun
+    "continued" each other, and the reason rendered to the model named «ها»
+    beside the word that mattered.
+    """
+    m = result()
+    assert m["anchor_clitic_cases"] == 0
+    assert m["thread_shared_clitic_cases"] == 0
+
+
+def test_the_clitic_check_is_not_vacuous():
+    """The corpus contains the defect's shape, so the zero above is a real pass.
+
+    Two anchors fold to a bare clitic token — «سلام بچه ها» → «بچه», «ها» — and
+    one of them reached a ``continues`` verdict on it before the fix. The scan
+    below is over the *folded tokens*, not over ``content_tokens``, so it stays
+    true after the fix: the shape is still in the corpus, and only the reading
+    changed. The relation is still scored, and the case the fix moved is now
+    labelled for it.
+    """
+    clitic = eval_intent._CLITIC_FORMS
+    shaped = [
+        case["id"]
+        for case in eval_intent.load_cases()["cases"]
+        if set(room_state._tokens(case["anchor"]["text"])) & clitic
+    ]
+    assert len(shaped) >= 2, shaped
+    m = result()
+    assert m["state_cases"] >= 13, "the relation stopped being scored"
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 def test_the_context_is_assembled_for_every_case():
     m = result()

@@ -48,6 +48,13 @@ The stopword list is the other half of that care. Overlap is only evidence if
 the words that overlap *mean* something: «این», «که», «رو», «میشه» appear in
 almost every Persian sentence and would make every message "continue" every
 other one.
+
+A clitic is the same hazard in a different shape. The fold turns the zero-width
+non-joiner into a space, so «بچهها» and «بچه ها» both arrive as two tokens and
+the bound morpheme «ها» becomes a *content word*: two messages that share any
+plural noun "continue" each other, and the reason rendered to the model names
+«ها» beside the real word. The clitic paradigm is closed, so it is listed with
+the stopwords rather than guessed.
 """
 from __future__ import annotations
 
@@ -110,6 +117,26 @@ _STOP = frozenset(
     }
 )
 
+# The plural and possessive clitics. A clitic is a bound morpheme — it cannot
+# stand on its own — but the ZWNJ fold splits it off, so «بچهها» arrives as
+# «بچه» + «ها» and the second token passed the length floor and the stopword
+# list. Two messages that share only a plural noun then "continued" each other,
+# and the rendered reason named «ها» beside the word that mattered. The paradigm
+# is closed, so it is listed rather than derived. The single-character clitics
+# («م» «ت» «ش») are not here: they never survive ``MIN_TOKEN``, which already
+# drops anything shorter than two characters.
+_CLITIC = frozenset(
+    {
+        # plural
+        "ها", "های", "هایی",
+        # possessive, attached to the plural
+        "هام", "هات", "هاش", "هامان", "هاتان", "هاشان",
+        "هامون", "هاتون", "هاشون",
+        # possessive, the formal/ezafe spellings
+        "هایم", "هایت", "هایش", "هایمان", "هایتان", "هایشان",
+    }
+)
+
 
 def _fold(text: str | None) -> str:
     """The shared fold, reused rather than copied.
@@ -146,11 +173,12 @@ def content_tokens(text: str | None) -> tuple[str, ...]:
 
     Deduped because overlap is a set question: «فایل» twice is not two pieces of
     evidence that the topic is files. Order is kept so a rendered reason reads
-    in the order the message used the words.
+    in the order the message used the words. A clitic is never one of them:
+    «ها» is a bound morpheme the fold split off, not a thing a message is about.
     """
     out: list[str] = []
     for token in _tokens(text):
-        if len(token) < MIN_TOKEN or token in _STOP:
+        if len(token) < MIN_TOKEN or token in _STOP or token in _CLITIC:
             continue
         if token not in out:
             out.append(token)

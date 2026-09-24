@@ -21,6 +21,10 @@ import pytest
 
 from app import room_state as R
 
+# The zero-width non-joiner, spelled out so the tests read the way Persian does:
+# «بچهها» is one word to a reader and two to the fold.
+ZWNJ = "\u200c"
+
 
 def row(user_id, text, at, *, mid=0, reply=0, role="member", name=""):
     """One window row, with the columns ``db.group_window`` returns."""
@@ -70,6 +74,55 @@ def test_the_fold_survives_the_orthographies():
 def test_an_empty_or_missing_text_has_no_content_words():
     assert R.content_tokens("") == ()
     assert R.content_tokens(None) == ()
+
+
+# ── The clitic the fold split off ─────────────────────────────────────────
+def test_the_plural_clitic_is_not_a_content_word():
+    """«ها» is a bound morpheme, not a thing a message is about.
+
+    The fold turns the zero-width non-joiner into a space, so «بچهها» and
+    «بچه ها» both arrive as two tokens. Without this, two messages that share any
+    plural noun "continue" each other, and the reason rendered to the model names
+    «ها» beside the word that mattered.
+    """
+    assert R.content_tokens("سلام بچه ها") == ("بچه",)
+    assert R.content_tokens("فایل" + ZWNJ + "ها رو چک کن") == ("فایل", "چک")
+
+
+@pytest.mark.parametrize(
+    "clitic",
+    ["ها", "های", "هایی", "هام", "هات", "هاش", "هاشون", "هایم", "هایش"],
+)
+def test_every_clitic_form_is_dropped_and_the_stem_kept(clitic):
+    words = R.content_tokens("کتاب" + ZWNJ + clitic)
+    assert clitic not in words
+    assert "کتاب" in words
+
+
+def test_a_greeting_is_too_short_to_continue():
+    """The defect's shape: a greeting "continued" the greeting before it.
+
+    «سلام بچه ها» has one content word once the clitic is gone — «بچه» — which is
+    below ``MIN_TOPIC_TOKENS``, so the reading abstains. That is the honest
+    answer for a greeting: it is not about anything to continue.
+    """
+    prior = [row(11, "سلام بچه ها", 900)]
+    state = R.read_state(prior, row(11, "سلام بچه ها", 1000))
+    assert state.relation == R.RELATION_UNCLEAR
+    assert state.shared == ()
+    assert R.render_thread(state) == ""
+
+
+def test_a_real_shared_word_still_continues_beside_a_clitic():
+    """The fix drops the clitic, not the overlap.
+
+    «گزارشها» and «گزارش» share the stem «گزارش», so the reading still says the
+    thread continues — it just no longer claims «ها» is a shared word.
+    """
+    prior = [row(12, "گزارش رو فرستادم", 900)]
+    state = R.read_state(prior, row(12, "گزارش" + ZWNJ + "ها آماده شد", 1000))
+    assert state.relation == R.RELATION_CONTINUES
+    assert state.shared == ("گزارش",)
 
 
 # ── The reply graph ───────────────────────────────────────────────────────

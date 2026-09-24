@@ -1702,6 +1702,14 @@ reference file is stale and this list is the one to fix first.
   floor of three dropped «چک» — two characters, and exactly what a message about
   a file is about — and made «فایل رو چک کن» too short to judge. The floor is now
   two, and a single character is never a topic.
+* A **clitic is not a content word**. The fold turns the ZWNJ into a space, so
+  «بچهها» and «بچه ها» both arrive as two tokens and «ها» passed the length floor
+  and the stopword list — two messages sharing any plural noun "continued" each
+  other, and the reason rendered to the model named «ها» beside the word that
+  mattered. The closed plural/possessive paradigm is in `_CLITIC` and filtered
+  beside `_STOP`. Only the **bare** clitic token is dropped; the glued spelling
+  («بچهها» with no separator) stays one token and is a separate recall matter,
+  not this one — suffix-stripping would over-strip «رها» and «تنها».
 * The anchor's **own row is excluded** from "what came before", by `message_id`
   when it has one and by the `(user_id, at, text)` triple when it does not — or
   its own words would overlap themselves and every message would look like a

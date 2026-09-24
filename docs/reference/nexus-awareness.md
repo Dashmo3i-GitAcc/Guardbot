@@ -26,6 +26,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [52. A sentence that contradicted itself](#s52)
 - [53. A correction the evidence did not support](#s53)
 - [54. The prompt, measured — and the block that never reached it](#s54)
+- [55. A clitic is not a content word](#s55)
 
 ---
 
@@ -3364,3 +3365,68 @@ one block's sentence and §53 scored another block's claims; the referent, act,
 object and room-state blocks still make claims nothing checks. And the coverage
 floor now says which sources reach the model — so the next block that stops
 reaching it fails a test instead of being noticed a dozen increments later.
+
+## 55. A clitic is not a content word
+
+### 55.1 The claim the thread reading made
+
+The thread reading is the one heuristic in `app/room_state.py`: whether the
+anchor's **content words** overlap the words of the messages before it. §54 left
+exactly this open — *the room-state block still makes claims nothing checks*.
+The verdict was scored; the words it named as the overlap never were. A word can
+be wrong while the verdict still looks plausible.
+
+### 55.2 The defect
+
+The shared fold turns the zero-width non-joiner into a **space**
+(`people.normalize`, `_SPACE_FOR`), so «بچهها» and «بچه ها» both arrive as two
+tokens. «ها» is two characters and is not a stopword, so it passed the length
+floor and the list and became a **content word**. In the corpus,
+`object-abstain-no-directive` — anchor «سلام بچه ها», with the same greeting in
+the window before it — rendered:
+
+```
+This message continues the thread the room is already on — it shares «بچه», «ها»
+with what came before.
+```
+
+The room's topic is not children; both messages are greetings. The reading's own
+docstring says a greeting is exactly what should abstain (*«باشه» shares nothing
+with anything*). With the clitic gone the anchor has one content word — «بچه» —
+which is below `MIN_TOPIC_TOKENS`, so the reading abstains. That is the honest
+answer for a greeting: it is not about anything to continue.
+
+### 55.3 The fix
+
+`_CLITIC` — the closed plural/possessive paradigm (`ها`, `های`, `هایی`, `هام`,
+`هاش`, `هاشون`, `هایم`, …) — is filtered beside `_STOP` in `content_tokens`. Only
+the **bare** clitic token is dropped: the glued spelling («بچهها» with no
+separator) stays one token, which is a separate *recall* matter (it fails to
+match «بچه»), not this defect. Suffix-stripping is deliberately not done — it
+would over-strip «رها» and «تنها».
+
+### 55.4 The numbers
+
+| | before | after |
+|---|---|---|
+| anchors whose content words include a clitic | **2** / 127 | **0** / 127 |
+| cases reaching a verdict on a clitic | **1** / 127 | **0** / 127 |
+| relation-labelled cases | 12 | 13 |
+| relation exact | 12 / 12 | 13 / 13 |
+| corpus version | 12 | 13 |
+| suite | 3157 | 3171 |
+
+The one case the fix moved — `object-abstain-no-directive` — went from a
+misleading `continues` to the honest `unclear`, and is now labelled for it, so
+the corrected verdict is **scored** rather than merely unpinned.
+
+Non-vacuity: the unfixed reader is reconstructed from the same tokenizer and
+filter, and the check reads **2** and **1** against it.
+
+### 55.5 What it leaves
+
+The act, object, referent and room-state blocks still make claims nothing checks
+— the graph's "converged on" wording, the object's "the verb decides", the
+referent's ranking reasons. §55 scored the thread's *evidence*; the remaining
+blocks' prose is the next thing to hold to the same standard.
+

@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 13,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -5904,7 +5904,8 @@
         "when_unit": "",
         "state": {
           "edges": [],
-          "focus": 0
+          "focus": 0,
+          "relation": "unclear"
         },
         "entities": {
           "newest_media": "document",
