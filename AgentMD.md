@@ -3851,6 +3851,28 @@ Y's `--arm context`, U's live probe, V's `--arm model`, the memory model seam,
 and Voice Live end-to-end. No fake health result was produced and no number was
 claimed from a run that did not complete.
 
+**Provider recheck (2026-09-24, at checkpoint close).** A fresh bare probe
+changed the picture in two ways, and the live probe was re-attempted on it:
+
+* The 503 is **intermittent and per-project, not global**. `models.list`
+  succeeds on every key; a single `generate_content` on
+  `gemini-flash-lite-latest` succeeded on **6 of 9** chat accounts
+  (`ad4bfbe4`, `23c19e3b`, `295c2a86`, `24b50725`, `2a52d966`, `4a75741b`) and
+  503'd on three (`5148caba`, `599a1072`, `5ff073ee`); the same account returned
+  OK and then 503 minutes apart. The awareness key served `gemini-flash-lite-latest`
+  too.
+* **One credential is dead, not degraded: `GEMINI_API_KEY` (fp `7c707e1b`),
+  the `intent` workload's primary (slot 1, `app/config.py:2755`), returns
+  `401 UNAUTHENTICATED` on every model** — an invalid/revoked key, not high
+  demand. Its only sibling `GEMINI_API_KEY_2` (fp `a3aae772`) is transiently
+  503. This is **reported, not fixed** — no token is added, moved, rotated or
+  removed without the owner's instruction.
+* `tools/eval_chat_quality.py --arm context --samples 2 --max-calls 60
+  --time-budget 90` was **re-attempted and is still NOT RUN**: 10 calls made,
+  every one 503, the pool reported `usable=0/9`, the chat breaker opened. Both
+  arms report `not_run: 14`, `answered_rate 0.0`, `scored_samples: 0` — the
+  honest NOT-RUN result, no number claimed. **PROVIDER UNAVAILABLE.**
+
 **Tests.** Targeted (this increment's files, run in the project image):
 `tests/test_objects.py tests/test_requests.py tests/test_intent_eval.py
 tests/test_awareness_schedule.py tests/test_awareness_schedule_eval.py` →
@@ -3883,7 +3905,10 @@ suite **3658 passed / 0 failed**. Nothing is pending except the live run below.
    refs/heads/develop/nexus-intelligence-evolution` = local HEAD.
 3. The only outstanding work is a **live** run, and it needs a healthy provider:
    `python tools/eval_chat_quality.py --arm context --samples 2 --max-calls 60`
-   (Y's probe). If the provider is healthy, run it and record the before/after.
+   (Y's probe). It was **re-attempted on 2026-09-24 and is still NOT RUN**
+   (503, `usable=0/9`); re-try it when the provider answers and record the
+   before/after. Also outstanding and **not to be fixed without instruction**:
+   the `intent` primary `GEMINI_API_KEY` (fp `7c707e1b`) is dead (401).
 4. Do **NOT** start V (its `--arm model` stays unrun until the owner authorises
    V), do **NOT** merge, do **NOT** deploy, do **NOT** raise the 200-request
    allowance, and do **NOT** reallocate tokens.
