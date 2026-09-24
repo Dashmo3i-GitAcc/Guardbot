@@ -40,6 +40,7 @@ from . import (
     ai_moderation,
     awareness,
     awareness_context,
+    awareness_schedule,
     burst,
     chat,
     classifier,
@@ -1135,7 +1136,7 @@ async def _awareness_capture(
         return False
     reply_user_id, reply_name, reply_message_id = _reply_context(msg)
     name = getattr(user, "full_name", "") or getattr(user, "first_name", "") or ""
-    return awareness.capture(
+    recorded = awareness.capture(
         room.id,
         user.id,
         awareness.role_of(principal),
@@ -1149,6 +1150,27 @@ async def _awareness_capture(
         actor=actor,
         kind=kind,
     )
+    if recorded:
+        # Increment U: classify the message for the *scheduler*, once, here,
+        # where the text is already in hand and a row is already being written.
+        # It is the same reading the chat path takes of a message it answers —
+        # "does this need the room" — reduced to one word and stored keyed by
+        # the room, so the pass loop can decide whether the next request is
+        # worth spending without ever letting the words reach ``awareness.due``
+        # (whose signature a test asserts). A failed classification is not a
+        # failed capture: ``read`` never raises, and the caller ignores the
+        # result either way.
+        awareness_schedule.note(
+            room.id,
+            awareness_schedule.read(
+                body,
+                kind=kind,
+                reply=bool(reply_user_id),
+                media=bool(kind),
+                directed=directed,
+            ),
+        )
+    return recorded
 
 
 async def _transcribe_for_awareness(ctx, ref) -> str:
@@ -1499,6 +1521,14 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
       ``awareness.due``), and ``urgent`` only relaxes the wait-for-quiet clause;
     * and the day must still be able to afford it, which is the second timing
       question and a different one — see ``_awareness_allowance_gap``.
+
+    Increment U adds one more, and it is a *selection* question rather than a
+    safety one: a room whose unread batch carries no evidence that it needs the
+    room is **postponed** (``awareness_schedule.defer``) so the rationed request
+    goes to a room that does. It is asked only on the ordinary path — the urgent
+    path never consults it, so a hint can delay a routine reading and never a
+    prompted one — and it can only postpone a room, never admit one, because
+    every gate above it has already run.
     """
     chat_id = int(row.get("chat_id") or 0)
     if not chat_id or chat_id in _awareness_inflight:
@@ -1511,14 +1541,34 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
         # cannot see from being retried forever.
         awareness.skip(chat_id, seen_message_id=int(row.get("max_id") or 0))
         return False
+    now = time.time()
     verdict = awareness.due(
         row,
-        now=time.time(),
+        now=now,
         last_pass_at=_awareness_last_pass.get(chat_id, 0.0),
         urgent=urgent,
     )
     if not verdict:
         return False
+    if not urgent:
+        oldest = int(row.get("oldest_at") or 0)
+        if oldest and awareness_schedule.defer(
+            chat_id,
+            waited=now - oldest,
+            # A room holding an unapproved action is one the pass is *for*:
+            # the confirmation arrives as a self-contained message that the
+            # classifier rightly reads as not needing the room, so without this
+            # the owner's approval would be postponed by up to the retention
+            # window. The server knows it is waiting, so it says so.
+            waiting=bool(db.admin_pending_waiting(chat_id=chat_id)),
+        ):
+            # Eligible, but not worth a request yet: the room's batch is idle
+            # chatter and it has not been waiting long enough to be read
+            # anyway. This is the whole of increment U — the decision that the
+            # 200 requests are better spent elsewhere — and it can only ever
+            # *delay* a pass, because the bound on the delay is the window's
+            # own retention and the room is re-offered on its next deadline.
+            return False
     if not _awareness_affordable(chat_id):
         # The room is ready but the day is not rich enough to read it yet. This
         # is the allowance brake rather than the quiescence one, and it is
@@ -1538,6 +1588,12 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
     finally:
         _awareness_inflight.discard(chat_id)
         _awareness_last_pass[chat_id] = time.time()
+        # The batch has been read, so the hint it produced is spent. Dropped
+        # here rather than in ``_awareness_pass`` because this is the one place
+        # that knows a pass actually ran: a room refused above keeps its hint,
+        # which is what stops a room the allowance cannot serve from being
+        # demoted for a reason that had nothing to do with its content.
+        awareness_schedule.forget(chat_id)
         # This room has just been read, so it has no deadline left to meet.
         # Dropping it here is what stops the deadline tick from waking up for a
         # room that the sweeper or the urgency hint already handled.
