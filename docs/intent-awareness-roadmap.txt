@@ -10,9 +10,9 @@ Rollback:   main == release-base/nexus-intel ==
 Remotes:    origin (mo3iiibest77-hub) and dashmo3i (Dashmo3i-GitAcc), both at HEAD
 Merge/deploy status: NOT merged to main, NOT deployed. Awaiting the owner's
             explicit go-ahead.
-Suite:      3251 passed, 0 failed  (.venv-test/bin/python -m pytest -q, ~2m20s)
+Suite:      3266 passed, 0 failed  (.venv-test/bin/python -m pytest -q, ~2m40s)
 Benchmark:  tools/eval_intent.py over tools/eval_cases.json, 141 cases (v18),
-            122 report keys, 101 per-case detail fields. Floors asserted in
+            128 report keys, 101 per-case detail fields. Floors asserted in
             tests/test_intent_eval.py.
 
 This file is written so another coding agent can continue without chat history.
@@ -325,6 +325,58 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
               (2 test_referents.py, 4 test_intent_eval.py incl. 2 non-vacuity).
               Suite 3245 -> 3251. Only production file touched: NONE.
 
+1.2d INCREMENT T (after the S checkpoint commit 896d260)
+
+  T  (this run)  main + awareness_context + awareness — the reading reaches the
+              addressed conversation. FIRST runtime-path change in the lettered
+              increments. NO DB CHANGE.
+              THE GAP (traced, not assumed): the awareness pass reads the window
+              once and hands the model the roster + memory_block +
+              awareness_context.blocks(ctx) — the server's READING of the anchor
+              (act, direction, object, reply graph, thread, entities, time,
+              questions, referent candidates). The addressed conversation
+              (main._answer_conversationally) built its context from the trusted
+              block + awareness.room_block (the raw transcript) + _today_block.
+              So the same message — «همون کاربر رو بن کن» — reached the model as a
+              resolved instruction on the pass and as raw text with no
+              resolution on the path where a person is waiting for an answer.
+              Same shape as the date (_today_block): a deterministic reading the
+              pass had and the conversation lacked.
+              WHAT T DID: awareness_context.blocks gained a `skip` argument and a
+              named CONVERSATION_SKIP = {calendar, room, remembered_people,
+              admin_activity, referenced_people}; main._room_reading renders the
+              reading of the message being answered from the window the reply
+              path already reads. The skip set is the date and the room the chat
+              prompt ALREADY states, plus the three DATABASE-BACKED sources
+              (room memory is the pass's job; the conversation pays for nothing
+              new). awareness.room_block gained a `messages` argument so the
+              window is read ONCE and handed to both the transcript and the
+              reading — no duplicated query.
+              WHY NO DB CHANGE (the owner's question, answered first): the
+              reading is a pure function of the window (group_messages,
+              persisted), the anchor (the row for the message being answered) and
+              the roles (rbac, on demand). Nothing needs to survive the pass; the
+              next pass re-reads the window, which contains the previous anchor,
+              and re-derives. Recording it with the awareness row would add a
+              column and a write per pass to store what group_messages already
+              lets any caller rebuild. So no column, no migration, no rollback
+              procedure; the 151b1e1 _ensure_column precedent is not needed.
+              MEASURED: borrowed reading over 141 cases — chars mean 517 / max
+              1146 (the pass reading is 954 / 1498); 28 cases carry the resolver's
+              candidates; 0 exceed the pass reading; 0 exceed the ceiling. The
+              reading is ~0.6 ms/reply (the transcript beside it ~0.5 ms).
+              +1 DB read per addressed reply (rbac.resolve_many -> db.admin_list,
+              once, for the roles). 0 Gemini/provider calls added. Everything
+              else on the benchmark unchanged (top-1 / ambiguity precision /
+              recall 1.0, wrong_confident 0, act_accuracy 1.0, edges_exact 141).
+              Harness gained conversation_reading_cases / _chars_mean / _chars_max
+              / _resolves_cases / _over_reading_cases / _over_ceiling_cases + a
+              report line. 15 new tests (11 test_awareness_context, 2
+              test_awareness_switch, 2 test_intent_eval). Suite 3251 -> 3266.
+              No corpus case was added: T's evidence is over the existing 141, and
+              a synthetic case that could not demonstrate an invariant was
+              deliberately not added. Narrative: reference §62.
+
 1.3 ARCHITECTURAL / SECURITY BOUNDARIES PRESERVED (verified in AgentMD §53.7)
 --------------------------------------------------------------------------------
 * Readers are EVIDENCE, NEVER A DECISION. Nothing branches on any reader; none
@@ -333,18 +385,26 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
 * `awareness_context` stays the ONLY importer of the readers; it may import
   nothing that could send/delete/restrict/ask a model (asserted structurally).
   It is imported by app/main.py and by the gated voice_live bridge.
-* NO DB CHANGE IN A–Q. No schema migration, no new table. (The ONE DB change on
+* NO DB CHANGE IN A–T. No schema migration, no new table. (The ONE DB change on
   this branch is in the foundation, before the lettering: commit `151b1e1`
   added `awareness_state.intent` and `about_user_id` ADDITIVELY through
   `_ensure_column`, so a row written before it reads as ''/0 and code from before
   it never reads them. That commit also touched app/main.py, app/chat.py and
   app/awareness.py — it is the only commit on the branch that did.)
-* NO RUNTIME-PATH CHANGE IN A–Q. Verified per file against main: app/main.py,
-  app/chat.py, app/awareness.py, app/db.py and app/config.py are UNCHANGED by
-  every lettered increment. The only runtime-adjacent file A–Q touch is
-  app/awareness_context.py, and only to add one `Source` entry per reader — the
-  documented extensible seam ("adding a context source is adding a `Source` to
-  SOURCES; neither `blocks` nor its caller changes").
+  T is the roadmap's DB-sensitive stage and it changed NO schema: the reading it
+  shares is derivable from `group_messages` (already persisted) plus the anchor
+  plus `rbac`, so nothing needed a column. See §1.2d.
+* RUNTIME-PATH CHANGE: A–S changed NONE. Verified per file against main:
+  app/main.py, app/chat.py, app/awareness.py, app/db.py and app/config.py are
+  UNCHANGED by every lettered increment A–S. The only runtime-adjacent file A–S
+  touch is app/awareness_context.py, and only to add one `Source` entry per
+  reader — the documented extensible seam ("adding a context source is adding a
+  `Source` to SOURCES; neither `blocks` nor its caller changes").
+  **T is the first lettered increment to change the runtime path.** It touched
+  app/main.py (the addressed path now appends the reading),
+  app/awareness_context.py (`blocks` gained a `skip` argument and
+  `CONVERSATION_SKIP`) and app/awareness.py (`room_block` gained a `messages`
+  argument). The change is bounded, fail-soft and adds no model call; see §1.2d.
 * Zero Gemini calls added by any increment.
 * Context is bounded: hard ceiling NEXUS_AWARENESS_CONTEXT_CHARS = 1500, each
   source has its own budget, `_clip` keeps whole lines from the front so the
@@ -656,12 +716,14 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              `role_focus_used_cases == 0`, both read from the EVIDENCE, with a
              non-vacuity proof each. See §1.2c.
 
-  INCREMENT T — "what the server read, kept"
+  INCREMENT T — "the reading reaches the conversation"  [DONE — see §1.2d/T]
   ------------------------------------------------------------------------------
   Purpose:   Intent <-> Awareness integration (item 12 / §3.3(c)). Make the
-             deterministic reading survive the pass instead of being rendered
-             and discarded: record the readers' output (or a bounded subset)
-             with the awareness row, and render it back where it helps.
+             deterministic reading reach the consumer that lacked it. The
+             roadmap originally proposed recording it with the awareness row;
+             T's baseline showed that was unnecessary (the reading is derivable
+             from the persisted window), so the increment became "the addressed
+             conversation borrows the pass's reading of the message".
   Files:     app/awareness.py (record), app/db.py (an ADDITIVE
              _ensure_column only), app/awareness_context.py or
              app/main.py (the render-back), tests for all of them.
@@ -678,6 +740,20 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              "tests pass" is not enough.
   Depends:   R (finish scoring the prompt before changing what the prompt
              carries). Not S.
+  RESULT:    DONE, and it was a RUNTIME change with NO DB change — the roadmap's
+             "record it with the awareness row" framing turned out to be
+             unnecessary once the question was asked properly. The reading is a
+             pure function of the window (`group_messages`, persisted) + the
+             anchor + `rbac`, so nothing needed to persist; recording it would
+             have added a column and a write per pass to store what the window
+             already lets any caller rebuild. What T actually did is close the
+             asymmetry: the addressed conversation now borrows the pass's reading
+             of the message being answered (`main._room_reading` ->
+             `awareness_context.blocks(ctx, skip=CONVERSATION_SKIP)`), from the
+             window it already reads. Measured: borrowed reading 141 cases, chars
+             mean 517 / max 1146 (pass reading 954 / 1498); 28 carry the resolver's
+             candidates; 0 exceed the pass reading or the ceiling; ~0.6 ms/reply;
+             +1 DB read (roles); 0 Gemini calls. See §1.2d and reference §62.
 
   INCREMENT U — "the room that should go next"
   ------------------------------------------------------------------------------
@@ -774,26 +850,29 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     e936aefdaf5f03fac2b31759e7965143f965d039 (increment S; R was 0697ed0,
-          checkpointed at 3b51fdd). Docs commits sit on top — a commit that names
+HEAD:     5904791459b699a5b9bc4ee1a773e21caa5f70a7 (increment T; S was e936aef,
+          checkpointed at 896d260). Docs commits sit on top — a commit that names
           its own count would be wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3251 passed, 0 failed
+Suite:    3266 passed, 0 failed
 Corpus:   141 cases, version 18
-Runtime-adjacent files A–S touch: app/awareness_context.py only (one Source
-          entry per reader — the documented seam). The only DB change on the
+Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
+          addressed path appends the reading), app/awareness_context.py (`skip` +
+          CONVERSATION_SKIP) and app/awareness.py (`room_block` gained
+          `messages`). NO DB change anywhere in A–T; the only DB change on the
           branch is the foundation's 151b1e1 (two additive columns).
-Next:     INCREMENT T — "what the server read, kept" (Intent <-> Awareness
-          integration). The FIRST DB change since 151b1e1 and the first runtime-
-          path change in the lettered increments; it must carry a forward/backward
-          proof and a rollback procedure, and a live probe. S is DONE with NO
-          production change (app/referents.py unchanged) — thread 4.1 resolved.
-          Do NOT start T without the owner's explicit go-ahead. Do NOT start U/V.
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.3 (the checkpoints).
-                 docs/reference/nexus-awareness.md §52–§61 (the narrative).
+Next:     INCREMENT U — "the room that should go next" (adaptive Awareness
+          scheduling, items 10/11). FIRST resolve the open design question in
+          §4.3: the seam that does not violate "`awareness.due` cannot see
+          messages" (its signature is asserted by a test). Then measure
+          coverage/priority at a FIXED 200-request allowance, assert no room is
+          starved, keep the per-room brake and debounce, and take a live probe.
+          Do NOT start U without the owner's explicit go-ahead. Do NOT start V.
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.4 (the checkpoints).
+                 docs/reference/nexus-awareness.md §52–§62 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1–§54.3 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.4 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

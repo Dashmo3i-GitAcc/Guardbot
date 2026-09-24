@@ -1552,7 +1552,21 @@ reference file is stale and this list is the one to fix first.
 * A block with less room than `MIN_BLOCK_CHARS` is not rendered; a source that
   raises is logged and skipped.
 * Adding a context source is adding a `Source` to `SOURCES`; neither `blocks`
-  nor its caller changes.
+  nor its caller changes. (`blocks` gained one optional argument in T — `skip` —
+  for the addressed conversation, which borrows the same reading minus the
+  blocks its prompt already states and minus the database-backed room memory it
+  does not pay for. A *source* is still one tuple entry.)
+* **The server's reading reaches both consumers of the same room.** The
+  awareness pass renders `awareness_context.blocks(ctx)` for its anchor; the
+  addressed conversation (`main._room_reading`) renders the same blocks for the
+  message being answered, skipping `CONVERSATION_SKIP` (the date and the room
+  the chat prompt already states, plus the three database-backed sources). The
+  window is read **once** and handed to both the transcript and the reading
+  (`awareness.room_block` takes `messages`), so a reply costs one window query,
+  not two, and **+1 read** for the roles the readers need. It adds **no** model
+  call and **no** schema: the reading is a pure function of the persisted window,
+  the anchor and `rbac`, so it never needs to be stored. It is context — the
+  answer goes out exactly as before when it cannot be built.
 * `awareness.record` runs on **every** completed pass; `wants_to_speak` is
   `respond` **or** a write that actually ran.
 * `parse_decision` returning `None` means **say nothing** — never send the raw
@@ -2605,3 +2619,99 @@ columns via `_ensure_column`). Increment T would be the first DB change since it
 it), `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
 (`e936aef…` or later).
+
+### 54.4 Checkpoint (2026-09-24, after T) — resume here (supersedes §54.3)
+
+**State, verified against the repository.** Branch
+`develop/nexus-intelligence-evolution`, HEAD
+`5904791459b699a5b9bc4ee1a773e21caa5f70a7` (increment T; S was `e936aef`,
+checkpointed at `896d260`), pushed to both remotes (`origin` = mo3iiibest77-hub,
+`dashmo3i` = Dashmo3i-GitAcc). Docs commits sit on top of T's code commit (a
+commit that names its own count would be wrong the moment it lands). `main` and
+the annotated tag `release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
+(the tag is local-only; neither remote carries tags). Suite **3266 passed, 0
+failed**. Corpus **141 cases, version 18**. Benchmark clean: top-1 / ambiguity
+precision / ambiguity recall 1.0, `wrong_confident == 0`, `act_accuracy == 1.0`,
+`edges_exact == 141`, `graph_claims_convergence_cases == 0`,
+`role_two_admin_confident_cases == 0`, `role_focus_used_cases == 0`; pass context
+mean/max 954/1498, borrowed reading 517/1146, both under the 1500 ceiling.
+**Not merged, not deployed.**
+
+**What T did — the first runtime-path change in the lettered increments, and NO
+DB change.** The roadmap called T "what the server read, kept" and proposed
+recording the deterministic reading with the awareness row. The baseline showed
+that was unnecessary, so T became "the reading reaches the conversation".
+
+* **The gap, traced not assumed.** The awareness pass
+  (`main._awareness_read`) hands the model the roster + `memory_block` +
+  `awareness_context.blocks(ctx)` — the server's *reading* of the anchor (act,
+  direction, object, reply graph, thread, entities, time, questions, referent
+  candidates). The addressed conversation (`main._answer_conversationally`)
+  built its context from the trusted block + `awareness.room_block` (the raw
+  transcript) + `_today_block`. So «همون کاربر رو بن کن» reached the model as a
+  resolved instruction on a pass and as raw text with no resolution on the path
+  where a person is waiting for an answer. Same shape as the date `_today_block`
+  already fixed once.
+* **The change.** `awareness_context.blocks` gained `skip`, and a named
+  `CONVERSATION_SKIP = {calendar, room, remembered_people, admin_activity,
+  referenced_people}`; `main._room_reading` renders the reading of the message
+  being answered from the window the reply path already reads;
+  `awareness.room_block` gained `messages` so the window is read **once** and
+  handed to both the transcript and the reading.
+* **Why no DB change.** The reading is a pure function of the window
+  (`group_messages`, persisted) + the anchor + `rbac`. Nothing needs to survive
+  the pass — the next pass re-reads the window, which contains the previous
+  anchor, and re-derives. Recording it would add a column and a write per pass
+  for what the window already lets any caller rebuild. **No column, no
+  migration, no rollback procedure**; the `151b1e1` precedent is not needed.
+* **Measured.** Borrowed reading over 141 cases: chars mean **517** / max
+  **1146** (pass reading 954 / 1498); **28** cases carry the resolver's
+  candidates; **0** exceed the pass reading; **0** exceed the ceiling; ~**0.6 ms**
+  per reply (the transcript beside it ~0.5 ms); **+1 DB read** per addressed
+  reply (`rbac.resolve_many` → `db.admin_list()`, once, for the roles);
+  **0 Gemini/provider calls** added; every other benchmark number unchanged.
+* **Fail-soft.** Message not in the window, layer off, or a resolver that raises
+  all return `""`; the answer goes out exactly as before.
+* **Tests.** 15 new (11 `test_awareness_context.py`, 2 `test_awareness_switch.py`,
+  2 `test_intent_eval.py`). No corpus case was added: T's evidence is over the
+  existing 141, and a synthetic case that could not demonstrate an invariant was
+  deliberately not added. Narrative: reference §62.
+
+**Unresolved (do not guess at):**
+- **The quality effect is unproven.** T delivers the reading to the addressed
+  prompt; the deterministic benchmark cannot score a model's answer, so *that the
+  answers got better* is a question for a live probe and is **not claimed**. This
+  is the honest open item.
+- **The evenly-split room** (R's thread): a room split evenly with distinct
+  members on each side still renders "converged on" via the most-recent-edge
+  tie-break — no corpus case demonstrates it; R, S and T all left it.
+- The partially-completed findings still open: `objects.Object.source`,
+  `requests.render`'s weak reason wording, the `objects.render` CLASS_THING
+  duplication (roadmap §2.2–§2.4).
+
+**Exact next step.** INCREMENT **U** — "the room that should go next" (adaptive
+Awareness scheduling, items 10/11). FIRST resolve the open design question in
+roadmap §4.3: the seam that does not violate "`awareness.due` cannot see
+messages" (its signature is asserted by a test). Then measure coverage/priority
+at a **fixed** 200-request allowance, assert no room is starved, keep the
+per-room brake and debounce, and take a live probe. **Do NOT start U without the
+owner's explicit go-ahead.** Do not start V.
+
+**Rollback.** Every increment is independently revertable: `git revert <sha>` on
+this branch. T reverts with `git revert 5904791` (it touches `app/main.py`,
+`app/awareness.py`, `app/awareness_context.py`, the harness and tests — and **no
+schema**, so the revert needs no data step). The whole evolution reverts by
+leaving the branch unmerged — `main` at
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state and is an
+**ancestor** of the branch. **No lettered increment (A–T) changed the DB
+schema**; the only DB change on the branch is the foundation's `151b1e1` (two
+ADDITIVE `awareness_state` columns via `_ensure_column`). T is the first lettered
+increment to change the **runtime path**.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt`, then verify: `git status` (clean),
+`git rev-parse HEAD` (`5904791…`, the T increment, or a docs commit on top of
+it), `git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
+(`5904791…` or later).

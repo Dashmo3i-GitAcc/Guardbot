@@ -33,6 +33,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [59. The object line ordered the model to ignore the block beside it](#s59)
 - [60. The room's replies converged — on one member](#s60)
 - [61. Two admins and the tie the resolver refuses to break](#s61)
+- [62. The same room, read twice — once with a reading and once without](#s62)
 
 ---
 
@@ -3944,3 +3945,103 @@ trip their metric.
 * 0 Gemini calls; no DB change; no runtime-path change. **No production file
   touched.** 6 new tests (2 `test_referents.py`, 4 `test_intent_eval.py`, incl. 2
   non-vacuity). Suite 3245 → **3251**.
+
+---
+
+<a id="s62"></a>
+
+## 62. The same room, read twice — once with a reading and once without
+
+### 62.1 The asymmetry
+
+Two paths read the same room.
+
+The **awareness pass** (`main._awareness_read`) reads the window once and hands
+the model three things: the roster, `awareness.memory_block`, and
+`awareness_context.blocks(ctx)` — the server's *reading* of the anchor: what the
+message is doing, whether it asks for the action or forbids it, what it acts on,
+where its time words point, who replied to whom, whether it is still the same
+thread, what a demonstrative may point at, and who a pronoun may mean.
+
+The **addressed conversation** (`main._answer_conversationally`) — the path that
+runs when somebody actually talks *to* Nexus — built its context from the
+trusted block, the raw transcript (`awareness.room_block`) and the date
+(`_today_block`). It had the room's *words* and none of the server's *reading*.
+
+So the same message, «همون کاربر رو بن کن», reached the model two different ways:
+as an instruction with the resolver's ranked candidates beside it when a pass
+read it, and as raw text with no resolution at all when somebody addressed it.
+The resolver exists precisely to answer "who does «همون» mean", and the path
+where a person is *waiting for an answer* was the one that did not get it. This
+is the same shape as the date (`_today_block`): a deterministic reading the pass
+had and the conversation lacked.
+
+### 62.2 What T does
+
+The conversation borrows the pass's reading. `awareness_context.blocks` grew a
+``skip`` argument, and `main._room_reading` renders the reading of **the message
+being answered** from the window the reply path already reads:
+
+    ctx = awareness_context.build_ctx(chat_id, messages=messages, anchor=anchor)
+    return awareness_context.blocks(ctx, skip=awareness_context.CONVERSATION_SKIP)
+
+``CONVERSATION_SKIP`` names the five sources the conversation does not take, and
+each exclusion has a reason:
+
+* ``calendar`` and ``room`` — the conversation already states the date
+  (``_today_block``) and the room (the trusted block), so a second copy is waste;
+* ``remembered_people``, ``admin_activity`` and ``referenced_people`` — the three
+  **database-backed** sources. Room memory is the pass's job; the conversation
+  reads the window it already read and pays for nothing new.
+
+What it *does* take is the part that answers "what is this message doing, and who
+does «همون» mean": the act and its direction, the reply graph, the thread, the
+entities, the time reading, the open questions and the resolver's candidates.
+
+### 62.3 No database change — and why
+
+T is the roadmap's first DB-sensitive stage, so the question was asked before any
+code: **what persistent state is missing?**
+
+The answer is *none*. The reading is a pure function of three things the server
+already has: the window (`group_messages`, persisted), the anchor (the row for
+the message being answered), and the roles (`rbac`, resolved on demand). Nothing
+about the reading needs to survive the pass — the next pass re-reads the window,
+which contains the previous anchor, and re-derives. Recording it with the
+awareness row would add a column and a write per pass to store something
+``group_messages`` already lets any caller rebuild.
+
+So T adds **no column, no migration and no rollback procedure**, and the
+`151b1e1` precedent (`_ensure_column`, additive only) is not needed. A row from
+before T reads exactly as it did, and code from before T ignores everything T
+added — because T added no schema at all.
+
+### 62.4 The numbers
+
+* The borrowed reading: **141 cases**, chars mean **517** / max **1146** (the pass
+  reading is 954 / 1498 — the borrowed one is smaller by construction).
+* **28** cases carry the resolver's ranked candidates into the borrowed reading —
+  the part that answers "who does this mean".
+* **0** borrowed readings exceed the pass reading; **0** exceed the ceiling
+  (both should be zero, and both are asserted).
+* Latency: the reading is ~0.6 ms per reply (the transcript it sits beside is
+  ~0.5 ms); against a model call that is ~0.02–0.06%.
+* Database: **+1 read per addressed reply** — ``rbac.resolve_many`` →
+  ``db.admin_list()``, once, for the roles the readers need. The window is read
+  **once** and handed to both the transcript and the reading (``room_block`` grew
+  a ``messages`` argument for this), so the transcript's own query is not
+  duplicated.
+* Gemini/provider calls: **0 added**. The reading is Python over data the server
+  already has.
+* A reading that cannot be built — the message is not in the window, the layer is
+  off, the resolver raises — returns ``""``. The answer goes out exactly as it
+  did before T.
+
+### 62.5 What it leaves
+
+The quality effect is a **prompt-content** change: the model answering an
+addressed message now sees the server's reading of that message. The deterministic
+benchmark cannot score a model's answer, so what is measured here is that the
+reading is *delivered* and *bounded*, not that the answers got better. Whether
+they did is a question for a live probe, and it is recorded as open rather than
+claimed.
