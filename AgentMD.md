@@ -2664,10 +2664,21 @@ non-negotiable for every stage:
   is declared on the handler (`@authz.requires`) and enforced by a middleware, so
   a new page cannot forget it; and a route-inventory test enumerates the router
   so the omission fails in the suite rather than in production.
-* **The panel never applies migrations**, and it must **tolerate their absence**:
-  it creates only its own table, and a resolution that fails because the bot's
-  overlay is not there is a **guest, not a crash** (`rbac.resolve_many`'s rule,
-  applied to `authz.principal`).
+* **The panel never applies migrations.** The bot owns the schema and migrates at
+  boot; a second process running them concurrently would race it, and the race
+  that actually bites is `_ensure_column` — two processes that both see a column
+  missing both issue the `ALTER TABLE`, and the second one raises. The **one
+  exception** is the panel's own `dashboard_audit` table, created by
+  `db.ensure_dashboard_audit()` with `CREATE TABLE IF NOT EXISTS` plus an index:
+  it is idempotent from either process, it touches no existing table, and it is
+  what lets the panel write its own events on a host where the bot has not booted
+  since the deploy.
+* The panel must **tolerate the bot's overlay being absent**. It creates only its
+  own table, so on a database the bot has never migrated, a resolution that
+  reaches for `admins` fails — and that is a **guest, not a crash**
+  (`rbac.resolve_many`'s rule, applied to `authz.principal`). A panel that
+  answered 500 on its own login page because a table it does not own was missing
+  would be less available than the bot it fronts.
 * **The panel's trail is its own table.** `dashboard_audit` — append-only,
   written by `app/web/audit.py`, read by the panel alone. Panel events must
   **never** be written to `admin_audit`: that would put logins in front of the
@@ -5594,7 +5605,17 @@ breakers, tenant isolation or the workload boundaries was modified.
 | the 403 sentence that distinguishes "not signed in" from "not allowed" | `app/web/copy.py`, `app/web/server.py`, `app/web/templates/*` |
 | `PRINCIPAL` request key | `app/web/context.py` |
 | the panel audit counter in the shared test fixture | `tests/conftest.py` |
-| **31 new tests**: identity, gate, trail, IDOR, cross-group | **`tests/test_web_dashboard_authz.py`** (new) |
+| **31 new tests**: identity, the gate, the trail, and the panel's empty IDOR surface | **`tests/test_web_dashboard_authz.py`** (new) |
+
+The §54.25 NEXT STEP asked for "IDOR / cross-group tests". The **IDOR** half is
+here and is two tests — `test_a_client_cannot_name_its_own_authority` (a request
+carrying `actor_id`/`pid`/`role` in its query or headers is ignored, and the
+refusal names the real actor) and `test_principal_reads_only_the_bound_id` (a
+payload with extra `role`/`permissions` fields grants nothing). The **cross-group**
+half is **not written, and cannot be**: M2 exposes no group-scoped object for a
+route to take an id for, so a cross-group test would have nothing to exercise and
+would pass by construction. It arrives with the first page that takes an object id
+(M3/M4), and it is recorded here rather than claimed.
 
 **Decisions taken during M2 (all reversible, none touching the bot).**
 
@@ -5634,11 +5655,12 @@ breakers, tenant isolation or the workload boundaries was modified.
   window, and a test asserts it (6 blocked requests → 1 row).
 * **No mutation exists yet, and none is claimed.** M2 makes every route
   server-authorized through one boundary; the panel's only state-changing routes
-  today are `/login` and `/logout`. The first real mutation arrives in M3 and will
-  go through `admin_service` — the same boundary the bot uses — not through a
-  second path. §54.25's NEXT STEP named `admin_service` here; that is deferred,
-  not dropped, and this checkpoint says so rather than implying a mutation path
-  that does not exist.
+  today are `/login` and `/logout` (verified by enumerating the router: the only
+  other routes are `GET/HEAD`). The first real mutation arrives with the first
+  page that writes (M4/M5) and will go through `admin_service` — the same boundary
+  the bot uses — not through a second path. §54.25's NEXT STEP named
+  `admin_service` here; that is deferred, not dropped, and this checkpoint says so
+  rather than implying a mutation path that does not exist.
 
 **A bug the live probe found and the suite did not.** Container smoke scenario B
 (panel bound to a non-owner id, on a database where the bot had never run) returned
@@ -5660,17 +5682,29 @@ suite could not (§54.25's lesson, repeated).
 | Both dashboard suites | **86 passed**, 36 subtests (5.2 s) |
 | Full suite | **3843 passed / 0 failed** (244.5 s) — was 3812, so **+31** |
 | `py_compile` on every changed module | clean |
-| Secret scan of the staged diff | clean (16 files; no key, token or `.env` value) |
+| Secret scan of the staged diff | clean (17 files; no key, token or `.env` value) |
 | **Smoke A** — operator = the owner (`424242`) | `/healthz` 200; `/` 302 → login; `POST /login` 303 + `gb_admin` cookie; `/` **200**, role **«مالک»**; `POST /logout` 303. Trail: `login\|ok\|424242\|owner`, `logout\|ok\|424242\|owner`. **0 tracebacks** |
-| **Smoke B** — operator `555555`, bot's schema absent | `/healthz` 200; `POST /login` **303** (was the 500); `/` **403** with the permission sentence; `POST /logout` 303. Trail: `login\|ok\|555555\|guest`, `authz.refused\|refused\|555555\|guest\|not_admin`, `logout\|ok\|555555\|guest`. The panel created **only** `dashboard_audit` |
-| **Smoke C** — operator `555555` granted `senior_admin` in the bot's own table | `/healthz` 200; `POST /login` 303; `/` **200**, role **«مدیر ارشد»**; **0 tracebacks**. Panel trail: `login\|ok\|555555\|senior_admin`. The bot's `admin_audit`: **0 rows** — the two trails are separate |
+| **Smoke B** — operator `555555`, bot's schema absent | `/healthz` 200; `POST /login` **303** (was the 500); `/` **403** with the permission sentence; `POST /logout` 303. Trail: `login\|ok\|555555\|guest`, `authz.refused\|refused\|555555\|guest\|not_admin`, `logout\|ok\|555555\|guest`. The panel's only table is `dashboard_audit`. **4 tracebacks in the log, and they are expected**: each is the logged guest-fallback from the bug below, once per `principal()` call (login, the gate, logout) — the request still succeeds, and nothing is retried |
+| **Smoke C** — operator `555555` granted `senior_admin` in the bot's own table | `/healthz` 200; `POST /login` 303; `/` **200**, role **«مدیر ارشد»**; **0 tracebacks**. Panel trail: `login\|ok\|555555\|senior_admin`. The bot's `admin_audit`: **0 rows** (the table exists — 33 schema tables — and is empty) — the two trails are separate |
 | Bot container before/after the rebuild | `guardbot` still `f36e60bf3971`, `RestartCount=0`, no restart |
+
+The three smoke scenarios were **re-run on the image this checkpoint names**
+(`guardbot:latest` = `9fd5fd927dc8`) after the final rebuild, and every number
+above is from that run. Worth recording why: the first run was on the build
+*before* the last source edit (one unused constant removed), and a probe whose
+result is attached to an image id must have been run on that image. The re-run
+also reproduced a mistake worth naming — the verification script deleted the
+SQLite `-wal` file *after* granting the administrator row and *before* starting
+the panel, which discarded the committed schema and made scenario C read as a
+**regression** (`403`, `guest`) when the code was correct. A probe that mutates
+state between the write and the read invalidates itself; the fix was to order the
+script reset → grant → launch. Nothing in the panel was changed for it.
 
 **Measured image / layer report (the owner's hard requirement, continued).**
 
 | Item | Measured |
 |---|---|
-| Shared image | `guardbot:latest` = **`9fd5fd927dc8`**, **1.15 GB** (unchanged from M1's `7768f5dc0053`) |
+| Shared image | `guardbot:latest` = **`9fd5fd927dc8`**, **1.15 GB** (the same size as M1's `7768f5dc0053`, whose id is from §54.25 — that image no longer exists locally, because the `guardbot:latest` tag moved onto this one) |
 | New layers | **none** — M2 adds no dependency, so the `requirements-dashboard.txt` layer (12.3 kB) and the `pip install` layer (1.48 MB) are **cache hits** |
 | `COPY app ./app` | **6.43 MB → 6.47 MB = +40 kB** (M2's source only) |
 | `COPY app ./app` vs the running bot's image | 6.18 MB → 6.47 MB = **+0.29 MB** (M1 + M2 together) |
