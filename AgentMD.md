@@ -1079,7 +1079,7 @@ Full text: [`docs/reference/coding-agent.md#s39`](docs/reference/coding-agent.md
 
 ## 40. A private chat is the owner's, and one request gets one reply
 
-A private chat belongs to the owner: the second gate, and the two duplicate-reply defects. `accepts_private` checks offline first and then `is_owner`, `NEXUS_ACTORS_ONLY` cannot open it, and the gate runs before `_answer_conversationally`, so a non-owner costs no model call and no row.
+A private chat belongs to the owner: the second gate, and the two duplicate-reply defects. `accepts_private` checks offline first and then `is_owner`, a group room boundary cannot open it, and the gate runs before `_answer_conversationally`, so a non-owner costs no model call and no row.
 
 Full text: [`docs/reference/assistant.md#s40`](docs/reference/assistant.md#s40).
 
@@ -1496,27 +1496,45 @@ reference file is stale and this list is the one to fix first.
   from a refund. `0` means unlimited. The charge stays in `note_request` and is
   refunded — **never** moved to after the call.
 
-**The group boundary (2026-09-24).** A Telegram group is served only if the
-**server-side configuration** says so — `config.GROUP_IDS`, read by
-`main.authorized_group()`. This is the *room* boundary, and it is **fail-closed**:
-with no configured groups, nothing is authorized.
+**The group boundary — the ROOM, not the SPEAKER (2026-09-24, authoritative).**
+The security boundary for a Telegram group is the **room**. Nexus MUST be
+allowed to chat with **all normal members** inside an explicitly
+authorized/registered group. Member and administrator status do **not** gate
+ordinary conversation.
 
-* Being **added** to a group, or made an **administrator** in it, is a Telegram
-  fact and is **not** application authorization. Neither is the group's title or
-  username, a member's display name, a member's claim, or a client-provided
-  flag. `authorized_group` reads `GROUP_IDS` and nothing else.
-* The boundary is enforced **before any Chat/AI work**: `on_group_chat` checks it
-  first, before the identity write, the awareness capture and every model call,
-  so an unregistered room produces **no** `chat.reply` and **no** Gemini request.
-  `_awareness_run_room` checks it too, so a stale awareness row for a room that
-  was removed from `GROUP_IDS` is not read. `on_transcribe_command` checks it in
-  groups as well, because transcription is AI work.
-* The room boundary and the **speaker** boundary (`rbac` / `nexus.accepts`) are
-  separate and **both required** — neither implies the other. The owner is the
-  speaker with the most authority, and is still refused in an unregistered room.
+* The authoritative source is the **database** allowlist — the
+  `authorized_groups` table (`app/db.py`), read only through `app/groups.py` and
+  `main.authorized_group()`. `config.GROUP_IDS` is a **bootstrap, not the rule**:
+  it seeds the table **once**, on the first boot against an empty table, and
+  thereafter the table is authoritative. A **soft revoke** keeps the row, so the
+  one-time seed can never resurrect a room the owner turned off.
+* A room is registered by an **explicit server-side act** — the Owner, or a
+  server-side administrative workflow (`register_group` / `unregister_group`
+  through `admin_service.execute`, and `/registergroup` / `/unregistergroup`).
+  Being **added** to a group, being made an **administrator** in it, its title
+  or username, a member's display name, and anything a member **claims** are
+  Telegram facts and are **not** authorization.
+* **Registered → every member may chat.** There is **no** per-member gate on
+  ordinary conversation: `nexus.accepts_in_group(room_authorized=...)` consults
+  the room and the online state and **nothing about the sender**.
+  `NEXUS_ACTORS_ONLY` is retired as a gate and read nowhere.
+* **Unregistered → Nexus does not participate at all.** The boundary is enforced
+  **before any Chat/AI work** — before the identity write, the awareness capture
+  and every model call — so an unregistered room produces **no** `chat.reply` and
+  **no** Gemini request. `_awareness_run_room` and `_awareness_pass` check it
+  too, so a stale awareness row for a removed room is not read or answered.
+* The boundary is **fail-closed**: with no registered rooms, nothing is
+  authorized. A read that cannot be answered is **no rooms**, never all rooms.
+* The key is the **canonical numeric chat id**, coerced on the way in, so a
+  string form and an int form of the same room are one tenant.
 * Authorization is **server-side and deterministic**; the model never decides
   whether a group or a member is authorized, and an AI verdict is never an
   authorization decision.
+* **Private chat is unchanged**: it is the owner's alone
+  (`nexus.accepts_private`), and a group boundary does **not** widen it.
+* Being able to **talk** is not being able to **act**: a member is answered but
+  offered **no** write tool; every tool call is re-authorised from the actor's id
+  by `admin_service` exactly as before.
 
 ### 53.6 The audit trail and identity
 
@@ -1556,6 +1574,40 @@ with no configured groups, nothing is authorized.
   from 63.0 ms to 1.7 ms (assistant.md §17.4.1). Do not raise `synchronous` back
   to `FULL` to "be safe" without saying so out loud — it is a 11× latency
   regression, and the trade is documented in `admin-and-audit.md`.
+
+**Tenant isolation (2026-09-24).** One **shared** database, never one physical
+DB per group, with strict **group/tenant scoping** of every group-bearing store.
+This is a security and privacy boundary, not a performance optimisation.
+
+* The tenant key is the **canonical numeric `chat_id`** on every group-scoped
+  table: `group_messages`, `awareness_state`, `conversation_state`, `user_memory`,
+  `people`, `agent_tasks`, `admin_audit` (`chat_id`), `admins` is **global** by
+  design. Every group-scoped query is bound to its `chat_id`.
+* A Telegram user has **one canonical global identity** — the numeric user id
+  (and the internal uuid) — but their **group-specific context and memory never
+  mix across groups**. The name memory is **per room**: `people.resolve` and
+  `identity._names_for` read only the rows for the room they were asked about.
+  Group membership (`chats_seen`) and the audit trail (`recent_audit`) are
+  **group-specific** facts and are returned **only** on the unscoped operator
+  view — never assembled into a group's prompt.
+* The coding-agent task id is **content-derived from `(chat_id, actor_id,
+  repository, task, minute)`**, so two groups cannot collide on a request id or
+  read each other's task or result; `agent_task_view` refuses a chat mismatch.
+* Analytics are scoped: `awareness_summary`, `group_pending`,
+  `group_role_counts` and `awareness.metrics`/`metrics_line` all take an
+  optional `chat_id`, and a room's `/nexus status` passes its own id.
+  `admin_service.recent_refusals`/`status_report` take `chat_id` and the
+  group-facing `/pool` passes `room.id`.
+* Retention row ceilings are **per group** (`ROW_NUMBER() OVER (PARTITION BY
+  chat_id …)`), so a busy group can never evict another group's rows. The **age**
+  bound stays global, because "nobody has seen this person for months" is a fact
+  about the person, not the room.
+* The design scales to a future **physical** per-tenant split without a redesign:
+  every read is already bound to one `chat_id`, so a tenant can be migrated by
+  moving its rows rather than by rewriting the queries.
+* An **optional** context source (Memory, Awareness) is **non-fatal and off the
+  sync path**: it must never delay or crash chat, and each source is
+  independently reachable (see `feedback_optional_sources_non_fatal`).
 
 ### 53.7 Nexus and awareness
 
@@ -1783,8 +1835,8 @@ with no configured groups, nothing is authorized.
 * The update guard runs in handler group `-1`, raises `ApplicationHandlerStop`,
   **never** advances a watermark, and refuses a missing or zero `update_id`.
 * In a private chat Nexus answers the owner and **nobody else**, and it is **not
-  a setting**: `accepts_private` checks offline first and then `is_owner`,
-  `NEXUS_ACTORS_ONLY` cannot open it, and being an administrator cannot open it.
+  a setting**: `accepts_private` checks offline first and then `is_owner`, the
+  group room boundary cannot open it, and being an administrator cannot open it.
 * The private gate runs **before** `_answer_conversationally`: no model call and
   **no row written** for a non-owner.
 * `app/referents.py` is **evidence, never a decision**: it ranks who a pronoun
@@ -4822,14 +4874,13 @@ with synthetic ids; only the rows it created were deleted. Results:
 * a registered, **unaddressed** member message → no model call (awareness only);
 * private: a stranger → refused before the model; the owner → answered.
 
-**Known nuance (unchanged behaviour, flagged for the owner).** In the deployed
+**Known nuance — RESOLVED 2026-09-24, superseded by §54.20.** In the deployed
 configuration `NEXUS_ACTORS_ONLY=false`, so an ordinary member in a **registered**
-room who addresses Nexus **is** answered by `nexus.accepts` — the deliberate
-"answer anybody" behaviour of a registered public group. Feature Two's new
-guarantee is the **room** boundary; the *speaker* boundary is unchanged, so the
-regression test `registered + unauthorized member → denied` holds only under
-`NEXUS_ACTORS_ONLY=true`. Enforcing member-level gating would be a behaviour
-change and needs the owner's explicit decision.
+room who addresses Nexus **is** answered by `nexus.accepts`. The owner has since
+confirmed this is the **intended** model — the boundary is the **ROOM, not the
+SPEAKER** — and the speaker gate has been **retired** entirely. See §54.20 and
+§53.5. (The `registered + unauthorized member → denied` test described here no
+longer exists; the member is answered on purpose.)
 
 **Architecture preserved.** No Pool, credential, isolation, rate-limit, breaker,
 cooldown, failover, context-assembly, persistence or deployment change. V remains
@@ -4839,6 +4890,99 @@ unchanged; no acquisition change; no new workload; no Phase Two.
 **Unresolved / next.** The two features are **deployed** (image `84583581d0dd`,
 live-probed). Open: (1) the owner's decision on member-level gating above; (2) the
 **broader integration test**, to be run only on the owner's go-ahead. Rollback is
+`docker tag guardbot-guardbot:pre-owner-group guardbot-guardbot:latest && docker
+compose up -d`. To resume: verify `git status` (clean), `git rev-parse HEAD`,
+`git ls-remote` on both remotes.
+
+---
+
+### 54.20 Checkpoint (2026-09-24, **room boundary + tenant isolation**) — resume here (supersedes §54.19)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~21:10Z**. Branch **`main`**, base
+**`7968c06`** (both remotes). This work is **committed and pushed but NOT
+DEPLOYED** — the owner's instruction was explicit: implement, test, commit and
+push, and **do not deploy unless explicitly requested afterwards**. The deployed
+image remains **`84583581d0dd`** (the §54.19 build); nothing here changes the
+running container.
+
+**The owner's definitive correction.** The security boundary is the **ROOM, not
+the SPEAKER**. Nexus MUST chat with **all normal members** inside an explicitly
+authorized/registered group. `NEXUS_ACTORS_ONLY=true` must **not** be enabled to
+satisfy group authorization, and there is **no per-member gate** on ordinary
+conversation. This resolves the "known nuance" flagged in §54.19.
+
+**Feature — the room allowlist, DB-authoritative.**
+* New table `authorized_groups` (`app/db.py`): `chat_id` PK, `enabled`, `title`,
+  `added_by/added_at/updated_at`, `revoked_by/revoked_at`, `note`. New functions
+  `authorized_group_get/list/set/disable/ids/any/reset`. `GROUP_IDS` is a
+  **bootstrap** seeded **once** (guard = "the table has ever held a row"), then
+  the table is authoritative; **revoke is a soft disable** that keeps the row, so
+  a restart can never resurrect a room.
+* New module `app/groups.py`: load/state/cache (mirrors `nexus.py`), fail-closed
+  (a failed read is **no rooms**), `is_authorized`, `register`, `revoke`,
+  `all_ids`, `count`, `list_rows`, `seed_if_empty`. It performs **no** permission
+  check — `admin_service.execute` is the boundary.
+* `app/nexus.py`: `accepts(principal)` **removed**; new
+  `accepts_in_group(*, room_authorized)` = `is_online() and room_authorized`.
+  `accepts_private` unchanged. `actors_only` removed from `describe()`.
+* `app/main.py`: `authorized_group()` now reads `groups.is_authorized`;
+  `_nexus_will_answer` / `_awareness_read` / `on_group_chat` gates use
+  `nexus.accepts_in_group`; the blind-list, visibility loop, startup log and
+  `/nexus status` scope line read the live allowlist. New commands
+  `/registergroup`, `/unregistergroup`, `/groups` (+ `OWNER_COMMAND_LABELS`).
+* `app/admin_service.py`: two new `OPERATIONS` — `register_group` /
+  `unregister_group` (`config.manage`, `kind=OP_SYSTEM`,
+  `requires_nexus_online=False`, **no AI tool**, not confirmation-gated) — with
+  `_apply` branches calling `groups.register` / `groups.revoke`. A typed command
+  is a person acting directly; the model has no tool for either.
+* `app/config.py`: `NEXUS_STATUS_TEXT` `{actors_only}` → `{answer_scope}`;
+  `NEXUS_ANSWER_SCOPE_LABEL` added; `NEXUS_ACTORS_ONLY*` kept but **read
+  nowhere**; the group-command strings added (unused ones removed).
+
+**Feature — tenant isolation (one shared DB, strict group scoping).**
+* `agent_tasks` gained `chat_id` (defensive `_ensure_column`); the request id is
+  now **content-derived from `(chat_id, actor_id, repository, task, minute)`**
+  (`agent_bridge.new_request_id`), so two rooms cannot collide; `agent_task_view`
+  refuses a chat mismatch; `agent_task_active/recent/waiting` take an optional
+  `chat_id`.
+* `people.resolve` and `identity._names_for`/`describe` are **room-scoped**:
+  name memory is per room; `chats_seen` (membership) and `recent_audit` are
+  **group-specific** and returned **only** on the unscoped operator view.
+* `db.audit_recent(limit, *, chat_id=None)`; `admin_service.recent_refusals` /
+  `status_report(*, chat_id=None)`; the group-facing `/pool` passes `room.id`.
+* Analytics scoped: `awareness_summary`, `group_pending`, `group_role_counts`
+  take `chat_id`; `awareness.metrics` / `metrics_line(*, chat_id=None)`;
+  `_nexus_status_text(*, chat_id=None)` passes `room.id`.
+* Row-ceiling prunes (`people_prune`, `memory_prune`, `state_prune`) are **per
+  group** via `ROW_NUMBER() OVER (PARTITION BY chat_id …)`; the age bound stays
+  global.
+
+**Tests.** New `tests/test_group_allowlist.py` (17) + rewritten
+`tests/test_group_authorization.py` (17). Rewritten/updated: `test_nexus.py`,
+`test_private_boundary.py`, `test_chat_activation.py`, `test_ai_isolation.py`,
+`test_awareness.py`, `test_awareness_metrics.py`; `tests/conftest.py` resets the
+allowlist table + `groups` cache per test (setup only — the teardown reset was
+removed because some module fixtures close `db._conn`). **Full suite: 3738
+passed / 0 failed** (247.5 s; was 3716 at §54.19).
+
+**Docs.** `AgentMD.md` §53.5 rewritten with the owner's definitive room-boundary
+text; §53.6 gained the **Tenant isolation** block; §54.19's "known nuance" marked
+resolved; the private-chat narrative de-referenced `NEXUS_ACTORS_ONLY`.
+`README.md`, `.env.example`, `docs/reference/nexus-awareness.md` (§34.13, §35.10,
+§35 test list) and `docs/reference/assistant.md` (§17.1, §40) updated with
+superseded banners where they described the retired speaker gate.
+
+**Architecture preserved.** No Pool, credential, isolation, rate-limit, breaker,
+cooldown, failover, context-assembly or deployment change. V remains **inactive**;
+the `--arm context` probe stays frozen; Awareness allocation unchanged; no
+acquisition change; no new workload; no Phase Two. Nothing was deployed.
+
+**NEXT STEP.** Nothing is running differently. To deploy this (only on the
+owner's explicit word): `docker compose build && docker compose up -d`, then a
+self-cleaning live probe (unregistered room → 0 model calls / 0 captures / 0
+identity writes; registered room + member → answered; registered room + owner →
+answered with the owner amendment; `/registergroup` / `/unregistergroup` /
+`/groups` in a real room). Rollback stays
 `docker tag guardbot-guardbot:pre-owner-group guardbot-guardbot:latest && docker
 compose up -d`. To resume: verify `git status` (clean), `git rev-parse HEAD`,
 `git ls-remote` on both remotes.

@@ -229,13 +229,19 @@ not a model: which model answers is decided by the `GEMINI_CHAT_*` settings and
 the account pool (`AgentMD.md` §28). Nexus may *ask* for an action; the bot's
 execution layer decides whether it happens.
 
-**Who it answers.** Only authorized administrators — the owner and anybody with a
-stored role. An ordinary member cannot activate it by replying to it, mentioning
-it, or wording a message that looks like an order; their message costs one lookup
-and never reaches Gemini as a question aimed at the assistant. (Set
-`NEXUS_ACTORS_ONLY=false` to restore the older "answers any member who addresses
-it" behaviour.) `/nexus status` prints this setting as its `پاسخ‌دهی به` line, so
-you can confirm from inside the group which gate is in force.
+**Who it answers.** The **room**, not the speaker. A Telegram group is served
+only if it is on the server-side allowlist (the `authorized_groups` table,
+seeded once from `GROUP_IDS` on first boot); once a room is registered, **every
+member** of it may talk to Nexus. An unregistered room is refused before any AI
+work — no model call, no identity write, no awareness capture. Being added to a
+group, or made an administrator in it, does **not** register it: the Owner (or a
+server-side administrative workflow — `/registergroup`, `/unregistergroup`,
+`/groups`) does. `/nexus status` prints the scope as its `پاسخ‌دهی به` line, so
+you can confirm from inside the group.
+
+Being able to *talk* is not being able to *act*: every action a conversation
+produces is re-authorised from the actor's Telegram id, and a member is offered
+no administrative tool at all.
 
 **It follows the room, not just the messages aimed at it.** Nexus keeps a
 bounded, per-group view of the recent conversation — who said what, and how they

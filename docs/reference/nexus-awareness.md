@@ -393,29 +393,33 @@ the existing rows survive; §35.12 extends that to the two Awareness tables.
 
 ### 34.13 Configuration
 
-`NEXUS_ACTORS_ONLY` (default true), `NEXUS_NAMES`, `NEXUS_OBSERVE_ADMINS`,
-`NEXUS_EXTRA_ACTION_WORDS`, `NEXUS_PEOPLE_ENABLED`, `NEXUS_PEOPLE_MAX`,
-`NEXUS_PEOPLE_RETENTION`, `NEXUS_PEOPLE_MAX_CANDIDATES`, and the Persian copy for
-the two state transitions and the status report. Each is documented in
-`.env.example`.
+> **SUPERSEDED 2026-09-24 — the boundary is the ROOM, not the SPEAKER.** The
+> paragraphs below describe the earlier speaker gate. That gate is **retired**:
+> `NEXUS_ACTORS_ONLY` is read nowhere, and once a room is on the allowlist every
+> member of it may talk to Nexus. The authoritative text is `AgentMD.md` §53.5
+> and the checkpoint §54.20; the room allowlist lives in `app/groups.py`. The
+> current status line is `پاسخ‌دهی به` followed by `NEXUS_ANSWER_SCOPE_LABEL`
+> and the number of registered rooms.
 
-`NEXUS_ACTORS_ONLY=true` is a behaviour change from the version before this
-section: the assistant used to answer any member who addressed it directly. It
-now answers authorized administrators only, and a member's message costs one
-dictionary lookup. Setting it to `false` restores the earlier behaviour and
-still changes nothing about what an *action* requires.
+`NEXUS_NAMES`, `NEXUS_OBSERVE_ADMINS`, `NEXUS_EXTRA_ACTION_WORDS`,
+`NEXUS_PEOPLE_ENABLED`, `NEXUS_PEOPLE_MAX`, `NEXUS_PEOPLE_RETENTION`,
+`NEXUS_PEOPLE_MAX_CANDIDATES`, and the Persian copy for the two state transitions
+and the status report. Each is documented in `.env.example`.
 
-Because the gate is silent by design — a refused member simply gets no answer —
-`/nexus status` reports the value in force as its own line, `پاسخ‌دهی به`
-(`فقط مدیرها` / `همه`, configurable through `NEXUS_ACTORS_ONLY_ON_LABEL` and
-`NEXUS_ACTORS_ONLY_OFF_LABEL`). The line and the gate read the same config value,
-so the report cannot disagree with the behaviour; a test pins that.
+*(Historical, no longer in force.)* `NEXUS_ACTORS_ONLY=true` was a behaviour
+change from the version before this section: the assistant used to answer any
+member who addressed it directly, and this switch made it answer authorized
+administrators only. Setting it to `false` restored the earlier behaviour and
+still changed nothing about what an *action* requires. The owner has since made
+"answer every member of a registered room" the **intended** model, so the switch
+is gone.
 
-**A private chat is not a smaller group, and §40 is the difference.**
-`NEXUS_ACTORS_ONLY` is a statement about a *group*, where everybody can already
-read everybody; it deliberately does not reach private chat, where there is one
-reader. The two gates are separate functions — `nexus.accepts` for a room and
-`nexus.accepts_private` for a direct message — and an administrator is an actor
+**A private chat is not a smaller group, and §40 is the difference.** The group
+boundary — now the room allowlist rather than a speaker switch — is a statement
+about a *group*, where everybody can already read everybody; it deliberately does
+not reach private chat, where there is one reader. The two gates are separate
+functions — `nexus.accepts_in_group(room_authorized=...)` for a room and
+`nexus.accepts_private` for a direct message — and an administrator is answered
 in the first and not in the second.
 
 ---
@@ -944,16 +948,22 @@ they stay in the window, so the next pass that completes re-reads them. Only the
 watermark moves, which is what stops an outage from becoming a retry loop on
 every tick. Nothing is lost but time.
 
-### 35.10 `NEXUS_ACTORS_ONLY`: preserved, and the one semantic change
+### 35.10 The room gate: awareness answers every member of a registered room
 
-`NEXUS_ACTORS_ONLY` still means exactly what §34.13 says: with it on, only
-authorized administrators are *answered* by Nexus. The awareness pass reads the
-gate in the same place the addressed path does — `nexus.accepts(principal)` —
-and a refused speaker is understood and still not answered:
+> **SUPERSEDED 2026-09-24 — the boundary is the ROOM, not the SPEAKER.** The
+> `nexus.accepts(principal)` code below no longer exists. The awareness pass now
+> reads the room boundary (`nexus.accepts_in_group(room_authorized=...)`) and the
+> speaker is not consulted: an ordinary member of a registered room may be
+> answered by the pass, and a member of an unregistered room never is. See
+> `AgentMD.md` §53.5 / §54.20.
+
+The awareness pass reads the gate in the same place the addressed path does —
+the room boundary — and a room Nexus does not serve is understood-not-read and
+never answered:
 
 ```python
-if not nexus.accepts(principal):
-    log.info("awareness stayed silent: speaker is not an actor chat=%s actor=%s", ...)
+if not nexus.accepts_in_group(room_authorized=authorized_group(chat_id)):
+    log.info("awareness stayed silent: room is not served chat=%s", chat_id)
     return
 ```
 
@@ -1039,8 +1049,10 @@ started and «همون مشکل قبلی» would have no antecedent.
   silence is the default, Nexus may be discussed without being named), as is the
   creator/developer sentence being attached to the owner's turn and to nobody
   else's.
-* **`NEXUS_ACTORS_ONLY`** — the gate is read in the awareness path; a member is
-  understood and not answered; the status line agrees with the config.
+* **The room boundary** — the gate is read in the awareness path; a member of a
+  registered room may be answered and a member of an unregistered one never is;
+  the status line is read from the live allowlist. (`NEXUS_ACTORS_ONLY` is
+  retired — see §35.10.)
 * **The date** — it renders on every pass and only from the pass's own clock; it
   rolls over at midnight in Tehran and *not* at midnight UTC; a date somebody
   typed cannot reach it, asserted both as "the claim is absent" and as "the block

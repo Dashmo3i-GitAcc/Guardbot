@@ -55,10 +55,11 @@ guard tested the narrower `_addressed_to_bot` while the chat handler tested
 `_nexus_directed`, so a message calling the assistant by name — answered by the
 assistant, but not a native address — fell through the boundary and got both a
 reply and a trial offer. The guard now consults `main._nexus_will_answer`, which
-is the chat handler's own gates: it can answer at all, the sender is one it
-accepts, and the message is aimed at it. The `accepts` condition is what stops
-this over-reaching — while `NEXUS_ACTORS_ONLY` is on, an ordinary member naming
-the assistant gets no reply, so their trial offer still happens.
+is the chat handler's own gates: it can answer at all, the **room is registered**,
+and the message is aimed at it. The room condition is what stops this
+over-reaching — in a room Nexus does not serve, naming the assistant gets no
+reply, so the trial offer still happens. (The condition was the *speaker* before
+2026-09-24; it is now the room. See `AgentMD.md` §53.5.)
 
 `on_group_text` binds a local named `chat` (its effective chat), which shadows
 the `chat` module for that whole function. That is why the guard goes through
@@ -529,13 +530,13 @@ door, and about the two ways the assistant was answering twice.
 ### 40.1 The requirement, and why it is not a setting
 
 The owner's instruction was unambiguous: in a private chat, Nexus answers the
-owner and nobody else. Not "administrators too", not "administrators if
-`NEXUS_ACTORS_ONLY` is off". The reasoning is the same reasoning that makes
-`NEXUS_ACTORS_ONLY` correct in a group, read the other way round:
+owner and nobody else. Not "administrators too", not "administrators if the group
+switch is off". The reasoning is the same reasoning that makes the *room* the
+group boundary, read the other way round:
 
-* in a **group**, an administrator is answered because the room is already
-  public and moderating it is their job. Answering them discloses nothing that
-  the other forty people in the room cannot already read;
+* in a **group**, every member of a registered room is answered because the room
+  is already public. Answering any of them discloses nothing that the other
+  forty people in the room cannot already read;
 * in a **private chat**, there is exactly one reader. Every message the bot
   stores, every turn of context it carries and every answer it produces is
   therefore the owner's property, and answering an administrator would hand a
@@ -549,11 +550,10 @@ So it is not a permission and not a flag. It is a second gate.
 docstrings because they are separate rules:
 
 ```python
-def accepts(principal) -> bool:          # a group
-    ...
-    return principal.is_owner or principal.is_admin   # subject to NEXUS_ACTORS_ONLY
+def accepts_in_group(*, room_authorized: bool) -> bool:   # a group
+    return is_online() and bool(room_authorized)          # the speaker is not read
 
-def accepts_private(principal) -> bool:  # a private chat
+def accepts_private(principal) -> bool:                   # a private chat
     if not is_online():
         return False
     if principal is None:
@@ -565,8 +565,8 @@ Three properties fall out of writing it this way, and each is a test:
 
 | property | why it matters |
 |---|---|
-| `NEXUS_ACTORS_ONLY` cannot open it | turning the group switch off restores "answer anybody" *in a group*. Reading it as a statement about private messages would silently reopen this door the first time an operator flipped it for an unrelated reason. |
-| being an administrator cannot open it | `accepts(admin) is True` and `accepts_private(admin) is False`, asserted together in one test. If they ever agree, the private boundary has been folded back into the group one. |
+| the group boundary cannot open it | the room allowlist answers *in a group*. Reading it as a statement about private messages would silently reopen this door the first time an operator registered a new room. |
+| being an administrator cannot open it | the group gate answers a room regardless of the speaker, and `accepts_private(admin) is False`, asserted together in one test. If they ever agree, the private boundary has been folded back into the group one. |
 | OFFLINE binds the owner too | the offline state is the owner's own instruction, so it applies to the owner in their own channel. `accepts_private` checks it first. |
 
 ### 40.3 Refused before the model, and before the record
@@ -671,6 +671,6 @@ also failed to carry an id.
 
 | file | tests | what it covers |
 |---|---|---|
-| `tests/test_private_boundary.py` | 10 | the owner is answered; an administrator and a member are refused with **zero** model calls and **zero** rows written; the owner's history is not readable from another scope; an administrator claiming ownership in the message text is still refused; `accepts_private` with `NEXUS_ACTORS_ONLY` off, and offline |
+| `tests/test_private_boundary.py` | 10 | the owner is answered; an administrator and a member are refused with **zero** model calls and **zero** rows written; the owner's history is not readable from another scope; an administrator claiming ownership in the message text is still refused; the group room boundary does not open private chat, and offline |
 | `tests/test_update_dedup.py` | 13 | first and second delivery, distinct updates, zero and missing ids refused, eight threads racing for one claim, the guard passing the first and raising `ApplicationHandlerStop` on a duplicate, the off switch, DB-failure tolerance, the handler group asserted from the source, prune, and the reaper |
 | `tests/test_awareness.py` | +9 | an addressed message is not answered a second time; a room that was never answered is still answerable; a write confirmation is never withheld; a silent decline leaves the room readable and a spoken one keeps the marker |
