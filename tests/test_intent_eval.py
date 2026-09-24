@@ -371,6 +371,32 @@ def test_the_clitic_check_is_not_vacuous():
     assert m["state_cases"] >= 13, "the relation stopped being scored"
 
 
+# ── The expression, and the wrong lead ────────────────────────────────────
+def test_the_resolver_never_offers_a_person_for_a_thing_word():
+    """A false positive here is a wrong lead — the worst mistake available.
+
+    The corpus says a message points at no person — a demonstrative bound to a
+    config, a link, a time — and the resolver offered one anyway. §46 fixed it
+    for the room-held nouns («این لینک»); §56 for the domain's own («همون
+    کانفیگ»).
+    """
+    m = result()
+    assert m["expression_false_positives"] == 0
+
+
+def test_the_expression_check_is_not_vacuous():
+    """The corpus carries the shape, and most cases point at a person.
+
+    Measured against the resolver before the fix, ``expression_false_positives``
+    was 3 — exactly the three ``thing-noun-*`` cases — and accuracy 97.7%. The
+    false *negative* is the safe direction and is counted apart.
+    """
+    m = result()
+    assert m["expression_cases"] >= 55, "no case points at a person"
+    leads = [r["id"] for r in m["detail"] if r["id"].startswith("thing-noun-")]
+    assert len(leads) >= 3, leads
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 def test_the_context_is_assembled_for_every_case():
     m = result()

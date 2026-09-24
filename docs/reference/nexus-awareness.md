@@ -27,6 +27,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [53. A correction the evidence did not support](#s53)
 - [54. The prompt, measured — and the block that never reached it](#s54)
 - [55. A clitic is not a content word](#s55)
+- [56. A config is not a person](#s56)
 
 ---
 
@@ -3430,3 +3431,60 @@ The act, object, referent and room-state blocks still make claims nothing checks
 referent's ranking reasons. §55 scored the thread's *evidence*; the remaining
 blocks' prose is the next thing to hold to the same standard.
 
+## 56. A config is not a person
+
+### 56.1 The wrong lead the room-held nouns did not cover
+
+§46 taught the resolver that a demonstrative immediately followed by a **thing
+word** is a determiner, not a person pronoun: «این لینک چیه» asks about a link,
+and offering the room's members as the people «این» might mean is a wrong lead.
+The thing words it knew were the ones the room *holds as a row* — media, links,
+messages — because `app/entities.py` is the reader that points at those.
+
+A VPN room talks about things it does not hold: «کانفیگ»، «سرور»، «تنظیمات»،
+«اشتراک». The word after the demonstrative is a thing, but not one the entity
+reader can point at, so it was not in the guard's lexicon — and the resolver read
+«همون» in «همون کانفیگ رو بده» as a person pointer. Measured, the block reached
+the prompt as:
+
+```
+Who «همون» may mean (server-built candidates, strongest first — evidence, not a decision):
+- سارا (22), 0.50 — they spoke shortly before this message
+- رضا (11), 0.50 — they spoke shortly before this message
+The server could not tell the top candidates apart. If you must act on a person, ask which one is meant rather than choosing.
+```
+
+for a message about a config. The brief names «همون کانفیگ» among the expressions
+Nexus must resolve; this is that expression.
+
+### 56.2 The fix: a second, closed list
+
+`entities.thing_word` is the union the **resolver** needs: the room-held kinds
+(`thing_kind`) plus `_GENERIC_THING_NOUNS`, the domain's own thing nouns. It is
+deliberately not what the entity block renders — that block points only at things
+the room holds, and the room holds no «کانفیگ» — so `thing_kind`, `KINDS` and the
+entity block are **unchanged**. `referents._thing_named` borrows `thing_word`
+instead of `thing_kind`; the person-noun and time-noun guards still take
+precedence, so «همون کاربر» stays a person.
+
+### 56.3 The numbers
+
+| | before | after |
+|---|---|---|
+| domain expressions read as a person | **8** / 8 | **0** / 8 |
+| `expression_false_positives` (corpus) | **3** / 130 | **0** / 130 |
+| expression accuracy | 97.7% | 100.0% |
+| corpus version | 13 | 14 |
+| corpus cases | 127 | 130 |
+| suite | 3171 | 3189 |
+
+Non-vacuity: the unfixed guard is reconstructed in-process from the same
+`thing_kind`, and the metric reads **3** — exactly the three `thing-noun-*` cases.
+
+### 56.4 What it leaves
+
+The resolver's wrong lead is closed for the nouns the domain names today; the
+list is closed and explicit, so a noun it does not know still reads as a person
+pointer — a false lead the entity block's evidence framing and the transcript
+soften but do not remove. The act, object and room-state blocks' prose remains
+unscored (§55.5).

@@ -202,6 +202,42 @@ def thing_kind(token: str | None) -> str:
     return _THING_NOUNS.get(token) or _THING_NOUNS.get(_bare(token)) or ""
 
 
+# The domain's own thing nouns — the things a room talks about that it does not
+# hold as a row. «کانفیگ», «سرور», «تنظیمات»: a demonstrative bound to one of
+# them is a **determiner**, not a person pronoun — «همون کانفیگ رو بده» is not
+# about anybody — and the resolver offered the room's members for it, the same
+# wrong lead §46 fixed for «این لینک». They are deliberately **not** in
+# ``_THING_NOUNS``: that table drives the entity block, which points at things
+# the room *holds* (a stored media kind, a URL, a reply row), and the room holds
+# no «کانفیگ». So this is a second, closed list, and ``thing_word`` is the union
+# the resolver needs rather than a kind the entity block would misrender.
+_GENERIC_THING_NOUNS = frozenset(
+    {
+        "کانفیگ", "config", "تنظیمات", "settings",
+        "سرور", "server", "سرویس", "service",
+        "اشتراک", "اکانت", "account", "پنل", "panel",
+        "لایسنس", "license", "کانال", "channel",
+    }
+)
+
+
+def thing_word(token: str | None) -> bool:
+    """Whether a noun names a *thing* rather than a person, room-held or not.
+
+    The union the **resolver** needs: the room-held kinds (``thing_kind``) plus
+    the domain's own thing nouns. It is deliberately not what the entity block
+    renders — that block only points at things the room holds — so this answers
+    "is the word after this demonstrative a noun, not a person?" and nothing
+    more. The clitic strip is included, as in ``thing_kind``.
+    """
+    token = str(token or "")
+    if not token:
+        return False
+    if thing_kind(token):
+        return True
+    return token in _GENERIC_THING_NOUNS or _bare(token) in _GENERIC_THING_NOUNS
+
+
 def named_kind(text: str | None) -> tuple[str, str]:
     """The thing the message *names*, and the word it used.
 
@@ -612,4 +648,5 @@ __all__ = [
     "read_entities",
     "render",
     "thing_kind",
+    "thing_word",
 ]

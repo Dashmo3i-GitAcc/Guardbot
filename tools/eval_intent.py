@@ -643,9 +643,30 @@ def _metrics(detail: list[dict]) -> dict:
     ]
     object_person_offered = [r for r in object_thing if r["got_referent"] is not None]
 
+    # ── The expression itself ─────────────────────────────────────────────
+    # The resolver's reading is scored as ``expression_accuracy`` above; the two
+    # *directions* of being wrong were never separated. The dangerous one is the
+    # false positive: the corpus says the message points at no person — a
+    # demonstrative bound to a config, a link, a time — and the resolver offered
+    # one anyway. That is the wrong lead §46 fixed for «این لینک» and §56 for
+    # «همون کانفیگ». The false negative (a person the resolver missed) is the
+    # safe direction and is counted apart, as the act and time readers do.
+    expression_cases = [r for r in detail if r["expected_kind"]]
+    expression_claimed = [r for r in detail if r["got_kind"]]
+    expression_false_positive = [
+        r for r in detail if r["got_kind"] and not r["expected_kind"]
+    ]
+    expression_false_negative = [
+        r for r in detail if r["expected_kind"] and not r["got_kind"]
+    ]
+
     return {
         "cases": len(detail),
         "expression_accuracy": rate(detail, lambda r: r["kind_ok"]),
+        "expression_cases": len(expression_cases),
+        "expression_coverage": len(expression_claimed) / n,
+        "expression_false_positives": len(expression_false_positive),
+        "expression_false_negatives": len(expression_false_negative),
         "addressing_accuracy": rate(detail, lambda r: r["addressed_ok"]),
         "act_accuracy": rate(detail, lambda r: r["act_ok"]),
         # Of the acts it claimed, the fraction it got right.
@@ -918,6 +939,10 @@ def report(result: dict, *, verbose: bool = False) -> str:
         "",
         "understanding",
         f"  expression accuracy        {_pct(m['expression_accuracy'])}",
+        f"  expression coverage        {_pct(m['expression_coverage'])} "
+        f"({m['expression_cases']} cases point at a person)",
+        f"  expression false pos/neg   {m['expression_false_positives']} / "
+        f"{m['expression_false_negatives']} (a false positive is a wrong lead)",
         f"  addressing accuracy        {_pct(m['addressing_accuracy'])}",
         "",
         f"the act (abstention is {discourse.ACT_UNKNOWN!r}, and it is not a failure)",

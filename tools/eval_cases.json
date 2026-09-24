@@ -1,5 +1,5 @@
 {
-  "version": 13,
+  "version": 14,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -6014,6 +6014,144 @@
         "object": {
           "kind": "media",
           "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "thing-noun-config",
+      "category": "reference",
+      "note": "A demonstrative bound to a config is a determiner, not a person pronoun.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رو فرستادم",
+          "at": 920,
+          "role": "member",
+          "message_id": 2
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کانفیگ رو بده",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "thing-noun-server",
+      "category": "reference",
+      "note": "The same guard for a server noun, with a different verb.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سرور کند شده",
+          "at": 900,
+          "role": "member",
+          "message_id": 1
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "آره",
+          "at": 920,
+          "role": "member",
+          "message_id": 2
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این سرور رو ریستارت کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "thing-noun-mixed",
+      "category": "reference",
+      "note": "Persian demonstrative, English thing noun — the mixed half of the room.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "ok",
+          "at": 920,
+          "role": "member",
+          "message_id": 2
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این config رو چک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
         }
       }
     }

@@ -461,6 +461,30 @@ def test_a_demonstrative_before_a_thing_word_is_not_a_person_reference():
         assert R.find_expression(text).kind == "", text
 
 
+def test_a_demonstrative_before_a_domain_thing_noun_is_not_a_person_reference():
+    """«همون کانفیگ» binds «همون» to a config — a determiner, not a pronoun.
+
+    The room-held nouns («لینک»، «عکس»، «پیام») are the entity reader's; the
+    domain's own thing nouns («کانفیگ»، «سرور»، «تنظیمات») are things the room
+    does not hold as a row, but a demonstrative bound to one is still not a
+    person. Offering the room's members for «همون کانفیگ رو بده» is the same
+    wrong lead «این لینک» was.
+    """
+    for text in ("همون کانفیگ رو بده", "این کانفیگ رو چک کن",
+                 "این سرور رو ریستارت کن", "اون تنظیمات رو ببین",
+                 "این اشتراک رو بده", "همون اکانت رو حذف کن",
+                 "این پنل رو ببند", "اون کانال رو پاک کن",
+                 "این config رو چک کن", "اون server رو ببین"):
+        assert R.find_expression(text).kind == "", text
+
+
+def test_the_domain_thing_guard_keeps_a_person_noun_a_person():
+    """The domain nouns must not swallow a real person reference beside them."""
+    assert R.find_expression("همون کاربر رو محدود کن").kind == R.KIND_PERSON
+    assert R.find_expression("این کانفیگ رو به این کاربر بده").kind == R.KIND_PERSON
+    assert R.find_expression("ادمینه رو محدود کن").kind == R.KIND_ROLE
+
+
 def test_the_thing_guard_reads_the_raw_token_not_the_clitic_stripped_one():
     """«پیام» would strip to «پی», so the guard must look before stripping.
 

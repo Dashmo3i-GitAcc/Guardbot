@@ -159,6 +159,39 @@ def test_the_single_token_form_is_exported():
     assert "thing_kind" in E.__all__
 
 
+@pytest.mark.parametrize(
+    "token",
+    ["کانفیگ", "config", "سرور", "server", "تنظیمات", "اشتراک", "اکانت",
+     "پنل", "لایسنس", "کانال", "سرویس"],
+)
+def test_a_domain_thing_noun_is_a_thing_word_but_not_a_room_held_kind(token):
+    """The room holds no «کانفیگ», so the entity block must not render one.
+
+    ``thing_word`` is the union the resolver needs — a demonstrative bound to one
+    of these is a determiner, not a person — while ``thing_kind`` stays the
+    room-held kinds the entity block points at. Keeping them apart is what stops
+    the resolver's widening from printing "a thing the room holds" for a config.
+    """
+    assert E.thing_word(token) is True
+    assert E.thing_kind(token) == ""
+
+
+def test_a_room_held_kind_is_still_a_thing_word():
+    """The union keeps everything it had."""
+    assert E.thing_word("لینک") and E.thing_kind("لینک") == E.KIND_LINK
+    assert E.thing_word("عکس") and E.thing_kind("عکس") == E.KIND_MEDIA
+
+
+def test_a_person_noun_is_not_a_thing_word():
+    """The union must not swallow a person."""
+    for token in ("کاربر", "user", "طرف", "آدم", "سلام"):
+        assert E.thing_word(token) is False, token
+
+
+def test_the_thing_word_form_is_exported():
+    assert "thing_word" in E.__all__
+
+
 # ── The demonstrative ─────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "text",

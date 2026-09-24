@@ -212,9 +212,15 @@ def _thing_named(token: str) -> bool:
 
     «این لینک», «اون عکس», «همین پیام» point at a link, a file, a message — not
     at a person — and the reader that knows which Persian nouns name things
-    already exists: ``app/entities.py``'s ``thing_kind``. This borrows it rather
+    already exists: ``app/entities.py``'s ``thing_word``. This borrows it rather
     than keeping a second list, for the reason every borrow in this module
     exists: two lists drift, and the drift shows up as a wrong-person mistake.
+
+    ``thing_word`` rather than ``thing_kind`` because the domain's own thing
+    nouns are not things the room holds: «همون کانفیگ رو بده» binds «همون» to a
+    config, and offering the room's members for it is the same wrong lead
+    «این لینک» was. The entity block still renders only the room-held kinds, so
+    this widening changes the resolver's reading and nothing else.
 
     Late and guarded, exactly as ``_action_words`` and ``_temporal_nouns`` are.
     A missing lexicon degrades to "no thing word known", which is precisely the
@@ -224,7 +230,7 @@ def _thing_named(token: str) -> bool:
     try:
         from . import entities
 
-        return bool(entities.thing_kind(token))
+        return entities.thing_word(token)
     except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
         return False
 
@@ -419,13 +425,14 @@ def find_expression(text: str | None) -> Expression:
     # * a time word — «همین الان», «این هفته», «اون موقع». The check reads the
     #   raw token, because the clitic stripper would have turned «هفته» into
     #   «هفت».
-    # * a thing word — «این لینک», «اون عکس», «همین پیام». «این لینک چیه» asks
-    #   about a link; offering the room's members as the people «این» might mean
-    #   is a wrong lead, and a wrong-person moderation action is the worst
-    #   mistake available here. The entity reader renders the things instead.
+    # * a thing word — «این لینک», «اون عکس», «همین پیام», and the domain's own
+    #   thing nouns («همون کانفیگ»، «این سرور»). «این لینک چیه» asks about a
+    #   link; offering the room's members as the people «این» might mean is a
+    #   wrong lead, and a wrong-person moderation action is the worst mistake
+    #   available here. The entity reader renders the room-held things instead.
     #   This check reads the raw token too, and for the same reason as the time
     #   check: this module's stripper turns «پیام» into «پی», so the noun would
-    #   never be recognized. ``entities.thing_kind`` does its own single strip,
+    #   never be recognized. ``entities.thing_word`` does its own single strip,
     #   which is the one that is safe.
     for index, token in enumerate(bare):
         if _deictic(token):

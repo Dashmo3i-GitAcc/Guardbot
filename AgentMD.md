@@ -1741,6 +1741,18 @@ reference file is stale and this list is the one to fix first.
   already refuses a time word. The check reads the **raw** token: this module's
   stripper turns «پیام» into «پی», so a stripped token would never reach
   `thing_kind`.
+* The word that guard reads is `entities.thing_word`, **not** `thing_kind`: the
+  union of the room-held kinds and the **domain's own thing nouns** («کانفیگ»,
+  «سرور», «تنظیمات», «اشتراک», «اکانت», «پنل», «لایسنس», «کانال», «سرویس» and
+  their Latin forms). The room holds no «کانفیگ» as a row, so `thing_kind` and
+  the entity block are **unchanged** — «همون کانفیگ رو بده» binds «همون» to a
+  config and is not about anybody, and offering the room's members for it is the
+  same wrong lead «این لینک» was. `thing_word` widens the **resolver's** reading
+  only, and a person noun immediately after the demonstrative still wins.
+* The benchmark reports the resolver's error in **both directions**:
+  `expression_false_positives` (the corpus says no person, the resolver offered
+  one — the wrong lead) and `expression_false_negatives` (the safe direction).
+  The floor is `expression_false_positives == 0`.
 * The entity block is a **tier-0 source** (`entities`, budget 600) that reads
   `Ctx`, never the database, and renders **nothing** when there is nothing to
   point at and nothing named — a block saying "no things found" would spend
