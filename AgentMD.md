@@ -2193,6 +2193,17 @@ reference file is stale and this list is the one to fix first.
   kept behind `--compare-ordering` in `tools/eval_awareness_schedule.py` so the
   negative result stays reproducible, and `tests/test_awareness_schedule_eval.py`
   pins it.
+* **A claim about answer quality requires a measurement, and a measurement may
+  never report a number it did not measure.** `tools/eval_chat_quality.py` is the
+  only thing in this repo that scores the assistant's own text: a labelled
+  corpus, a deterministic scorer with **no LLM judge**, and a harness that drives
+  the real addressed path and the real `chat.reply`. A `(scenario, arm)` pair
+  whose every sample was skipped or errored is **NOT RUN** and leaves every
+  denominator — a gap is never scored as a zero. The report prints its own
+  limits with every run: it measures text against authored rules and never tone;
+  `ChatReply.model` is the **requested** model, not necessarily the serving one;
+  temperature is 0.8, so it reports samples and spread rather than one number as
+  a verdict. Nothing else may justify a routing change (V).
 
 ### 53.8 The assistant
 
@@ -3616,6 +3627,127 @@ V, do NOT merge, do NOT deploy U.** Do not raise the 200-request allowance.
 
 **To resume after any context loss.** Re-read this section and
 `docs/intent-awareness-roadmap.txt` (§4.3(d) is now RESOLVED, §5 for U/V, §7 for
+the continuation point), then verify: `git status`, `git rev-parse HEAD`,
+`git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.
+
+### 54.11 Checkpoint (2026-09-24, after the V evidence base) — resume here (supersedes §54.10)
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`. The V
+evidence base sits on §54.10, in two commits — `4a84756` (the tool and the
+fixture) and `c58fa2a` (the tests). `main` and the annotated tag
+`release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
+and is an ancestor of HEAD. Suite **3640 passed, 0 failed** (was 3619).
+**Not merged, not deployed.** Nothing in production changed: no routing, no
+config default, no table, no awareness allowance.
+
+**What this is, and what it is not.** It is the **measurement** V was blocked on,
+and only the measurement. `docs/intent-awareness-roadmap.txt` §5/V said it
+plainly: *"There is currently NO measurement of model quality anywhere in this
+repo… This increment cannot be planned until an evidence base exists; the honest
+first step would be to BUILD that evidence base, not to change routing."* That is
+what was built. **V itself is still NOT SCOPED** — producing a measurement is not
+starting V, and no routing decision has been made or implied.
+
+**What was added (DONE).**
+
+* **`tools/eval_chat_quality.py`** (new) — the corpus, the deterministic scorer
+  and the live harness, in one script.
+  * **The corpus**: 14 scenarios across the six categories the docs name —
+    `referent`, `ambiguity`, `grounded`, `correction`, `self_contained`,
+    `action_safety`. One grounded scenario is a deliberately **absent fact**
+    («پسورد root سرور چیه؟»), so "always confident" cannot score full marks.
+  * **The scorer**: each scenario carries machine-checkable rules (`all_of`,
+    `any_of`, `none_of`, `asks`, `claims_action`, `admits_unknown`, `max_chars`,
+    `room_markers`) matched against the folded text (ZWNJ removed, Arabic-Indic
+    digits folded, whitespace collapsed). **No LLM judge.** A `(scenario, arm)`
+    pair whose every sample was skipped or errored is **NOT RUN** and leaves
+    every denominator — a gap, never a zero.
+  * **The harness**: drives the **real** `main._answer_conversationally` and the
+    **real** `chat.reply`, with `DB_PATH` forced to `:memory:`, the search and the
+    awareness note stubbed, each scenario in its own room and its own person, and
+    the whole process restored in a `finally`.
+  * **Two arms**: `--arm context` (default) compares the real `context_plan.read`
+    against the pre-Y "render everything" reading, installed by swapping
+    `context_plan.read` — **that is Y's outstanding probe**. `--arm model` pins
+    one model per arm (`config.GEMINI_CHAT_MODEL`, a one-element `models` list on
+    the chat pool spec, then `build_pools`, because `Pool.models` is frozen at
+    build time and chat **rotates**) and compares them. `--no-pin` trades
+    attribution for the pool's ordinary failover.
+* **`tests/test_chat_quality_eval.py`** (new, 21 tests) — all offline, zero model
+  calls. The floors are the two ways a benchmark lies: **vacuity** (four targeted
+  mutations each move exactly their metric while a control category stays 1.0)
+  and **reporting a number it did not measure** (the credential gate prints NOT
+  RUN and never calls `chat.reply`; the pre-Y arm is proved to render a *larger*
+  prompt than the real reading on the real path).
+* **`tools/fixtures/chat_quality_transcripts.json`** (new) — a **synthetic**
+  transcript for both arms, generated from the corpus's own labelled good answers
+  and round-trip asserted, so a corpus edit and the fixture cannot drift.
+
+**The live run: NOT RUN — and the reason is the provider, not the tool.** The
+authorised run is:
+
+```
+docker run --rm --env-file .env -v "$PWD:/srv" -w /srv guardbot-guardbot \
+  python tools/eval_chat_quality.py --arm context --samples 2 --max-calls 60
+```
+
+It was attempted three times. Each attempt ended with the chat workload's own
+attempt budget spent on `503`/`504` from the provider. A **bare `google-genai`
+call, outside this application entirely**, then returned
+`503 UNAVAILABLE … This model is currently experiencing high demand` for
+`gemini-flash-lite-latest`, `gemini-flash-latest`, `gemini-3.5-flash-lite`,
+`gemini-3.1-flash-lite` and `gemini-3.7-flash` — every chat model, on every one
+of the four configured accounts. A bounded 2-request probe reported
+`answered_rate 0.0`, `not_run 1`. **No numbers are reported from it.** A quality
+score computed from an empty transcript would be invented, and making that
+impossible is the tool's whole purpose. This is the same provider-side
+degradation recorded on 2026-09-23, still in effect. The run needs only a
+healthy provider — nothing else is outstanding.
+
+**Two defects found by running the real path** — both invisible from the offline
+suite, and both now closed:
+
+1. **A logger level that was never restored.** The tool's `main()` lowered the
+   `guardbot` logger to `WARNING` to keep its own output readable, and left it
+   there. Four `tests/test_classifier.py` `caplog.at_level("INFO")` assertions
+   then failed in a full-suite run — for a reason that was not in those tests.
+   The level is now saved and restored around the run.
+2. **Cleanup after the connection was closed.** `_bench` rebuilt the pool
+   registry *after* dropping the database connection, and `build_pools` reads the
+   database once per account, so cleanup raised
+   `'NoneType' object has no attribute 'execute'`. It fires **only on a
+   deployment that has credentials**: with no key the pool has no accounts, the
+   per-account loop never runs, and the offline suite passes. That is exactly why
+   a live run is not optional. Fixed by removing the rebuild (the pinning helper
+   already restores the registry while the connection is open), with a regression
+   test that populates the pool before cleanup.
+
+**Honesty, printed with every report.** It measures **text against authored
+rules** — never tone, helpfulness or politeness. `ChatReply.model` is the
+**requested** model, not necessarily the serving one; that is recorded as a
+limitation and a finding for V, not fixed here. Temperature is 0.8, so a report
+carries the sample count and the spread rather than one number as a verdict. The
+corpus is small (14 scenarios) and was authored by the same project that answers
+it: it is a floor to move on purpose, not a verdict.
+
+**Rollback.** Two new files and one new fixture; no production file is touched, so
+the whole increment reverts by `git revert 4a84756 c58fa2a` on this branch, or by
+leaving the branch unmerged. `main` at
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state and is an
+**ancestor** of the branch.
+
+**Exact next step.** Run the command above **once the provider answers**, and read
+`--arm context` as Y's probe: does the real reading hold up against "render
+everything"? Then, and only then, is there a basis to discuss V's routing question
+at all — and that discussion needs the owner's go-ahead. **Do NOT start V, do NOT
+merge, do NOT deploy U, and do NOT raise the 200-request allowance.** The
+`--arm model` comparison is built and deliberately unrun: running it answers V's
+own question.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§4.3(e) is now RESOLVED, §5 for U/V, §7 for
 the continuation point), then verify: `git status`, `git rev-parse HEAD`,
 `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.

@@ -764,8 +764,17 @@ the repository actually shows:
       built and measured and has **zero** leverage: the scheduler is
       event-driven per room, not batch-driven, so there is nothing to sort. See
       §5/U RESULT.
-    * (e) Whether any model-routing change is measurable at all with the
-      current evidence base.
+    * (e) RESOLVED — the evidence base now exists; the routing question is still
+      open. The gap was that **nothing** in the repo measured answer quality, so
+      a routing change could only have been justified by a feeling.
+      `tools/eval_chat_quality.py` now measures it: a labelled Persian corpus
+      (14 scenarios across six categories — referent, ambiguity, grounded,
+      correction, self-contained, action-safety), a deterministic text scorer
+      with no LLM judge, and a harness that drives the **real** addressed path
+      and the **real** `chat.reply` behind two arms. What it does *not* yet say
+      is whether a routing change moves the number: the live run was blocked by
+      the provider (503 UNAVAILABLE for every chat model), so the measurement is
+      built and unrun. See §5/V RESULT.
 
 4.4 DOCUMENTATION DRIFT (see §2.5) — corrected in the AgentMD checkpoint.
 
@@ -1237,9 +1246,15 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              itself: read ~0.15/0.5 ms, compose ~0.02/0.08 ms p50/p95 (the test
              floor is p95 < 5 ms); 0 model calls (asserted). Suite 3568 passed,
              0 failed.
-  Probe:     NOT RUN — the answer-quality probe needs a chat provider credential
-             and a live room; the numbers above are the SERVER's contribution and
-             are not evidence that answers improved.
+  Probe:     BUILT AND ATTEMPTED — BLOCKED BY THE PROVIDER (§5/V RESULT). The
+             answer-quality probe that Y's own measurement could not be now
+             exists: `tools/eval_chat_quality.py --arm context` compares the real
+             reading against the pre-Y "render everything" reading on the REAL
+             addressed path, with the real `chat.reply`. Three live attempts ended
+             in 503/504 from every chat model on every account, confirmed by a
+             bare `google-genai` call outside the application; no numbers are
+             claimed. The numbers above remain the SERVER's contribution and are
+             not evidence that answers improved.
   Not done:  the reading is a fixed set of deterministic signals (an
              unanticipated wording reads as self-contained); de-duplication
              matches on shared WORDS (a fact recorded in another script is not
@@ -1341,8 +1356,80 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
   Files:     unknown.
   Runtime:   would be YES.
   Gemini:    by definition.
-  Evidence:  a measurement that does not exist yet.
+  Evidence:  the measurement now EXISTS (tools/eval_chat_quality.py) and is
+             unrun: the live run was blocked by the provider. See RESULT below.
   Depends:   T and U.
+  RESULT:    THE EVIDENCE BASE IS BUILT; THE LIVE RUN IS BLOCKED BY THE
+             PROVIDER. No routing change was made — V itself is still NOT SCOPED.
+             * WHAT WAS BUILT. `tools/eval_chat_quality.py` (new) — the corpus,
+               the deterministic scorer and the live harness, in one script.
+               `tests/test_chat_quality_eval.py` (new, 21 tests, all offline).
+               `tools/fixtures/chat_quality_transcripts.json` (new) — a SYNTHETIC
+               transcript for both arms, generated from the corpus's own labelled
+               good answers, so a corpus edit and the committed fixture cannot
+               drift apart (a test asserts the round trip). No routing change, no
+               config default changed, no table, no awareness-allowance change,
+               no new model call in production.
+             * THE TWO ARMS. `--arm context` is the authorised run: arm **a** is
+               the real `context_plan.read`; arm **b** is the pre-Y "render
+               everything" reading, installed by swapping `context_plan.read` in a
+               `try/finally` exactly as `bench_context_real` does — so the same
+               code renders the same blocks and the only difference is the
+               selection. That is **Y's outstanding probe**, and it is what makes
+               the "never drop to a smaller model" invariant testable at all.
+               `--arm model` pins each arm to exactly one model
+               (`config.GEMINI_CHAT_MODEL`, a one-element `models` list on the
+               chat pool spec, then `build_pools` — necessary because
+               `Pool.models` is frozen at build time and chat **rotates**) and
+               compares them. It is BUILT and **NOT RUN**: running it answers V's
+               own question, and V is not authorised. `--no-pin` is the honest
+               fallback when one pinned model cannot carry a run.
+             * THE SCORER IS DETERMINISTIC, AND ITS GAPS ARE GAPS. Each scenario
+               carries machine-checkable rules (`all_of`, `any_of`, `none_of`,
+               `asks`, `claims_action`, `admits_unknown`, `max_chars`,
+               `room_markers`) matched against the folded text (ZWNJ removed,
+               Arabic-Indic digits folded, whitespace collapsed). There is **no
+               LLM judge**. A `(scenario, arm)` pair whose every sample was
+               skipped or errored is reported as **NOT RUN** and excluded from
+               every denominator — a gap, never a zero, because counting a
+               non-measurement as a failure is how a benchmark lies. One grounded
+               scenario is a deliberately **absent fact**, so "always confident"
+               cannot score full marks.
+             * LIVE RUN: NOT RUN, AND THE REASON IS THE PROVIDER, NOT THE TOOL.
+               `--arm context --samples 2 --max-calls 60` was attempted three
+               times; each ended with the chat workload's own attempt budget spent
+               on `503`/`504`. A bare `google-genai` call — **outside this
+               application entirely** — then returned
+               `503 UNAVAILABLE ... This model is currently experiencing high
+               demand` for `gemini-flash-lite-latest`, `gemini-flash-latest`,
+               `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` and
+               `gemini-3.7-flash`: every chat model, on every one of the four
+               configured accounts. A bounded 2-request probe produced
+               `answered_rate 0.0`, `not_run 1`. **No numbers are reported from
+               it**: a quality score computed from an empty transcript would be
+               invented, and the tool's whole purpose is to make that impossible.
+               The run is one command away and needs only a healthy provider
+               (recorded in AgentMD §54.11).
+             * TWO DEFECTS FOUND BY RUNNING THE REAL PATH, neither visible from
+               the offline suite: (1) the tool's `main()` lowered the guardbot
+               logger to WARNING and never restored it, which made four
+               `tests/test_classifier.py` caplog assertions fail in a full-suite
+               run — the level is now saved and restored around the run; (2)
+               `_bench` rebuilt the pool registry **after** dropping the database
+               connection, so cleanup raised
+               `'NoneType' object has no attribute 'execute'` on any deployment
+               that has a credential — invisible offline, because with no key the
+               pool has no accounts and never reads the database. Fixed, with a
+               regression test that populates the pool before cleanup runs.
+             * HONESTY, PRINTED WITH EVERY REPORT. It measures **text against
+               authored rules** — never tone, helpfulness or politeness.
+               `ChatReply.model` is the **requested** model, not necessarily the
+               serving one; that is recorded as a limitation and a finding for V,
+               not fixed here. Temperature is 0.8, so a report carries the sample
+               count and the spread rather than one number as a verdict. The
+               corpus is small (14 scenarios) and was authored by the same project
+               that answers it: it is a floor to move on purpose, not a verdict.
+             * Suite 3619 -> 3640 passed, 0 failed. Not merged, not deployed.
 
 --------------------------------------------------------------------------------
 6. END STATE — WHAT "COMPLETE" MEANS FOR THIS PROJECT
@@ -1448,19 +1535,25 @@ Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
 Next:     INCREMENT V — "only if the numbers say so" (roadmap §5/V). **U is
           DONE** (see §5/U RESULT): adaptive Awareness scheduling shipped as a
           per-room spend-or-wait decision WITHIN the existing 200-request
-          allowance and with NO new model calls. V (model/Gemini routing) remains
-          **NOT SCOPED** — it needs an answer-quality measurement that does not
-          exist, and the honest first step would be to BUILD that evidence base,
-          not to change routing. The remaining order is V alone. Do NOT start V,
-          do NOT merge, do NOT deploy U, and do NOT raise the allowance. U's live
-          probe was NOT RUN (U is not deployed, and the brief forbids deploying
-          it). W, the W extension, X, Y and U are DONE (see §5/W RESULT,
-          §5/W-EXTENSION RESULT, §5/X RESULT, §5/Y RESULT, §5/U RESULT).
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.10 (the checkpoints).
+          allowance and with NO new model calls. **V's evidence base is now
+          BUILT** (see §5/V RESULT): `tools/eval_chat_quality.py` measures answer
+          quality with a labelled corpus, a deterministic scorer and a harness
+          that drives the real addressed path behind two arms. V (model/Gemini
+          routing) itself remains **NOT SCOPED** — the measurement exists, but
+          the live run that would populate it was blocked by the provider
+          (503 UNAVAILABLE for every chat model), so no numbers are claimed.
+          The remaining order is V alone, and the first step is a single
+          `--arm context` run once the provider answers, not a routing change.
+          Do NOT start V, do NOT merge, do NOT deploy U, and do NOT raise the
+          allowance. U's live probe was NOT RUN (U is not deployed, and the brief
+          forbids deploying it). W, the W extension, X, Y and U are DONE, and
+          V's evidence base is BUILT (see §5/W RESULT, §5/W-EXTENSION RESULT,
+          §5/X RESULT, §5/Y RESULT, §5/U RESULT, §5/V RESULT).
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.11 (the checkpoints).
                  docs/reference/nexus-awareness.md §52–§66 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1–§54.10 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.11 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.
