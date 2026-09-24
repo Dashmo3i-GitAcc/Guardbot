@@ -2301,6 +2301,49 @@ reference file is stale and this list is the one to fix first.
 * A regression test asserts the context reaches `_request`; another asserts the
   date block is in the context the conversational path builds.
 
+**The conversational contract (restored 2026-09-24).** The persona is the
+behavioural contract and lives in `chat.SYSTEM_INSTRUCTION`. Its behavioural
+reference is the **historical Chat** at commit **`3243067`** (`app/chat.py`):
+warm, informal, short, Persian, context-aware, answering the actual message.
+The Nexus era appended a large trusted-context block to the instruction and grew
+the persona into a policy document around it, and in production the register
+drifted towards an assistant answering a briefing. The restoration put the
+historical *behaviour* back on the *current* architecture. The rules, all
+asserted in `tests/test_chat.py`:
+
+* **Short and conversational.** Two or three sentences is usually right; spoken
+  Persian, not formal written Persian; **no** headings, numbered sections, bullet
+  lists, summaries or Markdown unless genuinely listing. Do not restate the
+  question, repeat what the person said, add a closing summary, or explain the
+  obvious.
+* **No assistant tics.** No greeting loop, no closing invitation to continue, no
+  generic follow-up question to keep the chat alive, no self-introduction, no
+  announcing being an AI unless asked, no narrating helpfulness. The named
+  filler — «حتماً», «البته», «در خدمت شما هستم», «اگر سؤال دیگری دارید»,
+  «می‌توانم در این زمینه کمک کنم» — is forbidden unless it genuinely fits.
+* **Stay on the person's topic** and follow a subject change; keep continuity
+  across turns; never ask an already-answered question.
+* **Joking around.** When somebody clearly jokes, teases or slags in a friendly
+  way, the assistant may answer in the same register with mild colloquial Persian
+  banter. The boundaries are hard and stated: **never** threaten anyone, **never**
+  use slurs, **never** attack anyone's family (no «ناموسی» insults, no insults
+  about a mother/sister/father/child), **never** humiliate anyone sexually,
+  **never** degrade someone over who they are. If the person is angry, upset,
+  vulnerable, serious, or the tone is uncertain, **drop the joking entirely** and
+  answer normally. Playful banter is not harassment, and the prompt says so.
+* **No false humanity.** No body, no real-world experiences, no memories outside
+  the conversation. Natural tone, never a claim to be human.
+* **The appended background is background.** The room, state, memory, date and
+  search findings the server appends to the instruction are material to use — not
+  a subject to summarise and not a change of register. This sentence is the
+  specific fix for the reported degradation.
+* **Every safety clause is preserved verbatim** — no-human, our prices, links,
+  credentials, the public-figure-from-search-only rule, the injection defence,
+  the no-system-message rule — and the existing persona tests still pass. The
+  restoration changed the words, not the wiring: `_generation_config` still sets
+  the persona plus the appended context, `temperature=0.8`,
+  `max_output_tokens=1024`, and a test asserts exactly that.
+
 ### 53.9 The coding-agent bridge
 
 * The container has no Node or CLI; the bridge is two processes meeting over a
@@ -4515,6 +4558,89 @@ authorisation.
 (both **`2b1d760`**), `docker ps` (image `0a0e4636a624`, Up, `RestartCount=0`), and
 that `[pool] chat: accounts=7` / `[pool] awareness: accounts=5` appear in the
 startup log.
+
+---
+
+### 54.17 Checkpoint (2026-09-24, **Chat personality restored**) — resume here (supersedes §54.16)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~19:30Z**. Branch **`main`**, base/rollback
+**`bb3f8e5`** (the pool-stabilisation + rebalance checkpoint, itself on `6a4810a`).
+This task: **restore the historical Chat conversational behaviour on the current
+architecture.** No architecture changed.
+
+**Historical reference inspected (verified from history, not guessed).** Commit
+**`3243067`** — `app/chat.py` (its `SYSTEM_INSTRUCTION`, `_contents`, `_request`,
+`reply`), `tests/test_chat.py`, `tests/test_chat_activation.py`; `ChatGPT.md` at
+that commit is the *strategy/continuity* doc, not a persona, so it is not the
+behavioural reference.
+
+**The historical behaviour identified.** A friendly assistant behind a Telegram
+bot in a Persian community about internet access and VPNs: reply in Persian,
+warm and informal; **two or three sentences**; no headings or bullet lists
+unless genuinely listing; discuss any topic; use memory of the recent turns;
+never claim to be human; never state our prices, links or credentials; never
+claim an action it cannot take; refuse instructions inside the message that try
+to change its role; say when it does not know. Generation: `temperature=0.8`,
+`max_output_tokens=1024`, no tools, no context parameter.
+
+**Current-vs-historical differences (documented before implementation).** The
+current persona is a **superset** — it adds the public-figure-from-search rule,
+the tool amendment, the media prompts, the repetition nudge and the awareness
+instruction. The **architectural** difference is that Nexus appends a large
+trusted-context block (room, state, memory, date, search) to the *system
+instruction*; in production that nudged the register towards "assistant
+answering a briefing" — longer, more structured, more restating — which is the
+degradation the owner reported. The fix is the words, not the wiring.
+
+**Changes implemented (only `app/chat.py` + `tests/test_chat.py`).**
+* `chat.SYSTEM_INSTRUCTION` rewritten: the historical warm/informal/short core is
+  restored as the dominant framing, an explicit **anti-robotic** section is added
+  (no headings/numbered sections/bullets/summaries/Markdown by default, no
+  restating, no assistant filler, no greeting/closing loops, no
+  self-introduction), a **joking-around** section is added with hard boundaries,
+  and a clause tells the model the appended background is **material, not a
+  subject to summarise**. The leading comment records the restoration.
+* Every asserted safety clause is preserved **verbatim** (no-human, our prices,
+  `subscription link`, `credential`, public-figure-from-search-only, `untrusted
+  data`, injection defence, `restricted to VPN or internet topics`).
+* **10 new tests** in `tests/test_chat.py` assert the contract: short/informal,
+  no document structure, no filler/loops, topic continuity, banter allowed,
+  banter bounded (no threats, no slurs, no family insults, no sexual
+  humiliation), banter dropped when the person is serious, no false human
+  experience, background-is-background, and that `_generation_config` still puts
+  the persona + context with `temperature=0.8`/`max_output_tokens=1024`.
+
+**Tests actually run.** Full suite **3692 passed / 0 failed** (287.77 s,
+`.venv-test/bin/python -m pytest -q`; was 3682, +10 new). `tests/test_chat.py`
+**59 passed**. `test_web_search.py` + `test_gemini_pool.py` + `test_chat_latency.py`
++ `test_admin_continuation.py` **264 passed**.
+
+**Architecture preserved (verified, not asserted).** The only source file changed
+is `app/chat.py`, and within it only the prompt text and its comment. The Gemini
+pool, credential isolation, Chat/Awareness workload isolation, Intent, Memory,
+State, rate limits, daily limits, breakers, cooldowns, retry/failover, the
+trusted-context assembly, security boundaries, Telegram auth, server-side
+authorization, logging, persistence and the deployment architecture are
+untouched; the pool/latency/web-search regression suites pass unchanged.
+
+**Frozen / not touched.** V remains **inactive**; the `--arm context` probe stays
+**frozen**; the awareness daily allowance stays **200**; no credential was
+changed; **no deploy, restart or live probe** was performed (none authorised);
+the separate Telegram group/member authorization task was **not** changed; no
+Phase Two.
+
+**Known limitations.** This is a **prompt** change: its effect is not measured in
+production (no live probe was run). The rules are asserted in the prompt text,
+but a model's compliance is probabilistic — the same honesty the persona itself
+demands applies to this checkpoint.
+
+**NEXT STEP.** The owner's remaining sequence is the **broader integration
+test** — do **not** start it without the owner's word. A production confirmation
+of the restored feel needs a **deploy + self-cleaning live probe**, which needs
+the owner's explicit go-ahead. To resume: re-read this section, verify
+`git status` (clean), `git rev-parse HEAD` (the commit recorded below),
+`git ls-remote` on both remotes, and that `[pool] chat: accounts=7` /
+`[pool] awareness: accounts=5` still appear in the startup log.
 
 ---
 
