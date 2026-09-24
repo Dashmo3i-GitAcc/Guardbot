@@ -2952,16 +2952,16 @@ begin X.
 
 ### 54.7 Checkpoint (2026-09-24, after the W extension) — resume here (supersedes §54.6)
 
-**Where the work is.** Branch `develop/nexus-intelligence-evolution`, on top of
-§54.6 (`70dd7e0`). The W extension is the automatic long-term memory described
-below. Working tree changes: `app/memory.py`, `app/db.py`, `app/config.py`,
-`app/awareness_context.py`, `app/main.py`, new `app/memory_extract.py`, new
-`tests/test_memory_auto.py`, `tests/test_chat_daily_budget.py`,
-`tests/test_gemini_pool.py`, `tests/test_nexus.py`, `tools/eval_memory.py`,
-`docs/intent-awareness-roadmap.txt`, `AgentMD.md`. `main` and the annotated tag
-`release-base/nexus-intel` are both still
-`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**.
-Suite **3417 passed, 0 failed** (was 3314). **Not merged, not deployed.**
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`. The
+W-extension **code** commit is `c6ab4c36268a72181efcadfa06efb78d0ddf0d79` (this
+checkpoint is the docs commit on top of it, as W was `ddc79aa` + `e55d48f`), and
+it sits on §54.6 (`70dd7e0`). Pushed to both remotes (`origin` =
+mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc); both verified with
+`git ls-remote`. Working tree **clean**. `main` and the annotated tag
+`release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**,
+and it is an ancestor of HEAD. Suite **3417 passed, 0 failed** (was 3314).
+**Not merged, not deployed.**
 
 **The four context sources, and the boundary between them.** These are
 complementary and deliberately *not* one generic "context":
