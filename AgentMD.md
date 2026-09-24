@@ -3954,6 +3954,110 @@ exhausted quota, not a faster answer (9 chat accounts still fail over 14+ times)
 run (still FROZEN), no token moved. This is a candidate for the owner to
 prioritise next; it is **not** a checkpoint NEXT STEP.
 
+**Nexus responsiveness fix — the account breaker (2026-09-24, DONE, not
+deployed).** The owner asked to make Chat usable again from the diagnosis above.
+The change is the **smallest safe one** and is confined to the pool's own
+routing; **no token was added, removed, moved or rotated**, and no credential
+policy changed.
+
+*Diagnosis, from the live DB and logs (not guessed).* `gemini_accounts` for
+`chat` held **4** rows, every one `state=ACTIVE`, `cooldown_until=0` — while
+their lifetime failure counters read **1058 / 927 / 400 / 388** and their
+`rate_limits` read **625 / 465 / 170 / 175**. `gemini_events` held **no
+`account_failover` row at all**; every chat event was `model_failover`. The
+container logs show the same account re-tried across models on one message
+(`BCIQ`: `3.6-flash` 429 → `flash-lite-latest` 504 → `3.5-flash-lite` 504 →
+`3.5-flash-lite` 504) and the same model re-tried on a *different* account
+minutes later. **Root cause: the pool benched the *model* and never the
+*account*.** `ModelState.note_failure` sets a model cooldown; `Account.trip`
+fires only on `SCOPE_ACCOUNT` faults (401 / project quota), which a per-model
+429 and a 503/504 are not. So an account out of allowance on every model it
+offered stayed `ACTIVE`, `ordered_accounts` returned it every time, and every
+message re-walked all four accounts and re-paid for the same failures.
+
+*Health check of every configured Chat credential (read-only, fingerprints
+only, one small `generate_content` per key, no DB/pool/key-store write).* All
+**9 configured chat keys answered** — `ad4bfbe4` 11.6 s, `5148caba` 18.6 s,
+`23c19e3b` 15.0 s, `295c2a86` 15.9 s, `24b50725` 17.6 s, `2a52d966` 21.7 s,
+`4a75741b` 13.2 s, `599a1072` 20.3 s, `5ff073ee` 24.4 s. **Healthy 9,
+unhealthy 0** — which is itself the finding: three of these keys 503'd in the
+13:30 recheck and none does now, confirming the 503 is **intermittent**, and the
+11.6–24.4 s cost of a five-token call is the provider being **slow**, not down.
+No key was modified.
+
+*Implemented behaviour (`app/gemini_pool.py`, `app/config.py`).* A per-account
+consecutive-failure breaker, on top of the existing model cooldowns — the
+existing pool is reused, no parallel pool, no ordering change (the pinned
+least-recently-succeeded rotation is untouched):
+  * `Account.consecutive_failures` — in-memory, incremented by
+    `note_failure` **only** for the kinds that mean "the project is unwell"
+    (`rate_limited`, `provider_error`, `network_error`, `timeout`,
+    `unknown_error`; the `_BENCH_KINDS` tuple), cleared by `note_success` and by
+    `trip`. `bad_request` / `unsupported_input` / `unsupported_model` are
+    **excluded on purpose**: they fail identically on every account, so counting
+    them would bench the whole pool over one malformed message.
+  * `Account.should_bench()` — `consecutive_failures >=
+    GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD` (**new env knob, default 3**), read
+    from config on each call so a reload is honoured without rebuilding.
+  * `_bench_repeated_failures(pool, account, model, now)` — trips the account
+    `UNAVAILABLE` for `GEMINI_POOL_TRANSIENT_COOLDOWN` (**60 s**) and records an
+    `account_failover` event (`reason=repeated_failures`), so the state is
+    observable for the first time. Called from both the timeout path and the
+    general failure path in `generate()`, **before** the scope dispatch, so the
+    walk moves to the next **account**, not to another model on the same bad
+    credential.
+  * **Threshold 3, not 1**: a single 503 is a wobble, and it is deliberately
+    above the two failures one retried model produces, so a retry that succeeds
+    on its second attempt never trips the breaker.
+  * **Bounded attempts are unchanged and still bound**: the total is
+    `GEMINI_POOL_MAX_ATTEMPTS` (12) shared as `12 // remaining_accounts` per
+    account, `attempts_per_model = retries + 1`, and the `intent`/`chat`
+    wall-clock ceilings are untouched. The breaker **shortens** the walk — once
+    unhealthy accounts are out, `ordered_accounts` returns fewer of them, so the
+    fair share and the walk both shrink.
+  * **Workload isolation preserved**: each pool owns its own `Account` objects,
+    so the same credential benched in `chat` stays `ACTIVE` in `awareness` or
+    `intent` — asserted by a test. `awareness`, `intent`, `moderation`,
+    `transcribe`, `memory`, `live_voice`, `search` share no failure state with
+    `chat`.
+
+*Tests (DONE).* `tests/test_gemini_pool.py` **+9 focused tests** in a new "THE
+ACCOUNT BREAKER" section: repeated failures bench the account (and the walk
+stops on the third, not the whole list); a benched account is **skipped by the
+next request** (the regression that caused this); a free-tier `rate_limited`
+counts toward the breaker while still benching the model; repeated **timeouts**
+bench the account; a success clears the streak; an account below the threshold
+stays in rotation; a **payload fault never benches** the account (threshold 1);
+benching is recorded as an `account_failover` event; and the breaker is
+**per-workload**. Targeted → **134 passed** (`tests/test_gemini_pool.py`); full
+suite, `.venv-test` → **3667 passed, 0 failed, 0 skipped, 0 errors** (baseline
+3658; +9). `python -m compileall app tools` → exit 0.
+
+*Remaining limitations, stated honestly.*
+  1. **The fix is not deployed.** The running container `guardbot` is
+     main-based `00c5d1d` and does **not** contain this change; no rebuild, no
+     restart, no recreate, no merge was performed (owner's instruction). Until
+     it is deployed the live behaviour is unchanged.
+  2. **Only 4 of the 9 configured chat keys are loaded.** The container's env
+     was frozen at creation (2026-09-23T20:15:33), when `.env` had
+     `GEMINI_CHAT_API_KEY`…`_4`; the five newer keys (`_5`…`_9`) are read at
+     startup only, so they are inert. Picking them up needs a container recreate
+     — **not done, deliberately**. `build_pools()` re-reads the *runtime key
+     store* per reload, so a key added **there** (not in `.env`) would load
+     without a restart; that is the owner's lever, not this change's.
+  3. **Provider latency and per-project free-tier quota are outside our
+     control** — 11.6–24.4 s for a trivial call, and `generate_content_free_tier`
+     is a property of the projects. The breaker bounds the *walk*; it cannot
+     make the provider fast or give a free-tier project more quota.
+  4. **Not fixed, still reported:** the dead `intent` primary
+     `GEMINI_API_KEY` (fp `7c707e1b`, 401) and the two credential collisions
+     (`24b50725`, `20ed3899`) — all need the owner's instruction.
+  5. **No live probe was run and none may be**: the `--arm context` probe stays
+     **FROZEN** and this work did not touch it. The breaker is verified by the
+     deterministic suite, not by a live end-to-end run — that verification is
+     still blocked by the freeze.
+  6. **V is unchanged: NOT IMPLEMENTED, NOT ROUTED, NOT ACTIVATED.**
+
 **V — explicitly, as required.**
 * **NOT IMPLEMENTED** — no routing change, no model allocation, no config
   default changed, no new production call.
@@ -3968,9 +4072,10 @@ is the production state and is an ancestor of HEAD.
 
 **State at checkpoint close.** The commit and the push are **done**: the branch
 tip on both remotes equals local HEAD, working tree clean, `main` still
-`00c5d1d…`, full suite **3658 passed / 0 failed**. Nothing is pending except the
-live run, which the owner has **frozen** — see FREEZE above. While the freeze
-holds, **there is no executable next implementation step**.
+`00c5d1d…`, full suite **3667 passed / 0 failed** (3658 before the account
+breaker, which added 9 tests). Nothing is pending except the live run, which the
+owner has **frozen** — see FREEZE above. While the freeze holds, **there is no
+executable next implementation step**.
 
 **NEXT STEP (do this first in the next session).**
 1. Read this section, `docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5/U

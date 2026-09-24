@@ -2080,6 +2080,28 @@ GEMINI_POOL_QUOTA_COOLDOWN = _int("GEMINI_POOL_QUOTA_COOLDOWN", 900)
 # nothing about the model itself.
 GEMINI_POOL_TRANSIENT_COOLDOWN = _int("GEMINI_POOL_TRANSIENT_COOLDOWN", 60)
 
+# How many failures *in a row* take a whole account out of rotation, and for
+# how long. The cooldown reuses ``GEMINI_POOL_TRANSIENT_COOLDOWN`` above, so one
+# number describes how long the pool waits before re-trusting a credential.
+#
+# The model cooldown above keeps one *model* out of the walk. It says nothing
+# about the account, and the account is the unit Google limits: quotas are per
+# project, and one project can be out of allowance on every model it offers
+# while another is fine. Measured live on 2026-09-24, four chat accounts carried
+# 388-1058 failures each, every one of them still ACTIVE with
+# ``cooldown_until=0``, and not a single ``account_failover`` event in the whole
+# table — so every message re-walked all four accounts and re-paid for the same
+# failures. The breaker below is what ends that.
+#
+# Three, not one: a single 503 is the provider wobbling, and benching an account
+# for it would turn a blip into an outage. Three in a row, across *different*
+# models, is the credential's project being the problem. It is deliberately
+# above the two failures a single retried model produces, so a retry that
+# succeeds on its second attempt never trips it.
+GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD = _int(
+    "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3
+)
+
 # Pool events are deduplicated per (workload, event, account, model) against
 # this window, so a hundred consecutive 429s produce one row rather than a
 # hundred.

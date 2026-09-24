@@ -816,6 +816,161 @@ def test_retries_are_bounded_per_model(provider):
     assert provider.models_used(KEY_A) == [TEXT_MODELS[0], TEXT_MODELS[0], TEXT_MODELS[1]]
 
 
+# ══ THE ACCOUNT BREAKER ═══════════════════════════════════════════════════
+# A model cooldown keeps one *model* out of the walk and leaves the account
+# ACTIVE. That is the right unit for a per-model limit and the wrong one for a
+# per-project problem, and Google's limits are per project. Measured live on
+# 2026-09-24: four chat accounts carrying 388-1058 failures each, every one of
+# them still ACTIVE with no cooldown, not a single ``account_failover`` event in
+# the table, and every message re-walking all four and re-paying for the same
+# failures. These tests pin the breaker that ends that.
+def test_repeated_failures_bench_the_account(provider, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "from B")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    assert call(pool) == "from B"
+
+    first = pool.accounts[0]
+    assert first.state == "UNAVAILABLE"
+    assert first.cooldown_until > int(time.time())
+    assert first.usable(time.time()) is False
+    # The walk stopped on the third failure, so the third model was the last one
+    # asked — not the whole list, and not a second round through it.
+    assert provider.models_used(KEY_A) == TEXT_MODELS
+
+
+def test_a_benched_account_is_skipped_by_the_next_request(provider, monkeypatch):
+    """The point of the breaker: the next message must not re-pay the walk."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    call(pool)
+    before = provider.total_calls
+    assert call(pool) == "b"
+
+    assert provider.total_calls == before + 1, "the benched account was re-walked"
+    assert provider.models_used(KEY_A) == TEXT_MODELS
+
+
+def test_a_free_tier_rate_limit_counts_toward_the_breaker(provider, monkeypatch):
+    """The live chat failure of 2026-09-24, and what the breaker was built for."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, rate_limited(model))
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    assert call(pool) == "b"
+    assert pool.accounts[0].state == "UNAVAILABLE"
+    # A per-model failure still benches the model on the way past. The account
+    # breaker is the addition, not a replacement.
+    assert pool.accounts[0].model_states[TEXT_MODELS[0]].state == "RATE_LIMITED"
+
+
+def test_repeated_timeouts_bench_the_account(provider, monkeypatch):
+    """A timeout is the most expensive failure, so a run of them must bench."""
+    class TimingOut:
+        async def generate_content(self, *, model, contents, config):  # noqa: A002
+            raise asyncio.TimeoutError
+
+    class TimingOutClient:
+        def __init__(self):
+            self.aio = type("Aio", (), {"models": TimingOut()})()
+
+    real = provider.client
+    monkeypatch.setattr(
+        gemini_pool,
+        "_client_for",
+        lambda key, timeout=None: (
+            TimingOutClient() if key == KEY_A else real(key, timeout)
+        ),
+    )
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3)
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    assert call(pool) == "b"
+    assert pool.accounts[0].state == "UNAVAILABLE"
+
+
+def test_a_success_clears_the_streak(provider, monkeypatch):
+    """An answer is proof the credential works, so the streak ends there."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3)
+    provider.then(KEY_A, TEXT_MODELS[0], overloaded())
+    provider.then(KEY_A, TEXT_MODELS[1], overloaded())
+    provider.always(KEY_A, TEXT_MODELS[2], "fine")
+    pool = make_pool()
+
+    assert call(pool) == "fine"
+    assert pool.accounts[0].consecutive_failures == 0
+    assert pool.accounts[0].state == "ACTIVE"
+
+
+def test_an_account_below_the_threshold_stays_in_rotation(provider, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3)
+    two = TEXT_MODELS[:2]
+    for model in two:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)), models=two)
+
+    assert call(pool) == "b"
+    first = pool.accounts[0]
+    assert first.consecutive_failures == 2
+    assert first.state == "ACTIVE"
+    assert first.usable(time.time()) is True
+
+
+def test_a_payload_fault_never_benches_the_account(provider, monkeypatch):
+    """A bad request fails on every account, so counting it would silence them all."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 1)
+    provider.then(KEY_A, TEXT_MODELS[0], bad_request())
+    pool = make_pool()
+
+    with pytest.raises(gemini_pool.PoolUnavailable):
+        call(pool)
+
+    assert pool.accounts[0].state == "ACTIVE"
+    assert pool.accounts[0].consecutive_failures == 0
+
+
+def test_benching_is_recorded_as_an_account_event(provider, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 2)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+    pool = make_pool(keys=(("1", KEY_A), ("2", KEY_B)))
+
+    call(pool)
+
+    recorded = events("account_failover")
+    assert [e["kind"] for e in recorded] == ["account_failover"]
+    assert recorded[0]["reason"] == "repeated_failures"
+    assert recorded[0]["slot"] == "1"
+
+
+def test_the_breaker_is_per_workload(provider, monkeypatch):
+    """One workload's benched credential must not bench another's."""
+    monkeypatch.setattr(config, "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 2)
+    for model in TEXT_MODELS:
+        provider.then(KEY_A, model, overloaded())
+    provider.answers(KEY_B, "b")
+    intent = make_pool(workload="intent", keys=(("1", KEY_A), ("2", KEY_B)))
+    chat = make_pool(workload="chat", keys=(("1", KEY_A),))
+
+    assert call(intent) == "b"
+    assert intent.accounts[0].state == "UNAVAILABLE"
+    # The same credential, in its own pool: its own account, its own streak.
+    assert chat.accounts[0].state == "ACTIVE"
+    assert chat.accounts[0].consecutive_failures == 0
+
+
 # ══ THE WALL-CLOCK BUDGET ═════════════════════════════════════════════════
 # The attempt count alone stops bounding latency the moment the per-attempt
 # deadline grows: twelve attempts at ten seconds is two minutes, and at
