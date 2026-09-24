@@ -741,6 +741,20 @@ def test_the_remembered_person_reaches_the_model():
     assert "user_memory" not in eval_intent._CONTEXT_DB_BACKED
 
 
+def test_the_active_task_reaches_the_model():
+    """Increment X's block, asserted by name, and distinct from memory.
+
+    The conversation's current task is a *different* layer from the person's
+    durable memory, so it is a different block and it must reach the prompt on
+    its own — not merely exist in a table beside the memory. The harness seeds
+    one active task per anchor through the real write path, so this is a real
+    render through the source registry rather than an exclusion from it.
+    """
+    m = result()
+    assert m["context_sources"]["conversation_state"] >= 1
+    assert "conversation_state" not in eval_intent._CONTEXT_DB_BACKED
+
+
 def test_the_context_stays_within_its_ceiling():
     m = result()
     assert m["context_chars_max"] <= m["context_ceiling"]

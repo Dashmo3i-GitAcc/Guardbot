@@ -50,6 +50,7 @@ def fresh_nexus_state():
         main,
         memory,
         nexus,
+        state,
         vpn_service,
         web_search,
     )
@@ -93,6 +94,10 @@ def fresh_nexus_state():
     # would make the next test's first write prune (or not) for a reason that is
     # not in that test.
     memory.reset_state()
+    # The state retention counter, for the same reason: it decides *when* the
+    # next whole-table prune runs, so a value left behind would make the next
+    # test's first transition prune (or not) for a reason that is not in it.
+    state.reset_state()
     yield
     nexus.reset_state()
     awareness.reset_timers()
@@ -103,4 +108,5 @@ def fresh_nexus_state():
     web_search.reset_state()
     vpn_service.prune_reset()
     memory.reset_state()
+    state.reset_state()
 

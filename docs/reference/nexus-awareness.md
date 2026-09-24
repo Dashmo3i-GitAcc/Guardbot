@@ -4335,11 +4335,152 @@ From `python3 tools/eval_memory.py`, deterministic and offline:
   rendered and what it costs — and they are **not** evidence that answers got
   better. The probe methodology is recorded in AgentMD §54.7 and the claim is
   left unmade.
-* **State is not built.** Continuity across turns is still the conversation
-  window's job; memory must not be asked to do state's work. That is increment X.
+* **State was not built yet at W.** Continuity across turns was still the
+  conversation window's job, and memory must not be asked to do state's work.
+  That was increment **X**, which is now built — see §65.
 * **Relevance is lexical.** An interest stored in one script may not match a topic
   written in another unless the hint table covers it.
 * **The global prune is a whole-table statement** (266 ms measured at 90 k rows)
   that runs every `PRUNE_EVERY` recordings once the table is over
   `NEXUS_MEMORY_MAX`. It is off the answer path, but it is the number to revisit
   first at scale.
+
+## 65. What the conversation is trying to do
+
+Increment **X**, the third of the four context sources. W made Nexus remember a
+fact about a person; X makes it remember *what the two of them are doing right
+now*. The two are not the same thing and the whole section is about keeping them
+apart.
+
+### 65.1 The boundary, in one example
+
+A person's preference for Python is **Memory**. "Currently debugging the Python
+authentication bug" is **State**. The first is durable, about the person, and
+relevant to almost any question they ask; the second is true *now*, about the
+interaction, and ends when the bug is fixed. Memory answers *what durable thing
+do I know about this person*; State answers *what is this interaction trying to
+accomplish*.
+
+That is why State is not a second `user_memory`. It is one active row per
+`(chat_id, user_id)` — a topic, a goal, an unresolved question and a status —
+and it is not a set. "The active topic" has exactly one answer.
+
+### 65.2 It is one row, and that is the bound
+
+The store is `conversation_state`, keyed by `(chat_id, user_id)`. There is no
+"how many tasks" number to configure because the answer is one, and a new task
+**replaces** the old one rather than joining it. A person who says "let's fix
+authentication" and then "now payments" has one active task, not two — which is
+the brief's own example, and the reason the state is unambiguous by
+construction.
+
+The row holds a topic, a goal, an unresolved question, a status from a closed
+vocabulary, the last transition's name, and two integers that make the
+background write safe. There is **no column a message body could fit in**. A
+state is a summary, never a transcript.
+
+### 65.3 The lifecycle is explicit, and completion clears
+
+Six transitions, read deterministically from the message:
+
+* **activate** — a task begins and none is active.
+* **update** — the same task is restated or gains a detail.
+* **replace** — a new task supersedes the old one (one row, not two).
+* **continue** — «خب الان قدم بعدی چیه؟» carries the task on.
+* **complete** — «حل شد» ends it.
+* **reset** — «بحث رو عوض کنیم» abandons it.
+
+A completion or a reset **clears** the row rather than leaving a finished task
+looking active, because "what is this conversation trying to accomplish" has no
+answer once the answer is "nothing". The scripted lifecycle in
+`tools/eval_state.py` ends with **0 rows** — after a task, a continuation, an
+open question, a replacement and a completion, there is no active state, not
+five.
+
+An ordinary message — a greeting, an acknowledgement, a reaction, a claim of
+authority, a request for an action — matches nothing and changes nothing. That
+is the same "a statement, not a guess" rule the memory reader follows, and it is
+what keeps the state path free.
+
+### 65.4 Relevance is freshness and supersession, not word overlap
+
+This is the one place State departs from Memory's retrieval, and the departure is
+the point. Memory is relevance-first by **lexical overlap**: a favourite game
+does not appear in an answer about a programming project. State cannot be, because
+continuation is **pronominal** — «خب الان قدم بعدی چیه؟» and «این قسمت رو چطور
+درست کنیم؟» share no content word with the topic — and a word-overlap filter
+would drop exactly the continuations State exists to serve.
+
+So the gate is two things instead:
+
+* **freshness** — a task older than `NEXUS_STATE_TTL` (72 h) is not "current";
+* **supersession** — a message that starts a new task, completes the current one
+  or resets the subject **withholds** the old state rather than showing it beside
+  the fresh input. Fresh explicit input wins, in the render path as well as the
+  write path.
+
+### 65.5 A stale worker cannot overwrite a newer state
+
+The write is a **compare-and-swap on a version**. The caller reads the row,
+computes the new state and writes naming the version it read; if another writer
+moved the row first, the write is **refused** and the caller drops its update.
+The newer state is the truth, so the older worker's read is discarded rather than
+retried into it. The message id makes a **duplicate delivery a no-op** rather
+than a second transition. Both are counted in the benchmark: the stale write is
+refused, the duplicate leaves the version unchanged, and one row remains.
+
+### 65.6 No model seam, and that is the design
+
+W has an off-by-default `memory` Gemini workload because semantic
+fact-extraction needed one. X deliberately has **no seam and no `state`
+workload**. The roadmap scoped X at "Gemini: 0 expected" and the request
+allowance is rationed, so the deterministic signals are the whole path. The
+consequence is the isolation the brief asks for, by construction rather than by
+a budget: State cannot spend, delay or exhaust the request an answer is waiting
+on, because it never makes one. `tools/eval_state.py` asserts the model-call
+count is **0**.
+
+### 65.7 It is off the answer path, and independent of awareness
+
+`main._schedule_state_observation` schedules `state.observe` as a background
+task, through the same `_schedule_background` helper the memory observation now
+uses — one place a background observation is scheduled, so the two cannot drift.
+Nothing about state is awaited by a handler; the worst case is that a state is
+not learned.
+
+The block reaches an addressed answer through the room reading when that exists
+(the `conversation_state` source is one of its blocks) and through
+`main._state_context` when awareness is off, the message is not in the window, or
+the reading cannot be built — and it is never duplicated. Turning awareness off
+does not take the state with it.
+
+### 65.8 Measured
+
+`python3 tools/eval_state.py`, deterministic and offline:
+
+* transition reader precision **1.0** / recall **1.0** (13 pos / 14 neg), **0**
+  false positives;
+* storage: one row per person, **267.6 bytes/row**, **0.77 MB at 3000 members**
+  (budget 200 MB); write **0.132 ms p50 / 0.374 ms p95**;
+* lifecycle: all five transitions, **0 rows at the end**, no ground-truth
+  mismatch;
+* concurrency: stale write **refused**, duplicate a **no-op**;
+* sync cost: read+render **0.059 ms p50 / 0.115 ms p95** vs **0.0016 ms** off;
+* retrieval **0.038 ms p50**; block mean/max **170 / 171** chars (budget 300);
+* model calls **0**; suite 3417 → **3484 passed, 0 failed**.
+
+### 65.9 What it leaves
+
+* **The live probe is not run.** It is an answer-quality measurement and it needs
+  a provider; the numbers above are the *server's* contribution, not a claim that
+  answers improved. The probe belongs to increment **Y**, whose whole purpose is
+  the controlled before/after evaluation; X supplies the State block it will
+  measure.
+* **The transition reader is a fixed set of phrasings.** A task stated in an
+  unanticipated wording changes nothing — documented, not inferred.
+* **Continuation after 72 h is a new interaction.** `NEXUS_STATE_TTL` is one
+  number; an operator who wants longer continuity changes one environment
+  variable.
+* **One task per person per room.** A person genuinely running two interleaved
+  tasks keeps only the most recent; ambiguity is preserved by *not* guessing
+  rather than by holding both.

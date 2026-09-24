@@ -562,6 +562,47 @@ def init() -> None:
         "CREATE INDEX IF NOT EXISTS idx_user_memory_signal_last "
         "ON user_memory_signal(last_at)"
     )
+    # ── Nexus State: what the current interaction is trying to accomplish ──
+    #
+    # A *different layer* from ``user_memory``, not a second table for the same
+    # thing. Memory is a bounded set of durable facts about a person; State is
+    # the single active task of the interaction — "currently debugging the
+    # authentication bug", not "programs in Python". So this is **one row per
+    # ``(chat_id, user_id)``**, and the row itself is the bound: there is no
+    # "how many tasks" number to configure, because the answer is one.
+    #
+    # The columns are a compact summary and never a transcript: a topic, a goal,
+    # an unresolved question, a status from a closed vocabulary, the last
+    # transition's name, and two integers that make the background write safe.
+    # ``version`` is the optimistic-concurrency token — a write names the version
+    # it read and is refused if the row moved on, so an older background worker
+    # can never overwrite a newer state. ``message_id`` is the idempotency guard:
+    # re-applying the same message is a no-op rather than a second transition.
+    #
+    # Keyed by BOTH ids, like ``user_memory``: a group can never read another
+    # group's state, and a private chat's state can never render in a group.
+    # Additive and new, so rollback is ``DROP TABLE conversation_state`` — no
+    # existing table is altered and no row outside it is touched.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS conversation_state (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            topic TEXT NOT NULL DEFAULT '',
+            goal TEXT NOT NULL DEFAULT '',
+            question TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            transition TEXT NOT NULL DEFAULT '',
+            message_id INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id))"""
+    )
+    # The age prune's shape: a range seek on the last update, not a scan.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversation_state_updated "
+        "ON conversation_state(updated_at)"
+    )
     # ── Nexus Awareness: the bounded view of the room ──
     #
     # Two tables, and they are a *different thing* from ``chat_messages`` rather
@@ -2578,6 +2619,227 @@ def signal_reset() -> None:
     """Forget every behavioural counter. For tests."""
     with _lock:
         _conn.execute("DELETE FROM user_memory_signal")
+        _conn.commit()
+
+
+# ── Nexus State: the one active task of an interaction ────────────────────
+def _state_row(row) -> dict | None:
+    """One ``conversation_state`` row as a dict, or ``None``."""
+    if not row:
+        return None
+    return {
+        "chat_id": int(row[0]),
+        "user_id": int(row[1]),
+        "topic": str(row[2] or ""),
+        "goal": str(row[3] or ""),
+        "question": str(row[4] or ""),
+        "status": str(row[5] or ""),
+        "transition": str(row[6] or ""),
+        "message_id": int(row[7] or 0),
+        "version": int(row[8] or 0),
+        "created_at": int(row[9] or 0),
+        "updated_at": int(row[10] or 0),
+    }
+
+
+_STATE_COLUMNS = (
+    "chat_id, user_id, topic, goal, question, status, transition, "
+    "message_id, version, created_at, updated_at"
+)
+
+
+def state_get(chat_id: int, user_id: int) -> dict | None:
+    """The active state for one person in one room, or ``None``.
+
+    Scoped by BOTH ids on purpose, exactly as ``memory_for`` is: the caller
+    cannot ask for "this user's state" across rooms, which is the query that
+    would leak a private task into a group. At most one row comes back.
+    """
+    with _lock:
+        row = _conn.execute(
+            f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchone()
+    return _state_row(row)
+
+
+def state_put(
+    chat_id: int,
+    user_id: int,
+    *,
+    topic: str = "",
+    goal: str = "",
+    question: str = "",
+    status: str = "",
+    transition: str = "",
+    message_id: int = 0,
+    expect_version: int = 0,
+    now: int = 0,
+) -> dict | None:
+    """Write the active state, under optimistic concurrency. Never raises here.
+
+    Two guards, and each answers a failure the brief names:
+
+    * **``expect_version``** is compare-and-swap. The caller reads the row,
+      computes the new state, and writes naming the version it read; if another
+      writer moved the row first, this returns ``None`` and the caller drops its
+      update. That is what stops an older background worker from overwriting a
+      newer state — the newer state is the one that survives.
+    * **``message_id``** is idempotency. Re-applying the same message (a retry,
+      a duplicate delivery) is a no-op that returns the row unchanged rather
+      than a second transition, so a duplicate event cannot duplicate state.
+
+    Returns the stored row, or ``None`` when the write was refused. The whole
+    read-modify-write runs under the connection lock, so the check and the write
+    cannot interleave.
+    """
+    stamp = int(now or time.time())
+    with _lock:
+        row = _conn.execute(
+            "SELECT version, message_id FROM conversation_state "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchone()
+        if row is None:
+            if int(expect_version or 0):
+                # The caller expected a row that is gone (cleared by a newer
+                # event); its update is stale, so it is refused.
+                return None
+            _conn.execute(
+                f"INSERT INTO conversation_state ({_STATE_COLUMNS}) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    int(chat_id),
+                    int(user_id),
+                    str(topic or ""),
+                    str(goal or ""),
+                    str(question or ""),
+                    str(status or ""),
+                    str(transition or ""),
+                    int(message_id or 0),
+                    1,
+                    stamp,
+                    stamp,
+                ),
+            )
+            _conn.commit()
+            stored = _conn.execute(
+                f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+                "WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            ).fetchone()
+            return _state_row(stored)
+        current_version = int(row[0] or 0)
+        if int(message_id or 0) and int(message_id or 0) == int(row[1] or 0):
+            # The same message has already been applied. Idempotent no-op.
+            _conn.commit()
+            stored = _conn.execute(
+                f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+                "WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            ).fetchone()
+            return _state_row(stored)
+        if current_version != int(expect_version or 0):
+            # Lost the race to a newer write. Drop this one; do not retry into
+            # the newer state, because the newer state is the truth.
+            return None
+        _conn.execute(
+            "UPDATE conversation_state SET topic=?, goal=?, question=?, "
+            "status=?, transition=?, message_id=?, version=version+1, "
+            "updated_at=? WHERE chat_id=? AND user_id=?",
+            (
+                str(topic or ""),
+                str(goal or ""),
+                str(question or ""),
+                str(status or ""),
+                str(transition or ""),
+                int(message_id or 0),
+                stamp,
+                int(chat_id),
+                int(user_id),
+            ),
+        )
+        _conn.commit()
+        stored = _conn.execute(
+            f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchone()
+    return _state_row(stored)
+
+
+def state_clear(
+    chat_id: int, user_id: int, *, expect_version: int = 0
+) -> bool:
+    """Drop the active state. Returns whether a row was removed.
+
+    The completion and reset paths: a task that is done, or an explicit change
+    of subject, leaves no active state rather than a stale one. ``expect_version``
+    is honoured when given, so a clear computed from a stale read cannot delete a
+    state a newer event just wrote.
+    """
+    with _lock:
+        if int(expect_version or 0):
+            cur = _conn.execute(
+                "DELETE FROM conversation_state "
+                "WHERE chat_id=? AND user_id=? AND version=?",
+                (int(chat_id), int(user_id), int(expect_version)),
+            )
+        else:
+            cur = _conn.execute(
+                "DELETE FROM conversation_state WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            )
+        _conn.commit()
+        return cur.rowcount > 0
+
+
+def state_prune(*, keep: int = 0, max_age: int = 0) -> int:
+    """The global backstop and the age bound. Returns rows dropped.
+
+    The age bound is the one that matters — a task idle past its TTL is over —
+    and it is indexed. The global bound is the same whole-table backstop
+    ``memory_prune`` uses, attempted only when the table is over its ceiling.
+    """
+    dropped = 0
+    if max_age and max_age > 0:
+        cutoff = int(time.time()) - int(max_age)
+        with _lock:
+            cur = _conn.execute(
+                "DELETE FROM conversation_state WHERE updated_at < ?", (cutoff,)
+            )
+            _conn.commit()
+            dropped += cur.rowcount
+    if keep and keep > 0:
+        with _lock:
+            total = int(
+                _conn.execute("SELECT COUNT(*) FROM conversation_state").fetchone()[0]
+            )
+        if total > int(keep):
+            with _lock:
+                cur = _conn.execute(
+                    "DELETE FROM conversation_state WHERE (chat_id, user_id) NOT IN "
+                    "(SELECT chat_id, user_id FROM conversation_state "
+                    " ORDER BY updated_at DESC LIMIT ?)",
+                    (int(keep),),
+                )
+                _conn.commit()
+                dropped += cur.rowcount
+    return dropped
+
+
+def state_count() -> int:
+    with _lock:
+        return int(
+            _conn.execute("SELECT COUNT(*) FROM conversation_state").fetchone()[0]
+        )
+
+
+def state_reset() -> None:
+    """Forget every active state. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM conversation_state")
         _conn.commit()
 
 

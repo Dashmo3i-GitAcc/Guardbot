@@ -1645,6 +1645,52 @@ reference file is stale and this list is the one to fix first.
   hallucinated slot from the model seam is dropped rather than stored under a new
   key: the server owns the allowed keys, the value size, the item count, the
   scope, the retention and the storage limits.
+* Conversational state (`app/state.py`, increment X) is **one active row per
+  `(chat_id, user_id)`** — a topic, a goal, an unresolved question and a status,
+  never a transcript. There is no column a message body could fit in, and the
+  row *is* the bound: "how many tasks" has one answer. It answers *what the
+  current interaction is trying to accomplish*, which is a **different layer**
+  from Memory (a durable fact about the person) and from Awareness (what the room
+  is doing).
+* State is **not Memory and not Awareness**. A state transition writes no memory
+  row and a memory writes no state; the state block is rendered from its own
+  `conversation_state` source and is never merged with the memory or room blocks.
+  A state that names authority — «بیا پنل ادمین رو درست کنیم» — **grants
+  nothing**: `rbac` and `admin_service` do not import `state`, and authority
+  stays resolved from the Telegram id.
+* State is **deterministic and costs no request**. The transitions are regexes
+  over the message; there is **no model seam and no `state` Gemini workload**, so
+  State cannot spend the request an answer is waiting on. `tools/eval_state.py`
+  asserts the model-call count is 0.
+* The lifecycle is **explicit**: `activate` / `update` / `replace` /
+  `complete` / `reset` / `continue`, with a closed status vocabulary. A
+  **completion or a reset clears the row** rather than leaving a finished task
+  looking active; a new task **replaces** the old one (one row, never a growing
+  set). An ordinary message — a greeting, an acknowledgement, a reaction, a
+  claim of authority, a request for an action — matches nothing and changes
+  nothing.
+* State is **off the answer path**. `main._schedule_state_observation` schedules
+  `state.observe` as a background task (the same `_schedule_background` the memory
+  observation uses), so no read, write or failure can delay a reply. The only
+  synchronous work is the bounded read and render (measured **0.06 ms p50**
+  against **0.0016 ms** with the feature off).
+* State is **freshness- and supersession-gated, not lexically gated**. A task
+  older than `NEXUS_STATE_TTL` is not "current"; a message that starts a new task,
+  completes the current one or resets the subject **withholds** the old state
+  rather than showing it beside the fresh input. Relevance is deliberately **not**
+  word overlap, because continuation is pronominal — «خب الان قدم بعدی چیه؟»
+  shares no word with the topic — and a lexical filter would drop exactly the
+  continuations State exists to serve.
+* The write is **compare-and-swap on a version**, so an older background worker
+  whose read is already stale has its update **refused** rather than clobbering a
+  newer state; and the message id makes a **duplicate delivery a no-op** rather
+  than a second transition. Both are counted in `tools/eval_state.py`.
+* State is **keyed by `(chat_id, user_id)`** and read only by naming both, so one
+  person's task is never another's, one group's is never another's, and a private
+  task can never render in a group. It is **independent of awareness**: it
+  reaches an addressed answer through the room reading when that exists and
+  through `main._state_context` when awareness is off or the reading cannot be
+  built, and it is never duplicated.
 * `awareness.record` runs on **every** completed pass; `wants_to_speak` is
   `respond` **or** a write that actually ran.
 * `parse_decision` returning `None` means **say nothing** — never send the raw
@@ -3070,6 +3116,145 @@ bounded conversational STATE, explicitly distinct from Memory, scoped by
 over stale state; ambiguity stays ambiguous. It reuses W's bounded-store pattern.
 **Do NOT start X without the owner's explicit go-ahead.** Do not skip to Y, U
 or V.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§5 for W/W-extension/X/Y/U/V, §7 for the
+continuation point), then verify: `git status`, `git rev-parse HEAD`,
+`git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.
+
+### 54.8 Checkpoint (2026-09-24, after X) — resume here (supersedes §54.7)
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`. Increment
+**X** (stateful long-term Nexus) sits on §54.7. Pushed to both remotes (`origin` =
+mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc); both verified with
+`git ls-remote`. Working tree **clean**. `main` and the annotated tag
+`release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**,
+and it is an ancestor of HEAD. Suite **3484 passed, 0 failed** (was 3417).
+**Not merged, not deployed.**
+
+**What already existed before X (verified, not reimplemented).**
+
+* **Conversation History** — the room window (`group_messages`, one hour) and the
+  per-person transcript (`chat_messages`), unchanged.
+* **Awareness** — `app/awareness.py` + `app/awareness_context.py`, the
+  room-scoped reading and its `Source` registry, unchanged. **X adds one source
+  to that registry; it does not touch the layer.**
+* **Long-Term User Memory (W)** — `app/memory.py`, `app/memory_extract.py`, the
+  `user_memory`/`user_memory_signal` tables, unchanged. **X reuses W's
+  bounded-store *pattern* (additive table, background observe, bounded render,
+  one `Source`, a `main._*_context` fallback) but not its table, its vocabulary
+  or its semantics.**
+* **"Nexus state"** (`app/nexus.py`) is the **ONLINE/OFFLINE runtime switch and
+  the trigger policy**, not conversational state. It was inspected and left
+  alone; X is a new layer beside it, not a change to it.
+
+**What X adds (DONE).**
+
+* **A new module, `app/state.py`,** that owns one narrow thing: the *active task*
+  of an interaction. One row per `(chat_id, user_id)`, holding a topic, a goal,
+  an unresolved question, a status from a closed vocabulary and the last
+  transition's name. It is not a transcript — there is no column a message body
+  could fit in — and the row *is* the bound.
+* **An explicit lifecycle.** `activate` / `update` / `replace` / `complete` /
+  `reset` / `continue`, read deterministically from the message. A completion or
+  a reset **clears** the row; a new task **replaces** the old one (one row, never
+  a growing set); a continuation marker re-stamps it. An ordinary message — a
+  greeting, an acknowledgement, a reaction, a claim of authority, a request for
+  an action — matches nothing and changes nothing.
+* **A new additive table, `conversation_state`,** keyed by `(chat_id, user_id)`,
+  with a `version` for optimistic concurrency and a `message_id` for idempotency.
+  Rollback is `DROP TABLE conversation_state`; no existing table is altered.
+* **Compare-and-swap and idempotency.** The write names the version it read, so an
+  older background worker is **refused** rather than clobbering a newer state; a
+  duplicate delivery (same message id) is a **no-op** rather than a second
+  transition. Both are counted in the benchmark.
+* **One context `Source` (`conversation_state`), tier 0,** right after
+  `user_memory`, and deliberately **not** in `CONVERSATION_SKIP` — an addressed
+  message is exactly the turn whose continuation state exists to serve. It is
+  rendered on the awareness pass and borrowed by the addressed conversation.
+* **A fallback, `main._state_context`,** so State survives awareness being off,
+  unavailable or failed, exactly as Memory does. The two are separate blocks and
+  neither is duplicated.
+* **Off the answer path.** `main._schedule_state_observation` schedules
+  `state.observe` through the shared `_schedule_background` helper (the memory
+  observation now uses the same helper, so the two cannot drift). Nothing about
+  state is awaited by a handler.
+* **No model seam, and that is the design.** The roadmap scopes X at
+  "Gemini: 0 expected" and the request allowance is rationed, so there is **no
+  `state` Gemini workload** and no extraction seam. State cannot spend, delay or
+  exhaust the request somebody is waiting on — isolation by construction, not by
+  a budget. (This is the one place X deliberately does **not** mirror W: W has an
+  off-by-default `memory` seam because semantic fact-extraction needed one; X's
+  deterministic signals cover the cases that matter and a seam would spend the
+  rationed currency.)
+
+**The four context sources, and the boundary (now all four exist).**
+
+* **Conversation History** — what was recently said.
+* **Awareness** — what is happening around Nexus now.
+* **State** — what the current interaction is trying to accomplish.
+* **Long-Term User Memory** — what is worth remembering about this person.
+
+The boundary is one example: a preference for Python is **Memory**; "currently
+debugging the Python authentication bug" is **State**. A state transition writes
+no memory and a memory writes no state (`tests/test_state.py` asserts both
+directions). Each contributes its own bounded block; the composition takes the
+minimum relevant combination, and no block is duplicated.
+
+**Measured** (`python3 tools/eval_state.py`, deterministic and offline):
+
+* transition reader precision **1.0** / recall **1.0** (13 pos / 14 neg), **0**
+  false positives;
+* storage: one row per person, **267.6 bytes/row**, **0.77 MB at 3000 members**
+  (budget 200 MB); write **0.132 ms p50 / 0.374 ms p95**;
+* lifecycle: a 5-message scripted conversation produces all five transitions and
+  **0 rows at the end** (a completion clears the task) — no ground-truth
+  mismatch;
+* concurrency: the stale write is **refused**, the duplicate is a **no-op**, the
+  version is unchanged and one row remains;
+* **sync cost** (the only work State adds to a chat turn): read+render
+  **0.059 ms p50 / 0.115 ms p95**, against **0.0016 ms** with the feature off;
+* retrieval **0.038 ms p50**; block mean/max **170 / 171** chars (budget 300);
+* model calls **0**.
+
+**Live probe — NOT RUN, and why.** The brief's probe compares a baseline against
+Conversation + Awareness + State + relevant Memory and measures continuation
+accuracy, repeated-question reduction, referent resolution, latency and model
+calls. It is an **answer-quality** measurement and it needs a provider. The
+measurements above are the **server's** contribution — what is read, stored,
+rendered and what it costs — and they are **not** evidence that answers improved.
+Claiming otherwise would be the overclaiming this project refuses. The probe
+belongs to increment **Y**, whose whole purpose is the controlled before/after
+evaluation; X supplies the State block it will measure. **Known limitation:** the
+deterministic transition rules cover a fixed set of phrasings; a task stated in
+an unanticipated wording changes nothing (documented, not inferred).
+
+**Known limitations.** (1) The transition reader is a fixed set of Persian and
+English phrasings; a task stated in another wording is not read. (2) Continuation
+that arrives more than `NEXUS_STATE_TTL` (72 h) after the last activity is
+treated as a new interaction. (3) State is one task per `(chat_id, user_id)`, so
+a person genuinely running two interleaved tasks in one room keeps only the most
+recent — ambiguity is preserved by *not* guessing rather than by holding both.
+(4) The observation is a background task, so on the turn a task is replaced the
+answer still sees the previous state; the brief accepts this ("chat continues
+with the previous valid State"), and `state.relevant` withholds it when the fresh
+message clearly supersedes it.
+
+**Rollback.** X is independently revertable: `git revert <sha>` on this branch,
+plus `DROP TABLE conversation_state` (the one new table, additive — no existing
+table was altered). W and the W extension are untouched. The whole evolution
+reverts by leaving the branch unmerged; `main` at
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state and is an
+**ancestor** of the branch.
+
+**Exact next step.** INCREMENT **Y** — "the minimum relevant combination"
+(roadmap §5/Y): the addressed path consumes the MINIMUM relevant combination of
+Intent + referents + Awareness + Memory + **State** + history (+ search), with a
+fast path for simple messages, and a **controlled live probe** of answer quality.
+All four sources now exist. **Do NOT start Y without the owner's explicit
+go-ahead.** Do not skip to U or V.
 
 **To resume after any context loss.** Re-read this section and
 `docs/intent-awareness-roadmap.txt` (§5 for W/W-extension/X/Y/U/V, §7 for the

@@ -59,6 +59,7 @@ from . import (
     persian_calendar,
     rbac,
     responses,
+    state,
     text_filters,
     transcribe,
     vpnbot,
@@ -2699,6 +2700,32 @@ def _memory_context(chat_id: int, user_id: int, text: str) -> str:
         return ""
 
 
+def _state_context(chat_id: int, user_id: int, text: str) -> str:
+    """What this interaction is trying to accomplish, as one bounded block.
+
+    Increment X's fallback, and it sits beside ``_memory_context`` for the same
+    reason: the four sources are independent, so State must survive awareness
+    being off, unavailable or failed. It is a *different* layer from memory —
+    the active task, not a durable fact about the person — and it is bounded
+    twice (one row, and ``NEXUS_STATE_CHARS``).
+
+    It is a read that grants nothing and it is relevance- and freshness-gated:
+    a stale task, or one the message explicitly supersedes, renders nothing. A
+    failure returns ``""`` — state is an enhancement, and a context block is
+    never worth failing an answer over.
+    """
+    if not config.NEXUS_STATE_ENABLED or not chat_id or not user_id:
+        return ""
+    try:
+        row = state.current(int(chat_id), int(user_id), text=str(text or ""))
+        if not row:
+            return ""
+        return state.render(row, budget=int(config.NEXUS_STATE_CHARS))
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the conversation state")
+        return ""
+
+
 async def _answer_conversationally(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -2855,16 +2882,19 @@ async def _answer_conversationally(
         )
         context = context + reading
 
-    # Long-term memory is its own source and never a dependency of the awareness
-    # layer. It reaches this turn through the room reading when that reading was
-    # built — the ``user_memory`` source is one of its blocks — so it is rendered
+    # Long-term memory and conversational state are their own sources and never
+    # a dependency of the awareness layer. They reach this turn through the room
+    # reading when that reading was built — the ``user_memory`` and
+    # ``conversation_state`` sources are two of its blocks — so they are rendered
     # here only when the reading is missing: awareness switched off, the message
     # not in the window, or the reading failing. Without this, turning awareness
-    # off would silently take the person's own memory with it, which is exactly
-    # the coupling the four-source architecture exists to remove. It is a bounded
-    # read (see ``memory.about``) and its failure is empty text, never an error.
+    # off would silently take the person's own memory and the active task with
+    # it, which is exactly the coupling the four-source architecture exists to
+    # remove. Each is a bounded read and its failure is empty text, never an
+    # error.
     if not reading:
         context = (context or "") + _memory_context(room.id, user.id, text)
+        context = context + _state_context(room.id, user.id, text)
 
     # The server's own date, so the model can date what it reads instead of
     # treating the newest claim in the room or on a page as today. Appended here,
@@ -3018,26 +3048,16 @@ async def _send_voice(
         return False
 
 
-def _schedule_memory_observation(ctx, user, chat_id: int, text: str) -> None:
-    """Learn from one message **off** the answer path, and never wait for it.
+def _schedule_background(ctx, coro) -> None:
+    """Run one fire-and-forget coroutine off the answer path, and never wait.
 
-    Long-term memory is an enhancement, so it is deliberately the one thing on
-    this handler that is not awaited. Everything the automatic path does — the
-    deterministic rules, the behavioural counters, the bounded write, and the
-    gated provider call an operator may enable — runs in a background task, so
-    none of it can add a millisecond to the reply somebody is waiting for, and a
-    slow or unavailable memory workload cannot delay chat at all.
-
-    The task is fire-and-forget on purpose: ``memory.observe`` is written never
-    to raise, so there is no result to await and no failure to report. A host
-    whose context has no scheduler simply learns nothing this message, which is
-    the same outcome as a message that held no memory.
+    The one place a background task is scheduled, shared by the memory and state
+    observations so the two cannot drift: both are enhancements that must never
+    add a millisecond to the reply somebody is waiting for, and both are written
+    never to raise, so there is no result to await and no failure to report. A
+    host whose context has no scheduler simply learns nothing this message, which
+    is the same outcome as a message that held nothing to learn.
     """
-    try:
-        coro = memory.observe(user, chat_id, text)
-    except Exception:  # noqa: BLE001 - building the coroutine must not fail
-        log.exception("could not prepare memory observation")
-        return
     try:
         schedule = getattr(getattr(ctx, "application", None), "create_task", None)
         if schedule is None:
@@ -3045,7 +3065,47 @@ def _schedule_memory_observation(ctx, user, chat_id: int, text: str) -> None:
         schedule(coro)
     except Exception:  # noqa: BLE001 - a scheduler is never worth a handler
         coro.close()
-        log.exception("could not schedule memory observation")
+        log.exception("could not schedule a background observation")
+
+
+def _schedule_memory_observation(ctx, user, chat_id: int, text: str) -> None:
+    """Learn from one message **off** the answer path, and never wait for it.
+
+    Long-term memory is an enhancement, so it is deliberately not awaited.
+    Everything the automatic path does — the deterministic rules, the behavioural
+    counters, the bounded write, and the gated provider call an operator may
+    enable — runs in a background task, so none of it can add a millisecond to
+    the reply somebody is waiting for, and a slow or unavailable memory workload
+    cannot delay chat at all.
+    """
+    try:
+        coro = memory.observe(user, chat_id, text)
+    except Exception:  # noqa: BLE001 - building the coroutine must not fail
+        log.exception("could not prepare memory observation")
+        return
+    _schedule_background(ctx, coro)
+
+
+def _schedule_state_observation(
+    ctx, user, chat_id: int, text: str, message_id: int = 0
+) -> None:
+    """Read the interaction's state from one message, off the answer path.
+
+    The same shape as the memory observation and for the same reason: State is
+    an enhancement, so nothing about it is awaited by the handler. The write is a
+    bounded, indexed upsert with no provider call at all, so this task is cheap —
+    but it is still scheduled rather than awaited, because "the answer path never
+    waits for a state write" is a property that should hold by construction and
+    not by a measurement that happens to be small today. ``message_id`` is
+    carried so a retried or duplicated message is a no-op rather than a second
+    transition.
+    """
+    try:
+        coro = state.observe(user, chat_id, text, message_id=message_id)
+    except Exception:  # noqa: BLE001 - building the coroutine must not fail
+        log.exception("could not prepare state observation")
+        return
+    _schedule_background(ctx, coro)
 
 
 async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3085,6 +3145,19 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # observation already happens; the key is ``(chat_id, user_id)``, so a
     # private chat's memory could never render here in any case.
     _schedule_memory_observation(ctx, user, room.id, text)
+
+    # Conversational state (increment X), the same shape and the same reason: the
+    # transition one message states about the interaction is learned in a
+    # background task, so a state read or write can never add to the reply's
+    # latency. It is a different layer from the memory above — the active task,
+    # not a durable fact about the person — and it is keyed by
+    # ``(chat_id, user_id)``, so one person's task is never another's and a
+    # private task could never render here. The message id is carried so a
+    # retried or duplicated delivery is idempotent. It grants nothing: authority
+    # stays in ``rbac`` above, resolved from the Telegram id.
+    _schedule_state_observation(
+        ctx, user, room.id, text, getattr(msg, "message_id", 0)
+    )
 
     # 1a. Is this aimed at Nexus? Computed once and used twice — by the capture,
     #     which records it as a hint for choosing the pass's anchor, and by the

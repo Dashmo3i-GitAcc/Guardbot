@@ -1118,6 +1118,44 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
   Depends:   W (memory and state are distinct and must not be conflated; W
              establishes the bounded-store pattern X reuses).
 
+  X — RESULT (DONE — see AgentMD §54.8)
+  ------------------------------------------------------------------------------
+  Built:     app/state.py (new) — one active row per (chat_id, user_id): a topic,
+             a goal, an unresolved question, a closed-vocabulary status and the
+             last transition's name. Never a transcript; the row is the bound.
+             An explicit lifecycle read deterministically from the message —
+             activate / update / replace / complete / reset / continue. A
+             completion or a reset CLEARS the row; a new task REPLACES the old
+             one (one row, never a growing set); an ordinary message, a claim of
+             authority and a request for an action each change nothing.
+             A new additive table conversation_state keyed by (chat_id, user_id)
+             with a version for compare-and-swap and a message_id for idempotency
+             (rollback: DROP TABLE). One tier-0 context Source
+             (conversation_state), not in CONVERSATION_SKIP, rendered on the pass
+             and borrowed by the addressed conversation; main._state_context as
+             the awareness-independent fallback; main._schedule_state_observation
+             schedules state.observe through the shared _schedule_background
+             helper (the memory observation now uses it too).
+  Gemini:    0 — NO model seam and NO `state` workload. The roadmap scoped X at
+             "Gemini: 0 expected" and the request allowance is rationed, so the
+             deterministic signals are the whole path. State cannot spend, delay
+             or exhaust the request an answer is waiting on. (This is where X
+             deliberately does NOT mirror W: W's off-by-default `memory` seam
+             exists because semantic fact-extraction needed one.)
+  Measured:  transition reader precision 1.0 / recall 1.0 (13 pos / 14 neg), 0
+             FP; one row per person, 267.6 bytes/row, 0.77 MB at 3000 members
+             (budget 200 MB); write 0.132 ms p50 / 0.374 ms p95; the scripted
+             5-message conversation produces all five transitions and 0 rows at
+             the end; stale write REFUSED and duplicate a NO-OP; sync read+render
+             0.059 ms p50 / 0.115 ms p95 vs 0.0016 ms off; block mean/max 170/171
+             chars (budget 300); model calls 0.
+  Probe:     NOT RUN — the answer-quality probe needs a provider and belongs to
+             Y, whose purpose is the controlled before/after evaluation. The
+             numbers above are the server's contribution, not a quality claim.
+  Not done:  no model seam (deliberate); a task in an unanticipated wording is
+             not read; continuation after NEXUS_STATE_TTL (72 h) is a new
+             interaction.
+
   INCREMENT Y — "the minimum relevant combination"
   ------------------------------------------------------------------------------
   Purpose:   CHAT QUALITY / CONTEXT INTELLIGENCE. Only after W and X. Make the
@@ -1240,12 +1278,12 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     see AgentMD.md §54.7 (the W-extension checkpoint). The previous
-          checkpoint was §54.6 at 70dd7e0; the W-extension commit sits on top of
+HEAD:     see AgentMD.md §54.8 (the after-X checkpoint). The previous checkpoint
+          was §54.7 at the W-extension docs commit; the X commits sit on top of
           it. Docs commits sit on top — a commit that names its own count would
           be wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3417 passed, 0 failed
+Suite:    3484 passed, 0 failed
 Corpus:   141 cases, version 18
 Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           addressed path appends the reading), app/awareness_context.py (`skip` +
@@ -1257,25 +1295,32 @@ Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           schedules `memory.observe` off the answer path; `_memory_context` renders
           the block when the room reading is missing), app/memory.py (the automatic
           write path, the signals and `observe`), app/memory_extract.py (new, off
-          by default). DB changes on the branch: the foundation's 151b1e1 (two
-          additive columns), **W's new `user_memory` table** and **the
-          extension's new `user_memory_signal` table** — both additive, new-table,
-          rollback `DROP TABLE`.
-Next:     INCREMENT X — "what is happening right now" (stateful long-term Nexus,
-          roadmap §5/X): bounded conversational STATE, explicitly distinct from
-          Memory, scoped by (chat_id, user_id) or (chat_id, task), never a global
-          state. It reuses W's bounded-store pattern. The remaining order is
-          X → Y → U → V; U and V come last because U spends the rationed request
-          budget and V needs an answer-quality measurement that does not exist
-          until Y. See §5 for the full scoping and the dependency rationale.
-          W and the W extension are DONE (see §5/W RESULT and §5/W-EXTENSION
-          RESULT). Do NOT start X without the owner's explicit go-ahead. Do NOT
-          skip to Y, U or V.
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.7 (the checkpoints).
-                 docs/reference/nexus-awareness.md §52–§64 (the narrative).
+          by default). **X adds a source, a background task and a fallback**:
+          app/state.py (new), app/main.py (`_schedule_state_observation` and
+          `_state_context`, and the shared `_schedule_background` the memory
+          observation now uses), app/awareness_context.py (one more `Source`),
+          app/db.py (the `conversation_state` table and helpers), app/config.py
+          (`NEXUS_STATE_*`). DB changes on the branch: the foundation's 151b1e1
+          (two additive columns), **W's new `user_memory` table**, **the
+          extension's new `user_memory_signal` table** and **X's new
+          `conversation_state` table** — all additive, new-table, rollback
+          `DROP TABLE`.
+Next:     INCREMENT Y — "the minimum relevant combination" (roadmap §5/Y): the
+          addressed path consumes the MINIMUM relevant combination of Intent +
+          referents + Awareness + Memory + State + history (+ search), with a
+          fast path for simple messages and a **controlled live probe** of answer
+          quality. All four context sources now exist (Conversation, Awareness,
+          State, Memory). The remaining order is Y → U → V; U and V come last
+          because U spends the rationed request budget and V needs an
+          answer-quality measurement that does not exist until Y. See §5 for the
+          full scoping and the dependency rationale. W, the W extension and X are
+          DONE (see §5/W RESULT, §5/W-EXTENSION RESULT and §5/X RESULT). Do NOT
+          start Y without the owner's explicit go-ahead. Do NOT skip to U or V.
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.8 (the checkpoints).
+                 docs/reference/nexus-awareness.md §52–§65 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1–§54.7 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.8 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

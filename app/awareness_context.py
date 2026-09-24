@@ -67,6 +67,7 @@ from . import (
     referents,
     requests,
     room_state,
+    state,
     temporal,
 )
 
@@ -551,6 +552,33 @@ def _render_user_memory(ctx: Ctx) -> str:
     return memory.render(rows, budget=int(config.NEXUS_MEMORY_CHARS))
 
 
+def _render_conversation_state(ctx: Ctx) -> str:
+    """What this interaction is trying to accomplish, if anything. Tier 0.
+
+    Increment X, and a *different* layer from ``user_memory`` beside it: memory
+    is a durable fact about the person, state is the active task of the
+    interaction — "currently debugging the authentication bug", not "programs in
+    Python". Keyed on the person the batch is *about* (``ctx.anchor_id()``) and
+    on the room, never on the speaker merely because they spoke and never across
+    rooms, so a private task can never render in a group.
+
+    It is a *read* that grants nothing, and it is bounded twice — one row, and
+    ``NEXUS_STATE_CHARS`` characters. It renders nothing for the many batches
+    with no active task, which is the common case and costs one indexed read.
+    Relevance is freshness plus supersession (see ``state.current``): a stale
+    task is dropped, and a message that starts a new task or ends the current one
+    withholds the old state rather than showing it beside the fresh input.
+    """
+    user_id = ctx.anchor_id()
+    if not user_id:
+        return ""
+    text = str((ctx.anchor or {}).get("text") or "")
+    row = state.current(ctx.chat_id, user_id, text=text, now=ctx.now)
+    if not row:
+        return ""
+    return state.render(row, budget=int(config.NEXUS_STATE_CHARS))
+
+
 def _wants_referents(ctx: Ctx) -> bool:
     """Whether this batch is one where a pronoun needs resolving.
 
@@ -649,6 +677,20 @@ SOURCES: tuple[Source, ...] = (
         TIER_ALWAYS,
         config.NEXUS_MEMORY_CHARS,
         _render_user_memory,
+    ),
+    # What this *interaction* is trying to accomplish (increment X). Tier 0,
+    # right after ``user_memory`` because the two are read together and are the
+    # pair the four-source architecture exists to keep apart: memory is what the
+    # person is, state is what they are doing right now. It is a query that
+    # returns nothing for most batches, so there is no predicate that would
+    # usefully make it conditional, and it is deliberately **not** in
+    # ``CONVERSATION_SKIP`` — an addressed message is exactly the turn whose
+    # continuation the state exists to serve.
+    Source(
+        "conversation_state",
+        TIER_ALWAYS,
+        config.NEXUS_STATE_CHARS,
+        _render_conversation_state,
     ),
     # What the batch is *doing*, and what the room has left unanswered. Both are
     # tier 0 because both are cheap — a scan of the window the pass already

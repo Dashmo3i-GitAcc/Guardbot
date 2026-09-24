@@ -34,6 +34,7 @@ The gap between them is the whole claim, stated as a fraction.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -68,6 +69,7 @@ from app import (  # noqa: E402
     referents,
     requests,
     room_state,
+    state,
     temporal,
 )
 
@@ -405,6 +407,26 @@ def _world(cases: list[dict]) -> None:
             )
     except Exception:  # noqa: BLE001 - a missing schema is not a harness failure
         log.exception("could not seed the harness memories")
+    # And give every anchor an active task, so ``conversation_state`` renders
+    # too. It is a *different* layer from the memory above — the interaction's
+    # current task, not a durable fact about the person — and it is seeded
+    # through the real write path (``state.observe``) so the benchmark measures
+    # the block the runtime would actually produce, not a row written around it.
+    # The clause is fixed so the measurement is reproducible.
+    try:
+        db.state_reset()
+        for user_id in sorted(
+            {int((c.get("anchor") or {}).get("user_id") or 0) for c in cases} - {0}
+        ):
+            asyncio.run(
+                state.observe(
+                    {"id": user_id, "is_bot": False},
+                    EVAL_CHAT,
+                    "بیا مشکل احراز هویت تلگرام رو درست کنیم",
+                )
+            )
+    except Exception:  # noqa: BLE001 - a missing schema is not a harness failure
+        log.exception("could not seed the harness state")
 
 
 def _context(cases: list[dict]) -> dict:

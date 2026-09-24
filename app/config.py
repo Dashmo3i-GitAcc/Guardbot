@@ -991,6 +991,49 @@ NEXUS_MEMORY_EXTRACT_MODEL = _bool("NEXUS_MEMORY_EXTRACT_MODEL", False)
 NEXUS_MEMORY_MODEL_DAILY_LIMIT = _int("NEXUS_MEMORY_MODEL_DAILY_LIMIT", 50)
 
 
+# ---------------- Nexus State: what the interaction is trying to do -----------
+# Increment X. A *different layer* from Memory, and the distinction is the whole
+# design: Memory answers "what durable thing do I know about this person", State
+# answers "what is the current interaction trying to accomplish". A preference
+# for Python is Memory; "currently debugging the Python authentication bug" is
+# State. State is keyed by ``(chat_id, user_id)`` — one active state per person
+# per room, never a global state — so a group can never inherit another group's
+# task and a private task can never render in a group.
+#
+# It is deterministic-only and makes **no provider call**: the roadmap scopes
+# increment X at "Gemini: 0 expected", the request allowance is rationed, and
+# the deterministic signals (an explicit task statement, an explicit completion,
+# a continuation marker, a question about the active task) cover the cases that
+# matter. There is deliberately no ``state`` pool and no model seam; see
+# ``app/state.py`` for why, and for the refusal that keeps it out of the request
+# budget entirely.
+NEXUS_STATE_ENABLED = _bool("NEXUS_STATE_ENABLED", True)
+
+# The automatic write path (reading ordinary messages for a state transition).
+# Turning it off keeps the read and the block but stops the learning, the same
+# two-switch shape Memory uses.
+NEXUS_STATE_AUTO_ENABLED = _bool("NEXUS_STATE_AUTO_ENABLED", True)
+
+# One active row per person per room, so there is no per-person ceiling to size —
+# the row *is* the bound. This is the global backstop for many members, applied
+# on the observation path because this process has no scheduler.
+NEXUS_STATE_MAX = _int("NEXUS_STATE_MAX", 50000)
+
+# How long a task stays "current". The single window, used both for rendering
+# (a state older than this is not shown — a task idle for three days is over) and
+# for the age prune. Three days is chosen so "let's continue this tomorrow"
+# survives and an abandoned task from last week does not linger; one number, and
+# an operator who wants longer continuity changes one environment variable.
+NEXUS_STATE_TTL = _int("NEXUS_STATE_TTL", 72 * 3600)
+
+# The per-field cap and the block budget. Both are small because State is a
+# compact summary — a topic, a goal, an unresolved question — and never a
+# transcript. The value cap keeps a pasted paragraph out of the row; the block
+# budget keeps the rendered context a sentence or three.
+NEXUS_STATE_VALUE_CHARS = _int("NEXUS_STATE_VALUE_CHARS", 120)
+NEXUS_STATE_CHARS = _int("NEXUS_STATE_CHARS", 300)
+
+
 # ---------------- Nexus Awareness: the room, understood -----------------------
 # The observation layer. Everything above decides *who may talk to Nexus and what
 # it may do*; this decides *what Nexus understands about the room it is in*.
