@@ -278,11 +278,26 @@ The point of this file is that the project does not have to be re-explained.
 Update this section after each meaningful change. The facts below were verified
 against the repository when this file was created.
 
-- **Branch:** `main`. **Tip:** run `git log -1`. Do not trust a hard-coded hash
-  — read `git log`. The history is long now (captcha, media moderation, flood,
-  awareness, VPN handover, the coding-agent bridge, pool rotation); read the
-  last few commits rather than a list copied into this file.
+- **Branch:** `main` is the production state; the Nexus intelligence evolution
+  lives on `develop/nexus-intelligence-evolution` (unmerged, undeployed).
+  **Tip:** run `git log -1` and `git branch --show-current`. Do not trust a
+  hard-coded hash — read `git log`. The history is long now (captcha, media
+  moderation, flood, awareness, VPN handover, the coding-agent bridge, pool
+  rotation); read the last few commits rather than a list copied into this file.
 - **What is done:**
+  - **Nexus intelligence evolution** (`develop/nexus-intelligence-evolution`,
+    unmerged, undeployed): increments R, S, T, W, the W extension, X and **Y**
+    are done. Y is the deterministic context-composition layer
+    (`app/context_plan.py`) — an addressed reply now consumes the **minimum
+    relevant combination** of Conversation, Awareness, State and Memory, with a
+    fast path (no room window) for simple messages, no second model call and no
+    new table. Measured: 27/27 labelled cases in `tools/eval_context.py`, corpus
+    context 29.1 % smaller, real-path context 11.3 % smaller, assembly p50 16.35 →
+    11.09 ms; suite **3564 passed / 0 failed**. Rollback base `main ==
+    release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709`,
+    untouched and an ancestor of the branch. See `AgentMD.md` §54.9. Next: **U**
+    (adaptive awareness scheduling, same 200-request allowance), then V (not
+    scoped).
   - **Text moderation** — the moderation AI's verdict on a group text message,
     turned into an action by `app/mod_policy.py`. Off by default
     (`MODERATION_TEXT_ENABLED=0`). Only `MODERATION_DELETABLE_CLASSES`

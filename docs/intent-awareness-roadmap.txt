@@ -1156,7 +1156,7 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              not read; continuation after NEXUS_STATE_TTL (72 h) is a new
              interaction.
 
-  INCREMENT Y — "the minimum relevant combination"
+  INCREMENT Y — "the minimum relevant combination"  [DONE — see RESULT]
   ------------------------------------------------------------------------------
   Purpose:   CHAT QUALITY / CONTEXT INTELLIGENCE. Only after W and X. Make the
              addressed conversation consume the MINIMUM relevant combination of
@@ -1182,6 +1182,61 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              benchmark is still green" is NOT evidence of better answers.
   Depends:   W and X (there is nothing to prioritise until memory and state
              exist).
+
+  Y — RESULT (DONE — see AgentMD §54.9)
+  ------------------------------------------------------------------------------
+  Built:     app/context_plan.py (new, 858 lines) — the deterministic selector
+             and composer. read(text, *, kind, reply, media) -> Reading is a pure
+             function of the message's own shape, built from the scored readers
+             the project already has (referents, discourse, state) plus two small
+             patterns (back-reference, opinion request) and two structural facts
+             (reply, media); a closed R_* reason vocabulary makes every decision
+             countable. compose(...) -> ContextPlan selects, orders, de-duplicates
+             and bounds the rendered blocks and ENFORCES the reading's selection,
+             so ContextPlan.selected() is the decision and not the caller's
+             discipline. Integrated into app/main.py `_answer_conversationally`:
+             the four sources are read only when wanted (no duplicate retrieval),
+             composed in one fixed order (admin, room, reading, state, memory,
+             date, search) and appended to the SYSTEM INSTRUCTION, so the
+             prompt-injection boundary is unchanged. app/awareness_context.blocks
+             gained `budget`; app/config.py gained NEXUS_CONTEXT_CHARS (3500),
+             which bounds the four SELECTABLE sources together — never the roster,
+             the date or the findings, which are never dropped. NO new table, NO
+             persistence of the plan, NO second model call.
+  Precedence: per-conflict, each rule a refusal — a correction drops the memory
+             line sharing a word with it; the state reader withholds a stale or
+             superseded task and Y does not put it back; the room is not the
+             person (a private intent selects no room); a repeated fact is sent
+             once, conservatively (every meaningful word of the lower block must
+             already be present).
+  Fast path: "no room window" for a message with no dependency signal. Short is
+             not simple («همونو بزن» needs the room; «قیمت چنده؟» does not); the
+             one short case called dependent is a bare interrogative («چی؟»).
+  Measured:  tools/eval_context.py — 27/27 labelled cases (the brief's A–U plus
+             an opinion case) exact on mode, selected, omitted, reasons and drops;
+             0 isolation leaks with a non-vacuity proof; corpus mean context
+             26.0 -> 18.4 chars (29.1% smaller). On the real path (20-message room,
+             owner's roster, state+memory seeded, model stubbed): context 40733 ->
+             36127 chars (11.3% smaller), each fast-path message saving the whole
+             room window (~1100–1200 chars); room renders 16 -> 8, reading 8 -> 4,
+             memory 8 -> 6 over 8 messages; assembly p50 16.35 -> 11.09 ms, p95
+             37.24 -> 24.56 ms. The selector itself: read 0.19/0.68 ms p50/p95,
+             compose 0.03/0.10 ms; 0 model calls (asserted). Suite 3564 passed,
+             0 failed.
+  Probe:     NOT RUN — the answer-quality probe needs a chat provider credential
+             and a live room; the numbers above are the SERVER's contribution and
+             are not evidence that answers improved.
+  Not done:  the reading is a fixed set of deterministic signals (an
+             unanticipated wording reads as self-contained); de-duplication
+             matches on shared WORDS (a fact recorded in another script is not
+             recognised); the opinion pattern is a lexicon, not a parse.
+  Defects:   two found by running the real path — (1) an opinion request
+             («نکسوس نظرت چیه؟») was read as self-contained and dropped the room
+             (caught by a pre-existing awareness test; fixed with R_OPINION);
+             (2) the whole-prompt ceiling counted the roster, so for an owner it
+             was already exceeded with nothing left to drop and it stripped the
+             room out of answers that needed it — the ceiling now bounds only the
+             selectable sources.
 
   INCREMENT U — "the room that should go next"
   ------------------------------------------------------------------------------
@@ -1278,13 +1333,14 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     see AgentMD.md §54.8 (the after-X checkpoint). The previous checkpoint
-          was §54.7 at the W-extension docs commit; the X commits sit on top of
-          it. Docs commits sit on top — a commit that names its own count would
-          be wrong the moment it lands.
+HEAD:     see AgentMD.md §54.9 (the after-Y checkpoint). The previous checkpoint
+          was §54.8 at the after-X docs commit; the Y commits sit on top of it.
+          Docs commits sit on top — a commit that names its own count would be
+          wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3484 passed, 0 failed
-Corpus:   141 cases, version 18
+Suite:    3564 passed, 0 failed
+Corpus:   141 cases, version 18 (tools/eval_intent.py); 27 labelled cases
+          (tools/eval_context.py — increment Y's deterministic context benchmark)
 Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           addressed path appends the reading), app/awareness_context.py (`skip` +
           CONVERSATION_SKIP) and app/awareness.py (`room_block` gained
@@ -1300,27 +1356,31 @@ Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           `_state_context`, and the shared `_schedule_background` the memory
           observation now uses), app/awareness_context.py (one more `Source`),
           app/db.py (the `conversation_state` table and helpers), app/config.py
-          (`NEXUS_STATE_*`). DB changes on the branch: the foundation's 151b1e1
-          (two additive columns), **W's new `user_memory` table**, **the
-          extension's new `user_memory_signal` table** and **X's new
-          `conversation_state` table** — all additive, new-table, rollback
-          `DROP TABLE`.
-Next:     INCREMENT Y — "the minimum relevant combination" (roadmap §5/Y): the
-          addressed path consumes the MINIMUM relevant combination of Intent +
-          referents + Awareness + Memory + State + history (+ search), with a
-          fast path for simple messages and a **controlled live probe** of answer
-          quality. All four context sources now exist (Conversation, Awareness,
-          State, Memory). The remaining order is Y → U → V; U and V come last
-          because U spends the rationed request budget and V needs an
-          answer-quality measurement that does not exist until Y. See §5 for the
-          full scoping and the dependency rationale. W, the W extension and X are
-          DONE (see §5/W RESULT, §5/W-EXTENSION RESULT and §5/X RESULT). Do NOT
-          start Y without the owner's explicit go-ahead. Do NOT skip to U or V.
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.8 (the checkpoints).
+          (`NEXUS_STATE_*`). **Y adds the composition layer**: app/context_plan.py
+          (new — the deterministic selector and composer), app/main.py
+          (`_answer_conversationally` reads the plan, fetches only the wanted
+          sources and composes them), app/awareness_context.py (`blocks` gained a
+          `budget`), app/config.py (`NEXUS_CONTEXT_CHARS`). DB changes on the
+          branch: the foundation's 151b1e1 (two additive columns), **W's new
+          `user_memory` table**, **the extension's new `user_memory_signal`
+          table** and **X's new `conversation_state` table** — all additive,
+          new-table, rollback `DROP TABLE`. **Y adds no table at all.**
+Next:     INCREMENT U — "the room that should go next" (roadmap §5/U):
+          intelligent/adaptive Awareness scheduling WITHIN the existing
+          200-request allowance and with NO new model calls. It has an open
+          design question to resolve first (§4.3: the seam that does not violate
+          "`awareness.due` cannot see messages", whose signature a test asserts).
+          Y is DONE (see §5/Y RESULT) and V remains NOT SCOPED (it needs an
+          answer-quality measurement that does not exist). The remaining order is
+          U → V. See §5 for the full scoping and the dependency rationale. W, the
+          W extension, X and Y are DONE (see §5/W RESULT, §5/W-EXTENSION RESULT,
+          §5/X RESULT and §5/Y RESULT). Do NOT start U without the owner's
+          explicit go-ahead. Do NOT merge or deploy Y.
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.9 (the checkpoints).
                  docs/reference/nexus-awareness.md §52–§65 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1–§54.8 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.9 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

@@ -2112,6 +2112,42 @@ reference file is stale and this list is the one to fix first.
   a thing-object request is a wrong lead by construction: `entity-media-newest`
   and `entity-media-and-link` carry `ambiguous: false`, the same reading
   `entity-media-single` already gets for the same words.
+* **Increment Y's composition is selection, never retrieval.** `app/context_plan.py`
+  holds **no data of its own**: it reads the blocks the existing readers already
+  rendered and only *selects*, *orders*, *de-duplicates* and *bounds* them. It
+  reads no database, calls no model and stores nothing — removing it leaves every
+  source working exactly as it does now. There is deliberately **no**
+  `UniversalContext`, no `ContextMemory`, no `NexusContextStore` and **no second
+  Gemini call** to choose context; the selection is deterministic, and
+  `tools/eval_context.py` asserts the module's source contains no model client.
+* **The four sources stay four sources.** Conversation, Awareness, State and
+  Memory keep their own readers, their own switches and their own fail-soft
+  behaviour; Y only decides which of them a given message needs. Awareness stays
+  optional: with the layer off, unavailable or failed, the answer still carries
+  the other three.
+* **A source is read only when it is wanted, and the plan enforces it.** The
+  addressed path (`main._answer_conversationally`) fetches the room window and
+  reading only when the reading asks for the room, and the memory/state blocks
+  only when it asks for them; `compose` then **enforces the same selection**, so a
+  block the reading rejected is not in the plan even if a caller rendered it.
+  `ContextPlan.selected()` is the decision, not the caller's discipline.
+* **`NEXUS_CONTEXT_CHARS` bounds only what it can remove.** The ceiling applies to
+  the four **selectable** sources together and drops whole sources in reverse
+  precedence (memory → state → room), never slicing a rendered block. The
+  administrative roster, the server date and the web findings are **never
+  dropped** and are therefore **never counted**: a ceiling that counted a roster
+  larger than the limit would have nothing left to remove, and its only effect
+  would be to strip the room out of an answer that needs it.
+* **The composed context is data in the system instruction.** Y appends to the
+  same system-level context the blocks already used, so the prompt-injection
+  boundary is unchanged: the transcript is people's text and is never presented
+  as a statement the server is making. The plan is logged as **names, reasons and
+  sizes only** — never a word of the message or of a block — and is never
+  persisted and never rendered to the model.
+* **Y grants nothing.** Nothing in `rbac.py` or `admin_service.py` imports
+  `context_plan`, and no decision it makes reaches a permission check. A memory or
+  a role selected into the context is a sentence for the model to read, not an
+  authority the server will honour.
 
 ### 53.8 The assistant
 
@@ -3255,6 +3291,142 @@ Intent + referents + Awareness + Memory + **State** + history (+ search), with a
 fast path for simple messages, and a **controlled live probe** of answer quality.
 All four sources now exist. **Do NOT start Y without the owner's explicit
 go-ahead.** Do not skip to U or V.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§5 for W/W-extension/X/Y/U/V, §7 for the
+continuation point), then verify: `git status`, `git rev-parse HEAD`,
+`git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.
+
+### 54.9 Checkpoint (2026-09-24, after Y) — resume here (supersedes §54.8)
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`. Increment
+**Y** (chat quality / context intelligence) sits on §54.8. Working tree clean;
+pushed to both remotes (`origin` = mo3iiibest77-hub, `dashmo3i` =
+Dashmo3i-GitAcc). `main` and the annotated tag `release-base/nexus-intel` both
+still `00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is
+untouched**, and it is an ancestor of HEAD. Suite **3564 passed, 0 failed** (was
+3484). **Not merged, not deployed.**
+
+**What Y is, and what it is not.** Y is *not* "give Gemini more context". It is a
+**deterministic context-composition layer** that answers one question — *given
+this message, what is the minimum relevant combination of the four sources* — and
+nothing else. There is deliberately **no** universal context database, no
+`ContextMemory`/`UniversalContext`/`NexusContextStore`, **no second model call**
+to select context, and **no new table**. The four sources stay four sources.
+
+**What Y adds (DONE).**
+
+* **`app/context_plan.py`** (new, 858 lines) — the selector and the composer.
+  `read(text, kind, reply, media) -> Reading` is a pure function of the message's
+  own shape; `compose(reading, admin, room, awareness, state, memory, date,
+  search, message, ceiling) -> ContextPlan` selects, orders, de-duplicates and
+  bounds the rendered blocks. Neither reads a database, calls a model or stores
+  anything.
+* **The selector** asks the scored readers the project already has
+  (`referents.find_expression`, `discourse.read_act`, `state.read`) plus its own
+  small patterns (back-reference, opinion request) and two structural facts the
+  handler already holds (`reply`, `media`). A closed reason vocabulary (`R_*`)
+  makes every decision countable. `wants_awareness` is true only for reasons that
+  make the message depend on the **room**; a task starting, continuing or ending
+  is the person's own thread and does **not** pull the room in.
+* **The fast path** is "no room window" — the expensive source — for a message
+  with no dependency signal. **Short is not simple**: «همونو بزن» is four
+  characters and needs the room; «قیمت چنده؟» has its own subject and needs none.
+  The one short case called dependent is a bare interrogative («چی؟»), which has
+  no content word to answer.
+* **Precedence is per-conflict, and each rule is a refusal**: a correction drops
+  the memory line that shares a word with it; the state reader withholds a stale
+  or superseded task and Y does not put it back; the room is not the person (a
+  private intent selects no room); a repeated fact is sent once — conservatively,
+  so every meaningful word of the lower block must already be present before it
+  is dropped.
+* **One deterministic order** — admin, room, reading, state, memory, date,
+  search — appended to the **system instruction**, so the prompt-injection
+  boundary is unchanged.
+* **`compose` enforces the reading's own selection.** A block the reading did not
+  ask for is dropped even if a caller rendered it, so `ContextPlan.selected()` is
+  the decision and not the caller's discipline. The caller still does not *read*
+  an unwanted source, which is where "no duplicate retrieval" lives.
+* **`NEXUS_CONTEXT_CHARS` (3500)** bounds the four **selectable** sources
+  together, by dropping whole sources in reverse precedence (memory → state →
+  room). It deliberately **does not count the roster, the date or the web
+  findings** — see defect 2 below.
+* **`app/awareness_context.blocks(ctx, *, skip, budget)`** gained a `budget`
+  parameter (defaulting to the pass-wide cap), so the reading can be bounded by
+  its caller. **`app/config.py`** and **`.env.example`** document the new knob.
+* **`tools/eval_context.py`** — the deterministic A–U benchmark (535 lines);
+  **`tests/test_context_eval.py`** (21 tests) holds its floors;
+  **`tests/test_context_plan.py`** (59 tests) covers the selector, the composer
+  and the real path.
+
+**Two defects found and fixed during verification** — both by running the real
+path, neither visible from reading the module in isolation:
+
+1. **An opinion request was read as self-contained.** «نکسوس نظرت چیه؟» ("what do
+   you think?") has no subject of its own — its subject is the room's recent
+   content — but «نظرت» reads as a content word, so the short-message rule called
+   it fast and the room was dropped. The pre-existing test
+   `test_awareness.py::test_an_addressed_answer_is_given_the_room_context` caught
+   it; only a **full-suite run** surfaced it. Added `R_OPINION` and an opinion
+   pattern.
+2. **The whole-prompt ceiling was self-defeating.** Counting the administrative
+   roster against `NEXUS_CONTEXT_CHARS` meant that for an owner (~3700-character
+   roster) the limit was already exceeded with nothing left to drop, so the only
+   effect was to strip the room out of answers that needed it — the plan logged
+   `dropped=awareness:ceiling` and `chars=3797 > 3500`. A ceiling may only bound
+   what it can remove, so it now bounds the four selectable sources only.
+
+**Measured** (`python3 tools/eval_context.py`, deterministic and offline):
+
+* **selection**: **27/27** labelled cases (the brief's A–U plus an opinion case) —
+  mode, selected sources, omitted sources, reasons and drops all exact; **0**
+  isolation leaks; non-vacuity proved (the same shape carries the block for its
+  own key).
+* **budget (corpus)**: mean context **26.0 → 18.4 chars** (**29.1 %** smaller);
+  the fast path is 9 of 27 cases.
+* **budget (the real path** — a 20-message room, an owner's roster, state and
+  memory seeded, model stubbed): context **40733 → 36127 chars** (**11.3 %**
+  smaller); each fast-path message saves the whole room window (**~1100–1200
+  chars**); over 8 messages the room renders **16 → 8**, the reading **8 → 4**,
+  memory **8 → 6**; assembly (DB + composition, model excluded) **p50 16.35 →
+  11.09 ms**, **p95 37.24 → 24.56 ms**.
+* **the selector's own cost**: `read` **0.19 ms p50 / 0.68 ms p95**, `compose`
+  **0.03 ms p50 / 0.10 ms p95**; **0** model calls in the module's source
+  (asserted).
+* full suite **3564 passed, 0 failed**.
+
+**Live probe — NOT RUN, and why.** The brief's probe compares a baseline against
+Conversation + Awareness + State + relevant Memory and measures answer quality,
+referent correctness, ambiguity handling, latency and model calls. It needs a
+**chat provider credential** and a live Telegram room; the measurements above are
+the **server's** contribution — what is selected, in what order, at what cost —
+and are **not** evidence that answers improved. Claiming otherwise would be the
+overclaiming this project refuses. The deterministic benchmark cannot score a
+model answer; the live probe waits on the owner's go-ahead.
+
+**Known limitations.** (1) The reading is a fixed set of deterministic signals; a
+dependency expressed in an unanticipated wording is read as self-contained, and
+the cost of that is a missing room block, never a wrong answer from the server.
+(2) De-duplication matches on shared **words**, so a fact recorded in one script
+and mentioned in another («Python» beside «پایتون») is not recognised as a
+duplicate and both are sent. (3) The opinion pattern is a lexicon, not a parse.
+(4) `ContextPlan` is not persisted and never rendered to the model — it exists
+for the log and the tests.
+
+**Rollback.** Y is independently revertable: `git revert <sha>` on this branch. No
+table was added or altered; the only persisted change is the new
+`NEXUS_CONTEXT_CHARS` default. W, the W extension and X are untouched. The whole
+evolution reverts by leaving the branch unmerged; `main` at
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state and is an
+**ancestor** of the branch.
+
+**Exact next step.** INCREMENT **U** — "the room that should go next" (roadmap
+§5/U): intelligent/adaptive Awareness scheduling **within the existing 200-request
+allowance**, **no new model calls**. It has an open design question to resolve
+first (§4.3: the seam that does not violate "`awareness.due` cannot see messages",
+whose signature a test asserts). **V** (model routing) stays NOT SCOPED. **Do NOT
+start U without the owner's explicit go-ahead.** Do not merge or deploy Y.
 
 **To resume after any context loss.** Re-read this section and
 `docs/intent-awareness-roadmap.txt` (§5 for W/W-extension/X/Y/U/V, §7 for the
