@@ -457,3 +457,77 @@ def test_the_clitic_forms_are_found_through_one_more_clitic():
     one more clitic than the list holds is still found."""
     assert D.acts_on("پاکش") == D.ACTS_ON_THING
     assert D.acts_on("بنش") == D.ACTS_ON_PERSON
+
+
+# ── The copula is not a clitic ────────────────────────────────────────────
+# «ه» ends a *predicate*, not a noun stem you can peel: «ادمینه» is «ادمین» +
+# «ه» ("is the admin"), «ساکته» is «ساکت» + «ه» ("is muted"), «کنه» is the
+# subjunctive ("that he does"). It was in ``_CLITICS``, so ``_bare`` stripped it
+# and the act reader read ordinary questions as orders — «ادمینه کیه؟» reached
+# the prompt as "the directive «ادمینه»", quoting the copula as the word that
+# asked for the ban.
+@pytest.mark.parametrize(
+    "token",
+    [
+        "ادمینه", "مدیره", "محدوده", "ساکته", "پاکه", "بنه", "حذفه", "کنه",
+        "ارتقائه", "تنزله", "بلاکه", "داره", "میشه", "شده", "بچه", "جلسه",
+    ],
+)
+def test_the_copula_is_not_stripped(token):
+    assert D._bare(token) == token
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ادمینه کیه", "مدیره کیه", "محدوده کیه", "چرا ساکته؟", "فایل پاکه؟",
+        "این پیام حذفه؟", "کاربر محدوده؟",
+    ],
+)
+def test_a_copula_predicate_is_not_a_directive(text):
+    """The predicate is a statement or a question, not the order it faked."""
+    assert D.read_act(text).kind == D.ACT_QUESTION
+
+
+@pytest.mark.parametrize(
+    "text", ["باید یه کاری کنه", "بهتره خودش کنه", "نکسوس کاری کنه"]
+)
+def test_a_subjunctive_is_not_an_imperative(text):
+    """«کنه» is "that he does", not the imperative «کن»: a wish is not an order."""
+    assert D.read_act(text).kind == D.ACT_UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "text", ["بنش کن", "پاکش کن", "ساکتش کن", "محدودش کن", "ادامه بده"]
+)
+def test_a_real_directive_still_reads(text):
+    """The genuine clitic «ـش» and the listed imperatives are untouched."""
+    assert D.read_act(text).kind == D.ACT_INSTRUCTION
+
+
+@pytest.mark.parametrize("word", ["خفه", "نتونه", "بده"])
+def test_a_directive_that_ends_in_he_is_still_a_directive(word):
+    """A word the lexicon *lists* with a final «ه» is not a copula artifact."""
+    assert D.read_act(word).kind == D.ACT_INSTRUCTION
+
+
+@pytest.mark.parametrize(
+    "text", ["کیه", "چقده", "چقدره", "کدومه", "کدامه", "چطوره"]
+)
+def test_the_copula_question_words_are_listed(text):
+    """The colloquial forms the removal would otherwise have taken with it.
+
+    No question mark: the word itself must carry the reading, which is why the
+    copula forms are in ``_QUESTION_WORDS`` rather than recovered by a suffix
+    rule — the same call the module already made for «چیه» and «چنده».
+    """
+    assert D.read_act(text).kind == D.ACT_QUESTION
+
+
+def test_a_genuine_clitic_is_still_stripped():
+    """«ـش» is a clitic, not the copula, and it is still peeled for the lookup."""
+    assert D._bare("بنش") == "بن"
+    assert D._bare("پاکش") == "پاک"
+    assert D._bare("محدودش") == "محدود"
+    assert D.acts_on("بنش") == D.ACTS_ON_PERSON
+    assert D.acts_on("پاکش") == D.ACTS_ON_THING

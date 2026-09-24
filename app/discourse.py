@@ -96,8 +96,10 @@ _PRECEDENCE = (ACT_CORRECTION, ACT_REPORT, ACT_INSTRUCTION, ACT_SOCIAL, ACT_QUES
 _QUESTION_WORDS = frozenset(
     {
         "چی", "چیه", "چیست", "چیا", "چیایی", "چرا", "کجا", "کی", "کیا",
-        "چند", "چنده", "چقدر", "چقد", "چندتا", "چطور", "چجوری", "چگونه",
-        "ایا", "آیا", "مگه", "مگر", "کدوم", "کدام", "کدومش", "کدومیک",
+        "چند", "چنده", "چقدر", "چقدره", "چقد", "چقده", "چندتا", "چطور",
+        "چطوره", "چجوری", "چگونه",
+        "ایا", "آیا", "مگه", "مگر", "کدوم", "کدومه", "کدام", "کدامه",
+        "کدومش", "کدومیک", "کیه",
         "what", "why", "how", "when", "where", "who", "which",
     }
 )
@@ -247,7 +249,19 @@ def _report_words() -> frozenset[str]:
         return frozenset()
 
 
-_CLITICS = ("رو", "را", "ها", "های", "یه", "یی", "ای", "ام", "ات", "اش", "ش", "ه")
+# The clitics a Persian word actually carries: the object markers («رو»، «را»),
+# the plural («ها»، «های»), the indefinite («یه»، «یی») and the possessive
+# («ام»، «ات»، «اش»، «ش»، «ای»). The **copula «ه» is not one of them**, and it
+# was, and that was the defect. «ه» ends a *predicate*, not a noun stem you can
+# peel: «ادمینه» is «ادمین» + «ه» ("is the admin"), «ساکته» is «ساکت» + «ه»
+# ("is muted"), «کنه» is the subjunctive ("that he does"). Stripping it turned
+# questions into orders — «ادمینه کیه؟» read as "the directive «ادمینه»", and
+# the prompt told the model an ordinary question was an instruction, quoting
+# the copula as the word that asked for it. The question words that genuinely
+# take a copula («کیه»، «چقده»، «چطوره») are listed in ``_QUESTION_WORDS``
+# explicitly, exactly as «چیه» and «چنده» already were, rather than recovered
+# by a suffix rule — the same call ``_IMPERATIVE_ENDINGS`` records below.
+_CLITICS = ("رو", "را", "ها", "های", "یه", "یی", "ای", "ام", "ات", "اش", "ش")
 
 # ``_`` is a separator as well as punctuation: a Telegram username is
 # ``@nexus_bot``, and ``\w`` would keep the whole thing as one token.

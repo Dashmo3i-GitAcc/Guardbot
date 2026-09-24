@@ -186,6 +186,51 @@ def _clitic_content_words(text: str | None) -> tuple[str, ...]:
     return tuple(t for t in room_state.content_tokens(text) if t in _CLITIC_FORMS)
 
 
+# ── The copula the act reader must not strip ──────────────────────────────
+# The act reader's ``_bare`` removes one clitic before it looks a word up in a
+# lexicon, and the copula «ه» was in that list. It is not a clitic: it ends a
+# *predicate*, so «ادمینه» ("is the admin") stripped to the moderation verb
+# «ادمین», «ساکته» ("is muted") to «ساکت», «کنه» (the subjunctive, "that he
+# does") to the imperative «کن» — and an ordinary question reached the prompt as
+# an instruction, quoting the copula as the word that asked for it.
+#
+# The artifact below is named against the *specification* of the copula
+# (``surface[:-1]``, one «ه» off the end) rather than against the reader's
+# ``_bare``, so the check cannot pass by agreeing with the stripper it is
+# scoring. The lexicons it consults are the reader's own, deliberately: the bug
+# was the stripper, not the lists.
+def _directive_lexicon() -> frozenset[str]:
+    return frozenset(discourse._action_words()) | frozenset(discourse._IMPERATIVES)
+
+
+def _copula_directive(surface: str | None) -> str:
+    """The surface if it is a copula form of a directive word, else ``""``.
+
+    A real directive that happens to end in «ه» («خفه»، «نتونه»، «بده») is in
+    the lexicon already and answers ``""``; only a surface the lexicon does not
+    hold, whose copula-stripped stem it does, is the artifact.
+    """
+    surface = str(surface or "")
+    if len(surface) < 3 or not surface.endswith("ه"):
+        return ""
+    words = _directive_lexicon()
+    if surface in words:
+        return ""
+    if surface[:-1] in words:
+        return surface
+    return ""
+
+
+def _quoted_directive(got_act: str, act_why: str) -> str:
+    """The directive the act sentence quotes, or ``""`` when it quotes none."""
+    if got_act != discourse.ACT_INSTRUCTION:
+        return ""
+    prefix = "the directive «"
+    if not act_why.startswith(prefix) or not act_why.endswith("»"):
+        return ""
+    return act_why[len(prefix):-1]
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 # Every section above scores one reader. None of them scored the *assembly* —
 # which sources actually reach the model, in what order, within the ceiling — and
@@ -417,6 +462,11 @@ def evaluate(cases: dict) -> dict:
                 "expected_act": expect.get("act", discourse.ACT_UNKNOWN),
                 "got_act": act.kind,
                 "act_why": act.why[0] if act.why else "",
+                # The copula the quoted directive should never be. Scored on
+                # the rendered sentence, because that is what reaches the model.
+                "act_copula_directive": _copula_directive(
+                    _quoted_directive(act.kind, act.why[0] if act.why else "")
+                ),
                 "expected_questions": expected_questions,
                 "got_questions": [q.text for q in questions],
                 "questions_block_chars": len(questions_block),
@@ -678,6 +728,11 @@ def _metrics(detail: list[dict]) -> dict:
         "act_false_positives": len(act_false_positive),
         "act_false_negatives": len(act_false_negative),
         "act_abstentions": len(act_abstentions),
+        # A directive the sentence quotes that is a copula form of a directive
+        # word — an order the reader invented by peeling «ه». The floor is 0.
+        "act_copula_directives": sum(
+            1 for r in detail if r["act_copula_directive"]
+        ),
         # Per class, because the corpus is lopsided — most messages in a
         # moderation room are instructions — and a single accuracy figure would
         # be a number a constant could also get. This is the honest shape.
@@ -951,6 +1006,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  recall on labelled cases   {_pct(m['act_recall'])}",
         f"  false positives/negatives  {m['act_false_positives']} / {m['act_false_negatives']}",
         f"  abstentions                {m['act_abstentions']}",
+        f"  copula directives          {m['act_copula_directives']} "
+        f"(a directive quoting the copula «ه» — should be 0)",
         "  per class (correct/total)  "
         + "  ".join(
             f"{kind} {v['correct']}/{v['total']}"
@@ -1105,6 +1162,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or r["entity_offers_things_for_a_person"]
         or r["entity_gives_an_order"]
         or r["anchor_clitic_words"] or r["shared_clitic_words"]
+        or r["act_copula_directive"]
         or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])

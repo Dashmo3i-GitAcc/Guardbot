@@ -1644,6 +1644,18 @@ reference file is stale and this list is the one to fix first.
 * The imperative lexicons are **explicit token lists**, never a suffix rule. A
   suffix rule read «نمیکن» as an instruction and bought nothing the lists did
   not already have; the bare «کن»/«بده» are listed as whole tokens instead.
+* The **copula «ه» is not a clitic**, and it was in the clitic list the act
+  reader strips before a lexicon lookup. «ه» ends a *predicate*, so peeling it
+  turned questions into orders: «ادمینه کیه؟» read as "the directive «ادمینه»",
+  «چرا ساکته؟» as "the directive «ساکته»", and the subjunctive «کنه» as the
+  imperative «کن». The prompt then told the model an ordinary question was an
+  order, quoting the copula as the word that asked for it. «ه» is removed from
+  `_CLITICS`, and the colloquial question words that genuinely take a copula
+  («کیه»، «چقده»، «چقدره»، «کدومه»، «کدامه»، «چطوره») are listed in
+  `_QUESTION_WORDS` explicitly — the same call the bullet above records. The
+  benchmark scores the artifact on the *rendered* directive, not the token:
+  `act_copula_directives == 0`, the count of cases whose act sentence quotes a
+  copula form of a directive word.
 * `open_questions` tests the **reply edge and nothing else**, and the block it
   renders says "no reply pointing at an answer", **never** "unanswered" — a room
   answers questions without using Telegram's reply as often as with it, and the

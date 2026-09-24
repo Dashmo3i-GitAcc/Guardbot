@@ -28,6 +28,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [54. The prompt, measured — and the block that never reached it](#s54)
 - [55. A clitic is not a content word](#s55)
 - [56. A config is not a person](#s56)
+- [57. The copula is not a clitic](#s57)
 
 ---
 
@@ -3488,3 +3489,83 @@ list is closed and explicit, so a noun it does not know still reads as a person
 pointer — a false lead the entity block's evidence framing and the transcript
 soften but do not remove. The act, object and room-state blocks' prose remains
 unscored (§55.5).
+
+## 57. The copula is not a clitic
+
+### 57.1 The order the server invented
+
+The act reader (`app/discourse.py`) decides whether a message asks, instructs,
+corrects, greets or reports. It matches words against closed lexicons, and before
+it looks a word up it removes one **clitic** — the bound ending a word carries
+(«بنش» → «بن», «پاکش» → «پاک»). The clitic list held the **copula «ه»**.
+
+### 57.2 The defect
+
+«ه» does not end a noun stem you can peel; it ends a *predicate*. «ادمینه» is
+«ادمین» + «ه» ("is the admin"), «ساکته» is «ساکت» + «ه» ("is muted"), «کنه» is
+the subjunctive ("that he does"). Stripping the «ه» landed each on a moderation
+verb — «ادمین»، «ساکت»، «کن» — so an ordinary question became an instruction and
+the prompt quoted the copula as the word that asked for the ban:
+
+```
+The server reads this message as an instruction (the directive «ادمینه»).
+```
+
+for the anchor «ادمینه کیه؟». The same path turned the subjunctive «کنه» into the
+imperative «کن»: «باید یه کاری کنه» ("[someone] should do something") read as an
+order.
+
+### 57.3 The fix
+
+«ه» is removed from `_CLITICS`; the list is now the object markers («رو»، «را»),
+the plural («ها»، «های»), the indefinite («یه»، «یی») and the possessive («ام»،
+«ات»، «اش»، «ش»، «ای»). The colloquial question words that genuinely take a
+copula — «کیه»، «چقده»، «چقدره»، «کدومه»، «کدامه»، «چطوره» — are listed in
+`_QUESTION_WORDS` explicitly, exactly as «چیه» and «چنده» already were, rather
+than recovered by a suffix rule. That is the module's own call: the same doctrine
+that removed the imperative suffix rule.
+
+The fix reaches three readers, because `discourse.directives`/`acts_on` are
+shared. `requests` (the directive's direction) and `objects` (what the request
+acts on) read the directive the act reader finds; on the three `role-*` cases the
+quoted directive moves from the copula «ادمینه» to the real verb «محدود», and the
+object surface «ادمینه» — the thing the «رو» marks — is found again.
+
+### 57.4 The numbers
+
+The before/after pair is measured on the **same 134-case corpus**, the reader
+reverted in-process for the "before" column, so the four new cases are in both.
+
+| | before | after |
+|---|---|---|
+| directives quoting a copula form | **7** / 134 | **0** / 134 |
+| act claimed precision | 96.4% | 100.0% |
+| act recall | 97.2% | 100.0% |
+| act false positives | 1 | 0 |
+| act accuracy | 97.0% | 100.0% |
+| question class | 17 / 20 | 20 / 20 |
+| unknown class | 24 / 25 | 25 / 25 |
+| instruction class | 77 / 77 | 77 / 77 |
+| corpus version | 14 | 15 |
+| corpus cases | 130 | 134 |
+| suite | 3189 | 3232 |
+
+The new metric is `act_copula_directives`: the count of cases whose *rendered*
+act sentence quotes a directive that ends in «ه» and is not itself a directive
+word. It scores the sentence the model would read, not the token, because the
+sentence is what does the damage. Non-vacuity: re-adding «ه» to the reader's
+clitic list in-process brings the count back to **7** and drops act accuracy
+below 1.0.
+
+The four new corpus cases are the four shapes the defect produced: three
+questions that read as instructions («محدوده کیه»، «چرا ساکته؟»، «فایل پاکه؟»)
+and one subjunctive that read as an imperative («باید یه کاری کنه»).
+
+### 57.5 What it leaves
+
+The copula is fixed where it made a *directive*. The same strip could have made
+a correction, a report or a social word; the corpus shows it did not — the
+`correction`, `report` and `social` classes are unchanged at 3/3, 4/4 and 5/5,
+because those lexicons already list their «ه» forms. The act block's remaining
+prose — the "why" wording — is still unscored beyond the `act_copula_directives`
+floor (§55.5).

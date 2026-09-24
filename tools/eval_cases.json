@@ -1,5 +1,5 @@
 {
-  "version": 14,
+  "version": 15,
   "about": [
     "A labelled corpus for the deterministic half of Nexus understanding.",
     "Each case is a room window plus the anchor message a pass would be about,",
@@ -2250,6 +2250,118 @@
         "ambiguous": false,
         "addressed": false,
         "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-question-role",
+      "category": "act",
+      "note": "«محدوده کیه» — «محدوده» is «محدود» + the copula, not a directive; the question word is «کیه».",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "محدوده کیه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-question-muted",
+      "category": "act",
+      "note": "«چرا ساکته؟» — «ساکته» is «ساکت» + the copula, an ordinary question, not an order.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "چرا ساکته؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-question-file",
+      "category": "act",
+      "note": "«فایل پاکه؟» — «پاکه» is «پاک» + the copula; the thing is deleted, nobody was told to delete.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل پاکه؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-subjunctive",
+      "category": "act",
+      "note": "«باید یه کاری کنه» — «کنه» is the subjunctive, not the imperative «کن»; a wish is not an order.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باید یه کاری کنه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
         "open_questions": [],
         "when": "",
         "when_unit": "",

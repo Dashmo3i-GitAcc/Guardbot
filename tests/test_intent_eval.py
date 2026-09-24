@@ -17,7 +17,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from app import entities, room_state, temporal
+from app import discourse, entities, room_state, temporal
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -395,6 +395,46 @@ def test_the_expression_check_is_not_vacuous():
     assert m["expression_cases"] >= 55, "no case points at a person"
     leads = [r["id"] for r in m["detail"] if r["id"].startswith("thing-noun-")]
     assert len(leads) >= 3, leads
+
+
+# ── The copula, and the order it invented ─────────────────────────────────
+def test_the_act_never_quotes_a_copula_directive():
+    """A directive ending in the copula «ه» is an order the reader invented.
+
+    «ه» ends a *predicate*, so peeling it turned questions into orders:
+    «ادمینه کیه؟» reached the prompt as "the directive «ادمینه»", «چرا ساکته؟»
+    as "the directive «ساکته»", and the subjunctive «کنه» as the imperative
+    «کن». Seven cases quoted one; now none do.
+    """
+    m = result()
+    assert m["act_copula_directives"] == 0
+
+
+def test_the_copula_check_is_not_vacuous():
+    """The corpus carries the shape, and the unfixed reader quotes it.
+
+    Re-adding «ه» to the reader's clitic list brings the defect back: seven
+    cases then quote a copula as the directive and act accuracy falls below
+    1.0. The scan below is over the corpus *text*, so it stays true after the
+    fix — the shape is still there, only the reading changed.
+    """
+    shaped = [
+        case["id"]
+        for case in eval_intent.load_cases()["cases"]
+        if any(
+            eval_intent._copula_directive(t)
+            for t in discourse._tokens(case["anchor"]["text"])
+        )
+    ]
+    assert len(shaped) >= 3, shaped
+    original = discourse._CLITICS
+    try:
+        discourse._CLITICS = tuple(original) + ("ه",)
+        unfixed = eval_intent.evaluate(eval_intent.load_cases())
+    finally:
+        discourse._CLITICS = original
+    assert unfixed["act_copula_directives"] >= 3
+    assert unfixed["act_accuracy"] < 1.0
 
 
 # ── The assembled context ─────────────────────────────────────────────────
