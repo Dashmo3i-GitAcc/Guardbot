@@ -3901,6 +3901,21 @@ tests/test_awareness_schedule.py tests/test_awareness_schedule_eval.py` →
 increment adds 16 tests — 13 deterministic, 3 real-path — the remaining +2
 predate the increment).
 
+**Build & regression verification (2026-09-24, HEAD `7d5ab6b`).** Re-verified
+from a clean tree on the frozen branch, using the repository's **non-Docker**
+test path (`AgentMD.md` §11: "a plain venv can run the suite"). **The Docker
+image was not rebuilt** — the owner's instruction forbids it, and the project's
+only official build (`docker compose build` / the `Dockerfile`) is
+Docker-dependent, so no non-Docker *build* exists; the existing image
+`guardbot-guardbot:latest` and the container `guardbot` were left untouched (an
+image built during the previous turn was removed, restoring the environment).
+Non-Docker build check: `python -m compileall app tools` → exit 0 (every module
+byte-compiles). Tests, in `.venv-test` (Python 3.10.12, pytest 9.1.1):
+collection **3658 tests**; targeted set (the same five files) → **247 passed**;
+full suite → **3658 passed, 0 failed, 0 skipped, 0 errors** (7 warnings, all a
+`google-genai` `DeprecationWarning`). No failure, so no fix was needed. These
+match the numbers already recorded above.
+
 **V — explicitly, as required.**
 * **NOT IMPLEMENTED** — no routing change, no model allocation, no config
   default changed, no new production call.
