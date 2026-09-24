@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="GuardBot">
+  <rect width="512" height="512" rx="116" fill="#0A0A0B"/>
+  <circle cx="256" cy="256" r="174" fill="none" stroke="#2E2C28" stroke-width="14"/>
+  <path d="M256 92 L394 150 V270 C394 348 332 406 256 436 C180 406 118 348 118 270 V150 Z"
+        fill="none" stroke="#D4AF37" stroke-width="28" stroke-linejoin="round"/>
+  <path d="M192 264 L238 310 L326 212"
+        fill="none" stroke="#3DDC84" stroke-width="28"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

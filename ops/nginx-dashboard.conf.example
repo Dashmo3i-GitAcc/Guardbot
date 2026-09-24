@@ -1,0 +1,99 @@
+# GuardBot Admin Control Center — reverse proxy
+# ---------------------------------------------------------------------------
+# Copy to /etc/nginx/sites-available/guardbot-dashboard, point the certificate
+# paths at your own, symlink into sites-enabled, then `nginx -t && systemctl
+# reload nginx`.
+#
+# The panel itself listens on 127.0.0.1:8100 and is NOT exposed directly. This
+# proxy is the only way in, and it is what provides TLS — the session cookie is
+# marked Secure by DASHBOARD_SECURE_COOKIES=1 in the dashboard's environment,
+# which must be set for this file to be safe to use.
+#
+# Two things this file deliberately does NOT do:
+#   * it does not add HTTP basic auth — the panel has its own login, its own
+#     session cookie and its own brute-force brake, and a second password in
+#     front of the first only moves the weakest link;
+#   * it does not serve the panel over plain HTTP. The :80 block redirects.
+
+# ── HTTP: redirect everything to HTTPS ─────────────────────────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name dashboard.example.com;
+
+    # ACME challenges must stay on :80 or certificate renewal breaks.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ── HTTPS: the panel ───────────────────────────────────────────────────────
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name dashboard.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/dashboard.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/dashboard.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    # The panel is private infrastructure.
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    # The panel loads only its own CSS and one SVG; nothing inline, nothing
+    # remote. `form-action 'self'` and `frame-ancestors 'none'` are the two that
+    # matter here: they stop a hostile page from posting the operator's forms.
+    add_header Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" always;
+
+    # Optional, and recommended if the operator's address is static: reject
+    # everyone else before a request ever reaches the panel. Commented out
+    # because a wrong address here locks the owner out of their own console.
+    # allow 203.0.113.7;
+    # deny all;
+
+    # The panel renders HTML per request and its responses must never be cached
+    # by a proxy or a browser — a cached page could show one session's data to
+    # the next visitor.
+    add_header Cache-Control "no-store" always;
+
+    client_max_body_size 256k;
+    proxy_read_timeout 30s;
+
+    location / {
+        proxy_pass http://127.0.0.1:8100;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        # The dashboard reads the first entry of this header as the client
+        # address, which is what its login brake counts against.
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "";
+    }
+
+    # Static assets are the one thing worth caching: they are code-owned, they
+    # change only on deploy, and they carry no session data.
+    location /static/ {
+        proxy_pass http://127.0.0.1:8100;
+        proxy_set_header Host $host;
+        add_header Cache-Control "public, max-age=3600" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # Liveness only; no data. Kept off the access log so a 30-second health
+    # check does not drown the log the operator actually reads.
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8100;
+        proxy_set_header Host $host;
+        access_log off;
+    }
+}

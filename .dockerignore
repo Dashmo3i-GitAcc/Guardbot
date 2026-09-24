@@ -1,0 +1,49 @@
+# What the Docker daemon must not send as build context.
+#
+# The Dockerfile needs only `requirements*.txt`, `app/` and `tools/`, but the
+# context is the whole repository. Excluding the rest keeps the context small
+# and — more importantly — keeps runtime state out of the image: a credential,
+# a database or a log baked into a layer is readable by anyone who can pull the
+# image, and survives every rotation.
+#
+# Two of these are load-bearing, not tidiness:
+#   .env      — the bot token, the dashboard secret and every API key live here
+#   data/     — the SQLite database and the runtime credential file
+# Neither is copied by the Dockerfile today; this makes that a rule rather than
+# an accident.
+
+# Version control
+.git
+.gitignore
+.github
+
+# Python virtualenvs and caches
+.venv
+.venv-*
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime state
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.log
+logs/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Not needed at build time
+docs/
+tests/
+*.md
+*.tar
+*.tar.gz

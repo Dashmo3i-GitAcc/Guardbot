@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="card">
+    <h2 class="card__title">{{ title }}</h2>
+    <p class="card__hint">{{ message|safe }}</p>
+    <div class="kv">
+      <span class="kv__key">HTTP</span>
+      <span class="kv__value mono">{{ status }}</span>
+    </div>
+  </section>
+{% endblock %}

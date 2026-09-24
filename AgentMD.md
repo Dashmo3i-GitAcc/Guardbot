@@ -2632,6 +2632,40 @@ not a personality: it states *who* is speaking and no rule of its own.
   `agent_data.nexus_diagnostics` reports `search_enabled`; the credential is
   never shown by either.
 
+### 53.13 The Admin Control Center (`app/web`)
+
+The panel is built in stages (M1…M8, §54.24/§54.25). These rules are
+non-negotiable for every stage:
+
+* The dashboard is a **separate process** from the bot — its own compose service
+  running `python -m app.web`. It must **never** run inside the bot's event loop,
+  and a problem in the web layer must never be able to disturb Telegram polling.
+* **The dashboard identity is not a Telegram identity.** Being an administrator
+  of a Telegram group grants **nothing** in the panel. The panel **never** trusts
+  a role, a group scope or an owner claim supplied by the client; authorization
+  is resolved server-side from the authenticated identity.
+* The panel **reads and writes through the existing modules** — `rbac`,
+  `admin_service`, `groups`, `key_store`. It must never bypass them, and must
+  never reimplement an authority check of its own.
+* The panel **never applies migrations**. The bot owns the schema and migrates at
+  boot; a second process running them concurrently would race it.
+* **One image, two processes.** The dashboard must not introduce a second image,
+  a second base, or a second data volume. Its own dependencies live in
+  `requirements-dashboard.txt`, in their own Docker layer.
+* Every state-changing request is **server-authorized** and carries the
+  session's **CSRF token**; both are middlewares, so a new route cannot forget
+  either.
+* A password, an API key or `DASHBOARD_SECRET` is **never** logged, returned in a
+  response, rendered, or placed in a URL. Only a masked fingerprint may be shown.
+* The session cookie is **`HttpOnly` + `SameSite=Lax`**, and **`Secure` whenever
+  TLS terminates in front of the panel** (`DASHBOARD_SECURE_COOKIES`) — the
+  default is off only because the default bind is loopback-only.
+* Changing the password **retires every session** (the epoch), and the current
+  password is required to change it, so a stolen cookie cannot lock the owner out.
+* The panel **must not claim a capability it does not have.** There is no
+  multi-bot support today and the panel must not pretend otherwise (§54.24
+  decision 5).
+
 ## 54. Nexus intelligence evolution — checkpoint (2026-09-24)
 
 A durable checkpoint for continuing the Intent/Awareness evolution. `§53.7` is
@@ -5391,6 +5425,121 @@ signed session cookie + CSRF, Jinja templates + dark static shell, login/logout,
 `dashboard` Compose service, `.dockerignore`, log rotation and the **measured
 image/layer report**; then commit, push, and continue M2…M8 from the repository.
 Do **not** modify Chat, pools, credentials, limits, breakers, tenant isolation or
+workload boundaries.
+
+---
+
+### 54.25 Checkpoint (2026-09-24, **M1 — the panel's foundation is built**) — M1 DONE, NOT DEPLOYED, M2 NEXT
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~22:40Z**. Branch **`main`**. M1 of the
+Admin Control Center (§54.24) is **implemented, tested and committed**. The
+dashboard service is **defined but not started**: the running bot is untouched
+(`guardbot`, image `f36e60bf3971`, `RestartCount=0`, verified before and after
+the build). Nothing in Chat, the pools, the credentials, the limits, the
+breakers, tenant isolation or the workload boundaries was modified.
+
+**What M1 ships (exactly what the §54.24 plan asked for).**
+
+| Piece | File |
+|---|---|
+| aiohttp app, middlewares, entry point | `app/web/server.py`, `app/web/__main__.py` |
+| identity, scrypt, signed cookie, CSRF, epoch, throttle | `app/web/auth.py` |
+| the credential file + the epoch it protects | `app/web/credentials.py` |
+| typed request/app keys | `app/web/context.py` |
+| Jinja environment + Persian filters | `app/web/jinja.py` |
+| shared page context, render, redirect, `safe_next` | `app/web/render.py` |
+| Persian digits, Jalali, durations | `app/web/jalali.py` |
+| every word the panel shows | `app/web/copy.py` |
+| login / logout / `/healthz` | `app/web/routes/auth_routes.py` |
+| the landing page | `app/web/routes/home.py` |
+| dark shell (RTL, Vazirmatn stack, gold accent, own logo) | `app/web/templates/*`, `app/web/static/{app.css,logo.svg}` |
+| password CLI (hash / apply / clear / status) | `ops/dashboard_passwd.py` |
+| reverse proxy with TLS + security headers | `ops/nginx-dashboard.conf.example` |
+| the panel's two dependencies, in their own layer | `requirements-dashboard.txt` |
+| the second process over the same image and volume | `docker-compose.yml` → `dashboard` |
+
+**Decisions taken during M1 (all reversible, none touching the bot).**
+
+* **One image, two processes.** Both compose services build the same tag
+  (`guardbot:latest`, declared once via an `x-guardbot-image` anchor). The
+  dashboard is a second `command` over the same layers, not a second image.
+  This does rename the bot's image from `guardbot-guardbot` to `guardbot:latest`
+  on the next `docker compose build`; the running container keeps its image ID,
+  so nothing restarts.
+* **The dashboard's dependencies are their own Docker layer.**
+  `requirements.txt` is copied and installed first (unchanged → cache hit), then
+  `requirements-dashboard.txt` in a second layer. `aiohttp` is now declared
+  directly as well as being present transitively through `py-tgcalls`, because
+  `app/web` imports it directly.
+* **The panel never migrates the schema.** The bot owns the tables and applies
+  the migrations at boot; a second process running them concurrently would race
+  it. M1 does not touch the database at all.
+* **Dark-only, no theme toggle, no JavaScript.** The plan said "dark static
+  shell", and the panel is one operator on one machine. There is no light
+  palette, no `theme.js` and no client-side behaviour, so there is nothing that
+  can break with scripting disabled.
+* **Session rotation is a sliding re-mint**, at half the session's life, on safe
+  methods only, and *before* the handler runs — so the CSRF token on the page
+  just rendered is the token the new cookie carries. Rotating after the handler
+  would break every POST from that page.
+* **`labels.py` was not created.** The plan listed it for M1, but M1 has no
+  status to label; an empty mapping module is dead code. It arrives with the
+  first page that has a status (M3).
+* **The credential is a file, not a table** (`/data/dashboard_credentials.json`,
+  mode 600, atomic write), because the SQLite database is backed up and copied
+  around and the panel's password should not travel with it.
+
+**Verification (all measured, none assumed).**
+
+| Check | Result |
+|---|---|
+| Focused suite `tests/test_web_dashboard.py` | **55 passed**, 22 subtests (6.0 s) |
+| Full suite | **3812 passed / 0 failed** (233.8 s) — was 3757, so **+55** |
+| `py_compile` on every new module | clean |
+| Container smoke (throwaway, `--rm`) | `/healthz` → `{"status":"ok"}`; `/login` renders the shell; POST → 303 + `gb_admin` cookie; the compose healthcheck command exits 0 |
+| Bot container before/after the build | `guardbot` still `f36e60bf3971`, `RestartCount=0`, no restart |
+| Secret scan of the staged diff | clean (27 files, no key, token or `.env` value) |
+
+**Measured image / layer report (the owner's hard requirement).**
+
+| Item | Measured |
+|---|---|
+| Bot image before | `guardbot-guardbot:latest` = `f36e60bf3971`, **1.15 GB** |
+| Shared image after | `guardbot:latest` = `7768f5dc0053`, **1.15 GB** |
+| Layers in the new image | 13 total, **8 shared** with the old image, **5 new** |
+| Reused unchanged | the 457 MB `ffmpeg` layer and the **259 MB** `pip install -r requirements.txt` layer (cache hits — the build took **13 s**, which is the proof) |
+| New layer: `COPY requirements-dashboard.txt` | 12.3 kB |
+| New layer: `pip install -r requirements-dashboard.txt` | **1.48 MB** (Jinja2 3.1.6 = 1.11 MB + MarkupSafe 3.0.3 = 81 kB) |
+| New layer: `COPY app ./app` | 6.43 MB (grew by the panel's source; `app/web` itself is **126 kB**) |
+| New layer: `COPY tools ./tools` | 1.06 MB (a code change, not the panel) |
+| New layer: `COPY ops ./ops` | 41 kB |
+| **Dashboard-specific unique addition** | **≈ 1.53 MB** (deps + `ops`) + 126 kB of source |
+| `aiohttp` | **not added** — 7.66 MB, already in the image (transitively via `py-tgcalls`) |
+| Extra persistent data | **none** — the same `./data` volume; M1 writes no database row |
+| Extra persistent logs | the same `json-file` ceiling as the bot: `10m` × 3 files |
+| Disk on `/` before vs after the build | **2.5 GB free / 88 %** both before and after (no measurable change) |
+
+**Known limitations / risks to carry forward.** (a) The dashboard is **not
+deployed**: `docker compose up -d dashboard` has not been run, and doing so is a
+deploy that needs the owner's go-ahead (§54.24 decision, and the standing rule
+that a deploy means deploy *and* a live probe). (b) `DASHBOARD_SECRET` and a
+password are **not set** in the host `.env`, so a started panel would log
+everyone out on restart and refuse every login; setting both is part of the M8
+deploy. (c) `DASHBOARD_SECURE_COOKIES` is off by default and **must be turned on
+with the nginx TLS proxy** — it is the only thing that keeps the session cookie
+off plain HTTP. (d) Still no multi-bot support (§54.24 decision 5); the schema
+and API seam for it does not exist yet either — it arrives with the bot page in
+M6. (e) SQLite is still single-writer: every later analytics page must aggregate
+at the DB layer and paginate.
+
+**NEXT STEP (exact).** Implement **M2 — Authorization + audit**: bind the
+dashboard identity to `app/rbac.py` (a Telegram group admin is *not* a dashboard
+admin), make every mutation server-authorized through the same boundary the bot
+uses (`admin_service`), add the append-only `dashboard_audit` table via
+`CREATE TABLE IF NOT EXISTS` + `_ensure_column` (no destructive rewrite), and add
+the IDOR / cross-group tests. Then M3 (Overview) … M8 (security, performance,
+deploy). Do **not** deploy the dashboard without the owner's go-ahead, and do
+**not** modify Chat, pools, credentials, limits, breakers, tenant isolation or
 workload boundaries.
 
 ---

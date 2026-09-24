@@ -1,6 +1,17 @@
+# One image, two processes.
+#
+# The bot and the Admin Control Center run from the *same* image, built once
+# from this repository: same base, same system packages, same bot requirements,
+# plus the panel's own two (see requirements-dashboard.txt). The dashboard is
+# not a second image and not a second stack — it is a second `command` over the
+# same layers, which is what keeps the extra disk cost of the panel at roughly
+# nothing. The name is declared once here and referenced by both services.
+x-guardbot-image: &guardbot_image guardbot:latest
+
 services:
   guardbot:
     build: .
+    image: *guardbot_image
     container_name: guardbot
     restart: always
     env_file: .env
@@ -51,3 +62,58 @@ services:
       resources:
         limits:
           memory: 2g
+
+  # ── The Admin Control Center ───────────────────────────────────────────────
+  #
+  # The same image as the bot, run with a different command. It is a separate
+  # *process*, never a thread inside the bot: a problem in the web layer (a bad
+  # route, a slow query, an out-of-memory page) must not be able to disturb
+  # Telegram polling, and the two can be restarted independently.
+  dashboard:
+    build: .
+    image: *guardbot_image
+    container_name: guardbot-dashboard
+    restart: always
+    env_file: .env
+    # The same volume, read and written through the same code paths the bot
+    # uses. There is no second database and no second data directory — a copy
+    # would drift, and the panel's whole point is to show the real state.
+    volumes:
+      - ./data:/data
+    # `python -m app.web` binds 127.0.0.1:8100 by default (DASHBOARD_HOST/PORT),
+    # which is why this service needs the host's network namespace: the port is
+    # meant to be reached by the reverse proxy on the host, and by nothing else.
+    # Nothing is published to the internet by this file; TLS and the firewall
+    # are the proxy's job (ops/nginx-dashboard.conf.example).
+    command: ["python", "-m", "app.web"]
+    network_mode: host
+    depends_on:
+      - guardbot
+
+    # A liveness probe that uses the image's own interpreter — the slim base
+    # has no curl, and adding one for a health check would be a package in the
+    # image for a single request.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # The same log ceiling as the bot. The dashboard logs far less, but "far
+    # less" is not a bound: an unbounded json-file log on a volume that already
+    # runs above 85% is a slow-motion outage.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    deploy:
+      resources:
+        limits:
+          memory: 512m

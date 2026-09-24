@@ -3077,3 +3077,45 @@ GEMINI_KEY_MAX_PER_WORKLOAD = _int("GEMINI_KEY_MAX_PER_WORKLOAD", 10)
 # The owner's command. Named for what it manages rather than for the provider,
 # so it reads the same way `/pool` does.
 GEMINI_KEYS_COMMAND = os.getenv("GEMINI_KEYS_COMMAND", "keys").strip().lstrip("/")
+
+# ── The admin dashboard (a separate process, not the bot) ─────────────────
+#
+# The dashboard is its own compose service running `python -m app.web` from
+# this same image, sharing the same SQLite volume. Its settings live here so
+# there is one config source, but nothing in the bot's runtime reads them.
+#
+# Its identity is deliberately **separate from Telegram membership**: being an
+# administrator of a Telegram group does not make anybody a dashboard
+# administrator, and the dashboard never trusts a role, a group scope or an
+# owner claim supplied by the client. See AgentMD §54.24 and app/web/auth.py.
+DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "owner").strip() or "owner"
+# One of these two is the password. The hash wins when both are set, so a
+# password changed from the panel/CLI is not silently overridden by a stale
+# `.env` value. Neither is ever logged, returned, or rendered.
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+DASHBOARD_PASSWORD_HASH = os.getenv("DASHBOARD_PASSWORD_HASH", "")
+# The cookie-signing key. Unset means a random one per process: sessions then do
+# not survive a restart (a warning is logged) — never a silent insecure default.
+DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
+# Bound to loopback by default, like the VPN bot's internal API: the dashboard
+# is reached through nginx/TLS, never straight from the internet.
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT = _int("DASHBOARD_PORT", 8100)
+# 12 hours, and the cookie is re-minted on every login (session rotation).
+DASHBOARD_SESSION_SECONDS = _int("DASHBOARD_SESSION_SECONDS", 43200)
+# Login brute-force brake: N failures per window, per client address.
+DASHBOARD_LOGIN_MAX_FAILURES = _int("DASHBOARD_LOGIN_MAX_FAILURES", 5)
+DASHBOARD_LOGIN_WINDOW_SECONDS = _int("DASHBOARD_LOGIN_WINDOW_SECONDS", 900)
+# Set the Secure cookie flag on the session cookie. There is no inference: with
+# the default (off) the cookie is also sent over plain HTTP, which is only
+# correct while the panel is reachable solely over loopback. Turn it on as soon
+# as TLS terminates in front of it (ops/nginx-dashboard.conf.example).
+DASHBOARD_SECURE_COOKIES = _bool("DASHBOARD_SECURE_COOKIES", False)
+# Where a password set from the panel is written. A file, not a row: the SQLite
+# database is backed up, copied to a laptop and attached to bug reports, and the
+# panel's credential should not travel with it. It lives under the mounted
+# volume so it survives a container replacement, and is written mode 600.
+DASHBOARD_CREDENTIALS_PATH = (
+    os.getenv("DASHBOARD_CREDENTIALS_PATH", "").strip()
+    or "/data/dashboard_credentials.json"
+)

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# This panel is private infrastructure: it must never be indexed, and it must
+     never be framed by another site. #}
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="same-origin">
+  <meta name="color-scheme" content="dark">
+  <title>{{ title }} · {{ copy.APP_TITLE }}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="/">
+      <img class="brand__mark" src="/static/logo.svg" alt="">
+      <span>
+        <span class="brand__name">{{ brand }}</span>
+        <span class="brand__tag">{{ copy.APP_TAGLINE }}</span>
+      </span>
+    </a>
+
+    <nav class="nav" aria-label="{{ copy.APP_TITLE }}">
+      {% for key, label, href in nav %}
+      <a class="nav__item" href="{{ href }}"
+         {% if key == nav_key %}aria-current="page"{% endif %}>
+        <span class="nav__icon" aria-hidden="true">{{ icons[key] }}</span>
+        <span>{{ label }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+
+    <div class="sidebar__foot">
+      {% if operator %}
+      <div class="who"><span class="who__dot" aria-hidden="true"></span>{{ operator }}</div>
+      {% endif %}
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn btn--sm btn--block" type="submit">{{ copy.NAV_LOGOUT }}</button>
+      </form>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <img class="brand__mark" src="/static/logo.svg" alt="" width="30" height="30">
+      <span class="topbar__title">{{ title }}</span>
+    </header>
+
+    <main class="content">
+      {% if flash.text %}
+      <div class="flash{% if flash.is_error %} flash--error{% endif %}" role="status">
+        <span class="flash__icon" aria-hidden="true">{{ '⚠️' if flash.is_error else '✅' }}</span>
+        <span>{{ flash.text|safe }}</span>
+      </div>
+      {% endif %}
+
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+      {{ copy.FOOTER_NOTE }}
+      · {{ brand }}
+      · <span class="mono">{{ server_time }}</span>
+    </footer>
+  </div>
+</div>
+</body>
+</html>

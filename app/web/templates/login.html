@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="same-origin">
+  <meta name="color-scheme" content="dark">
+  <title>{{ copy.LOGIN_TITLE }} · {{ copy.APP_TITLE }}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="login">
+  <div class="login__card">
+    <div class="login__brand">
+      <img class="login__mark" src="/static/logo.svg" alt="">
+      <div>
+        <div class="login__title">{{ brand }}</div>
+        <div class="login__intro">{{ copy.APP_TAGLINE }}</div>
+      </div>
+    </div>
+
+    <p class="login__intro">{{ copy.LOGIN_INTRO }}</p>
+
+    {% if error %}
+    <div class="flash flash--error" role="alert">
+      <span class="flash__icon" aria-hidden="true">⚠️</span>
+      <span>{{ error|safe }}</span>
+    </div>
+    {% elif flash_text %}
+    <div class="flash{{ ' flash--error' if flash_is_error else '' }}" role="status">
+      <span class="flash__icon" aria-hidden="true">{{ '⚠️' if flash_is_error else '✅' }}</span>
+      <span>{{ flash_text|safe }}</span>
+    </div>
+    {% elif not configured %}
+    {# No password is set, so there is no form below — say why, and say what to
+       do about it, rather than showing an empty card. #}
+    <div class="flash flash--error" role="status">
+      <span class="flash__icon" aria-hidden="true">⚠️</span>
+      <span>{{ copy.LOGIN_NOT_CONFIGURED|safe }}</span>
+    </div>
+    {% endif %}
+
+    {% if configured %}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{{ next_path }}">
+      <div class="field">
+        <label class="field__label" for="username">{{ copy.LOGIN_USERNAME }}</label>
+        <input class="input" id="username" name="username" type="text"
+               autocomplete="username" required autofocus>
+      </div>
+      <div class="field">
+        <label class="field__label" for="password">{{ copy.LOGIN_PASSWORD }}</label>
+        <input class="input" id="password" name="password" type="password"
+               autocomplete="current-password" required>
+      </div>
+      <button class="btn btn--primary btn--block" type="submit">{{ copy.LOGIN_SUBMIT }}</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# The Admin Control Center's own dependencies (app/web).
+#
+# This is **not** a second image. The dashboard runs from the same image as the
+# bot — the same base, the same system packages, the same bot requirements — and
+# this file exists separately so that adding a dashboard dependency does not
+# invalidate the bot's large requirements layer. See the Dockerfile: it installs
+# `requirements.txt` in one layer and this file in the next, so a change here
+# costs one small layer instead of a full re-install.
+#
+# aiohttp is the HTTP server for the panel. It is already present transitively
+# (py-tgcalls depends on it), but `app/web` imports it directly, and a direct
+# import deserves a direct declaration: a future py-tgcalls release could drop
+# it and the dashboard would then fail at import rather than at build time.
+aiohttp>=3.9,<4
+# Jinja2 renders the server-side templates. Pure Python, no build step.
+Jinja2>=3.1,<4
