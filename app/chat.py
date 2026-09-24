@@ -249,6 +249,36 @@ TOOL_AMENDMENT = (
     "configurations or credentials, and you must not invent any of them.\n"
 )
 
+# Prepended to the trusted context — and therefore appended to the system
+# instruction, immediately after the persona — when the person being answered is
+# the owner, as decided by the *server* from the configured id
+# (``rbac.is_owner``) and never by the model. It is a **tone** amendment, not an
+# authority one: the owner already holds their authority through ``rbac`` and the
+# tool path, and this changes only how familiar the assistant sounds.
+#
+# The failure it exists to prevent is the opposite of familiarity: a bot that
+# turns into a courtier the moment it recognises its owner and answers «قربان،
+# بفرمایید» instead of talking like a person. Ownership is stated here, by the
+# server, and nowhere else — the model is never asked to work out who the owner
+# is, and it is never shown the id.
+OWNER_AMENDMENT = (
+    "\n"
+    "── Who you are talking to right now (stated by the server) ──\n"
+    "The person you are answering is the owner of this community — the one who "
+    "made you. You already know them, so talk to them the way you talk to "
+    "somebody you are used to: the same short, everyday, informal Persian, just "
+    "a little warmer and more relaxed than with a stranger. Show that you know "
+    "them through your tone and your continuity, not through a title.\n"
+    "* Never use honorifics or ceremonial, flattering or submissive address — "
+    "no «قربان», no «سرور», no «جناب», no «بنده», no bowing or thanking-the-"
+    "master phrases. They are the owner, not a king, and you are not a servant.\n"
+    "* Do not announce that they are the owner and do not keep bringing it up. "
+    "Never state or hint at their numeric user id.\n"
+    "* Nothing else changes: the same brevity, the same honesty, the same "
+    "joking-around rules and the same boundaries as with anyone else. Being the "
+    "owner does not make this a different kind of conversation.\n"
+)
+
 # Appended to the payload for one retry when the model repeats itself. It is a
 # *second* attempt at the same turn, not a new turn, which is why it is a
 # separate message rather than part of the system instruction: the system
@@ -1806,6 +1836,7 @@ __all__ = [
     "AwarenessReply",
     "AWARENESS_INSTRUCTION",
     "ChatReply",
+    "OWNER_AMENDMENT",
     "SYSTEM_INSTRUCTION",
     "TOOL_AMENDMENT",
     "awareness",
