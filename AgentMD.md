@@ -3916,6 +3916,44 @@ full suite → **3658 passed, 0 failed, 0 skipped, 0 errors** (7 warnings, all a
 `google-genai` `DeprecationWarning`). No failure, so no fix was needed. These
 match the numbers already recorded above.
 
+**Production latency diagnosis (2026-09-24, read-only trace).** The owner
+reported that replies are noticeably slow. Traced from the live container's logs
+(`guardbot`, main-based `00c5d1d`, Up 20h — no code change, no restart). One
+real reply (user `6931339207`, chat `-1001299527312`, 16:35:42 → 16:36:30):
+`prepare_ms=0`, `gemini_ms=40408`, `send_ms=172`, `total_ms=40580` → **≈48.5 s
+end-to-end, and 40.4 s of it is the provider call**. Across **151** real chat
+replies: p50 **5.3 s**, p75 18.7 s, p90 44.3 s, p95 95 s, p99 135 s, max
+**143 s**; **15 % over 30 s, 8 % over 60 s** — the median is healthy, the tail
+is not. `prepare_ms` is 0 and `send_ms` ≤ 1.1 s, so neither context assembly nor
+the Telegram send is the cost.
+
+*Root cause, in order.* (1) **Provider degradation** — 503/504 on most models
+(266 `provider_error`: 183×503, 83×504 in ~20 min); the healthy path is a
+first-model answer in 9–12 s, now the walk burns 14–22 attempts. (2) **Free-tier
+quota** — 120 `rate_limited` = `generate_content_free_tier` on chat *and*
+awareness; the keys are free-tier projects and **quota is the binding
+constraint**. (3) **The walk is sequential** (`app/gemini_pool.py` `generate()`:
+`for account → for model → for attempt → await _call`, with `await
+asyncio.sleep(1.5)` between retries), up to 12 attempts per logical call and up
+to 2 logical calls per reply, each failure costing 0.3–2 s (503) or up to 25 s
+(a timeout). (4) **Awareness contention** — it runs in its own 15 s sweep, not
+inline with chat, but overruns it (**137 passes vs 139 skips**) and **shares a
+key with chat** (`iqnA` = fp `24b50725`). (5) **Intent adds a floor** — it burns
+its ~21.5 s budget (`2×10 + 1.5`) on the failing provider before falling back to
+the rules. (6) **A dead intent key** — `bxvA` = `GEMINI_API_KEY` (fp `7c707e1b`)
+= 401 `invalid_credential`, an attempt spent on every intent call.
+
+*What it is NOT.* Not a code regression: the running container is main-based
+`00c5d1d` and no code has landed on `main` since. Not the rate limiter or the
+circuit breaker — those **skip**, they do not sleep. Not the Telegram send or
+the update path. **The new chat key does not help**: the bottleneck is provider
+health + **per-project** free-tier quota, so another free-tier key adds one more
+exhausted quota, not a faster answer (9 chat accounts still fail over 14+ times).
+
+*Status.* **Diagnosis only — no fix applied** (owner's instruction), no probe
+run (still FROZEN), no token moved. This is a candidate for the owner to
+prioritise next; it is **not** a checkpoint NEXT STEP.
+
 **V — explicitly, as required.**
 * **NOT IMPLEMENTED** — no routing change, no model allocation, no config
   default changed, no new production call.
