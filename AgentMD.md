@@ -4460,6 +4460,64 @@ accounts=5` appear in the startup log.
 
 ---
 
+### 54.16 Checkpoint (2026-09-24, **COMMITTED & PUSHED**) — resume here (supersedes §54.15)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~19:20Z**. Branch **`main`**, HEAD
+**`2b1d760`** `= origin/main = dashmo3i/main` (verified by `git ls-remote`, not by
+push output). Working tree **clean**. The Phase One code and the rebalance are no
+longer uncommitted: the verified tree was committed in three logical slices and
+pushed to **both** remotes.
+
+**The commits.** Base `6a4810a` → `2b1d760`:
+* **`a46ee09`** `fix(pool):` the minimum-usable-account floor, the
+  cooling-vs-no-compatible split, the retry-backoff guard, the breakdown unit fix
+  and the `pool_account_save` identity fix (`app/gemini_pool.py`, `app/db.py`,
+  `tests/test_gemini_pool.py`).
+* **`2597db1`** `feat(chat):` the `ChatReply.timing` seam and the
+  `_answer_conversationally` stage decomposition (`app/chat.py`, `app/main.py`,
+  `tests/test_chat_latency.py`).
+* **`2b1d760`** `docs(agents):` the §53.3 allocation invariant and the §54.14 /
+  §54.15 checkpoints (`AgentMD.md`).
+
+Range `6a4810a..2b1d760` = **7 files, 827 insertions / 29 deletions** — exactly
+the tree that was deployed and probed. Each slice's staged diff was secret-scanned
+clean before its commit.
+
+**The deploy is unchanged and now backed by a commit.** Image
+**`guardbot-guardbot:latest` = `0a0e4636a624`**, container `guardbot` Up,
+`RestartCount=0`. The deployed files were verified against the committed tree by
+sha256 — `/srv/app/{gemini_pool,chat,main,db}.py` each **match**
+`git show HEAD:app/…` byte-for-byte. **§54.15 limitation (5) ("the deployed image
+is built from an uncommitted tree") is now RESOLVED**: the tree is committed as
+`2b1d760` and the running image matches it.
+
+**Unchanged / frozen.** V untouched; `--arm context` probe frozen; awareness daily
+allowance unchanged at 200/account; no credential rotated, moved or deleted; no
+destructive DB cleanup; no Phase Two. Runtime pools still `chat=7` / `awareness=5`
+/ `tts=7`.
+
+**Still open (owner's call).** (1) Stale `gemini_accounts` rows for the two moved
+keys under `workload=chat` (slots 8/9) — harmless, not loaded, deliberately not
+cleaned. (2) The two pre-existing credential collisions (`chat:5==awareness:2` fp
+`24b5072536f6`, `live_voice:1==search:1` fp `20ed38996022`). (3) Organic
+end-to-end chat latency is still unmeasured (no addressed message arrived; the
+self-cleaning probe is the post-deploy measurement). (4) Provider free-tier 429s /
+503-504 persist — no pool change creates quota.
+
+**NEXT STEP.** The owner's sequence is **Chat Personality restoration**, then the
+**broader integration test** — do **not** start either without the owner's word.
+Do not deploy, restart the production container, or change credentials without
+authorisation.
+
+**To resume after any context loss.** Re-read this section, then verify
+`git status` (**clean**), `git rev-parse HEAD` (**`2b1d760`**),
+`git ls-remote origin refs/heads/main` and `git ls-remote dashmo3i refs/heads/main`
+(both **`2b1d760`**), `docker ps` (image `0a0e4636a624`, Up, `RestartCount=0`), and
+that `[pool] chat: accounts=7` / `[pool] awareness: accounts=5` appear in the
+startup log.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or
