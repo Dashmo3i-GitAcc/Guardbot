@@ -3846,7 +3846,7 @@ genuinely different Google project), which this phase must not invent or move:
 **Provider degradation (external limitation).** The chat provider returns
 `503 UNAVAILABLE` for every chat model on every account (confirmed by a bare
 `google-genai` call outside this application). Every live probe is therefore
-**NOT VERIFIED — PROVIDER UNAVAILABLE**, never "failed" and never "healthy":
+**NOT VERIFIED / BLOCKED BY PROVIDER**, never "failed" and never "healthy":
 Y's `--arm context`, U's live probe, V's `--arm model`, the memory model seam,
 and Voice Live end-to-end. No fake health result was produced and no number was
 claimed from a run that did not complete.
@@ -3871,7 +3871,9 @@ changed the picture in two ways, and the live probe was re-attempted on it:
   --time-budget 90` was **re-attempted and is still NOT RUN**: 10 calls made,
   every one 503, the pool reported `usable=0/9`, the chat breaker opened. Both
   arms report `not_run: 14`, `answered_rate 0.0`, `scored_samples: 0` — the
-  honest NOT-RUN result, no number claimed. **PROVIDER UNAVAILABLE.**
+  honest NOT-RUN result, no number claimed. **NOT VERIFIED / BLOCKED BY
+  PROVIDER.** Do **not** spend another run on it while the provider is still
+  intermittently 503 — the owner has explicitly frozen this probe.
 
 **Tests.** Targeted (this increment's files, run in the project image):
 `tests/test_objects.py tests/test_requests.py tests/test_intent_eval.py
@@ -3894,8 +3896,9 @@ leave the branch unmerged; `main` at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709`
 is the production state and is an ancestor of HEAD.
 
 **State at checkpoint close.** The commit and the push are **done**: HEAD
-`50a45ee` on both remotes, working tree clean, `main` still `00c5d1d…`, full
-suite **3658 passed / 0 failed**. Nothing is pending except the live run below.
+`ac44f62` on both remotes, working tree clean, `main` still `00c5d1d…`, full
+suite **3658 passed / 0 failed**. Nothing is pending except the live run below,
+which the owner has **frozen** (do not spend another run on it).
 
 **NEXT STEP (do this first in the next session).**
 1. Read this section, `docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5/U
@@ -3906,14 +3909,16 @@ suite **3658 passed / 0 failed**. Nothing is pending except the live run below.
 3. The only outstanding work is a **live** run, and it needs a healthy provider:
    `python tools/eval_chat_quality.py --arm context --samples 2 --max-calls 60`
    (Y's probe). It was **re-attempted on 2026-09-24 and is still NOT RUN**
-   (503, `usable=0/9`); re-try it when the provider answers and record the
-   before/after. Also outstanding and **not to be fixed without instruction**:
-   the `intent` primary `GEMINI_API_KEY` (fp `7c707e1b`) is dead (401).
+   (503, `usable=0/9`) and is **NOT VERIFIED / BLOCKED BY PROVIDER**. The owner
+   has **frozen** it: do **not** re-run it, and do not repeat the same blocked
+   probe, until the owner lifts the freeze. Also outstanding and **not to be
+   fixed without instruction**: the `intent` primary `GEMINI_API_KEY`
+   (fp `7c707e1b`) is dead (401).
 4. Do **NOT** start V (its `--arm model` stays unrun until the owner authorises
    V), do **NOT** merge, do **NOT** deploy, do **NOT** raise the 200-request
    allowance, and do **NOT** reallocate tokens.
-5. If the provider is still 503, record it again as PROVIDER UNAVAILABLE and
-   stop — do not invent a result.
+5. Keep the probe recorded as **NOT VERIFIED / BLOCKED BY PROVIDER** — never
+   invent a result from a run that did not complete.
 
 **To resume after any context loss.** Re-read this section and
 `docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5, §7), then verify `git status`,
