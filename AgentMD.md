@@ -1567,6 +1567,28 @@ reference file is stale and this list is the one to fix first.
   call and **no** schema: the reading is a pure function of the persisted window,
   the anchor and `rbac`, so it never needs to be stored. It is context — the
   answer goes out exactly as before when it cannot be built.
+* Long-term user memory (`app/memory.py`) is **explicit-only**: a clause is
+  stored **only** when a person asks to be remembered, matched by a deterministic
+  trigger over the message they typed. The server **never infers** a fact from
+  ordinary conversation — an ordinary «من ادمینم» stores nothing — because
+  extracting one would need a model call the evidence rule forbids and because a
+  guessed fact can be wrong about a real person.
+* A memory **grants nothing**. It is a sentence for the model to read; no
+  authority module imports `memory`, and nothing gates a reply, an action or a
+  permission on it. Authority stays in `rbac`, resolved from the Telegram id.
+* A memory is keyed by **`(chat_id, user_id)`**, so one person's memory is never
+  another's, one group's is never another's, and a private-chat memory can never
+  render in a group. Isolation is by construction — there is no read that does
+  not name the room.
+* The store is **bounded three ways** — `NEXUS_MEMORY_MAX_PER_USER`,
+  `NEXUS_MEMORY_RETENTION` and `NEXUS_MEMORY_MAX` — applied on the observation
+  path (no scheduler). The per-person delete is the indexed one and runs on the
+  write; the whole-table bounds run every `PRUNE_EVERY` recordings. The value is
+  clipped to `NEXUS_MEMORY_VALUE_CHARS`, and the rendered block to
+  `NEXUS_MEMORY_CHARS` including its own framing line.
+* The memory block is rendered as **the person's own words**, never as a fact the
+  server asserts, and only for the person the batch is **about**
+  (`ctx.anchor_id()`), never for whoever happened to speak.
 * `awareness.record` runs on **every** completed pass; `wants_to_speak` is
   `respond` **or** a write that actually ran.
 * `parse_decision` returning `None` means **say nothing** — never send the raw
@@ -2797,3 +2819,77 @@ point), then verify: `git status` (clean), `git rev-parse HEAD` (`ec3b29e…` or
 later), `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
 (`ec3b29e…` or later). Then begin W.
+
+### 54.6 Checkpoint (2026-09-24, after W) — resume here (supersedes §54.5)
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`, HEAD
+`ddc79aadac92d36752fc85df9b1b056563d3f2bf` (increment W; this checkpoint is the
+docs commit that sits on top of it), pushed to both remotes (`origin` =
+mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc). Working tree **clean**. `main`
+and the annotated tag `release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**.
+Suite **3314 passed, 0 failed**. Corpus **141 cases, version 18**. **Not merged,
+not deployed.**
+
+**Increment W — "what the server may remember about a person" (DONE).**
+Long-term user memory: a bounded set of clauses a person explicitly asked to be
+remembered, keyed by `(chat_id, user_id)`.
+
+* **The branch's first genuinely necessary table.** The roadmap's stop rule was
+  applied first: `people` (identity metadata + a count), `identities` (an opaque
+  uuid), `awareness_state` (the room) and `chat_messages` (one person's
+  conversation) were all inspected, and none holds a durable fact about a person.
+  So `user_memory` was added **additively as a new table** — no existing table
+  altered, no existing row touched, rollback is `DROP TABLE user_memory`.
+* **The cap is 30, chosen by measurement.** 202 bytes/row means 3000 members × 30
+  items is **17.4 MB** against a 200 MB budget, so disk is not the binding
+  constraint; the ~300-character block that can surface ~4 clauses is. 30 leaves a
+  ~7× recall margin while keeping the table a fact set rather than a log. Three
+  bounds: `NEXUS_MEMORY_MAX_PER_USER`, `NEXUS_MEMORY_RETENTION`,
+  `NEXUS_MEMORY_MAX`, applied on the observation path (no scheduler); the indexed
+  per-person delete runs on the write, the whole-table bounds every `PRUNE_EVERY`.
+* **Writes are explicit-only.** A deterministic trigger over the text the person
+  typed; no model call, nothing inferred. «من ادمینم» stores nothing. A memory
+  **grants nothing** — no authority module imports `app/memory.py`.
+* **Isolation is by construction.** The key names the room, so one person's memory
+  is never another's, one group's is never another's, and a private memory can
+  never render in a group.
+* **Files.** New: `app/memory.py`, `tests/test_memory.py`, `tools/eval_memory.py`.
+  Changed: `app/db.py` (the table + helpers), `app/config.py` (six knobs),
+  `app/awareness_context.py` (one `Source`), `app/main.py` (the write),
+  `tests/conftest.py`, `tests/test_intent_eval.py`, `tools/eval_intent.py`.
+* **Measured.** Extraction precision **1.0** / recall **1.0**, **0** false
+  positives; write **0.22 ms p50**; retrieval **0.005 ms p50**; **0** Gemini
+  calls. The block renders on **141/141** corpus cases; the assembled context
+  moved mean 954 → **1046** / max 1498 → **1489**, the addressed reading mean 517
+  → **615** / max 1146 → **1244** — all under the 1500 ceiling.
+* **Deliberately NOT built** (recorded, not half-done): semantic extraction from
+  ordinary conversation (needs a model call or an awareness-prompt change), and
+  memory for a referenced person other than the anchor.
+
+**Exact next step.** INCREMENT **X** — Stateful Long-term Nexus (roadmap §5/X):
+bounded conversational STATE (active topic/referent, pending question/action,
+continuity), explicitly distinct from Memory, scoped by `(chat_id, user_id)` or
+`(chat_id, task)`, never a global state; fresh explicit input wins over stale
+state; ambiguity stays ambiguous. It reuses W's bounded-store pattern. **Do NOT
+start X without the owner's explicit go-ahead.** Do not skip to Y, U or V.
+
+**Note on the mission brief.** The brief's Phase U tail arrived truncated
+("spend reques…"); the U/V requirements must be re-stated in full before those
+phases are attempted. W, X and Y were specified completely.
+
+**Rollback.** Every increment is independently revertable: `git revert <sha>` on
+this branch. W is `ddc79aa` (code) plus this docs commit; reverting W is a code
+revert and a `DROP TABLE user_memory` — the table is new, so nothing else moves.
+The whole evolution reverts by leaving the branch unmerged — `main` at
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state and is an
+**ancestor** of the branch. The only DB changes on the branch are the
+foundation's `151b1e1` (two additive `awareness_state` columns) and W's new
+table.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§5 for W/X/Y/U/V, §7 for the continuation
+point), then verify: `git status` (clean), `git rev-parse HEAD` (this checkpoint's
+commit or later), `git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`. Then
+begin X.

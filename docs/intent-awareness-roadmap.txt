@@ -377,6 +377,46 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
               a synthetic case that could not demonstrate an invariant was
               deliberately not added. Narrative: reference §62.
 
+1.2e INCREMENT W (after the T checkpoint commit ec3b29e)
+
+  W  (this run)  memory + db + main + awareness_context — what the server may
+              remember about a person. FIRST lettered increment to add a TABLE.
+              THE STOP RULE, APPLIED FIRST: people (identity metadata + a count),
+              identities (an opaque uuid), awareness_state (the room) and
+              chat_messages (one person's conversation) were inspected and NONE
+              holds a durable fact about a person, so a new table is genuinely
+              necessary — unlike T's, which turned out derivable.
+              THE BOUNDED MODEL, FROM A BENCHMARK: 202 bytes/row, so 3000 members
+              x 30 items is 17.4 MB against the 200 MB budget — disk is NOT the
+              binding constraint. What is rationed is attention: the ~300-char
+              block surfaces ~4 clauses, so the cap is 30 (inside the brief's
+              20–50, chosen for a ~7x recall margin over what can be read), with
+              NEXUS_MEMORY_MAX_PER_USER / _RETENTION / _MAX bounding it three
+              ways. The indexed per-person delete runs on the write; the
+              whole-table bounds every PRUNE_EVERY recordings.
+              EXPLICIT-ONLY: a deterministic trigger over the text the person
+              typed, no model call, nothing inferred. «من ادمینم» stores nothing.
+              A memory GRANTS NOTHING — no authority module imports app/memory.py.
+              ISOLATION BY CONSTRUCTION: the key is (chat_id, user_id), so a
+              person's memory is never another's, a group's never another's, and a
+              private memory can never render in a group.
+              THE BLOCK is framed as the person's own words, follows the batch's
+              ANCHOR (not whoever spoke), and is one more Source — tier 0, beside
+              remembered_people, because a query that returns nothing spends no
+              tokens. It is the one DB-backed source the addressed conversation
+              does NOT skip, because it is about the person the turn is for.
+              MEASURED (tools/eval_memory.py): extraction precision 1.0 / recall
+              1.0 over 12 positive + 13 negative, 0 false positives; write 0.22 ms
+              p50 / 0.62 p95; retrieval 0.005 ms p50; 0 Gemini/provider calls.
+              CORPUS: user_memory renders on 141/141 (the harness seeds one memory
+              per anchor, so the block is scored on a real render, not excluded);
+              assembled context mean 954 -> 1046 / max 1498 -> 1489; addressed
+              reading mean 517 -> 615 / max 1146 -> 1244 — all under the ceiling.
+              New: app/memory.py, tests/test_memory.py, tools/eval_memory.py.
+              Changed: app/db.py, app/config.py, app/awareness_context.py,
+              app/main.py, tests/conftest.py, tests/test_intent_eval.py,
+              tools/eval_intent.py. Suite 3266 -> 3314. Narrative: reference §63.
+
 1.3 ARCHITECTURAL / SECURITY BOUNDARIES PRESERVED (verified in AgentMD §53.7)
 --------------------------------------------------------------------------------
 * Readers are EVIDENCE, NEVER A DECISION. Nothing branches on any reader; none
@@ -394,6 +434,11 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
   T is the roadmap's DB-sensitive stage and it changed NO schema: the reading it
   shares is derivable from `group_messages` (already persisted) plus the anchor
   plus `rbac`, so nothing needed a column. See §1.2d.
+  **W is the first lettered increment to add a table.** `user_memory` is a NEW
+  table — additive, no existing table altered, no existing row touched — so its
+  rollback is `DROP TABLE user_memory` and a row from before it reads as absent.
+  It is not a `CREATE TABLE` change to an existing table, which is the shape the
+  `151b1e1` precedent forbids. See §5/W.
 * RUNTIME-PATH CHANGE: A–S changed NONE. Verified per file against main:
   app/main.py, app/chat.py, app/awareness.py, app/db.py and app/config.py are
   UNCHANGED by every lettered increment A–S. The only runtime-adjacent file A–S
@@ -405,6 +450,12 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
   app/awareness_context.py (`blocks` gained a `skip` argument and
   `CONVERSATION_SKIP`) and app/awareness.py (`room_block` gained a `messages`
   argument). The change is bounded, fail-soft and adds no model call; see §1.2d.
+  **W also changes the runtime path**: app/main.py (the observation path records
+  an explicit memory beside `people.remember`), a new app/memory.py, and one
+  `Source` in app/awareness_context.py. The write is a regex over text the
+  handler already holds and fires only on an explicit request, so an ordinary
+  message costs one failed match and no write; the read is one indexed lookup
+  that returns nothing for most people. Zero model calls; see §5/W.
 * Zero Gemini calls added by any increment.
 * Context is bounded: hard ceiling NEXUS_AWARENESS_CONTEXT_CHARS = 1500, each
   source has its own budget, `_clip` keeps whole lines from the front so the
@@ -625,12 +676,17 @@ the repository actually shows:
       be mislabelled.
 
 4.3 ARCHITECTURE DECISIONS THAT STILL NEED EVIDENCE
-    * (c) Whether the readers' output should be RECORDED with the pass, and if
-      so in what shape and with what retention. This is a DB change, so it needs
-      a forward/backward story and a rollback procedure — the first DB change
-      since the foundation's `151b1e1`, and the first in the lettered
-      increments. The `151b1e1` pattern is the precedent: additive columns via
-      `_ensure_column`, never a `CREATE TABLE` change.
+    * (c) RESOLVED — TWICE, AND BOTH ANSWERS WERE "NO" TO THE QUESTION AS ASKED.
+      T asked whether the readers' output should be RECORDED with the pass and
+      answered no: the reading is a pure function of `group_messages`, the anchor
+      and `rbac`, so nothing needed to persist (§1.2d). W then asked a different
+      DB question — whether a *durable fact about a person* could live in the
+      existing storage — and the answer there was no, so the branch's first
+      lettered table (`user_memory`) was added. The two are not in tension: T's
+      subject was derivable, W's was not. The precedent for the new table is the
+      `151b1e1` rule — additive, never destructive — which for a new table means
+      `CREATE TABLE IF NOT EXISTS` and a `DROP TABLE` rollback, never a rewrite of
+      an existing table.
     * (d) The seam for content-aware scheduling that does not violate
       "`awareness.due` cannot see messages".
     * (e) Whether any model-routing change is measurable at all with the
@@ -766,7 +822,7 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
   to tell whether the answers got worse. So the order is W → X → Y → U → V, and
   each stage's evidence is a prerequisite for the next.
 
-  INCREMENT W — "what the server may remember about a person"
+  INCREMENT W — "what the server may remember about a person"  [DONE — see RESULT]
   ------------------------------------------------------------------------------
   Purpose:   A bounded, structured LONG-TERM USER MEMORY — durable facts and
              preferences about a person, so Nexus knows something about a
@@ -799,6 +855,108 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              input is added to the conversation).
   Stop rule: if the existing storage architecture already has a suitable bounded
              mechanism, USE IT and do not add a table; document why.
+
+  DESIGN (measured on this host before a line of W was written)
+  ------------------------------------------------------------------------------
+  THE EXISTING ARCHITECTURE CANNOT CARRY IT. Inspected first, as the stop rule
+  requires: ``people`` is per-room identity metadata and a message COUNT — it has
+  no column for a fact and its docstring makes that a refusal; ``identities`` is
+  an opaque per-user uuid; ``awareness_state`` is a one-row-per-chat derived
+  cache of the room, not of a person; ``chat_messages`` is the assistant's own
+  conversation with one person. None of them stores a durable fact about a
+  person. So a new table is genuinely necessary, and it is the first genuinely
+  necessary one on the branch (T's turned out to be derivable).
+
+  THE BOUNDED MODEL, FROM THE BENCHMARK (not from the brief's 20–50). Two
+  synthetic runs at the owner's scale (3000 members, 120-character values, WAL):
+    * storage: 208 bytes/row; 30 items/user x 3000 users = 17.9 MB, 50 = 29.8 MB,
+      100 = 59.5 MB — every one of them an order of magnitude under the 200 MB
+      ceiling, so DISK IS NOT THE BINDING CONSTRAINT and must not choose the cap.
+    * write: one upsert = 0.50 ms p50 / 0.70 ms p95 (commit-dominated);
+    * per-user prune-to-cap = 0.021 ms p50; retrieval of one person's items =
+      0.033 ms p50 / 0.13 ms p95.
+    * a whole-table ``NOT IN`` prune over 90k rows is the one expensive statement
+      (seconds), so the global cap is enforced rarely and the hot-path prune is
+      the indexed per-user one.
+  What the cap actually bounds is therefore the *quality property*, not cost: a
+  memory is only useful if the relevant item can be surfaced, and retrieval into
+  a ~300-character block can surface at most ~4 items. So the cap is set with
+  margin over what can ever be read: ``NEXUS_MEMORY_MAX_PER_USER = 30`` (inside
+  the brief's range, chosen by measurement rather than copied), which gives a
+  ~7x recall margin over the block and keeps the table a bounded FACT SET rather
+  than a log. ``NEXUS_MEMORY_MAX = 50000`` rows globally and
+  ``NEXUS_MEMORY_RETENTION = 180 days``, both applied on the observation path
+  (this process has no scheduler) every ``PRUNE_EVERY`` recordings, exactly as
+  ``people`` does.
+
+  SCHEMA (additive, new table — the 151b1e1 precedent is "additive, never
+  destructive"; a new table needs no ``_ensure_column`` and touches no existing
+  row):
+      user_memory(chat_id, user_id, key, category, value, source, confidence,
+                  created_at, updated_at, used_at)  PRIMARY KEY (chat_id,user_id,key)
+      INDEX (chat_id, user_id, updated_at)   -- retrieval and the per-user prune
+      INDEX (updated_at)                     -- the age prune
+  Rollback: ``DROP TABLE user_memory``. No existing table is altered, no row
+  outside it is touched, and code from before the change never reads it.
+
+  EXTRACTION IS EXPLICIT-ONLY, AND COSTS NO CALL. The evidence rule forbids a
+  model call on the ordinary path, and deterministic free-text-to-fact parsing is
+  exactly the kind of guessing this codebase refuses. So W v1 writes ONLY from an
+  explicit, user-authored request to be remembered, matched by a narrow trigger
+  detector in the same "evidence, never authority" shape as ``requests``/``objects``
+  (the clause the person typed is stored, bounded and verbatim, and never a fact
+  the server inferred). Semantic extraction from ordinary conversation — which
+  would need a model call or a change to the awareness prompt — is deliberately
+  NOT built; it is recorded as a later, separately-evidenced increment.
+
+  RETRIEVAL IS RELEVANCE-BASED AND KEYED ON THE SUBJECT. The block renders the
+  memories of the person the batch is ABOUT (``ctx.anchor_id()``), never of the
+  speaker merely because they spoke, and never the room's. ``(chat_id, user_id)``
+  is the key, so a group cannot inherit another group's memory and a private-chat
+  memory cannot render in a group — isolation is by construction, not by a check.
+  It is one more ``Source`` in ``awareness_context.SOURCES``, bounded to
+  ``NEXUS_MEMORY_ITEMS`` items and ``NEXUS_MEMORY_CHARS`` characters, and it is a
+  READER like every other: it reports what was recorded, it grants nothing, and
+  it is never an input to a permission decision.
+
+  RESULT
+  ------------------------------------------------------------------------------
+  DONE, and it is the branch's first genuinely necessary table. Built as one
+  additive new table (``user_memory``) with two indexes, a new reader/writer
+  module (``app/memory.py``) in the "evidence, never authority" shape, one new
+  ``Source`` in the registry, and the write hooked into the observation path
+  beside ``people.remember``. NO existing table was altered, so rollback is
+  ``DROP TABLE user_memory``.
+  Measured (``tools/eval_memory.py``, deterministic and offline):
+    * extraction — 12 positives / 13 negatives, precision **1.0**, recall
+      **1.0**, **0** false positives. The negatives include the two that matter:
+      an ordinary «من ادمینم» and a request to remember an ACTION.
+    * storage — **202 bytes/row** through the real write path. The pre-build
+      sizing predicted 208 / 17.9 MB; the build measured 202 and the model held.
+      **3000 members x 30 items = 17.4 MB**, an order of magnitude under the
+      200 MB budget. Disk never chose the cap; the ~4 items the block can surface
+      did. (The benchmark's own table stopped at 50000 rows — the global bound
+      firing on itself, which is the bound working rather than a measurement
+      error.)
+    * write — the upsert plus the indexed per-person prune, **0.22 ms p50 /
+      0.62 ms p95**.
+    * retrieval — the context block's read, **0.005 ms p50 / 0.02 ms p95**.
+    * the block — bounded to ``NEXUS_MEMORY_CHARS`` including its framing line;
+      mean 36 / max 145 characters over the sample.
+    * Gemini/provider calls — **0**. ``memory`` imports no model client, and the
+      write is a regex over text the handler already holds.
+  Corpus (``tools/eval_intent.py`` over 141 cases): ``user_memory`` renders on
+  **141/141** — the harness now seeds one memory per anchor, so the block is
+  scored on a real render rather than excluded as a block the model never sees.
+  The assembled context moved mean 954 → **1046** / max 1498 → **1489** (still
+  under the 1500 ceiling); the addressed reading moved mean 517 → **615** / max
+  1146 → **1244**. Both are bounded by the existing machinery, not by a new one.
+  Tests: 3266 → **3314** (+47 in ``tests/test_memory.py``, +1 in
+  ``tests/test_intent_eval.py``), and the full suite is green.
+  What it deliberately does NOT do: semantic extraction from ordinary
+  conversation (it would need a model call or an awareness-prompt change), and
+  memory for a referenced person other than the anchor. Both are recorded as
+  later, separately-evidenced increments rather than half-built here.
 
   INCREMENT X — "what is happening right now"
   ------------------------------------------------------------------------------
@@ -951,35 +1109,34 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     5904791459b699a5b9bc4ee1a773e21caa5f70a7 (increment T; S was e936aef,
-          checkpointed at 896d260). Docs commits sit on top — a commit that names
-          its own count would be wrong the moment it lands.
+HEAD:     ddc79aadac92d36752fc85df9b1b056563d3f2bf (increment W; T was 5904791,
+          S e936aef). Docs commits sit on top — a commit that names its own count
+          would be wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3266 passed, 0 failed
+Suite:    3314 passed, 0 failed
 Corpus:   141 cases, version 18
 Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
           addressed path appends the reading), app/awareness_context.py (`skip` +
           CONVERSATION_SKIP) and app/awareness.py (`room_block` gained
-          `messages`). NO DB change anywhere in A–T; the only DB change on the
-          branch is the foundation's 151b1e1 (two additive columns).
-Next:     INCREMENT W — "what the server may remember about a person"
-          (long-term User Memory). The remaining order is W → X → Y → U → V:
-          W (bounded structured memory), X (bounded conversational state),
-          Y (chat context intelligence), U (adaptive scheduling), V (model
-          routing, only if Y's quality measurement justifies it). U and V come
-          last because U spends the rationed request budget and V needs an answer
-          -quality measurement that does not exist until Y. See §5 for the full
-          scoping and the dependency rationale.
-          FIRST for W: establish the bounded model from the real architecture
-          (items/user, categories, retention, storage growth at ~3000 members /
-          ≤200 MB) and decide whether a new additive table is genuinely needed.
-          Do NOT start W without the owner's explicit go-ahead. Do NOT skip to
-          U or V.
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.4 (the checkpoints).
-                 docs/reference/nexus-awareness.md §52–§62 (the narrative).
+          `messages`). **W adds a runtime write and a source**: app/main.py (the
+          observation path records an explicit memory), app/memory.py (new),
+          app/awareness_context.py (one `Source`). DB changes on the branch: the
+          foundation's 151b1e1 (two additive columns) and **W's new
+          `user_memory` table** — additive, new-table, rollback `DROP TABLE`.
+Next:     INCREMENT X — "what is happening right now" (stateful long-term Nexus,
+          roadmap §5/X): bounded conversational STATE, explicitly distinct from
+          Memory, scoped by (chat_id, user_id) or (chat_id, task), never a global
+          state. It reuses W's bounded-store pattern. The remaining order is
+          X → Y → U → V; U and V come last because U spends the rationed request
+          budget and V needs an answer-quality measurement that does not exist
+          until Y. See §5 for the full scoping and the dependency rationale.
+          W is DONE (see §5/W RESULT). Do NOT start X without the owner's
+          explicit go-ahead. Do NOT skip to Y, U or V.
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.6 (the checkpoints).
+                 docs/reference/nexus-awareness.md §52–§63 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1–§54.4 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.6 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

@@ -34,6 +34,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [60. The room's replies converged — on one member](#s60)
 - [61. Two admins and the tie the resolver refuses to break](#s61)
 - [62. The same room, read twice — once with a reading and once without](#s62)
+- [63. What the server may remember about a person](#s63)
 
 ---
 
@@ -4045,3 +4046,115 @@ benchmark cannot score a model's answer, so what is measured here is that the
 reading is *delivered* and *bounded*, not that the answers got better. Whether
 they did is a question for a live probe, and it is recorded as open rather than
 claimed.
+
+<a id="s63"></a>
+
+## 63. What the server may remember about a person
+
+### 63.1 The gap the roadmap named
+
+Every layer built so far answers a question about *now*: Intent reads one message,
+Awareness reads the room, the window holds an hour of conversation and is thrown
+away. None of them answers "what durable thing do I know about this person". A
+member who told the room they prefer to be addressed a certain way, or that they
+moderate another group, is a stranger again the next hour.
+
+W is the layer that holds that. It is deliberately the smallest useful version of
+it: a bounded set of clauses, keyed by `(chat_id, user_id)`, that a person
+**explicitly asked to be remembered**.
+
+### 63.2 The existing storage cannot carry it
+
+The roadmap's stop rule says to check first, and the check was done before any
+code:
+
+* `people` is per-room identity metadata — a name, a username, a message
+  **count** — and its docstring makes "no column for a message body" a refusal;
+* `identities` is an opaque per-user uuid;
+* `awareness_state` is a one-row-per-chat cache of the **room**;
+* `chat_messages` is the assistant's own conversation with one person.
+
+None holds a durable fact about a person. So this is the branch's first genuinely
+necessary table — T's turned out to be derivable, W's did not.
+
+### 63.3 The bounded model, chosen by measurement
+
+The brief suggested "20–50 items per user". The roadmap said to benchmark rather
+than copy, and the benchmark changed the reasoning:
+
+* **storage is not the binding constraint.** 202 bytes/row means 3000 members × 30
+  items is **17.4 MB** against a 200 MB budget. Even 100 items each is ~60 MB.
+* **what is actually rationed is attention.** The retrieval block is ~300
+  characters and can surface about four clauses. Storing more than that buys
+  nothing the model will ever read.
+
+So the cap is **30** — inside the brief's range, but chosen because it leaves a
+~7× margin over what can be read while keeping the table a *fact set* rather than
+a log. `NEXUS_MEMORY_MAX_PER_USER`, `NEXUS_MEMORY_RETENTION` and
+`NEXUS_MEMORY_MAX` bound it three ways; the indexed per-person delete runs on the
+write (0.22 ms) and the whole-table bounds run every `PRUNE_EVERY` recordings.
+
+### 63.4 Explicit-only, and why that is the whole safety story
+
+The rule that shapes W is a refusal: **a memory is written only when a person asks
+for it**, matched by a deterministic trigger over the text they typed
+(«یادت باشه …», "remember that …"). The clause is stored verbatim and bounded.
+
+Nothing is inferred from ordinary conversation. Two reasons, and the second is the
+important one:
+
+1. Inferring a durable fact from a passing sentence would need a model call, and
+   the evidence rule forbids one on the ordinary path;
+2. a *guessed* fact can be **wrong about a real person**, and being wrong about a
+   real person is the failure this whole project is built to avoid.
+
+The negative corpus makes that explicit: «من ادمینم» — an ordinary claim of
+authority — stores nothing. The most dangerous thing a memory layer could do is
+let a sentence become a permission, so the detector is built so the sentence never
+becomes anything at all.
+
+A memory **grants nothing**. It is a sentence for the model to read, framed as the
+person's own words rather than as a fact the server asserts, and no authority
+module imports `app/memory.py`.
+
+### 63.5 Isolation is by construction
+
+The key is `(chat_id, user_id)`. There is no read that does not name the room, so:
+
+* one person's memory is never another's;
+* one group's memory is never another's;
+* a private-chat memory can never render in a group.
+
+That is a property of the key rather than of a check, which is the point — a check
+can be forgotten, a key cannot.
+
+### 63.6 The numbers
+
+* Extraction: 12 positive / 13 negative, precision **1.0**, recall **1.0**, **0**
+  false positives.
+* Storage: 202 bytes/row; **17.4 MB** projected at 3000 members × 30 items.
+* Write: **0.22 ms p50 / 0.62 ms p95** per remembered clause.
+* Retrieval: **0.005 ms p50** — one indexed read that returns nothing for most
+  people.
+* Corpus: `user_memory` renders on **141/141** cases (the harness seeds one memory
+  per anchor, so the block is scored on a real render). The assembled context
+  moved mean 954 → **1046** / max 1498 → **1489**; the addressed reading moved
+  mean 517 → **615** / max 1146 → **1244**. Both stay under the 1500 ceiling.
+* Gemini/provider calls: **0**.
+* Suite: 3266 → **3314 passed, 0 failed**.
+
+### 63.7 What it leaves
+
+Two things are deliberately not built, and both are recorded rather than
+half-done:
+
+* **semantic extraction** from ordinary conversation — it needs a model call or a
+  change to the awareness prompt, either of which is a separate increment with its
+  own evidence;
+* **memory for a referenced person other than the anchor** — the block follows
+  `ctx.anchor_id()`, so a batch that is *about* somebody other than its anchor
+  does not yet surface that person's memory.
+
+The quality effect is a prompt-content change the deterministic benchmark cannot
+score. What is measured here is that the block is *delivered*, *bounded* and
+*isolated*; whether answers got better is a question for a live probe.
