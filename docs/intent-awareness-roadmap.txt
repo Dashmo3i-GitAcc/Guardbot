@@ -10,9 +10,9 @@ Rollback:   main == release-base/nexus-intel ==
 Remotes:    origin (mo3iiibest77-hub) and dashmo3i (Dashmo3i-GitAcc), both at HEAD
 Merge/deploy status: NOT merged to main, NOT deployed. Awaiting the owner's
             explicit go-ahead.
-Suite:      3240 passed, 0 failed  (.venv-test/bin/python -m pytest -q, ~2m10s)
-Benchmark:  tools/eval_intent.py over tools/eval_cases.json, 137 cases (v17),
-            116 report keys, 96 per-case detail fields. Floors asserted in
+Suite:      3251 passed, 0 failed  (.venv-test/bin/python -m pytest -q, ~2m20s)
+Benchmark:  tools/eval_intent.py over tools/eval_cases.json, 141 cases (v18),
+            122 report keys, 101 per-case detail fields. Floors asserted in
             tests/test_intent_eval.py.
 
 This file is written so another coding agent can continue without chat history.
@@ -278,6 +278,53 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
               0 Gemini calls, no DB change, no source/budget/runtime-path change;
               only production file touched: app/room_state.py. Suite 3240 -> 3245.
 
+1.2c INCREMENT S (after the R checkpoint commit 3b51fdd)
+
+  S  (this run)  referents — the role-two-admins tie (thread 4.1). RESOLVED WITH
+              NO PRODUCTION CHANGE, on evidence. The invariant: a role signal
+              must NEVER run, replace or override the anaphoric/conversational
+              convergence, and must never manufacture certainty from the fact
+              that two people share a role.
+              BASELINE FIRST. Traced the runtime path: the role signal in
+              referents.resolve() runs only for KIND_ROLE, skips the anchor's own
+              speaker, and is scoped by _acts_on_a_thing; the anaphoric
+              convergence (_about_focus) runs only when expression.anaphoric()
+              (far demonstrative / object clitic) and needs >= 2 replies all
+              aimed at one person. So the two mechanisms are already disjoint:
+              «ادمینه» never reaches _about_focus. role-two-admins reads
+              ambiguous: true by design (two tied admins at 0.75; recency only
+              orders the list, it does not settle it). Adding room convergence
+              does not settle a role word; an anaphor on the same room IS settled
+              by convergence (candidate 11 at 1.0). The role candidate never
+              carries the focus reason.
+              DECISION: the behaviour is already correct — no production change.
+              Per the increment's own stop rule and the owner's "do not invent
+              work", app/referents.py is UNCHANGED.
+              The corpus pins it: 4 new cases, v17 -> v18, 137 -> 141:
+                role-two-admins-converge-one   two admins, room converged on one
+                                               -> ambiguous, no referent.
+                role-admin-vs-member-converge  room converged on a MEMBER while
+                                               the word names an admin -> ask.
+                role-two-admins-recency        one admin just spoke -> ask.
+                role-anaphoric-beats-admins    «همون کاربر» with two admins ->
+                                               referent 11, settled by the
+                                               anaphor, role holders excluded.
+              The harness gains two SHOULD-BE-ZERO metrics —
+              role_two_admin_confident_cases (0) and role_focus_used_cases (0)
+              — a report line, and a failures clause. Both checks read the
+              EVIDENCE (the candidate's why list), not the final verdict, so a
+              right-looking answer by the wrong mechanism still fails. Non-
+              vacuity: dropping CONFIDENT_MIN AND MARGIN together makes the tied
+              admins read confident (the metric rises); removing the anaphoric
+              gate lets a role tie run convergence (the metric rises). Measured:
+              role_cases 7, role_two_admin_cases 3, role_two_admin_confident 0,
+              role_focus_used 0; top-1 / ambiguity precision / ambiguity recall
+              1.0; wrong_confident 0; act_accuracy 1.0; edges_exact 141/141.
+              Context chars mean 940.3 -> 953.8, max 1498 (ceiling 1500).
+              0 Gemini calls, no DB change, no runtime-path change. Tests: 6 new
+              (2 test_referents.py, 4 test_intent_eval.py incl. 2 non-vacuity).
+              Suite 3245 -> 3251. Only production file touched: NONE.
+
 1.3 ARCHITECTURAL / SECURITY BOUNDARIES PRESERVED (verified in AgentMD §53.7)
 --------------------------------------------------------------------------------
 * Readers are EVIDENCE, NEVER A DECISION. Nothing branches on any reader; none
@@ -474,7 +521,7 @@ the repository actually shows:
     model's judgement, which does not exist.
 
 (f) EVALUATION WORK NOT YET DONE (item 14)
-    - The corpus is 137 hand-labelled cases. `context_sources` shows
+    - The corpus is 141 hand-labelled cases. `context_sources` shows
       `remembered_people` and `admin_activity` render 0 times — by design
       (DB-backed, excluded by name in `_CONTEXT_DB_BACKED`), but they have no
       end-to-end coverage at all.
@@ -493,25 +540,27 @@ the repository actually shows:
 4. OPEN QUESTIONS / THREADS
 --------------------------------------------------------------------------------
 
-4.1 THE role-two-admins TIE-BREAK THREAD  (carried since P, still open)
+4.1 THE role-two-admins TIE-BREAK THREAD  (RESOLVED in S — see §1.2c)
     Corpus case `role-two-admins` («ادمینه رو محدود کن» with two admins in the
     room) reads `ambiguous: true` BY DESIGN — the resolver refuses to pick
-    between two people who genuinely hold the role. Open question: should the
-    corpus carry a case where the room's REPLY CONVERGENCE should legitimately
-    break that tie? `_about_focus` fires only on a unanimous, repeated signal
-    (>= 2 replies, all aimed at one person) and is scoped to ANAPHORIC
-    expressions (far demonstrative or the object clitic); «ادمینه» is a ROLE
-    expression, so `_about_focus` does not run for it. Deciding this needs
-    evidence, not an opinion: either the corpus gains the case and the resolver
-    is changed to let convergence break a role tie, or the case is left
-    ambiguous and the reason is recorded. NO INCREMENT HAS STARTED THIS.
+    between two people who genuinely hold the role. The question was whether the
+    room's REPLY CONVERGENCE should be able to break that tie. RESOLVED: it must
+    NOT. `_about_focus` fires only on a unanimous, repeated signal (>= 2 replies,
+    all aimed at one person) and is scoped to ANAPHORIC expressions (far
+    demonstrative or the object clitic); «ادمینه» is a ROLE expression, so
+    `_about_focus` does not run for it — and that disjointness is the invariant,
+    not an accident. A role signal must never run, replace or override the
+    convergence, and two holders of a role are an ask, never a choice. The
+    behaviour was already correct, so S changed NO production code; it pinned the
+    reading with 4 corpus cases and two should-be-zero metrics
+    (`role_two_admin_confident_cases`, `role_focus_used_cases`). See §1.2c.
 
 4.2 UNRESOLVED CORPUS / MEASUREMENT QUESTIONS
     * §2.3 the requests.render reason wording (two routes, one sentence).
     * §2.2 objects.Object.source is unrendered — does the model need it?
     * Whether `remembered_people` / `admin_activity` need any end-to-end
       coverage (they are excluded from the render-coverage assertion by name).
-    * The 137-case corpus is the whole labelled set; its growth is deliberate
+    * The 141-case corpus is the whole labelled set; its growth is deliberate
       (a new case per newly-defensible reading). No case is currently known to
       be mislabelled.
 
@@ -577,7 +626,7 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
                a floor (`act_quote_not_in_anchor_cases == 0`) keeps it so.
              See §1.2/R and docs/reference/nexus-awareness.md §60.
 
-  INCREMENT S — "the tie the resolver refuses to break"
+  INCREMENT S — "the tie the resolver refuses to break"  [DONE — see §1.2c/S]
   ------------------------------------------------------------------------------
   Purpose:   Resolve thread 4.1 with evidence. Decide whether the room's reply
              convergence should be able to break a ROLE tie, and either
@@ -595,6 +644,17 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
   Depends:   R is not a prerequisite, but R is cheaper and already scoped.
   Note:      This increment may legitimately END with "no change" — that is an
              acceptable, evidence-based outcome.
+  RESULT:    NO CHANGE — and the no-change outcome is the correct one. The
+             runtime path proves the two mechanisms are already disjoint: the
+             role signal runs only for KIND_ROLE and never calls `_about_focus`,
+             which is gated on `expression.anaphoric()`. Two holders of a role
+             read `ambiguous`, never confident; convergence settles an anaphor
+             on the same room but never a role word; recency orders the list but
+             does not settle it. app/referents.py is UNCHANGED. The corpus pins
+             it (4 cases, v18/141) and the harness floors
+             `role_two_admin_confident_cases == 0` and
+             `role_focus_used_cases == 0`, both read from the EVIDENCE, with a
+             non-vacuity proof each. See §1.2c.
 
   INCREMENT T — "what the server read, kept"
   ------------------------------------------------------------------------------
@@ -714,23 +774,26 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     0697ed05e9e6fee6c5fb141a4b242b8eb76075e6 (increment R)
+HEAD:     e936aefdaf5f03fac2b31759e7965143f965d039 (increment S; R was 0697ed0,
+          checkpointed at 3b51fdd). Docs commits sit on top — a commit that names
+          its own count would be wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3245 passed, 0 failed
-Corpus:   137 cases, version 17
-Runtime-adjacent files A–R touch: app/awareness_context.py only (one Source
+Suite:    3251 passed, 0 failed
+Corpus:   141 cases, version 18
+Runtime-adjacent files A–S touch: app/awareness_context.py only (one Source
           entry per reader — the documented seam). The only DB change on the
           branch is the foundation's 151b1e1 (two additive columns).
-Next:     INCREMENT S — "the tie the resolver refuses to break".
-          Resolve thread 4.1 with evidence: decide whether the room's reply
-          convergence should be able to break a ROLE tie, and either implement it
-          with a corpus case that proves the desired behaviour, or record why not.
-          Do NOT start S without the owner's explicit go-ahead.
-Durable context: AgentMD.md §53.7 (invariants) and §54.1/§54.2 (the checkpoints).
-                 docs/reference/nexus-awareness.md §52–§60 (the narrative).
+Next:     INCREMENT T — "what the server read, kept" (Intent <-> Awareness
+          integration). The FIRST DB change since 151b1e1 and the first runtime-
+          path change in the lettered increments; it must carry a forward/backward
+          proof and a rollback procedure, and a live probe. S is DONE with NO
+          production change (app/referents.py unchanged) — thread 4.1 resolved.
+          Do NOT start T without the owner's explicit go-ahead. Do NOT start U/V.
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.3 (the checkpoints).
+                 docs/reference/nexus-awareness.md §52–§61 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54.1/§54.2 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1–§54.3 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

@@ -32,6 +32,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [58. The benchmark scored a different reading than the prompt showed](#s58)
 - [59. The object line ordered the model to ignore the block beside it](#s59)
 - [60. The room's replies converged — on one member](#s60)
+- [61. Two admins and the tie the resolver refuses to break](#s61)
 
 ---
 
@@ -3860,3 +3861,86 @@ the most-recent-edge tie-break. The count is disclosed as "(2 of 4)", but the
 word "converged" may be too strong for a tie. Adding a case is what would settle
 it; until then the single-member rule is the demonstrated defect and the tie is
 recorded as an open thread, not guessed at.
+
+---
+
+<a id="s61"></a>
+
+## 61. Two admins and the tie the resolver refuses to break
+
+### 61.1 The thread
+
+Since P the roadmap carried one open thread: a role word like «ادمینه» ("the
+admin") in a room where **two** people hold the role. The resolver reads it
+`ambiguous` — it refuses to pick between two people who genuinely hold the role
+— and the question was whether it *should*: could the room's reply convergence
+legitimately break that tie?
+
+The question matters because the two mechanisms answer different questions.
+The **role signal** in `referents.resolve()` asks "who holds this role?" and is
+scoped to `KIND_ROLE`. The **anaphoric convergence** (`_about_focus`) asks "who
+has the room been replying to?" and is scoped to anaphoric words — the far
+demonstrative, the object clitic. Convergence is a *conversational* signal: it is
+evidence about the room's topic. A role is not a topic.
+
+### 61.2 The invariant
+
+A role signal must **never** run, replace or override the anaphoric/conversational
+convergence, and must never manufacture certainty from the fact that two people
+share a role. Concretely it must not:
+
+* choose an admin simply *because* they are an admin;
+* turn a genuine ambiguity into false certainty;
+* bypass referent resolution;
+* settle a role word by a mechanism scoped to anaphors.
+
+### 61.3 The baseline — the behaviour was already correct
+
+S measured before it changed anything, and found nothing to change. The runtime
+path proves the two mechanisms are **disjoint by construction**, not by luck:
+
+* the role signal runs only for `KIND_ROLE`, skips the anchor's own speaker, and
+  never calls `_about_focus`;
+* `_about_focus` runs only when `expression.anaphoric()` — so «ادمینه» never
+  reaches it;
+* two admins are tied at 0.75, and `MARGIN` keeps a tie from reading confident;
+  recency orders the candidate list but does not settle it;
+* on the same room, an anaphor («همون کاربر») **is** settled by convergence
+  (candidate 11 at 1.0) while the role holders stay out of the reading.
+
+So the invariant already holds. `app/referents.py` is **unchanged** — the
+increment's own stop rule prefers a no-change outcome when the evidence says the
+reading is already right, and inventing a change would be the thing to avoid.
+
+### 61.4 What S added instead
+
+Four corpus cases (v17 → v18, 137 → 141) pin the six shapes:
+
+* `role-two-admins-converge-one` — two admins, the room converged on one of
+  them, but a role word does not settle on the room's topic → ask;
+* `role-admin-vs-member-converge` — the room converged on a **member** while the
+  word names an admin: the member is not the referent, the admin is not certain
+  → ask;
+* `role-two-admins-recency` — one admin just spoke; recency orders the list but
+  does not settle it → ask;
+* `role-anaphoric-beats-admins` — «همون کاربر» with two admins → referent 11,
+  settled by the anaphor, the role holders excluded.
+
+The harness gained two **should-be-zero** metrics, `role_two_admin_confident_cases`
+and `role_focus_used_cases`, plus a report line and a failures clause. Both read
+the candidate **evidence** (the `why` list), not the final verdict: a
+right-looking answer reached by the wrong mechanism still fails. **Non-vacuity:**
+dropping `CONFIDENT_MIN` *and* `MARGIN` together makes the tied admins read
+confident, and removing the anaphoric gate lets a role tie run convergence — both
+trip their metric.
+
+### 61.5 The numbers
+
+* `role_cases` 7, `role_two_admin_cases` 3,
+  `role_two_admin_confident_cases` **0**, `role_focus_used_cases` **0**.
+* top-1 / ambiguity precision / ambiguity recall 1.0; `wrong_confident` 0;
+  `act_accuracy` 1.0; `edges_exact` 141/141.
+* Assembled context chars mean 940.3 → 953.8, max 1498 (ceiling 1500).
+* 0 Gemini calls; no DB change; no runtime-path change. **No production file
+  touched.** 6 new tests (2 `test_referents.py`, 4 `test_intent_eval.py`, incl. 2
+  non-vacuity). Suite 3245 → **3251**.

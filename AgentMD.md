@@ -1624,6 +1624,17 @@ reference file is stale and this list is the one to fix first.
   unambiguous instruction render as *"could not tell the top candidates apart,
   ask"*. The exclusion is for the role **inference**, not for the explicit
   facts: a name, a stated id and a reply edge still name whoever they name.
+* A **role signal never runs, replaces or overrides the anaphoric/conversational
+  convergence**, and two holders of a role are an **ask, never a choice**. The
+  two mechanisms are disjoint *by construction*: the role signal runs only for
+  `KIND_ROLE` and never calls `_about_focus`, which is gated on
+  `expression.anaphoric()` (far demonstrative / object clitic) and needs ≥ 2
+  replies all aimed at one person. So «ادمینه» with two admins reads `ambiguous`,
+  recency only **orders** the candidate list, and an anaphor on the same room is
+  settled by convergence while the role holders stay out of the reading. A role
+  must never be chosen *because* it is a role; the benchmark floors
+  `role_two_admin_confident_cases == 0` and `role_focus_used_cases == 0`, both
+  read from the candidate **evidence**, not the verdict (§61).
 * A block **states what its reader found and does not order the model about a
   fact its reader does not hold**. Two of the prompt's orders were replaced by
   evidence for this reason: the entity block's closing line (§54) and
@@ -1927,7 +1938,7 @@ reference file is stale and this list is the one to fix first.
   file is the worst direction available here.
 * The object line renders into the **same source as the act and the direction**
   (`anchor_act`, budget 420 — the longest block the corpus produces is 350 at
-  137 cases), and
+  141 cases), and
   the two lines that contradict a naive reading come **first**: `_clip` keeps
   whole lines from the front, so what survives a tight budget is the warning, not
   the claim it warns about.
@@ -2511,3 +2522,86 @@ proof and rollback procedure.
 `git rev-parse main` (00c5d1d…), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
 (0697ed0… or later).
+
+### 54.3 Checkpoint (2026-09-24, after S) — resume here (supersedes §54.2)
+
+**State, verified against the repository.** Branch
+`develop/nexus-intelligence-evolution`, HEAD
+`e936aefdaf5f03fac2b31759e7965143f965d039` (increment S; R was `0697ed0`,
+checkpointed at `3b51fdd`), pushed to both remotes (`origin` = mo3iiibest77-hub,
+`dashmo3i` = Dashmo3i-GitAcc). Docs commits sit on top of S's code commit (a
+commit that names its own count would be wrong the moment it lands). `main` and
+the annotated tag `release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
+(the tag is local-only; neither remote carries tags). Suite **3251 passed, 0
+failed**. Corpus **141 cases, version 18**. Benchmark clean: top-1 / ambiguity
+precision / ambiguity recall 1.0, `wrong_confident == 0`, `act_accuracy == 1.0`,
+`edges_exact == 141`, `graph_claims_convergence_cases == 0`,
+`role_two_admin_confident_cases == 0`, `role_focus_used_cases == 0`, assembled
+context mean/max 953.8/1498 under the 1500 ceiling. **Not merged, not deployed.**
+
+**What S did — and did NOT do.** S is "the tie the resolver refuses to break"
+(roadmap §1.2c / thread §4.1). It resolved the role-two-admins thread with
+evidence and **changed no production code**: `app/referents.py` is UNCHANGED.
+The baseline showed the behaviour is already correct, so pinning it and recording
+why is the whole increment (the increment's own stop rule allows — indeed
+prefers — a no-change outcome).
+
+The invariant S exists to protect: **a role signal must never run, replace or
+override the anaphoric/conversational convergence**, and must never manufacture
+certainty from the fact that two people share a role. The runtime path proves the
+two mechanisms are disjoint *by construction*: the role signal in
+`referents.resolve()` runs only for `KIND_ROLE`, skips the anchor's own speaker,
+and never calls `_about_focus`; `_about_focus` runs only when
+`expression.anaphoric()` (far demonstrative or the object clitic) and needs ≥ 2
+replies all aimed at one person. So «ادمینه» never reaches convergence, two
+holders read `ambiguous` (never confident), recency only orders the list, and an
+anaphor on the same room *is* settled by convergence while the role holders stay
+out of the reading.
+
+Pinned with **4 corpus cases** (v17 → v18, 137 → 141), covering the six named
+shapes: `role-two-admins-converge-one`, `role-admin-vs-member-converge`,
+`role-two-admins-recency`, `role-anaphoric-beats-admins`. The harness gained two
+**should-be-zero** metrics — `role_two_admin_confident_cases` (0) and
+`role_focus_used_cases` (0) — a report line and a failures clause. Both checks
+read the candidate **evidence** (the `why` list), not the final verdict, so a
+right-looking answer reached by the wrong mechanism still fails. **Non-vacuity:**
+dropping `CONFIDENT_MIN` *and* `MARGIN` together makes the tied admins read
+confident (the metric rises); removing the anaphoric gate lets a role tie run
+convergence (the metric rises). 6 new tests (2 `test_referents.py`, 4
+`test_intent_eval.py` incl. 2 non-vacuity). 0 Gemini calls; no DB change; no
+source, budget or runtime-path change. Context chars mean 940.3 → 953.8, max
+1498 (ceiling 1500).
+
+**Unresolved (do not guess at):**
+- **The evenly-split room.** A room split evenly between two people *with
+  distinct members on each side* still renders "converged on" via the
+  most-recent-edge tie-break (the R thread). No corpus case demonstrates it; R and
+  S both left it. Open thread — do NOT solve it without a case.
+- The partially-completed findings still open: the dead field
+  `objects.Object.source`, `requests.render`'s weak reason wording, the
+  `objects.render` CLASS_THING duplication (roadmap §2.2–§2.4).
+
+**Exact next step.** INCREMENT **T** — "what the server read, kept" (Intent ↔
+Awareness integration, roadmap §5/T). It is the **first DB change since the
+foundation's `151b1e1`** and the **first runtime-path change in the lettered
+increments**, so it must carry a forward/backward compatibility proof for the
+(additive, `_ensure_column`-only) column AND a documented rollback procedure AND
+a live probe — "tests pass" is not enough. Do NOT start T without the owner's
+explicit go-ahead. Do not start U or V.
+
+**Rollback.** Every increment is independently revertable: `git revert <sha>` on
+this branch. S reverts with `git revert e936aef` (it touches only the harness,
+the corpus and tests — no production file). The whole evolution reverts by
+leaving the branch unmerged — `main` at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709`
+is the production state and is an **ancestor** of the branch. **No lettered
+increment (A–S) changed the DB schema or the runtime path**; the only DB change
+on the branch is the foundation's `151b1e1` (two ADDITIVE `awareness_state`
+columns via `_ensure_column`). Increment T would be the first DB change since it.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt`, then verify: `git status` (clean),
+`git rev-parse HEAD` (`e936aef…`, the S increment, or a docs commit on top of
+it), `git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
+(`e936aef…` or later).
