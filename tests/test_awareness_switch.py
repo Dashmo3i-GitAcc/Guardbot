@@ -656,3 +656,29 @@ def test_no_reply_ever_contains_the_key():
     run(main.on_group_chat, message(text="آگاهی روشن"), bot, actor=OWNER)
 
     assert all("test-awareness-key" not in m for m in bot.messages)
+
+
+def test_room_block_uses_the_window_it_was_handed(monkeypatch):
+    """One read per reply: the caller hands in what it already read.
+
+    The addressed path reads the room once and gives the same rows to the
+    transcript and to the reading beside it. If ``room_block`` read the window
+    again, that promise would be false and a reply would cost two queries.
+    """
+    awareness.capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "m", "سلام")
+    rows = db.group_window(CHAT, limit=10)
+
+    def _must_not_read(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("room_block read the window it was handed")
+
+    monkeypatch.setattr(awareness, "window", _must_not_read)
+    assert awareness.room_block(CHAT, limit=10, messages=rows) != ""
+
+
+def test_room_block_with_an_empty_window_renders_nothing(monkeypatch):
+    """An empty handed-in window is empty, not a reason to read the database."""
+    def _must_not_read(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("an empty window was re-read")
+
+    monkeypatch.setattr(awareness, "window", _must_not_read)
+    assert awareness.room_block(CHAT, limit=10, messages=[]) == ""

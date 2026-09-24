@@ -311,6 +311,22 @@ _MAY_HAVE_BEEN_SERVED = ("timeout", "network_error", "unknown_error")
 # been served. It arrives as a status name or as the 504 that means the same.
 _DEADLINE_DETAILS = ("DEADLINE_EXCEEDED", "504")
 
+# The failure kinds that say "this credential's project is unwell" rather than
+# "this request is wrong". Only these count toward the account breaker, because
+# the two mistakes are not symmetric: counting a payload fault would bench every
+# account over one bad message, while missing a wobble costs one extra walk.
+# ``bad_request`` and ``unsupported_input`` fail identically on every account,
+# and ``unsupported_model`` is a fact about a model, so none of them belongs
+# here. ``invalid_credential`` and ``quota_exhausted`` are absent for the
+# opposite reason: they trip the account on their own, on the first sighting.
+_BENCH_KINDS = (
+    "rate_limited",
+    "provider_error",
+    "network_error",
+    "timeout",
+    "unknown_error",
+)
+
 
 def _may_have_been_served(failure: Failure) -> bool:
     """Whether a failed request might still have been served by the provider.
@@ -582,6 +598,14 @@ class Account:
         self.model_states: dict[str, "ModelState"] = {}
         self._persisted = False
 
+        # Failures in a row, across models and across requests, cleared by the
+        # next success. Deliberately *not* persisted: ``failures`` above is a
+        # lifetime counter and cannot answer "is this credential unwell right
+        # now", which is the only question the breaker asks. A restart clears it
+        # because a restart is itself a fresh start for the credentials — the
+        # persisted cooldown is what carries across, and it still does.
+        self.consecutive_failures = 0
+
         # The per-account daily allowance, set by the pool after construction.
         # 0 means unlimited. Only chat, awareness, live_voice and search set a
         # budget; every other workload runs without a per-account ceiling.
@@ -679,6 +703,17 @@ class Account:
     def in_cooldown(self, now: float) -> bool:
         return self.cooldown_until > int(now)
 
+    def should_bench(self) -> bool:
+        """Whether this account has failed enough in a row to leave rotation.
+
+        Read from configuration on each call rather than captured at
+        construction, so a threshold changed by a reload is honoured by the next
+        failure without rebuilding the pool.
+        """
+        return self.consecutive_failures >= max(
+            1, int(config.GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD)
+        )
+
     # -- the per-account daily allowance --
     #
     # These deliberately take **no** clock from the caller, and default to
@@ -759,6 +794,10 @@ class Account:
         was_down = self.state in ("RATE_LIMITED", "QUOTA_EXHAUSTED", "UNAVAILABLE")
         self.successes += 1
         self.last_success = int(now)
+        # An answer is proof the credential works, so the streak ends here. This
+        # is what keeps the breaker from benching a good account for a run of
+        # failures it did not cause.
+        self.consecutive_failures = 0
         self.state = "ACTIVE"
         self.cooldown_until = 0
         self.last_error = ""
@@ -793,6 +832,12 @@ class Account:
             self.quota_events += 1
             db.pool_account_bump(self.workload, self.slot, "quota_events")
 
+        # Only the kinds that mean "the project is unwell" count. A payload
+        # fault is excluded on purpose: it fails on every account, so counting
+        # it would bench the whole pool over one malformed message.
+        if failure.kind in _BENCH_KINDS:
+            self.consecutive_failures += 1
+
         if self.daily_budget and not _may_have_been_served(failure):
             # The provider refused this one, so it cost no quota. Giving the
             # charge back is what makes the allowance mean "requests the
@@ -803,6 +848,11 @@ class Account:
 
     def trip(self, failure: Failure, now: float) -> None:
         """Take the whole account out of rotation after an account-level fault."""
+        # The account is already out, so the streak has done its job. Clearing it
+        # here rather than letting it survive the cooldown means the account gets
+        # a fresh run of chances when it comes back, instead of being re-benched
+        # by the first failure after a wobble.
+        self.consecutive_failures = 0
         if failure.kind == "invalid_credential":
             self.state = "INVALID"
             self.cooldown_until = 0
@@ -1705,6 +1755,12 @@ async def generate(
                         failure.detail or f"no response within {pool.timeout:g}s",
                         account.failures,
                     )
+                    # A timeout is the most expensive way to fail, so a run of
+                    # them is the strongest signal there is that this credential
+                    # should leave rotation rather than be re-walked.
+                    if _bench_repeated_failures(pool, account, model, now):
+                        account_dead = True
+                        break
                     if attempt + 1 < attempts_per_model:
                         await asyncio.sleep(_backoff(pool, attempt))
                         continue
@@ -1734,6 +1790,13 @@ async def generate(
                         failure.detail or "-",
                         account.failures,
                     )
+
+                    # Checked before the scope dispatch, so a run of failures
+                    # takes the *account* out and the walk moves to the next
+                    # credential rather than to another model on the same one.
+                    if _bench_repeated_failures(pool, account, model, now):
+                        account_dead = True
+                        break
 
                     if failure.scope == SCOPE_MODEL:
                         _record_model_failure(
@@ -1909,6 +1972,35 @@ def _record_pool_health(pool, now) -> None:
             detail=f"usable={health['usable']}/{health['accounts']}",
             now=now,
         )
+
+
+def _bench_repeated_failures(pool, account, model, now) -> bool:
+    """Take an account out of rotation after too many failures in a row.
+
+    Returns True when the account was just benched, so the caller stops walking
+    it and moves to the next account rather than to the next model.
+
+    The model cooldowns already keep the *models* that just failed out of the
+    walk. They leave the account ACTIVE, and Google's limits are per project, so
+    the account is exactly the unit that should leave rotation — otherwise every
+    request re-walks a credential that is out of allowance on everything it
+    offers. Measured live on 2026-09-24: four chat accounts, 388-1058 failures
+    each, all ACTIVE, no ``account_failover`` event ever recorded, and each
+    message paying for the same walk again. The cooldown is
+    ``GEMINI_POOL_TRANSIENT_COOLDOWN``, so the pool re-trusts the credential on
+    the same schedule it re-trusts a model.
+    """
+    if not account.should_bench():
+        return False
+    failure = Failure(
+        "repeated_failures",
+        SCOPE_ACCOUNT,
+        detail=f"{account.consecutive_failures} in a row",
+        cooldown=int(config.GEMINI_POOL_TRANSIENT_COOLDOWN),
+    )
+    account.trip(failure, now)
+    _record_account_failure(pool, account, model, failure, now)
+    return True
 
 
 # ── The registry ──────────────────────────────────────────────────────────

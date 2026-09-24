@@ -911,6 +911,160 @@ NEXUS_PEOPLE_RETENTION = _int("NEXUS_PEOPLE_RETENTION", 90 * 86400)
 NEXUS_PEOPLE_MAX_CANDIDATES = _int("NEXUS_PEOPLE_MAX_CANDIDATES", 8)
 
 
+# ---------------- Nexus Memory: what the server may remember about a person ---
+# A bounded, structured long-term memory about ONE person, so Nexus knows
+# something durable about a member it has not met this hour. It is deliberately
+# NOT: conversation history, the room window, Awareness, Intent, or raw messages.
+#
+# What it may hold is narrow on purpose. It records only what a person explicitly
+# asked to be remembered — the clause they typed, bounded and verbatim — never a
+# fact the server inferred from ordinary conversation. That refusal is what keeps
+# the write path free: extracting a fact from ordinary talk would need a model
+# call or a change to the awareness prompt, and the evidence rule forbids both.
+# Nothing here grants anything: a memory is data the model may read, never a
+# permission, an authorisation or a gate. Authority stays in ``app/rbac.py``.
+NEXUS_MEMORY_ENABLED = _bool("NEXUS_MEMORY_ENABLED", True)
+
+# The per-person ceiling. Sized by MEASUREMENT, not by the brief's 20–50: storage
+# is 208 bytes/row, so 30 items x 3000 members is 17.9 MB — an order of magnitude
+# under the 200 MB budget, meaning disk is not what should choose this number. The
+# real bound is what can ever be *read*: the retrieval block is ~300 characters
+# and surfaces at most ~4 items, so 30 leaves a ~7x recall margin while keeping
+# the table a bounded fact set rather than a log. The least recently updated row
+# is dropped first when a person goes over.
+NEXUS_MEMORY_MAX_PER_USER = _int("NEXUS_MEMORY_MAX_PER_USER", 30)
+
+# A global ceiling and an age bound, both applied on the observation path because
+# this process has no scheduler. The global cap is enforced rarely — a
+# whole-table prune is the one expensive statement here — while the age delete is
+# indexed and cheap. Either way a table that only grows is a table that
+# eventually stops being written to.
+NEXUS_MEMORY_MAX = _int("NEXUS_MEMORY_MAX", 50000)
+NEXUS_MEMORY_RETENTION = _int("NEXUS_MEMORY_RETENTION", 180 * 86400)
+
+# How long a single remembered clause may be, and how many of a person's memories
+# one context block may show. Both are small because this is context, not a
+# dossier: the point is that the model knows a durable thing or two about the
+# person the batch is about, not that it can enumerate them.
+NEXUS_MEMORY_VALUE_CHARS = _int("NEXUS_MEMORY_VALUE_CHARS", 200)
+NEXUS_MEMORY_ITEMS = _int("NEXUS_MEMORY_ITEMS", 4)
+NEXUS_MEMORY_CHARS = _int("NEXUS_MEMORY_CHARS", 300)
+
+# ── Automatic extraction ──────────────────────────────────────────────────
+# W v1 stored a memory only when a person explicitly asked. Automatic extraction
+# also learns stable, useful characteristics from ordinary conversation — the
+# same store, a second write path, and a deliberately conservative one.
+#
+# It is **deterministic first**: a closed vocabulary of SLOTS (identity,
+# interest, preference, style, humour) matched by rules over the message the
+# person typed. A slot is the memory's *identity*, so a new value for the same
+# slot replaces the old one — which is what stops "I program in JavaScript" and
+# "I program in Python" from both living for ever. The slot vocabulary is closed
+# and small, so a person's automatic memories are bounded by the vocabulary
+# rather than by how much they talk.
+NEXUS_MEMORY_AUTO_ENABLED = _bool("NEXUS_MEMORY_AUTO_ENABLED", True)
+
+# A repeated *behaviour* (a style or humour signal) is only promoted to a memory
+# after this many observations, because one playful message is not a personality.
+# The counters live in their own bounded table and decay by age, so a person who
+# was playful a year ago is not labelled playful for ever.
+NEXUS_MEMORY_SIGNAL_THRESHOLD = _int("NEXUS_MEMORY_SIGNAL_THRESHOLD", 5)
+NEXUS_MEMORY_SIGNAL_RETENTION = _int(
+    "NEXUS_MEMORY_SIGNAL_RETENTION", 30 * 86400
+)
+
+# ── The model seam (OFF by default, and isolated when on) ──────────────────
+# For a sentence that looks like durable self-information but matches no slot,
+# the deterministic layer may ask a model to structure it. That path is OFF
+# unless an operator turns it on AND gives the ``memory`` workload its own
+# credential; with either absent, extraction is deterministic-only and makes no
+# provider call at all. When it does run it uses its own workload pool (its own
+# key slots, model preference, breaker and daily allowance) and its output is
+# treated as **untrusted candidate data**: the server validates it against the
+# same slot vocabulary and the same rejections as the deterministic path, and
+# drops anything it does not recognise.
+NEXUS_MEMORY_EXTRACT_MODEL = _bool("NEXUS_MEMORY_EXTRACT_MODEL", False)
+
+# The model path's own per-account daily allowance, separate from chat's and
+# awareness's so it can never spend the request a person is waiting on an answer
+# to. Only consulted when the path is enabled and credentialed.
+NEXUS_MEMORY_MODEL_DAILY_LIMIT = _int("NEXUS_MEMORY_MODEL_DAILY_LIMIT", 50)
+
+
+# ---------------- Nexus State: what the interaction is trying to do -----------
+# Increment X. A *different layer* from Memory, and the distinction is the whole
+# design: Memory answers "what durable thing do I know about this person", State
+# answers "what is the current interaction trying to accomplish". A preference
+# for Python is Memory; "currently debugging the Python authentication bug" is
+# State. State is keyed by ``(chat_id, user_id)`` — one active state per person
+# per room, never a global state — so a group can never inherit another group's
+# task and a private task can never render in a group.
+#
+# It is deterministic-only and makes **no provider call**: the roadmap scopes
+# increment X at "Gemini: 0 expected", the request allowance is rationed, and
+# the deterministic signals (an explicit task statement, an explicit completion,
+# a continuation marker, a question about the active task) cover the cases that
+# matter. There is deliberately no ``state`` pool and no model seam; see
+# ``app/state.py`` for why, and for the refusal that keeps it out of the request
+# budget entirely.
+NEXUS_STATE_ENABLED = _bool("NEXUS_STATE_ENABLED", True)
+
+# The automatic write path (reading ordinary messages for a state transition).
+# Turning it off keeps the read and the block but stops the learning, the same
+# two-switch shape Memory uses.
+NEXUS_STATE_AUTO_ENABLED = _bool("NEXUS_STATE_AUTO_ENABLED", True)
+
+# One active row per person per room, so there is no per-person ceiling to size —
+# the row *is* the bound. This is the global backstop for many members, applied
+# on the observation path because this process has no scheduler.
+NEXUS_STATE_MAX = _int("NEXUS_STATE_MAX", 50000)
+
+# How long a task stays "current". The single window, used both for rendering
+# (a state older than this is not shown — a task idle for three days is over) and
+# for the age prune. Three days is chosen so "let's continue this tomorrow"
+# survives and an abandoned task from last week does not linger; one number, and
+# an operator who wants longer continuity changes one environment variable.
+NEXUS_STATE_TTL = _int("NEXUS_STATE_TTL", 72 * 3600)
+
+# The per-field cap and the block budget. Both are small because State is a
+# compact summary — a topic, a goal, an unresolved question — and never a
+# transcript. The value cap keeps a pasted paragraph out of the row; the block
+# budget keeps the rendered context a sentence or three.
+NEXUS_STATE_VALUE_CHARS = _int("NEXUS_STATE_VALUE_CHARS", 120)
+NEXUS_STATE_CHARS = _int("NEXUS_STATE_CHARS", 300)
+
+
+# ---------------- Nexus context composition (increment Y) ---------------------
+# The hard ceiling on the four **selectable** context sources together: the room
+# window, the server's reading of the message, the active state and the person's
+# memory — the sources the selector chooses between and is therefore allowed to
+# drop.
+#
+# It deliberately does **not** count the administrative roster, the server date
+# or the web findings. Those are never dropped — the roster is a security
+# property, the date is what stops a date being invented, and the findings are
+# the only reason a live answer can be grounded — so counting them would make
+# the ceiling self-defeating: a large roster (an owner's is ~3700 characters on
+# its own) would exceed the limit with nothing left to drop, and the only effect
+# would be to strip the room out of the answer. A ceiling may only bound what
+# the thing enforcing it is able to remove.
+#
+# It is a **safety valve, not a target**. Each source already has its own cap
+# beneath it (``NEXUS_AWARENESS_WINDOW_CHARS`` for the room window,
+# ``NEXUS_AWARENESS_CONTEXT_CHARS`` for the reading, ``NEXUS_STATE_CHARS`` and
+# ``NEXUS_MEMORY_CHARS`` for the two personal blocks), so the sum is already
+# bounded; this number bounds the sum. Y enforces it by **dropping whole
+# sources** in reverse precedence — memory first, then state, then the room
+# window — never by slicing a rendered block in half, because a fragment of a
+# sentence costs tokens and tells the model less than nothing.
+#
+# 3500 sits below the sum of the per-source caps (a worst case near 8100) and
+# well above the ordinary turn (the fast path carries no room window at all).
+# It is measured in ``tools/eval_context.py``; an operator who wants a smaller
+# prompt lowers it, and the ceiling only ever *removes* context.
+NEXUS_CONTEXT_CHARS = _int("NEXUS_CONTEXT_CHARS", 3500)
+
+
 # ---------------- Nexus Awareness: the room, understood -----------------------
 # The observation layer. Everything above decides *who may talk to Nexus and what
 # it may do*; this decides *what Nexus understands about the room it is in*.
@@ -1043,6 +1197,13 @@ NEXUS_AWARENESS_CONTEXT_DEEP = _bool("NEXUS_AWARENESS_CONTEXT_DEEP", True)
 # who the batch is about, not that it can enumerate the room.
 NEXUS_AWARENESS_ADMIN_ACTIONS = _int("NEXUS_AWARENESS_ADMIN_ACTIONS", 5)
 NEXUS_AWARENESS_REFERENCED_PEOPLE = _int("NEXUS_AWARENESS_REFERENCED_PEOPLE", 4)
+
+# How many referent candidates a deictic instruction may be shown. Bounded for
+# the same reason as the two above — this is context, not a directory — and
+# kept small deliberately: a list of six people is a list the model has to
+# reason about, and the resolver's whole point is that the answer is usually
+# one or two names, or an honest "these are too close to tell apart".
+NEXUS_AWARENESS_REFERENTS = _int("NEXUS_AWARENESS_REFERENTS", 4)
 
 # Sent when an awareness pass actually performed an action but the model gave no
 # wording for it. Rare, and the alternative is worse: an administrator whose
@@ -1919,6 +2080,28 @@ GEMINI_POOL_QUOTA_COOLDOWN = _int("GEMINI_POOL_QUOTA_COOLDOWN", 900)
 # nothing about the model itself.
 GEMINI_POOL_TRANSIENT_COOLDOWN = _int("GEMINI_POOL_TRANSIENT_COOLDOWN", 60)
 
+# How many failures *in a row* take a whole account out of rotation, and for
+# how long. The cooldown reuses ``GEMINI_POOL_TRANSIENT_COOLDOWN`` above, so one
+# number describes how long the pool waits before re-trusting a credential.
+#
+# The model cooldown above keeps one *model* out of the walk. It says nothing
+# about the account, and the account is the unit Google limits: quotas are per
+# project, and one project can be out of allowance on every model it offers
+# while another is fine. Measured live on 2026-09-24, four chat accounts carried
+# 388-1058 failures each, every one of them still ACTIVE with
+# ``cooldown_until=0``, and not a single ``account_failover`` event in the whole
+# table — so every message re-walked all four accounts and re-paid for the same
+# failures. The breaker below is what ends that.
+#
+# Three, not one: a single 503 is the provider wobbling, and benching an account
+# for it would turn a blip into an outage. Three in a row, across *different*
+# models, is the credential's project being the problem. It is deliberately
+# above the two failures a single retried model produces, so a retry that
+# succeeds on its second attempt never trips it.
+GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD = _int(
+    "GEMINI_POOL_ACCOUNT_FAILURE_THRESHOLD", 3
+)
+
 # Pool events are deduplicated per (workload, event, account, model) against
 # this window, so a hundred consecutive 429s produce one row rather than a
 # hundred.
@@ -2211,6 +2394,40 @@ GEMINI_AWARENESS_BACKOFF_SECONDS = _float(
 GEMINI_AWARENESS_CIRCUIT_FAILURES = _int("GEMINI_AWARENESS_CIRCUIT_FAILURES", 5)
 GEMINI_AWARENESS_CIRCUIT_SECONDS = _float(
     "GEMINI_AWARENESS_CIRCUIT_SECONDS", 300.0
+)
+
+# ── The memory-extraction workload (its own pool, and off without a key) ────
+#
+# A **seventh** workload, and separate for the same reason awareness is: the
+# provider's limits are per project, so a workload that shares a credential
+# shares a rate limit no per-workload counter can partition. It also has its own
+# breaker, so an extraction outage opens only its own circuit and cannot stop a
+# conversation or an awareness pass.
+#
+# ``ALLOW_SHARED_KEY`` defaults to **False**, unlike chat's and awareness's. The
+# point of this workload is isolation; letting it fall back onto the shared pool
+# would quietly undo that, so the default is "no credential, no extraction".
+# With no ``GEMINI_MEMORY_API_KEY`` the pool has no account, the deterministic
+# path is the whole of extraction, and no provider call is ever made.
+GEMINI_MEMORY_API_KEY = os.getenv("GEMINI_MEMORY_API_KEY", "").strip()
+GEMINI_MEMORY_ALLOW_SHARED_KEY = _bool("GEMINI_MEMORY_ALLOW_SHARED_KEY", False)
+GEMINI_MEMORY_MODEL = os.getenv("GEMINI_MEMORY_MODEL", GEMINI_CHAT_MODEL)
+GEMINI_MEMORY_FALLBACK_MODELS = _str_list(
+    os.getenv("GEMINI_MEMORY_FALLBACK_MODELS", "")
+)
+# The API's floor is 10s; the default is comfortably above it.
+GEMINI_MEMORY_TIMEOUT_SECONDS = _float("GEMINI_MEMORY_TIMEOUT_SECONDS", 20.0)
+# No retries: an extraction is a background nicety, never something a person is
+# waiting on, so a failed attempt is simply "no candidate this time".
+GEMINI_MEMORY_MAX_RETRIES = _int("GEMINI_MEMORY_MAX_RETRIES", 0)
+GEMINI_MEMORY_BACKOFF_SECONDS = _float("GEMINI_MEMORY_BACKOFF_SECONDS", 1.5)
+GEMINI_MEMORY_CIRCUIT_FAILURES = _int("GEMINI_MEMORY_CIRCUIT_FAILURES", 5)
+GEMINI_MEMORY_CIRCUIT_SECONDS = _float("GEMINI_MEMORY_CIRCUIT_SECONDS", 300.0)
+# A hard wall-clock ceiling on one logical request, so a degraded pool cannot
+# hold a background task open. Short on purpose: the work is one short sentence
+# in, one small JSON out.
+GEMINI_MEMORY_TIME_BUDGET_SECONDS = _float(
+    "GEMINI_MEMORY_TIME_BUDGET_SECONDS", 30.0
 )
 
 # ── Nexus Voice Live ──────────────────────────────────────────────────────
@@ -2684,6 +2901,40 @@ GEMINI_POOLS = [
         # cutting a pass short would lose the observation, not just the time.
         # See ``GEMINI_AWARENESS_TIME_BUDGET_SECONDS``.
         "time_budget": GEMINI_AWARENESS_TIME_BUDGET_SECONDS,
+    },
+    {
+        # Automatic memory extraction's own workload. It is a *seventh* pool
+        # rather than a corner of chat's or awareness's, because the thing being
+        # protected is the isolation: the provider's limits are per project, so a
+        # shared credential means a shared limit, and an extraction must never be
+        # able to spend the request a person is waiting on an answer to — nor the
+        # other way round.
+        #
+        # It has no shared-pool fallback (see ``GEMINI_MEMORY_ALLOW_SHARED_KEY``),
+        # so with no credential of its own it has no accounts and the pool is
+        # disabled. That is the default state: extraction is deterministic-only
+        # and costs no provider call at all.
+        "workload": "memory",
+        "keys": _pool_key_list(
+            GEMINI_MEMORY_API_KEY,
+            "GEMINI_MEMORY_API_KEY",
+            SHARED_POOL_KEYS,
+            GEMINI_MEMORY_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(GEMINI_MEMORY_MODEL, GEMINI_MEMORY_FALLBACK_MODELS),
+        # Text in, a small JSON object out — the same capability every text
+        # workload needs, and nothing more.
+        "capabilities": frozenset({"text"}),
+        "allow_experimental": False,
+        "retries": GEMINI_MEMORY_MAX_RETRIES,
+        "backoff": GEMINI_MEMORY_BACKOFF_SECONDS,
+        "timeout": _deadline(GEMINI_MEMORY_TIMEOUT_SECONDS),
+        # Per account, like chat's and awareness's, and its own number: an
+        # extraction must not be able to spend either of the other two.
+        "daily_budget": max(1, NEXUS_MEMORY_MODEL_DAILY_LIMIT),
+        # The caller is a background task, but a degraded pool must still not
+        # hold it open indefinitely.
+        "time_budget": GEMINI_MEMORY_TIME_BUDGET_SECONDS,
     },
     {
         # The live voice call. Its own workload, for the same reason awareness

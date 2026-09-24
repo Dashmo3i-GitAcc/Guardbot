@@ -487,6 +487,122 @@ def init() -> None:
     _conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_people_last_seen ON people(last_seen)"
     )
+    # ── Nexus Memory: what the server may remember about ONE person ──
+    #
+    # A *new* table rather than a column on ``people``, and the distinction is
+    # the whole point. ``people`` is per-room identity metadata with a message
+    # count and, by its own docstring, no column able to hold a fact; this holds
+    # durable facts a person asked to be remembered. Folding them together would
+    # put remembered content in the table a name lookup scans, which is a
+    # disclosure the name path has no need to make.
+    #
+    # ``(chat_id, user_id)`` is the key, so a group can never inherit another
+    # group's memory and a private-chat memory can never render in a group —
+    # isolation is by construction rather than by a check that could be
+    # forgotten. ``key`` is derived from the remembered clause, so restating the
+    # same thing updates one row instead of growing the table, and
+    # ``updated_at`` orders both the read and the prune.
+    #
+    # Every column is bounded by the caller (``app/memory.py``): there is no
+    # column for a message body, and no path writes an unbounded value. This is
+    # additive and new, so rollback is ``DROP TABLE user_memory`` — no existing
+    # table is altered and no row outside it is touched.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_memory (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT '',
+            value TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            used_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id, key))"""
+    )
+    # The shape both the retrieval and the per-user prune ask for.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memory_user "
+        "ON user_memory(chat_id, user_id, updated_at)"
+    )
+    # And the shape the age prune asks for, so that statement is a range seek
+    # rather than a scan as the table grows.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memory_updated "
+        "ON user_memory(updated_at)"
+    )
+    # ── Nexus Memory: the evidence behind a repeated behaviour ──
+    #
+    # A *counter*, not a memory. Automatic extraction will not label somebody
+    # "playful" on one playful message, so each behavioural signal is counted
+    # first and only promoted to a memory when it crosses the threshold. The row
+    # holds a number and two timestamps — there is no column for a message and no
+    # path writes one.
+    #
+    # Bounded by construction: the signal vocabulary is a closed, small set
+    # (``app/memory.SIGNALS``), so a person can have at most one row per signal.
+    # Keyed by ``(chat_id, user_id)`` for the same reason ``user_memory`` is: a
+    # group can never read another group's evidence, and a private chat's can
+    # never reach a group.
+    #
+    # Additive and new, so rollback is ``DROP TABLE user_memory_signal``.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_memory_signal (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            signal TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            first_at INTEGER NOT NULL DEFAULT 0,
+            last_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id, signal))"""
+    )
+    # The age prune's shape: a range seek on the last observation, not a scan.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memory_signal_last "
+        "ON user_memory_signal(last_at)"
+    )
+    # ── Nexus State: what the current interaction is trying to accomplish ──
+    #
+    # A *different layer* from ``user_memory``, not a second table for the same
+    # thing. Memory is a bounded set of durable facts about a person; State is
+    # the single active task of the interaction — "currently debugging the
+    # authentication bug", not "programs in Python". So this is **one row per
+    # ``(chat_id, user_id)``**, and the row itself is the bound: there is no
+    # "how many tasks" number to configure, because the answer is one.
+    #
+    # The columns are a compact summary and never a transcript: a topic, a goal,
+    # an unresolved question, a status from a closed vocabulary, the last
+    # transition's name, and two integers that make the background write safe.
+    # ``version`` is the optimistic-concurrency token — a write names the version
+    # it read and is refused if the row moved on, so an older background worker
+    # can never overwrite a newer state. ``message_id`` is the idempotency guard:
+    # re-applying the same message is a no-op rather than a second transition.
+    #
+    # Keyed by BOTH ids, like ``user_memory``: a group can never read another
+    # group's state, and a private chat's state can never render in a group.
+    # Additive and new, so rollback is ``DROP TABLE conversation_state`` — no
+    # existing table is altered and no row outside it is touched.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS conversation_state (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            topic TEXT NOT NULL DEFAULT '',
+            goal TEXT NOT NULL DEFAULT '',
+            question TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            transition TEXT NOT NULL DEFAULT '',
+            message_id INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id))"""
+    )
+    # The age prune's shape: a range seek on the last update, not a scan.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversation_state_updated "
+        "ON conversation_state(updated_at)"
+    )
     # ── Nexus Awareness: the bounded view of the room ──
     #
     # Two tables, and they are a *different thing* from ``chat_messages`` rather
@@ -581,6 +697,14 @@ def init() -> None:
             summary TEXT NOT NULL DEFAULT '',
             participants TEXT NOT NULL DEFAULT '')"""
     )
+    # The structured half of the understanding, added after the first deploy.
+    # Additive and therefore rollback-safe: code from before these columns
+    # existed never reads them, and code after them defaults to "the model did
+    # not say". ``intent`` is one of ``awareness.INTENTS`` or empty; ``about``
+    # is the id the pass judged the room to be about, or 0. Neither is ever a
+    # permission, an authorisation or a gate.
+    _ensure_column("awareness_state", "intent", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column("awareness_state", "about_user_id", "INTEGER NOT NULL DEFAULT 0")
     # One coding-agent task. The row is the *index*: it is written by the
     # container, which is the only writer, and read by the host runner, which
     # executes the agent. Everything the runner needs is here, and everything
@@ -2260,6 +2384,465 @@ def people_reset() -> None:
         _conn.commit()
 
 
+def memory_remember(
+    chat_id: int,
+    user_id: int,
+    key: str,
+    *,
+    category: str = "",
+    value: str = "",
+    source: str = "",
+    confidence: float = 0.0,
+) -> bool:
+    """Record or refresh one remembered clause about one person.
+
+    An upsert on ``(chat_id, user_id, key)``, because the useful thing is the
+    latest statement of a thing: a person who says "remember I prefer short
+    answers" twice should have one memory, not two. ``created_at`` is set only on
+    the insert, so the first time a thing was remembered survives a restatement
+    while ``updated_at`` moves.
+
+    The value arrives already bounded — ``app/memory.py`` clips it — so there is
+    no path here that writes an unbounded string into the table.
+    """
+    now = int(time.time())
+    _exec(
+        """INSERT INTO user_memory
+               (chat_id, user_id, key, category, value, source, confidence,
+                created_at, updated_at, used_at)
+           VALUES (?,?,?,?,?,?,?,?,?,0)
+           ON CONFLICT(chat_id, user_id, key) DO UPDATE SET
+               category=excluded.category,
+               value=excluded.value,
+               source=excluded.source,
+               confidence=excluded.confidence,
+               updated_at=excluded.updated_at""",
+        (
+            int(chat_id),
+            int(user_id),
+            str(key),
+            str(category or ""),
+            str(value or ""),
+            str(source or ""),
+            float(confidence or 0.0),
+            now,
+            now,
+        ),
+    )
+    return True
+
+
+def memory_for(chat_id: int, user_id: int, *, limit: int = 0) -> list[dict]:
+    """One person's memories in one room, most recently updated first.
+
+    Scoped by BOTH ids on purpose: the caller cannot ask for "everything about
+    this user" across rooms, which is the query that would leak a private
+    memory into a group. ``limit`` of 0 means no bound from here — the caller
+    passes the configured retrieval bound.
+    """
+    sql = (
+        "SELECT chat_id, user_id, key, category, value, source, confidence, "
+        "created_at, updated_at, used_at FROM user_memory "
+        "WHERE chat_id=? AND user_id=? ORDER BY updated_at DESC"
+    )
+    args: tuple = (int(chat_id), int(user_id))
+    if limit:
+        sql += " LIMIT ?"
+        args = args + (int(limit),)
+    with _lock:
+        rows = _conn.execute(sql, args).fetchall()
+    return [
+        {
+            "chat_id": int(row[0]),
+            "user_id": int(row[1]),
+            "key": str(row[2] or ""),
+            "category": str(row[3] or ""),
+            "value": str(row[4] or ""),
+            "source": str(row[5] or ""),
+            "confidence": float(row[6] or 0.0),
+            "created_at": int(row[7] or 0),
+            "updated_at": int(row[8] or 0),
+            "used_at": int(row[9] or 0),
+        }
+        for row in rows
+    ]
+
+
+def memory_prune_user(chat_id: int, user_id: int, *, keep: int = 0) -> int:
+    """Drop one person's oldest memories in one room beyond ``keep``.
+
+    Per-person rather than whole-table on purpose: it is the indexed statement
+    (0.02 ms measured), it runs on the observation path right after the person
+    who overflowed was written, and it never scans the table. Returns how many
+    rows were dropped.
+    """
+    if not keep or keep <= 0:
+        return 0
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM user_memory WHERE chat_id=? AND user_id=? AND key NOT IN "
+            "(SELECT key FROM user_memory WHERE chat_id=? AND user_id=? "
+            " ORDER BY updated_at DESC LIMIT ?)",
+            (int(chat_id), int(user_id), int(chat_id), int(user_id), int(keep)),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def memory_prune(*, keep: int = 0, max_age: int = 0) -> int:
+    """The whole-table retention bounds. Returns how many rows were dropped.
+
+    Two bounds, and they are not alternatives. The age bound drops a fact nobody
+    has restated for months; the global bound is the backstop for many members.
+    Both are whole-table statements, so ``app/memory.py`` runs this rarely — the
+    hot path uses the indexed ``memory_prune_user`` above — and the global bound
+    is only attempted when the table is actually over its ceiling.
+    """
+    dropped = 0
+    if max_age and max_age > 0:
+        cutoff = int(time.time()) - int(max_age)
+        with _lock:
+            cur = _conn.execute(
+                "DELETE FROM user_memory WHERE updated_at < ?", (cutoff,)
+            )
+            _conn.commit()
+            dropped += cur.rowcount
+    if keep and keep > 0:
+        with _lock:
+            total = int(
+                _conn.execute("SELECT COUNT(*) FROM user_memory").fetchone()[0]
+            )
+        if total > int(keep):
+            with _lock:
+                cur = _conn.execute(
+                    "DELETE FROM user_memory WHERE (chat_id, user_id, key) NOT IN "
+                    "(SELECT chat_id, user_id, key FROM user_memory "
+                    " ORDER BY updated_at DESC LIMIT ?)",
+                    (int(keep),),
+                )
+                _conn.commit()
+                dropped += cur.rowcount
+    return dropped
+
+
+def memory_count() -> int:
+    with _lock:
+        return int(_conn.execute("SELECT COUNT(*) FROM user_memory").fetchone()[0])
+
+
+def memory_clear_user(chat_id: int, user_id: int) -> int:
+    """Forget one person's memories in one room. Returns how many were dropped.
+
+    The "forget me" path, and the reason it is scoped by both ids is the same
+    reason the read is: a person leaving one group must not take their memory in
+    every other room with them.
+    """
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM user_memory WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def memory_reset() -> None:
+    """Forget every remembered clause. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM user_memory")
+        _conn.commit()
+
+
+def signal_bump(chat_id: int, user_id: int, signal: str, *, now: int = 0) -> int:
+    """Count one observation of one behavioural signal. Returns the new count.
+
+    An upsert rather than an insert, because the useful thing is *how often*, not
+    *when each time*: the row is the evidence and the count is the reading. The
+    whole table is a bounded set of counters, never a log of what was said.
+    """
+    stamp = int(now or time.time())
+    with _lock:
+        _conn.execute(
+            """INSERT INTO user_memory_signal
+                   (chat_id, user_id, signal, count, first_at, last_at)
+               VALUES (?,?,?,1,?,?)
+               ON CONFLICT(chat_id, user_id, signal) DO UPDATE SET
+                   count=user_memory_signal.count + 1,
+                   last_at=excluded.last_at""",
+            (int(chat_id), int(user_id), str(signal), stamp, stamp),
+        )
+        _conn.commit()
+        row = _conn.execute(
+            "SELECT count FROM user_memory_signal "
+            "WHERE chat_id=? AND user_id=? AND signal=?",
+            (int(chat_id), int(user_id), str(signal)),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def signal_for(chat_id: int, user_id: int) -> dict[str, int]:
+    """Every counted signal for one person in one room, as ``{signal: count}``."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT signal, count FROM user_memory_signal "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchall()
+    return {str(row[0]): int(row[1]) for row in rows}
+
+
+def signal_prune(*, max_age: int = 0) -> int:
+    """Drop counters not observed for ``max_age``. Returns how many were dropped.
+
+    The decay that stops "playful a year ago" from being "playful for ever": a
+    behaviour has to keep being demonstrated to keep counting.
+    """
+    if not max_age or max_age <= 0:
+        return 0
+    cutoff = int(time.time()) - int(max_age)
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM user_memory_signal WHERE last_at < ?", (cutoff,)
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def signal_count() -> int:
+    with _lock:
+        return int(
+            _conn.execute("SELECT COUNT(*) FROM user_memory_signal").fetchone()[0]
+        )
+
+
+def signal_reset() -> None:
+    """Forget every behavioural counter. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM user_memory_signal")
+        _conn.commit()
+
+
+# ── Nexus State: the one active task of an interaction ────────────────────
+def _state_row(row) -> dict | None:
+    """One ``conversation_state`` row as a dict, or ``None``."""
+    if not row:
+        return None
+    return {
+        "chat_id": int(row[0]),
+        "user_id": int(row[1]),
+        "topic": str(row[2] or ""),
+        "goal": str(row[3] or ""),
+        "question": str(row[4] or ""),
+        "status": str(row[5] or ""),
+        "transition": str(row[6] or ""),
+        "message_id": int(row[7] or 0),
+        "version": int(row[8] or 0),
+        "created_at": int(row[9] or 0),
+        "updated_at": int(row[10] or 0),
+    }
+
+
+_STATE_COLUMNS = (
+    "chat_id, user_id, topic, goal, question, status, transition, "
+    "message_id, version, created_at, updated_at"
+)
+
+
+def state_get(chat_id: int, user_id: int) -> dict | None:
+    """The active state for one person in one room, or ``None``.
+
+    Scoped by BOTH ids on purpose, exactly as ``memory_for`` is: the caller
+    cannot ask for "this user's state" across rooms, which is the query that
+    would leak a private task into a group. At most one row comes back.
+    """
+    with _lock:
+        row = _conn.execute(
+            f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchone()
+    return _state_row(row)
+
+
+def state_put(
+    chat_id: int,
+    user_id: int,
+    *,
+    topic: str = "",
+    goal: str = "",
+    question: str = "",
+    status: str = "",
+    transition: str = "",
+    message_id: int = 0,
+    expect_version: int = 0,
+    now: int = 0,
+) -> dict | None:
+    """Write the active state, under optimistic concurrency. Never raises here.
+
+    Two guards, and each answers a failure the brief names:
+
+    * **``expect_version``** is compare-and-swap. The caller reads the row,
+      computes the new state, and writes naming the version it read; if another
+      writer moved the row first, this returns ``None`` and the caller drops its
+      update. That is what stops an older background worker from overwriting a
+      newer state — the newer state is the one that survives.
+    * **``message_id``** is idempotency. Re-applying the same message (a retry,
+      a duplicate delivery) is a no-op that returns the row unchanged rather
+      than a second transition, so a duplicate event cannot duplicate state.
+
+    Returns the stored row, or ``None`` when the write was refused. The whole
+    read-modify-write runs under the connection lock, so the check and the write
+    cannot interleave.
+    """
+    stamp = int(now or time.time())
+    with _lock:
+        row = _conn.execute(
+            "SELECT version, message_id FROM conversation_state "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchone()
+        if row is None:
+            if int(expect_version or 0):
+                # The caller expected a row that is gone (cleared by a newer
+                # event); its update is stale, so it is refused.
+                return None
+            _conn.execute(
+                f"INSERT INTO conversation_state ({_STATE_COLUMNS}) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    int(chat_id),
+                    int(user_id),
+                    str(topic or ""),
+                    str(goal or ""),
+                    str(question or ""),
+                    str(status or ""),
+                    str(transition or ""),
+                    int(message_id or 0),
+                    1,
+                    stamp,
+                    stamp,
+                ),
+            )
+            _conn.commit()
+            stored = _conn.execute(
+                f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+                "WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            ).fetchone()
+            return _state_row(stored)
+        current_version = int(row[0] or 0)
+        if int(message_id or 0) and int(message_id or 0) == int(row[1] or 0):
+            # The same message has already been applied. Idempotent no-op.
+            _conn.commit()
+            stored = _conn.execute(
+                f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+                "WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            ).fetchone()
+            return _state_row(stored)
+        if current_version != int(expect_version or 0):
+            # Lost the race to a newer write. Drop this one; do not retry into
+            # the newer state, because the newer state is the truth.
+            return None
+        _conn.execute(
+            "UPDATE conversation_state SET topic=?, goal=?, question=?, "
+            "status=?, transition=?, message_id=?, version=version+1, "
+            "updated_at=? WHERE chat_id=? AND user_id=?",
+            (
+                str(topic or ""),
+                str(goal or ""),
+                str(question or ""),
+                str(status or ""),
+                str(transition or ""),
+                int(message_id or 0),
+                stamp,
+                int(chat_id),
+                int(user_id),
+            ),
+        )
+        _conn.commit()
+        stored = _conn.execute(
+            f"SELECT {_STATE_COLUMNS} FROM conversation_state "
+            "WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id)),
+        ).fetchone()
+    return _state_row(stored)
+
+
+def state_clear(
+    chat_id: int, user_id: int, *, expect_version: int = 0
+) -> bool:
+    """Drop the active state. Returns whether a row was removed.
+
+    The completion and reset paths: a task that is done, or an explicit change
+    of subject, leaves no active state rather than a stale one. ``expect_version``
+    is honoured when given, so a clear computed from a stale read cannot delete a
+    state a newer event just wrote.
+    """
+    with _lock:
+        if int(expect_version or 0):
+            cur = _conn.execute(
+                "DELETE FROM conversation_state "
+                "WHERE chat_id=? AND user_id=? AND version=?",
+                (int(chat_id), int(user_id), int(expect_version)),
+            )
+        else:
+            cur = _conn.execute(
+                "DELETE FROM conversation_state WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            )
+        _conn.commit()
+        return cur.rowcount > 0
+
+
+def state_prune(*, keep: int = 0, max_age: int = 0) -> int:
+    """The global backstop and the age bound. Returns rows dropped.
+
+    The age bound is the one that matters — a task idle past its TTL is over —
+    and it is indexed. The global bound is the same whole-table backstop
+    ``memory_prune`` uses, attempted only when the table is over its ceiling.
+    """
+    dropped = 0
+    if max_age and max_age > 0:
+        cutoff = int(time.time()) - int(max_age)
+        with _lock:
+            cur = _conn.execute(
+                "DELETE FROM conversation_state WHERE updated_at < ?", (cutoff,)
+            )
+            _conn.commit()
+            dropped += cur.rowcount
+    if keep and keep > 0:
+        with _lock:
+            total = int(
+                _conn.execute("SELECT COUNT(*) FROM conversation_state").fetchone()[0]
+            )
+        if total > int(keep):
+            with _lock:
+                cur = _conn.execute(
+                    "DELETE FROM conversation_state WHERE (chat_id, user_id) NOT IN "
+                    "(SELECT chat_id, user_id FROM conversation_state "
+                    " ORDER BY updated_at DESC LIMIT ?)",
+                    (int(keep),),
+                )
+                _conn.commit()
+                dropped += cur.rowcount
+    return dropped
+
+
+def state_count() -> int:
+    with _lock:
+        return int(
+            _conn.execute("SELECT COUNT(*) FROM conversation_state").fetchone()[0]
+        )
+
+
+def state_reset() -> None:
+    """Forget every active state. For tests."""
+    with _lock:
+        _conn.execute("DELETE FROM conversation_state")
+        _conn.commit()
+
+
 # ── Identities: the opaque handle for a Telegram user ─────────────────────
 def identity_ensure(user_id: int) -> dict:
     """Return this user's identity row, creating it on first sight.
@@ -2965,7 +3548,8 @@ def awareness_get(chat_id: int) -> dict | None:
     with _lock:
         row = _conn.execute(
             "SELECT chat_id, updated_at, seen_message_id, passes, relevant, "
-            "topic, summary, participants FROM awareness_state WHERE chat_id=?",
+            "topic, summary, participants, intent, about_user_id "
+            "FROM awareness_state WHERE chat_id=?",
             (int(chat_id),),
         ).fetchone()
     if row is None:
@@ -2979,6 +3563,8 @@ def awareness_get(chat_id: int) -> dict | None:
         "topic": str(row[5] or ""),
         "summary": str(row[6] or ""),
         "participants": str(row[7] or ""),
+        "intent": str(row[8] or ""),
+        "about_user_id": int(row[9] or 0),
     }
 
 
@@ -2989,6 +3575,8 @@ def awareness_set(
     relevant: bool = False,
     topic: str = "",
     summary: str = "",
+    intent: str = "",
+    about_user_id: int = 0,
     participants: str = "",
 ) -> dict:
     """Record what a completed pass understood about one room.
@@ -3002,7 +3590,8 @@ def awareness_set(
         _conn.execute(
             "INSERT INTO awareness_state "
             "(chat_id, updated_at, seen_message_id, passes, relevant, topic, "
-            " summary, participants) VALUES (?,?,?,?,?,?,?,?) "
+            " summary, participants, intent, about_user_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(chat_id) DO UPDATE SET "
             "updated_at=excluded.updated_at, "
             # Monotonic: a pass over an older window must never move the
@@ -3014,7 +3603,9 @@ def awareness_set(
             "relevant=excluded.relevant, "
             "topic=excluded.topic, "
             "summary=excluded.summary, "
-            "participants=excluded.participants",
+            "participants=excluded.participants, "
+            "intent=excluded.intent, "
+            "about_user_id=excluded.about_user_id",
             (
                 int(chat_id),
                 now,
@@ -3024,6 +3615,8 @@ def awareness_set(
                 (topic or "")[:400],
                 (summary or "")[:1200],
                 (participants or "")[:400],
+                (intent or "")[:24],
+                max(0, int(about_user_id or 0)),
             ),
         )
         _conn.commit()
@@ -3079,7 +3672,8 @@ def awareness_summary() -> dict:
     """
     with _lock:
         row = _conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(passes),0), COALESCE(SUM(relevant),0) "
+            "SELECT COUNT(*), COALESCE(SUM(passes),0), COALESCE(SUM(relevant),0), "
+            "COALESCE(SUM(about_user_id != 0),0) "
             "FROM awareness_state"
         ).fetchone()
         replies = _conn.execute(
@@ -3089,6 +3683,12 @@ def awareness_summary() -> dict:
         "rooms": int(row[0] or 0),
         "passes": int(row[1] or 0),
         "relevant": int(row[2] or 0),
+        # How many rooms' last completed pass judged the conversation to be
+        # *about* a particular person. A number near zero on a busy deployment
+        # says the pass is reading the room as chatter; a number near ``rooms``
+        # says it is reading it as one long conversation about somebody, which
+        # is the shape a moderation room takes and a shape worth knowing.
+        "about_rooms": int(row[3] or 0),
         "replies": int(replies[0] or 0),
     }
 

@@ -54,7 +54,22 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import awareness, config, db, identity, persian_calendar
+from . import (
+    awareness,
+    config,
+    db,
+    discourse,
+    entities,
+    identity,
+    memory,
+    objects,
+    persian_calendar,
+    referents,
+    requests,
+    room_state,
+    state,
+    temporal,
+)
 
 log = logging.getLogger("guardbot.awareness.context")
 
@@ -265,6 +280,114 @@ def _render_remembered_people(ctx: Ctx) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ── The batch's own reading, and what the room left open ──────────────────
+def _render_anchor_act(ctx: Ctx) -> str:
+    """What the message the pass is about is doing, in which direction, and at
+    what. Tier 0.
+
+    Three lines at most, and one source: the anchor's act, whether it asks for
+    the action or forbids it, and what the request acts on. «چقدره؟» and «بنش کن»
+    are the same length and opposite in force, and a model reading a transcript
+    has to work that out from the sentence — which it can, and which this saves it
+    from having to do on every pass.
+
+    They are one block on purpose, twice over. An act that says *instruction*
+    while the message forbids the action is one half-truth — «بنش کن» and «بنش
+    نکن» read identically to the act reader. An act that says *instruction, the
+    directive «پاک»* while the message is about a file is the other — the model
+    has to join the directive to the thing it acts on, and that join is where a
+    person gets banned over a photograph. Neither may be a separate source that a
+    budget can drop while the act survives.
+
+    The two contradicting lines come **first**, for the same reason one level
+    down: a clip keeps whole lines from the front, so if a budget ever did bite,
+    the lines that survive must be the ones that contradict a naive reading, not
+    the naive reading itself.
+
+    Evidence, never a gate: nothing branches on any of it.
+    """
+    text = (ctx.anchor or {}).get("text")
+    return (
+        requests.render(requests.read_request(text))
+        + objects.render(objects.read_object(text, ctx.messages, ctx.anchor))
+        + discourse.render_act(discourse.read_act(text))
+    )
+
+
+def _render_open_questions(ctx: Ctx) -> str:
+    """The questions in the window no reply points at an answer for. Tier 0.
+
+    The one piece of room state a group most reliably loses track of, and the
+    one a server can read exactly, because the reply edge is a stored column
+    rather than a judgement. The block is labelled as what it is — "no reply
+    pointing at an answer" — because a room answers questions without using
+    Telegram's reply as often as with it, and claiming "nobody answered" would
+    be a claim about meaning.
+    """
+    return discourse.render_questions(discourse.open_questions(ctx.messages))
+
+
+def _render_reply_graph(ctx: Ctx) -> str:
+    """Who replied to whom, and who the room converged on. Tier 0.
+
+    The reply edge is a stored column, so this is the room's own record rather
+    than a reading of meaning: who answered whom, and — when more than one reply
+    points at the same person — who the room has converged on. It reads the
+    window the pass already read, so it costs no query.
+
+    ``read_state`` is called here rather than in the builder, and again by the
+    thread source beside it. That is deliberate: each source is independent, so
+    one failing costs its own block and no other, and the scan it repeats is a
+    pass over rows already in memory.
+    """
+    return room_state.render_graph(room_state.read_state(ctx.messages, ctx.anchor))
+
+
+def _render_thread(ctx: Ctx) -> str:
+    """Whether the anchor continues the thread, with the words that decided it. Tier 0.
+
+    The one reading in this pair rather than a record, and it says so: the shared
+    words are rendered as its reason, because the model is the one that should
+    weigh a heuristic. An abstention renders nothing.
+    """
+    return room_state.render_thread(room_state.read_state(ctx.messages, ctx.anchor))
+
+
+def _render_entities(ctx: Ctx) -> str:
+    """The things the anchor may point at, when they are not people. Tier 0.
+
+    The correction this block exists to make: ``referent_candidates`` offers the
+    room's *members* for a demonstrative, and when the demonstrative means the
+    photograph somebody just posted, that is a wrong lead. The server knows the
+    things exactly — the media kind is a stored column, a link is a regular
+    expression away — so this says so, and says that they are things rather than
+    people, and lets the model decide.
+    """
+    return entities.render(entities.read_entities(ctx.messages, ctx.anchor))
+
+
+def _render_anchor_when(ctx: Ctx) -> str:
+    """Where the message's own time words point, from the server's clock. Tier 0.
+
+    A Persian sentence places itself in time with a word rather than a date —
+    «الان»، «قبلاً»، «چند دقیقه پیش»، «دیروز»، «فردا» — and a model reading a
+    transcript has no clock, so it supplies one and reads «قبلاً» as whenever it
+    imagines the conversation to be. This block is the server's clock doing that
+    arithmetic instead: the direction and the granularity the words state, plus
+    how old the window the pass is reading is, so «قبلاً» has something to be
+    earlier *than*.
+
+    It renders nothing when the message carries no time word — the block is
+    about what the words say, and a message that says nothing about time has
+    nothing here. It states the server's reading and never a date, because
+    «چند دقیقه پیش» does not contain one; see ``app/temporal.py``.
+    """
+    when = temporal.read_when((ctx.anchor or {}).get("text"))
+    if not when:
+        return ""
+    return temporal.render(when, now=ctx.now, window_start=ctx.oldest_at())
+
+
 def _state(chat_id: int) -> dict:
     try:
         return db.awareness_get(chat_id) or {}
@@ -397,6 +520,123 @@ def _identity_line(user_id: int, chat_id: int, now: int) -> str:
     return "- " + ", ".join(bits)
 
 
+def _render_user_memory(ctx: Ctx) -> str:
+    """What this person asked to be remembered, if anything. Tier 1.
+
+    Keyed on the person the batch is *about* — ``ctx.anchor_id()`` — and on the
+    room, never on the speaker merely because they spoke and never across rooms.
+    The retrieval is bounded twice: ``NEXUS_MEMORY_ITEMS`` rows and
+    ``NEXUS_MEMORY_CHARS`` characters, because this is context rather than a
+    dossier. It renders nothing for the many people who have asked for nothing,
+    which is the common case and costs one indexed read.
+
+    It is a *read*: the block reports what the person asked the server to
+    remember, in their own words, and grants nothing. Authority is resolved from
+    the Telegram id elsewhere and never from a memory.
+
+    Retrieval is **relevance-first**: the topic is the message the pass is
+    about, so a memory that bears on it is shown and an unrelated one is not.
+    A favourite game does not appear in an answer about a programming project.
+    The preference, style and humour rows are always relevant — they describe
+    how to talk to this person — and are ranked in with the rest by ``_rank``.
+    """
+    user_id = ctx.anchor_id()
+    if not user_id:
+        return ""
+    topic = str((ctx.anchor or {}).get("text") or "")
+    rows = memory.about(
+        ctx.chat_id, user_id, limit=int(config.NEXUS_MEMORY_ITEMS), topic=topic
+    )
+    if not rows:
+        return ""
+    return memory.render(rows, budget=int(config.NEXUS_MEMORY_CHARS))
+
+
+def _render_conversation_state(ctx: Ctx) -> str:
+    """What this interaction is trying to accomplish, if anything. Tier 0.
+
+    Increment X, and a *different* layer from ``user_memory`` beside it: memory
+    is a durable fact about the person, state is the active task of the
+    interaction — "currently debugging the authentication bug", not "programs in
+    Python". Keyed on the person the batch is *about* (``ctx.anchor_id()``) and
+    on the room, never on the speaker merely because they spoke and never across
+    rooms, so a private task can never render in a group.
+
+    It is a *read* that grants nothing, and it is bounded twice — one row, and
+    ``NEXUS_STATE_CHARS`` characters. It renders nothing for the many batches
+    with no active task, which is the common case and costs one indexed read.
+    Relevance is freshness plus supersession (see ``state.current``): a stale
+    task is dropped, and a message that starts a new task or ends the current one
+    withholds the old state rather than showing it beside the fresh input.
+    """
+    user_id = ctx.anchor_id()
+    if not user_id:
+        return ""
+    text = str((ctx.anchor or {}).get("text") or "")
+    row = state.current(ctx.chat_id, user_id, text=text, now=ctx.now)
+    if not row:
+        return ""
+    return state.render(row, budget=int(config.NEXUS_STATE_CHARS))
+
+
+def _wants_referents(ctx: Ctx) -> bool:
+    """Whether this batch is one where a pronoun needs resolving.
+
+    Two clauses, and each excludes a case where the block would be waste:
+
+    * **a reply edge settles it already.** When the instruction was sent as a
+      reply, ``awareness.instruction_block`` states that id as fact, and a ranked
+      candidate list beside it would spend tokens re-deciding something the
+      server already knows. The resolver's value is exactly the cases the reply
+      edge cannot reach.
+    * **only somebody who can act.** The block exists to resolve a person for a
+      possible action, and only an authority can act. A member's «این چیه» has no
+      action behind it, so the block would put a ranked list of the room's people
+      in front of the model for an ordinary message — tokens with no use, and the
+      kind of preload the owner asked to avoid. A *directed* message is the
+      second case, because Nexus has been asked something and the referent is
+      what it is being asked about.
+    """
+    if int((ctx.anchor or {}).get("reply_user_id") or 0):
+        return False
+    if ctx.is_authority(ctx.anchor_id()):
+        return True
+    # The capture-time ``actor`` hint is the second reading, and it is a stored
+    # server fact rather than a second authority model: it was written by
+    # ``nexus.is_actor``, which is itself a read of ``app/rbac.py``. It covers
+    # the case the role lookup cannot — an anchor whose row is not in the window
+    # the roles were resolved from — without ever granting anything.
+    if bool((ctx.anchor or {}).get("actor")):
+        return True
+    return bool((ctx.anchor or {}).get("directed"))
+
+
+def _render_referent_candidates(ctx: Ctx) -> str:
+    """Who a deictic instruction may mean, ranked. Tier 1.
+
+    The resolver is ``app/referents.py`` and the rendering is its own, because
+    the two are one idea: the candidates and the honest reading of how close
+    they are. This function only decides that the batch calls for it and bounds
+    the list — the arithmetic and the wording both live beside the tests that
+    pin them.
+
+    It reads the window the pass already read (``ctx.messages``) and the roles
+    the pass already resolved (``ctx.roles``), so it costs no query. A resolver
+    that raises contributes nothing, like every other source.
+    """
+    try:
+        resolution = referents.resolve(
+            ctx.anchor,
+            messages=list(ctx.messages),
+            roles=dict(ctx.roles or {}),
+            limit=max(1, int(config.NEXUS_AWARENESS_REFERENTS)),
+        )
+    except Exception:  # noqa: BLE001 - context, never worth a crash
+        log.exception("could not resolve the referent candidates")
+        return ""
+    return referents.render(resolution)
+
+
 def _ago(then: int, now: int) -> str:
     """A short, honest age. ``""`` when it cannot be known."""
     if not then or not now or then > now:
@@ -425,12 +665,90 @@ SOURCES: tuple[Source, ...] = (
     Source("calendar", TIER_ALWAYS, 400, _render_calendar),
     Source("room", TIER_ALWAYS, 200, _render_room),
     Source("remembered_people", TIER_ALWAYS, 400, _render_remembered_people),
+    # What the person the batch is about asked the server to remember. Tier 0,
+    # beside ``remembered_people`` and for the same reason: it is a query that
+    # returns nothing for most people, and a query with no result spends no
+    # tokens — so there is no predicate that would usefully make it conditional,
+    # and a conditional source that fires on every batch would misreport the
+    # cost. It goes after ``remembered_people`` because that block describes who
+    # was in the room and this one describes one of them.
+    Source(
+        "user_memory",
+        TIER_ALWAYS,
+        config.NEXUS_MEMORY_CHARS,
+        _render_user_memory,
+    ),
+    # What this *interaction* is trying to accomplish (increment X). Tier 0,
+    # right after ``user_memory`` because the two are read together and are the
+    # pair the four-source architecture exists to keep apart: memory is what the
+    # person is, state is what they are doing right now. It is a query that
+    # returns nothing for most batches, so there is no predicate that would
+    # usefully make it conditional, and it is deliberately **not** in
+    # ``CONVERSATION_SKIP`` — an addressed message is exactly the turn whose
+    # continuation the state exists to serve.
+    Source(
+        "conversation_state",
+        TIER_ALWAYS,
+        config.NEXUS_STATE_CHARS,
+        _render_conversation_state,
+    ),
+    # What the batch is *doing*, and what the room has left unanswered. Both are
+    # tier 0 because both are cheap — a scan of the window the pass already
+    # read, no query — and because both are room state the model should not have
+    # to re-derive from a transcript on every pass. The act is one line and
+    # renders nothing when the words carry no reading; the question block is
+    # empty unless there is a question no reply points at.
+    #
+    # The budget covers all three lines — the act, the direction it points in and
+    # the thing it acts on — because they are one source on purpose: an
+    # "instruction" reading must never outlive the negation that reverses it, nor
+    # the object line that says it is aimed at a file rather than at a person. The
+    # longest block the corpus produces is 297 characters (a negated request whose
+    # object is a named thing), so 420 leaves room for a longer surface word
+    # without letting the block grow unbounded.
+    Source("anchor_act", TIER_ALWAYS, 420, _render_anchor_act),
+    Source("open_questions", TIER_ALWAYS, 500, _render_open_questions),
+    # Who is talking to whom, and whether this message is still the same thread.
+    # Tier 0: both are a pass over the window the pass already read. The graph is
+    # the room's own record (a stored reply column); the thread is a heuristic
+    # with its evidence attached, and it renders nothing when the anchor is too
+    # short to judge.
+    Source("reply_graph", TIER_ALWAYS, 600, _render_reply_graph),
+    Source("thread", TIER_ALWAYS, 500, _render_thread),
+    # What the anchor may point at when it is not a person — the photo, the link,
+    # the message it replies to. Tier 0: a scan of the window the pass already
+    # read. It goes after the reply graph because the two are read together, and
+    # before ``anchor_when`` so the shortest block stays the cheapest to lose.
+    Source("entities", TIER_ALWAYS, 600, _render_entities),
+    # Where the anchor's own time words point, from the server's clock. Last of
+    # the tier-0 sources on purpose: it is the shortest block and the one that
+    # renders least often (only when the message carries a time word), so if the
+    # pass-wide ceiling ever bites it is the cheapest thing to lose. It is a
+    # *reading of the anchor*, like ``anchor_act``, but it goes after the
+    # window-wide question block so that block — the larger piece of room state
+    # — is never the one dropped.
+    Source("anchor_when", TIER_ALWAYS, 300, _render_anchor_when),
     Source(
         "admin_activity",
         TIER_CONDITIONAL,
         500,
         _render_admin_activity,
         lambda ctx: ctx.authority_involved(),
+    ),
+    # Before ``referenced_people`` and after ``admin_activity``: it is the block
+    # that answers "who does this instruction mean", so it goes ahead of the
+    # directory of who these people are, and behind the record of what has
+    # already been tried here. The two predicates are disjoint in practice —
+    # this one declines whenever the anchor is a reply, and ``referenced_people``
+    # requires a reply edge somewhere in the window — so on the batch that
+    # matters most (an authority's un-replied «اینو بن کن») this is the only
+    # conditional block with something to say.
+    Source(
+        "referent_candidates",
+        TIER_CONDITIONAL,
+        700,
+        _render_referent_candidates,
+        _wants_referents,
     ),
     Source(
         "referenced_people",
@@ -439,6 +757,33 @@ SOURCES: tuple[Source, ...] = (
         _render_referenced_people,
         lambda ctx: ctx.has_reply_edge(),
     ),
+)
+
+
+# What the *addressed conversation* leaves out when it borrows the reading.
+#
+# The conversation path (``main._answer_conversationally``) answers one message
+# and already carries the room's name and type in its trusted context and the
+# date in ``_today_block`` — so ``calendar`` and ``room`` would be a second copy
+# of a fact the prompt already states.
+#
+# The other three are **database-backed room memory**, not readings of the
+# window: ``remembered_people`` reads ``awareness_state``, ``admin_activity``
+# reads the audit log, and ``referenced_people`` runs an identity lookup per
+# person. The awareness pass pays for those on every pass, which is where room
+# memory belongs; the conversation reads the window it already read and pays for
+# nothing new. What it *does* take is the part that answers "what is this
+# message doing, and who does «همون» mean" — the act, the reply graph, the
+# thread, the entities, the time reading and the resolver's candidates.
+#
+# ``user_memory`` is the one database-backed source the conversation does NOT
+# skip, and the exception is deliberate. The other three are memory *about the
+# room*; this one is memory about **the person talking to Nexus**, and the
+# anchor on this path is the message being answered — so the block is about the
+# one person the turn is for. It is also the cheapest read of the four: one
+# indexed lookup (0.03 ms measured) that returns nothing for most people.
+CONVERSATION_SKIP = frozenset(
+    {"calendar", "room", "remembered_people", "admin_activity", "referenced_people"}
 )
 
 
@@ -476,7 +821,9 @@ def build_ctx(
     )
 
 
-def blocks(ctx: Ctx) -> str:
+def blocks(
+    ctx: Ctx, *, skip: frozenset[str] = frozenset(), budget: int = 0
+) -> str:
     """Render every source this batch calls for, within the pass-wide ceiling.
 
     Tier order, then declaration order, and the first tier to be exhausted stops
@@ -484,12 +831,25 @@ def blocks(ctx: Ctx) -> str:
     predicate is false is not rendered at all, and a source that raises is
     logged and skipped — a pass that loses a context block still understands the
     room, while a pass that dies loses the room entirely.
+
+    ``skip`` names sources this caller already carries. The awareness pass skips
+    nothing; the addressed conversation skips ``CONVERSATION_SKIP`` — the date
+    and the room it already states, and the database-backed room memory it does
+    not pay for. A skipped source is not rendered and not counted against the
+    ceiling, so a borrower gets the same reading for less.
+
+    ``budget`` overrides the pass-wide ceiling for a caller that has already
+    spent part of the prompt on something else — increment Y's composed context
+    hands the reading whatever room is left under ``NEXUS_CONTEXT_CHARS``. It
+    defaults to the configured ceiling, so every existing caller is unchanged.
     """
-    total = max(0, int(config.NEXUS_AWARENESS_CONTEXT_CHARS))
+    total = max(0, int(budget or config.NEXUS_AWARENESS_CONTEXT_CHARS))
     deep = bool(config.NEXUS_AWARENESS_CONTEXT_DEEP)
     out: list[str] = []
     used = 0
     for source in SOURCES:
+        if source.name in skip:
+            continue
         if source.tier != TIER_ALWAYS and not deep:
             continue
         if not _wanted(source, ctx):

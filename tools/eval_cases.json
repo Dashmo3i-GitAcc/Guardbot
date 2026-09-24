@@ -1,0 +1,6714 @@
+{
+  "version": 18,
+  "about": [
+    "A labelled corpus for the deterministic half of Nexus understanding.",
+    "Each case is a room window plus the anchor message a pass would be about,",
+    "and the reading the server should reach. The harness in tools/eval_intent.py",
+    "scores it; tests/test_intent_eval.py holds the floor.",
+    "",
+    "expect.expression_kind  the deictic kind the resolver should find ('' for none)",
+    "expect.referent         the Telegram id the message points at, or null",
+    "expect.requires_resolution  whether the text alone leaves the referent open",
+    "expect.ambiguous        whether the server should report it could not tell",
+    "expect.addressed        whether addressing.addressed should fire",
+    "",
+    "A note on `ambiguous` and an empty room: with no window there is nothing to",
+    "be ambiguous *between*, so the flag is false and the render says the server",
+    "found no candidate. That is a different reading from 'these two are too",
+    "close', and the corpus keeps them distinct on purpose.",
+    "",
+    "expect.when             the time word's direction ('', past, now, future, repeat)",
+    "expect.when_unit        its granularity ('' or minute/hour/day/week/month/year)",
+    "",
+    "expect.when is '' for a message with no time word, and a claimed reading",
+    "there is a false positive: the server would be placing a time nobody stated.",
+    "",
+    "expect.state            the room-state reading:",
+    "  .edges                the reply edges [[source_id, target_id]], oldest first",
+    "  .focus                the target the replies converge on (0 when none)",
+    "  .relation             '' / continues / shifts / unclear — scored only where",
+    "                        labelled, because it is a reading rather than a record",
+    "",
+    "expect.entities         the things a demonstrative may point at:",
+    "  .newest_media         the kind of the newest media row ('' when none)",
+    "  .has_link             whether a URL is in the window",
+    "  .named                the class the message names ('' / media / link /",
+    "                        message) — scored only where labelled",
+    "",
+    "expect.request          the directive the anchor uses, and its direction:",
+    "  .directive            the word that makes it an instruction, quoted",
+    "  .polarity             '' / affirmative / negated — '' when a negation",
+    "                        is present that the reader cannot scope",
+    "  .manner               '' / command / request",
+    "                        — scored only where labelled, like `state.relation`",
+    "",
+    "Every case carries expect.entities, so a window with no media and no link says",
+    "so explicitly rather than leaving the fact to a default — the same rule",
+    "expect.when follows. A window row with media or a link but no label would",
+    "otherwise read in the report as a false positive in the reader.",
+    "",
+    "expect.object         what the request acts on:",
+    "  .kind               '' / person / media / link / message / thing —",
+    "                        the class, where 'thing' means a thing whose",
+    "                        kind the message does not state",
+    "  .source             '' / named / pointed / verb — how the server knows",
+    "                        — scored only where labelled, like `state.relation`"
+  ],
+  "cases": [
+    {
+      "id": "reply-edge-basic",
+      "category": "reference",
+      "note": "A reply to رضا and «اینو» — the id is the answer, not a candidate.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "این آدم اذیتم کرد",
+          "at": 960,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 11,
+        "reply_name": "رضا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "reply-edge-colloquial",
+      "category": "reference",
+      "note": "Colloquial object form: the clitic is reported, because it is checked with the explicit person-words before any bare demonstrative.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "شلوغش نکن",
+          "at": 970,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ساکتش کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "reply-edge-noun",
+      "category": "reference",
+      "note": "«این کاربر» as a reply — person kind, and the edge still settles it.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم مینویسه",
+          "at": 975,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این کاربر رو محدود کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "clitic-reply",
+      "category": "reference",
+      "note": "No demonstrative at all: the object is the clitic on the verb.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 975,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ساکتش کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "clitic-no-reply",
+      "category": "reference",
+      "note": "«بنش کن» with one person having just spoken.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من بودم",
+          "at": 998,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "affirmative",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "named-in-text",
+      "category": "reference",
+      "note": "No reply edge, but the instruction names رضا.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "چی شده؟",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "هیچی",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا اینو ببین",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [
+          "چی شده؟"
+        ],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "stated-id",
+      "category": "reference",
+      "note": "The instruction states the Telegram id outright.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "چی شده؟",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "هیچی",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین 22",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [
+          "چی شده؟"
+        ],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-single-admin",
+      "category": "reference",
+      "note": "«ادمینه» with exactly one administrator in the room.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "منم هستم",
+          "at": 985,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "خوبم",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": 44,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-two-admins",
+      "category": "ambiguity",
+      "note": "«ادمینه» with two administrators is not a referent — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "منم هستم",
+          "at": 985,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "منم",
+          "at": 988,
+          "role": "admin"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-two-admins-converge-one",
+      "category": "ambiguity",
+      "note": "«ادمینه» with two administrators: the room's replies converged on one of them, but a role word does not settle on the room's topic — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "منم هستم",
+          "at": 960,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "منم",
+          "at": 965,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 970,
+          "role": "member",
+          "reply_user_id": 44,
+          "reply_name": "نیما"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "چشم",
+          "at": 975,
+          "role": "member",
+          "reply_user_id": 44,
+          "reply_name": "نیما"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              11,
+              44
+            ],
+            [
+              22,
+              44
+            ]
+          ],
+          "focus": 44
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-admin-vs-member-converge",
+      "category": "ambiguity",
+      "note": "«ادمینه» but the room's replies converged on a member: the role word names an administrator, so the member is not the referent and the admin is not certain — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "من ادمینم",
+          "at": 960,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من کاربرم",
+          "at": 965,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "باشه",
+          "at": 970,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "چشم",
+          "at": 975,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-two-admins-recency",
+      "category": "ambiguity",
+      "note": "«ادمینه» with two administrators, one of them just spoke: recency orders the list but does not settle it — ask.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "الف",
+          "at": 1000,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "ب",
+          "at": 4990,
+          "role": "admin"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 5000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "role-anaphoric-beats-admins",
+      "category": "continuation",
+      "note": "«همون کاربر» with two administrators in the room: the anaphor points at the person the room has been replying to, and the role holders do not enter the reading.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "من ادمینم",
+          "at": 960,
+          "role": "admin"
+        },
+        {
+          "user_id": 66,
+          "name": "لیلا",
+          "text": "منم",
+          "at": 962,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من کاربرم",
+          "at": 965,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "باشه",
+          "at": 970,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "چشم",
+          "at": 975,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "member-cannot-be-role",
+      "category": "reference",
+      "note": "A member spoke more recently, but «ادمینه» is the administrator.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "من ادمینم",
+          "at": 900,
+          "role": "admin"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من کاربرم",
+          "at": 998,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادمینه رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": 44,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "room-about",
+      "category": "continuation",
+      "note": "«همون کاربر» — three replies in a row aimed at رضا.",
+      "window": [
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا آروم",
+          "at": 900,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "آره رضا",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "رضا بس کن",
+          "at": 940,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 950,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ],
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "clitic-anaphoric-room",
+      "category": "continuation",
+      "note": "«ساکتش کن» — the clitic «ـش» is a pronoun, and the room has been replying to رضا.",
+      "window": [
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا آروم",
+          "at": 900,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "آره رضا",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "رضا بس کن",
+          "at": 940,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 950,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ساکتش کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ],
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "anaphoric-split-room",
+      "category": "ambiguity",
+      "note": "«همون کاربر», but the room's replies are split between رضا and سارا — the anaphor does not settle it.",
+      "window": [
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا آروم",
+          "at": 900,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 33,
+          "name": "مالک",
+          "text": "رضا حواست باشه",
+          "at": 910,
+          "role": "owner",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "سارا تو هم",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 22,
+          "reply_name": "سارا"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "سارا بس کن",
+          "at": 930,
+          "role": "member",
+          "reply_user_id": 22,
+          "reply_name": "سارا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 940,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "چشم",
+          "at": 950,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ],
+            [
+              33,
+              11
+            ],
+            [
+              55,
+              22
+            ],
+            [
+              55,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "deictic-three-recent",
+      "category": "ambiguity",
+      "note": "Three people spoke moments ago and nobody was replied to — do not guess.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "الف",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "ب",
+          "at": 994,
+          "role": "member"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ج",
+          "at": 997,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "deictic-one-recent",
+      "category": "reference",
+      "note": "One person spoke just before; still not a confident referent alone.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "من بودم",
+          "at": 998,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "prior-expression",
+      "category": "reference",
+      "note": "«قبلیش» points backwards; the kind is recorded even when weak.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "الف",
+          "at": 985,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "ب",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "قبلیش رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "prior",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": true,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "mixed-user-noun",
+      "category": "mixed",
+      "note": "Persian and English in one sentence: «این user».",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "spam",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این user رو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "mixed-role-admin",
+      "category": "mixed",
+      "note": "A Latin role word with a Persian instruction.",
+      "window": [
+        {
+          "user_id": 44,
+          "name": "نیما",
+          "text": "hmm",
+          "at": 995,
+          "role": "admin"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "admin رو محدود کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "role",
+        "referent": 44,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "english-deictic-person",
+      "category": "mixed",
+      "note": "Fully English phrasing with a Persian room.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "spam spam",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "this user رو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "no-expression-chatter",
+      "category": "ordinary",
+      "note": "Ordinary conversation points at nobody.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 980,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "سلام بچه ها چطوری",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "no-expression-name-only",
+      "category": "ordinary",
+      "note": "An explicit name needs no resolution — the transcript already carries it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "بله",
+          "at": 980,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا رو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "no-expression-question",
+      "category": "ordinary",
+      "note": "A price question is not a person reference.",
+      "window": [],
+      "anchor": {
+        "user_id": 55,
+        "name": "مهدی",
+        "text": "قیمت چنده؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "no-expression-vav-word",
+      "category": "ordinary",
+      "note": "A word ending in «و» must not be read as a demonstrative.",
+      "window": [],
+      "anchor": {
+        "user_id": 55,
+        "name": "مهدی",
+        "text": "آموزش رو ببین",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "no-expression-bare-stem",
+      "category": "ordinary",
+      "note": "A bare action stem has no object; only the clitic does.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "addressed-exact",
+      "category": "addressing",
+      "note": "Nexus called by name, with an instruction.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "spam",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نکسوس اینو بررسی کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "addressed-typo",
+      "category": "addressing",
+      "note": "The name written the way a group writes it.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نکسی اینو ببین",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "addressed-clitic-name",
+      "category": "addressing",
+      "note": "The object marker attached to the name, and a clitic on the verb.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نکسوسو ساکتش کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "quotation-not-addressed",
+      "category": "addressing",
+      "note": "A quotation about Nexus is a mention, not a call: the name is the subject of a reporting verb.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "نکسوس گفت که اینو بن کنه",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "report",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "quotation-reporting-verb",
+      "category": "addressing",
+      "note": "A quotation about Nexus is a mention, not a call: the name is the subject of a reporting verb.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "نکسوس گفت اینو بن کن",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "report",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "about-nexus-mid-sentence",
+      "category": "addressing",
+      "note": "Talking about Nexus mid-sentence: the name is the object of the preposition «با», so the sentence is about the assistant rather than addressed to it. It used to be the corpus's one known gap — the strong grade read it as a call and the assistant would answer a statement that was not for it. A name immediately after a preposition is now a mention; the weak grade is unchanged, so the line still reaches the model as context.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "من با نکسوس کار نکردم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "about-nexus-english",
+      "category": "addressing",
+      "note": "The same reading in the mixed text a group actually writes: «with nexus» is a prepositional phrase, so the message is about the assistant. The English half of the preposition list exists for exactly this, and it is deliberately short — «to» and «for» are absent because both can head a line that addresses somebody.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "i never worked with nexus",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "addressed-mid-sentence-request",
+      "category": "addressing",
+      "note": "The case the demotion had to protect, and the reason the old gap was left open: the name is in the middle of the message and this is still a call, because «میشه» is not a preposition. It was pinned only in a unit test; it is in the corpus now so the measurement holds both sides of the rule at once.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "میشه نکسوس اینو بررسی کنی؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "about-nexus-preposition-boundary",
+      "category": "addressing",
+      "note": "The boundary, stated rather than hidden: «از نکسوس بپرس» is a third-person instruction to the room — ask Nexus — so the message is about the assistant and the strong grade demotes it. A group that wants the assistant itself says «نکسوس، ...». The weak grade still marks the line for the model, so the message is not silenced; only the immediate reply is.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "از نکسوس بپرس",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "directed-member-question",
+      "category": "addressing",
+      "note": "A member addressing Nexus is addressed, even though they cannot act.",
+      "window": [],
+      "anchor": {
+        "user_id": 55,
+        "name": "مهدی",
+        "text": "نکسوس این چیه",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": true,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "typo-in-instruction",
+      "category": "typo",
+      "note": "A misspelled instruction still carries its deictic.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بگنش",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "zwnj-person-noun",
+      "category": "typo",
+      "note": "A zero-width non-joiner inside the phrase must not split it.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این‌کاربر رو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "arabic-yeh-fold",
+      "category": "typo",
+      "note": "Arabic yeh/kaf folded to Persian before matching.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اين كاربر رو بن كن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "correction-named",
+      "category": "correction",
+      "note": "A correction that names the person it corrects to.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "من نه",
+          "at": 990,
+          "role": "member"
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ببخشید",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نه منظورم مهدی بود، اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 55,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "correction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بن",
+          "polarity": "",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "topic-switch-no-reference",
+      "category": "topic-switch",
+      "note": "A sudden unrelated message carries no person reference.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "بحث قبلی",
+          "at": 960,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "راستی فردا تعطیله؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "temporal-reference",
+      "category": "temporal",
+      "note": "A temporal word is not a person reference.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "قبلاً گفتم که اینکار رو نکنید",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "report",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "two-users-reply-chain",
+      "category": "reply-chain",
+      "note": "A chain of replies between two people; the edge names the target.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سارا؟",
+          "at": 900,
+          "role": "member"
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بله",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "بیا",
+          "at": 940,
+          "role": "member",
+          "reply_user_id": 22,
+          "reply_name": "سارا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همینو محدود کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 11,
+        "reply_name": "رضا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [
+          "سارا؟"
+        ],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              11,
+              22
+            ],
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "owner-anchor-deictic",
+      "category": "reference",
+      "note": "The owner's instruction with a reply edge is the confident case.",
+      "window": [
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "شرمنده",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو از گروه حذف کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 55,
+        "reply_name": "مهدی"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 55,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              55
+            ]
+          ],
+          "focus": 55
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "admin-anchor-deictic",
+      "category": "reference",
+      "note": "An administrator's instruction behaves the same as the owner's.",
+      "window": [
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ببخشید",
+          "at": 990,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 44,
+        "name": "نیما",
+        "text": "این کاربر رو ساکت کن",
+        "at": 1000,
+        "role": "admin",
+        "reply_user_id": 55,
+        "reply_name": "مهدی"
+      },
+      "expect": {
+        "expression_kind": "person",
+        "referent": 55,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              44,
+              55
+            ]
+          ],
+          "focus": 55
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "slang-instruction",
+      "category": "slang",
+      "note": "Slang for muting, with a reply edge.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بازم",
+          "at": 995,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو خفه کن",
+        "at": 1000,
+        "role": "owner",
+        "reply_user_id": 22,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-question-why",
+      "category": "act",
+      "note": "A plain question with a question mark.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "چرا اینطوری شد؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-question-colloquial",
+      "category": "act",
+      "note": "Colloquial «چخبر؟» — a question with no question word.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "چخبر؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-social-morning",
+      "category": "act",
+      "note": "A greeting, not an instruction.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "سلام صبح بخیر",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-report-third-party",
+      "category": "act",
+      "note": "Reporting what somebody else said — not an order to Nexus.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا گفت که بعداً میاد",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "report",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-correction-plain",
+      "category": "act",
+      "note": "A correction with no question and no directive.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نه گفتم مهدی نه سارا",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "correction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-instruction-imperative",
+      "category": "act",
+      "note": "An ordinary imperative whose verb is in no lexicon; «کن» carries it.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بررسی کن ببین چی شده",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-instruction-mixed",
+      "category": "act",
+      "note": "A Persian/English directive.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "لطفا check کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "check",
+          "polarity": "affirmative",
+          "manner": "request"
+        }
+      }
+    },
+    {
+      "id": "act-followup-command",
+      "category": "act",
+      "note": "A follow-up directive built on «بده».",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ادامه بده",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-implicit-complaint",
+      "category": "act",
+      "note": "IMPLICIT INTENT, left as a known gap: a complaint that asks for nothing in words. No deterministic marker fires, and inventing one would fire on every complaint in the room.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "یکی اینجا خیلی داره شلوغ میکنه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-statement-plain",
+      "category": "act",
+      "note": "An ordinary statement. The server abstains rather than guess.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "امروز خیلی شلوغ بود",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-instruction-polite-question",
+      "category": "act",
+      "note": "A polite request phrased as a question. Read as a question, because the mark is the marker that decides and second-guessing it needs semantics — recorded as a boundary, not a bug.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "میشه اینو بررسی کنی؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-question-role",
+      "category": "act",
+      "note": "«محدوده کیه» — «محدوده» is «محدود» + the copula, not a directive; the question word is «کیه».",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "محدوده کیه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-question-muted",
+      "category": "act",
+      "note": "«چرا ساکته؟» — «ساکته» is «ساکت» + the copula, an ordinary question, not an order.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "چرا ساکته؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-question-file",
+      "category": "act",
+      "note": "«فایل پاکه؟» — «پاکه» is «پاک» + the copula; the thing is deleted, nobody was told to delete.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل پاکه؟",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "act-copula-subjunctive",
+      "category": "act",
+      "note": "«باید یه کاری کنه» — «کنه» is the subjunctive, not the imperative «کن»; a wish is not an order.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باید یه کاری کنه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "questions-answered",
+      "category": "room-state",
+      "note": "A question with a reply pointing at it is not open.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "قیمت چنده؟",
+          "at": 900,
+          "role": "member",
+          "message_id": 5
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "نمیدونم",
+          "at": 920,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_message_id": 5,
+          "reply_name": "رضا"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ممنون",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "questions-open",
+      "category": "room-state",
+      "note": "A question nothing replies to stays open.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "قیمت چنده؟",
+          "at": 900,
+          "role": "member",
+          "message_id": 5
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "سلام",
+          "at": 920,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "خب",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [
+          "قیمت چنده؟"
+        ],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "questions-one-of-two",
+      "category": "room-state",
+      "note": "Two questions, one answered: only the unanswered one is reported.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "کی میاد؟",
+          "at": 900,
+          "role": "member",
+          "message_id": 5
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "نمیدونم",
+          "at": 910,
+          "role": "member",
+          "reply_user_id": 11,
+          "reply_message_id": 5,
+          "reply_name": "رضا"
+        },
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "چرا دیر کرد؟",
+          "at": 920,
+          "role": "member",
+          "message_id": 7
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باشه",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [
+          "چرا دیر کرد؟"
+        ],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-present",
+      "category": "temporal",
+      "note": "«همین الان» is the present moment, read from the server's clock.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "همین الان دارم میام",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-past-minutes",
+      "category": "temporal",
+      "note": "«چند دقیقه پیش» points back at a scale of minutes and states no count.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 940,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "چند دقیقه پیش فرستادم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "minute",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-today",
+      "category": "temporal",
+      "note": "«امروز» is the present, at a scale of days.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "امروز هوا خیلی گرمه",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-tomorrow",
+      "category": "temporal",
+      "note": "«فردا» points forwards, at a scale of days. The reading was always right; the sentence was not — it read «about 1 day(s) ago», so the block stated a direction and then contradicted it in the same line. The four cases below cover the other magnitude branches of the same defect.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "فردا میبینمت",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-after-tomorrow",
+      "category": "temporal",
+      "note": "A future span of two days, so the magnitude is not a constant one. The sentence must say «about 2 day(s) from now»: a magnitude worded as an age is the defect this pins.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "پس فردا جلسه داریم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-next-week",
+      "category": "temporal",
+      "note": "The week branch of the future span, which is a different magnitude band from the day one.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "هفته بعد میبینمت",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "week",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-next-month",
+      "category": "temporal",
+      "note": "The month branch, whose unit span is labelled approximate — «at a scale of months (about)» — so the sentence carries two approximations and must not add a third by calling it an age.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "ماه بعد میام",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "month",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-next-year",
+      "category": "temporal",
+      "note": "The year branch, the largest band. All four are labelled so the harness scores a sentence per magnitude, not one sentence that happens to work for days.",
+      "window": [],
+      "anchor": {
+        "user_id": 11,
+        "name": "رضا",
+        "text": "سال بعد میبینمت",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "year",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-yesterday-question",
+      "category": "temporal",
+      "note": "A question whose time word points back a day.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 700,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دیروز چرا اینکارو کردی",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-that-time",
+      "category": "temporal",
+      "note": "«اون موقع» points back at a time the room established; no scale stated.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "اون موقع کجا بودی",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-still",
+      "category": "temporal",
+      "note": "«هنوز» is about the present state — \"still has not\".",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "هنوز جواب نداده",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-repeat",
+      "category": "temporal",
+      "note": "«دوباره» says this has happened before; a direction the words state.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دوباره امتحان کن",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "repeat",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-absent",
+      "category": "temporal",
+      "note": "No time word at all: the reading is empty, not wrong.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-last-week",
+      "category": "temporal",
+      "note": "«هفته پیش» points back a week.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "هفته پیش چی شد؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "week",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-mixed",
+      "category": "temporal",
+      "note": "A time word in a Persian/English mixed sentence.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دیروز یه issue داشتیم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-colloquial",
+      "category": "temporal",
+      "note": "A colloquial question whose time word is «دیشب».",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "دیشب چخبر بود؟",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-explicit-beats-demonstrative",
+      "category": "temporal",
+      "note": "«فردا اون موقع» is the future: the word that states a direction decides.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "فردا اون موقع میام",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "future",
+        "when_unit": "day",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-zwnj",
+      "category": "temporal",
+      "note": "«همین‌الان» with the ZWNJ is the same present moment.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "همین‌الان فرستادم",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "now",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-a-while-ago",
+      "category": "temporal",
+      "note": "«چند وقت پیش» is \"a while ago\": a direction and no scale.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "چند وقت پیش بود",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "when-duration-not-question",
+      "category": "temporal",
+      "note": "«چند ساعت پیش» is a duration, not a question — the noun after «چند» decides.",
+      "window": [],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "چند ساعت پیش دیدمش",
+        "at": 1000,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "past",
+        "when_unit": "hour",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-converge",
+      "category": "room-state",
+      "note": "Two people reply to the same person: that is a convergence, and the anchor continues the file thread.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رو دیدم",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "فایل مشکل داره",
+          "at": 940,
+          "role": "member",
+          "message_id": 3,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو دوباره چک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 4,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "repeat",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-one-reply",
+      "category": "room-state",
+      "note": "One reply edge is reported but is not called a convergence.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "دیدمش",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باشه",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "unclear"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-no-replies",
+      "category": "room-state",
+      "note": "No reply edges at all, and the anchor still continues the thread.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "بله",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو چک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-topic-shift",
+      "category": "room-state",
+      "note": "A substantive message that shares no content word: a change of subject.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "قیمت دلار چنده",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "shifts"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-thread-continues",
+      "category": "room-state",
+      "note": "A shared noun is the evidence, and it is reported.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "گزارش رو نوشتم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "گزارش رو بفرست",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-split-replies",
+      "category": "room-state",
+      "note": "Replies split between two people: the focus is the more recent, and the short anchor is not judged.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "الف",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 11
+        },
+        {
+          "user_id": 55,
+          "name": "مهدی",
+          "text": "ب",
+          "at": 940,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 44
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "باشه",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ],
+            [
+              55,
+              44
+            ]
+          ],
+          "focus": 44,
+          "relation": "unclear"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-anchor-is-reply",
+      "category": "room-state",
+      "note": "The anchor's own reply edge is in the graph even with no window, and there is nothing before it to continue. The reply target (11) is the referent, as in every other reply-anchor case; the label was null while the harness resolved the window without the anchor and saw no candidates.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 9,
+        "reply_user_id": 11
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": ""
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-continues-two-words",
+      "category": "room-state",
+      "note": "Two shared content words, both reported.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "مشکل فایل جدیه",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "فایل و مشکل رو بگو",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-short-anchor",
+      "category": "room-state",
+      "note": "A two-word message shares nothing with anything and is not judged.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "سارا",
+        "text": "باشه",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "unknown",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "unclear"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-reply-chain-continues",
+      "category": "room-state",
+      "note": "A reply chain, and the anchor continues the thread it belongs to.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رسید",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو تایید کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "continues"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "state-shift-with-graph",
+      "category": "room-state",
+      "note": "A graph is present and the anchor still changes the subject.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل مشکل داره",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "reply_user_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رو دیدم",
+          "at": 920,
+          "role": "member",
+          "message_id": 2,
+          "reply_user_id": 11
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "قیمت دلار چنده",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "reply_user_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [
+            [
+              22,
+              11
+            ]
+          ],
+          "focus": 11,
+          "relation": "shifts"
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "entity-media-newest",
+      "category": "entity",
+      "note": "Two things posted; the newest is the one a demonstrative prefers. The anchor names no class, so the person resolver is also scored: «اینو» points at the media, and the request acts on it, so the resolver reports no person at all — not even an ambiguous one. An ambiguous pair here would be a person lead for a request about a file, which is the mistake the object reading exists to remove; entity-media-single already reads the same words with no ambiguity, and this is now the same reading for the same reason.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "اینم",
+          "at": 940,
+          "role": "member",
+          "message_id": 2,
+          "kind": "video",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "video",
+          "has_link": false,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-media-single",
+      "category": "entity",
+      "note": "A photo was posted and the anchor points at it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین این چیه",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-link-named",
+      "category": "entity",
+      "note": "The message names the class, and the link is in the window.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "این لینک رو ببین https://example.com/page",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این لینک چیه",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": "link"
+        }
+      }
+    },
+    {
+      "id": "entity-media-named",
+      "category": "entity",
+      "note": "«فایل» names the media class.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این فایل رو بفرست",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": "media"
+        },
+        "request": {
+          "directive": "بفرست",
+          "polarity": "affirmative",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "entity-message-named",
+      "category": "entity",
+      "note": "«پیام» names a message, so the reply target is stated.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این پیام رو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 1
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": "message"
+        }
+      }
+    },
+    {
+      "id": "entity-none",
+      "category": "entity",
+      "note": "A demonstrative and nothing to point at: the block renders nothing.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-link-unnamed",
+      "category": "entity",
+      "note": "A link with no class named.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "www.example.org/x",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "entity-media-and-link",
+      "category": "entity",
+      "note": "A link is not a media row: the newest media is still the photo. As in entity-media-newest, the bare «اینو» points at the thing the request acts on, so the person resolver offers nobody rather than a tied pair — two speakers in the window no longer make a person question out of a request about a thing.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "لینک https://example.com",
+          "at": 940,
+          "role": "member",
+          "message_id": 2,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": true,
+          "named": ""
+        }
+      }
+    },
+    {
+      "id": "punctuation-thing-question",
+      "category": "punctuation",
+      "note": "A question mark after a thing noun. Before the tokenizer fix «لینک؟» was one token, so the noun was missed and the person resolver offered the room's members for a message about a link.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "این لینک رو ببین https://example.com/page",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این لینک؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": "link"
+        }
+      }
+    },
+    {
+      "id": "punctuation-message-question",
+      "category": "punctuation",
+      "note": "«پیام؟» names a message, so the reply target is stated — the same reading «پیام» gives without the mark.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "فایل رو فرستادم",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این پیام؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 11,
+        "reply_message_id": 1
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": "message"
+        },
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        }
+      }
+    },
+    {
+      "id": "punctuation-name-at-end",
+      "category": "punctuation",
+      "note": "A name at the very end of the message, with the question mark attached. Before the fix «سارا؟» was one token, the name was never matched, and the resolver returned the more recent speaker instead.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "سارا",
+          "text": "ببین",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        },
+        {
+          "user_id": 22,
+          "name": "رضا",
+          "text": "باشه",
+          "at": 990,
+          "role": "member",
+          "message_id": 2,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو بن کن سارا؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بن",
+          "polarity": "affirmative",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "punctuation-greeting-mark",
+      "category": "punctuation",
+      "note": "A greeting with a question mark is still a greeting. Before the fix «ممنون؟» was one token, so the greeting lexicon missed it and the mark alone made it a question.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ممنون؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 1,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "punctuation-correction-mark",
+      "category": "punctuation",
+      "note": "A correction with a question mark is still a correction — and correction outranks question, so the precedence only sees it once the token is clean.",
+      "window": [],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اشتباه؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 1,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "correction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "punctuation-thread-mark",
+      "category": "punctuation",
+      "note": "The one shared content word carries the question mark. Before the fix «چنده؟» was not «چنده», the two messages shared nothing, and the thread read as a topic shift.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "سارا",
+          "text": "قیمت چنده",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 22,
+        "name": "رضا",
+        "text": "چنده؟ گرون شده",
+        "at": 1000,
+        "role": "member",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "question",
+        "open_questions": [
+          "قیمت چنده"
+        ],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "continues"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-persian",
+      "category": "polarity",
+      "note": "The dangerous pair. «بنش نکن» is built on the same directive as «بنش کن» and asks for the opposite; the act reader alone reads both as an instruction.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش نکن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-clitic",
+      "category": "polarity",
+      "note": "«ساکتش نکن» — the object clitic is inside the directive and the prohibitor follows it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ساکتش نکن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ساکتش",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-polite",
+      "category": "polarity",
+      "note": "A polite request NOT to act — the case the module exists for. Reading it as a request to ban is the worst mistake available here.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "میشه بنش نکنی؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "negated",
+          "manner": "request"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-trailing",
+      "category": "polarity",
+      "note": "The politeness word comes after the prohibitor, so the prohibition is still the token right after the directive.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش نکن لطفا",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "negated",
+          "manner": "request"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-plural",
+      "category": "polarity",
+      "note": "The plural prohibitor «نکنید», which is what a room writes to several administrators. The clitic «ـش» points at the file, not at a person, so the message names a thing and leaves no person open — the referent column is not exercised here on purpose.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "فایل رو پاکش نکنید",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false,
+          "named": "media"
+        },
+        "request": {
+          "directive": "پاکش",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-negated-english",
+      "category": "polarity",
+      "note": "English puts the negator before the verb, and the tokenizer splits the apostrophe: «don't» arrives as «don» + «t». Without the look-back window this read as a plain instruction to ban. The Persian reader finds no deictic expression in an English sentence, and the label says so rather than claiming a resolution the server does not make.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "don't ban him",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ban",
+          "polarity": "negated",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-affirmative-command",
+      "category": "polarity",
+      "note": "The other half of the pair: a bare imperative with nothing negating it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "بنش کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "affirmative",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-affirmative-polite",
+      "category": "polarity",
+      "note": "A polite request, with nothing negating it.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "میشه بنش کنی؟",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "affirmative",
+          "manner": "request"
+        }
+      }
+    },
+    {
+      "id": "polarity-affirmative-english",
+      "category": "polarity",
+      "note": "The English affirmative, for the pair with polarity-negated-english.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "ban him",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ban",
+          "polarity": "affirmative",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-unscoped-negation",
+      "category": "polarity",
+      "note": "A negation that has nothing to do with the directive. The reader abstains rather than claiming the message asks for the action — the fail-safe direction.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این آدم خوب نیست، بنش کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "polarity-unscoped-disagreement",
+      "category": "polarity",
+      "note": "«نه بنش کن» is 'no, ban him' — a disagreement, not a negation. In Persian the negator of a directive follows it, so a Persian word before the directive never makes it negated; it only costs an abstention.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "نه بنش کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بنش",
+          "polarity": "",
+          "manner": "command"
+        }
+      }
+    },
+    {
+      "id": "object-thing-named-media",
+      "category": "object",
+      "note": "The message names the thing it acts on, so the object needs no inference.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "این فایل رو پاک کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false,
+          "named": "media"
+        },
+        "request": {
+          "directive": "پاک",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "named"
+        }
+      }
+    },
+    {
+      "id": "object-thing-named-link",
+      "category": "object",
+      "note": "The same, for a link: the noun is the strongest evidence and it wins.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "این لینک رو حذف کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false,
+          "named": "link"
+        },
+        "request": {
+          "directive": "حذف",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "link",
+          "source": "named"
+        }
+      }
+    },
+    {
+      "id": "object-thing-named-message",
+      "category": "object",
+      "note": "And for a message.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "این پیام رو پاک کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false,
+          "named": "message"
+        },
+        "request": {
+          "directive": "پاک",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "message",
+          "source": "named"
+        }
+      }
+    },
+    {
+      "id": "object-thing-pointed",
+      "category": "object",
+      "note": "The clitic carries the object and the verb says it is a thing, so the object is the media row the room holds. Before this reader the same message handed the model a person.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "پاکش کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "پاکش",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "object-thing-pointed-delete",
+      "category": "object",
+      "note": "The same shape with a second content verb, because the reading must come from the verb and not from one lucky word.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "حذفش کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "حذفش",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "object-thing-pointed-link",
+      "category": "object",
+      "note": "A bare demonstrative with a content verb, in a room whose newest thing is a link rather than a media row.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "اینو ببینید https://example.com/report",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "اینو حذف کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "",
+          "has_link": true
+        },
+        "request": {
+          "directive": "حذف",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "link",
+          "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "object-thing-unstated",
+      "category": "object",
+      "note": "The verb says a thing, and the message points at nothing in particular: the kind is stated as unknown rather than guessed from the room.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "پاک کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "پاک",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "thing",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-person-clitic",
+      "category": "object",
+      "note": "The same shape as object-thing-pointed and the opposite side: «ساکت» acts on a member.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "ساکتش کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": 14,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "ساکتش",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "person",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-person-deictic",
+      "category": "object",
+      "note": "A person verb with a bare demonstrative: the object is a person.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "اینو بن کن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 14,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بن",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "person",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-person-polite",
+      "category": "object",
+      "note": "The politeness frame does not change the side of the verb.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "میشه اینو محدود کنی؟",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 14,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "محدود",
+          "polarity": "affirmative",
+          "manner": "request"
+        },
+        "object": {
+          "kind": "person",
+          "source": "verb"
+        }
+      }
+    },
+    {
+      "id": "object-abstain-generic",
+      "category": "object",
+      "note": "A generic imperative carries no side, so the reader abstains. Before this reader the same message handed the model a person.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "برای اینم همین کارو بکن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "بکن",
+          "polarity": "affirmative",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "object-abstain-no-directive",
+      "category": "object",
+      "note": "No directive, so no object — the abstention is silent, not a line in the prompt.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "سلام بچه ها",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "social",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0,
+          "relation": "unclear"
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "",
+          "polarity": "",
+          "manner": ""
+        },
+        "object": {
+          "kind": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "object-thing-negated",
+      "category": "object",
+      "note": "The object is read the same way under a negation: the direction and the target are independent readings and both are reported.",
+      "window": [
+        {
+          "id": 1,
+          "user_id": 11,
+          "text": "سلام بچه ها",
+          "at": 900,
+          "name": "رضا",
+          "message_id": 1,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 2,
+          "user_id": 12,
+          "text": "گزارش امروز آماده شد",
+          "at": 920,
+          "name": "سارا",
+          "message_id": 2,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "admin"
+        },
+        {
+          "id": 3,
+          "user_id": 13,
+          "text": "",
+          "at": 940,
+          "name": "",
+          "message_id": 3,
+          "kind": "document",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        },
+        {
+          "id": 4,
+          "user_id": 14,
+          "text": "چطوری",
+          "at": 960,
+          "name": "مهدی",
+          "message_id": 4,
+          "kind": "",
+          "reply_message_id": 0,
+          "reply_user_id": 0,
+          "role": "member"
+        }
+      ],
+      "anchor": {
+        "id": 9,
+        "user_id": 11,
+        "text": "پاکش نکن",
+        "at": 1300,
+        "name": "رضا",
+        "message_id": 9,
+        "kind": "",
+        "reply_message_id": 0,
+        "reply_user_id": 0,
+        "role": "member"
+      },
+      "expect": {
+        "expression_kind": "clitic",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "state": {
+          "edges": [],
+          "focus": 0
+        },
+        "entities": {
+          "newest_media": "document",
+          "has_link": false
+        },
+        "request": {
+          "directive": "پاکش",
+          "polarity": "negated",
+          "manner": "command"
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        }
+      }
+    },
+    {
+      "id": "thing-noun-config",
+      "category": "reference",
+      "note": "A demonstrative bound to a config is a determiner, not a person pronoun.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "فایل رو فرستادم",
+          "at": 920,
+          "role": "member",
+          "message_id": 2
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "همون کانفیگ رو بده",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "thing-noun-server",
+      "category": "reference",
+      "note": "The same guard for a server noun, with a different verb.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سرور کند شده",
+          "at": 900,
+          "role": "member",
+          "message_id": 1
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "آره",
+          "at": 920,
+          "role": "member",
+          "message_id": 2
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این سرور رو ریستارت کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "thing-noun-mixed",
+      "category": "reference",
+      "note": "Persian demonstrative, English thing noun — the mixed half of the room.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "سلام",
+          "at": 900,
+          "role": "member",
+          "message_id": 1
+        },
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "ok",
+          "at": 920,
+          "role": "member",
+          "message_id": 2
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "این config رو چک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 3
+      },
+      "expect": {
+        "expression_kind": "",
+        "referent": null,
+        "requires_resolution": false,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": false
+        }
+      }
+    },
+    {
+      "id": "object-media-reply-author",
+      "category": "object",
+      "note": "The object is a thing and an explicit source names a person: the anchor is a reply to the sender of the photograph, and the reply edge is the answer. The object line must say what the object is without ordering the model to ignore the reply edge beside it — the thing is not a member of the room, but the person the reply names is real.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین این چیه",
+          "at": 980,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 11,
+        "reply_message_id": 0,
+        "reply_name": "رضا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": ""
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        },
+        "state": {
+          "edges": [
+            [
+              33,
+              11
+            ]
+          ],
+          "focus": 11
+        }
+      }
+    },
+    {
+      "id": "object-link-reply-author",
+      "category": "object",
+      "note": "The same shape one class over: the room's thing is a link, not a media row, and the reply edge still names its sender. The object reading is a thing and the referent is a person, and both are true of the same message.",
+      "window": [
+        {
+          "user_id": 22,
+          "name": "سارا",
+          "text": "لینک https://example.com",
+          "at": 980,
+          "role": "member",
+          "message_id": 1,
+          "kind": "",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "اینو ببین",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 22,
+        "reply_message_id": 0,
+        "reply_name": "سارا"
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 22,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "",
+          "has_link": true,
+          "named": ""
+        },
+        "object": {
+          "kind": "link",
+          "source": "pointed"
+        },
+        "state": {
+          "edges": [
+            [
+              33,
+              22
+            ]
+          ],
+          "focus": 22
+        }
+      }
+    },
+    {
+      "id": "object-media-named-author",
+      "category": "object",
+      "note": "No reply edge: the person is named in the message instead. «رضا اینو پاک کن» acts on a photograph and names the person who sent it, so the resolver settles on them at 0.80 and the object line must not deny that they exist.",
+      "window": [
+        {
+          "user_id": 11,
+          "name": "رضا",
+          "text": "ببین این چیه",
+          "at": 980,
+          "role": "member",
+          "message_id": 1,
+          "kind": "photo",
+          "reply_user_id": 0,
+          "reply_message_id": 0
+        }
+      ],
+      "anchor": {
+        "user_id": 33,
+        "name": "مالک",
+        "text": "رضا اینو پاک کن",
+        "at": 1000,
+        "role": "owner",
+        "message_id": 2,
+        "kind": "",
+        "reply_user_id": 0,
+        "reply_message_id": 0
+      },
+      "expect": {
+        "expression_kind": "deictic",
+        "referent": 11,
+        "requires_resolution": true,
+        "ambiguous": false,
+        "addressed": false,
+        "act": "instruction",
+        "open_questions": [],
+        "when": "",
+        "when_unit": "",
+        "entities": {
+          "newest_media": "photo",
+          "has_link": false,
+          "named": ""
+        },
+        "object": {
+          "kind": "media",
+          "source": "pointed"
+        },
+        "state": {
+          "edges": [],
+          "focus": 0
+        }
+      }
+    }
+  ]
+}

@@ -730,6 +730,57 @@ def due(
 # else is: the object still has to parse.
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
+# What a batch is doing, from a closed vocabulary. The point of closing it is
+# that a classification nobody can enumerate is not a classification: an unknown
+# or missing value normalises to ``other`` rather than being stored, so the
+# column stays countable and the model cannot invent a category. The vocabulary
+# is deliberately small — it names the shapes a room actually takes, not every
+# nuance a linguist could draw.
+INTENTS = ("question", "instruction", "discussion", "social", "other")
+
+
+def _intent(value) -> str:
+    """The model's classification of the batch, clamped to the vocabulary.
+
+    Casefolded and trimmed before the lookup, because a model that answers
+    ``"Question"`` has classified the batch correctly and refusing the capital
+    letter would be a schema pretending to be a judgement. Anything outside the
+    vocabulary — a new word, a sentence, ``null`` — becomes ``other``, which is
+    an honest bucket rather than a silent pass-through of whatever arrived.
+    """
+    word = str(value or "").strip().casefold()
+    return word if word in INTENTS else "other"
+
+
+def _claimed_id(value) -> int:
+    """A user id the model claims the batch is about, or 0.
+
+    A claim, so it is normalised rather than trusted: anything that is not a
+    positive integer becomes 0, which reads as "the model did not name anyone".
+    Whether the id is really in the room is checked by :func:`about_in_window`,
+    which has the window — this function must not grow one.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def about_in_window(value: int, messages) -> int:
+    """The claimed id if it is really in the window, else 0.
+
+    The second half of validating the model's claim about *who* a batch
+    concerns. A model that names a person nobody in the room has mentioned has
+    not understood the room, and storing its guess as room state would make the
+    next pass inherit the mistake. The window is the authority on who is here.
+    """
+    value = _claimed_id(value)
+    if not value:
+        return 0
+    present = {int(message.get("user_id") or 0) for message in messages or ()}
+    return value if value in present else 0
+
 
 def parse_decision(text: str) -> dict | None:
     """Read the model's structured decision, or ``None`` if it cannot be read.
@@ -760,6 +811,14 @@ def parse_decision(text: str) -> dict | None:
         "relevant": bool(data.get("relevant")),
         "respond": bool(data.get("respond")),
         "message": data.get("message"),
+        # The structured half of the understanding. These are *recorded*, never
+        # obeyed: nothing in this codebase gates a reply, an action or a
+        # permission on them. What they buy is that the pass's judgement of what
+        # the room is doing, and who it is about, stops being prose nobody can
+        # count — and that a claim about a person is dropped unless the window
+        # confirms it.
+        "intent": _intent(data.get("intent")),
+        "about": _claimed_id(data.get("about")),
     }
     if decision["message"] is not None:
         decision["message"] = str(decision["message"]).strip() or None
@@ -969,6 +1028,24 @@ def nexus_has_the_last_word(chat_id: int) -> bool:
     )
 
 
+def _about_name(remembered: dict) -> str:
+    """The name of the person the last pass judged the room to be about.
+
+    Read out of the stored participants rather than looked up again: the row
+    already carries who was in the room, and a second query for a name would be
+    a second answer that can disagree with the first. Empty when the pass named
+    nobody, or named somebody the stored roster does not carry.
+    """
+    about = int(remembered.get("about_user_id") or 0)
+    if not about:
+        return ""
+    for entry in (remembered.get("participants") or "").split(","):
+        parts = entry.strip().split(":")
+        if len(parts) >= 3 and parts[-1].isdigit() and int(parts[-1]) == about:
+            return parts[1].strip()
+    return ""
+
+
 def memory_block(chat_id: int) -> str:
     """What Nexus understood about this room a moment ago.
 
@@ -984,6 +1061,9 @@ def memory_block(chat_id: int) -> str:
     lines = ["\nWhat you understood about this conversation a moment ago:\n"]
     if remembered.get("topic"):
         lines.append(f"Topic then: {remembered['topic']}\n")
+    about = _about_name(remembered)
+    if about:
+        lines.append(f"About then: {about}\n")
     lines.append(f"{remembered['summary']}\n")
     lines.append(
         "That is your earlier reading, not a fact: if the messages below have "
@@ -992,7 +1072,13 @@ def memory_block(chat_id: int) -> str:
     return "".join(lines)
 
 
-def room_block(chat_id: int, *, limit: int = 0, budget: int = 0) -> str:
+def room_block(
+    chat_id: int,
+    *,
+    limit: int = 0,
+    budget: int = 0,
+    messages: list[dict] | None = None,
+) -> str:
     """The room transcript, labelled, for the system instruction.
 
     Used by the *direct* answer path, where the user turn is the message being
@@ -1006,10 +1092,15 @@ def room_block(chat_id: int, *, limit: int = 0, budget: int = 0) -> str:
     the layer off would otherwise still pay for a rendered room window on every
     addressed reply, still spend the tokens to carry it, and still have no way
     to tell that the switch had not done what it said.
+
+    ``messages`` is the window the caller already read, passed through to
+    ``render`` for the same reason it exists there: the addressed path reads the
+    room once and hands the same rows to the transcript and to the reading it
+    borrows beside it, so a reply costs one window query rather than two.
     """
     if not enabled():
         return ""
-    body = render(chat_id, limit=limit, budget=budget)
+    body = render(chat_id, limit=limit, budget=budget, messages=messages)
     if not body:
         return ""
     return (
@@ -1035,6 +1126,8 @@ def record(chat_id: int, *, seen_message_id: int, decision: dict) -> dict:
         relevant=bool(decision.get("relevant")),
         topic=str(decision.get("topic") or ""),
         summary=str(decision.get("summary") or ""),
+        intent=_intent(decision.get("intent")),
+        about_user_id=_claimed_id(decision.get("about")),
         participants=participants_of(chat_id),
     )
 

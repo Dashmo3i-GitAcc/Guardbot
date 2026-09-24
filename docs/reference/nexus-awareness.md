@@ -13,6 +13,29 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [35. Nexus Group Awareness: understanding the room](#s35)
 - [36. The assistant reads a room when its own clock expires](#s36)
 - [41. The allowance is a day's, so it is spent across the day](#s41)
+- [42. Who does «این» mean? The referent resolver](#s42)
+- [43. What is this message doing, and what is unanswered](#s43)
+- [44. When does «الان» mean? The server's clock, not the model's](#s44)
+- [45. Who is talking to whom, and is this still the same thread](#s45)
+- [46. What does «این» point at when it is not a person](#s46)
+- [47. The question mark was part of the word](#s47)
+- [48. «بنش کن» and «بنش نکن» were the same message](#s48)
+- [49. What does the request act on?](#s49)
+- [50. The person lead the object reading removed](#s50)
+- [51. Talking about Nexus, not to it](#s51)
+- [52. A sentence that contradicted itself](#s52)
+- [53. A correction the evidence did not support](#s53)
+- [54. The prompt, measured — and the block that never reached it](#s54)
+- [55. A clitic is not a content word](#s55)
+- [56. A config is not a person](#s56)
+- [57. The copula is not a clitic](#s57)
+- [58. The benchmark scored a different reading than the prompt showed](#s58)
+- [59. The object line ordered the model to ignore the block beside it](#s59)
+- [60. The room's replies converged — on one member](#s60)
+- [61. Two admins and the tie the resolver refuses to break](#s61)
+- [62. The same room, read twice — once with a reading and once without](#s62)
+- [63. What the server may remember about a person](#s63)
+- [64. Four sources, and the one that learns on its own](#s64)
 
 ---
 
@@ -1481,3 +1504,3143 @@ return is precisely when a timeline is most useful; a turn that never consults
 the model reports a zero model stage rather than borrowing somebody else's
 duration; and `sent` is the same value the function returns, because the caller
 uses it to decide whether the ambient path may still speak.
+
+---
+
+<a id="s42"></a>
+
+## 42. Who does «این» mean? The referent resolver
+
+### 42.1 The gap, stated in the room's own language
+
+A moderation instruction in a group is almost never self-contained. «اینو ساکت
+کن», «همون کاربر رو بن کن», «ادمینه رو محدود کن» — the person is named by a
+pronoun or a role, and the only thing in the world that says who that is, is the
+conversation around it.
+
+Before this stage the server resolved exactly one of those cases: the *reply
+edge*. If the instruction was sent as a reply, the target is a stored column and
+`awareness.instruction_block` states it as fact. If it was not, the server said
+so and told the model to read the transcript and ask if it could not tell.
+
+That is the right fail-safe direction, but it leaves a large, determinable class
+of cases on the table. A message that names somebody, states an id, or follows a
+person who has been the subject of the last three replies has a referent the
+server could have found without a model call — and a model handed a ranked list
+of candidates makes fewer wrong-person mistakes than one asked to re-derive the
+room from a transcript.
+
+### 42.2 What the module is, and what it deliberately is not
+
+`app/referents.py` is **evidence**, in exactly the sense `app/addressing.py` is
+evidence: it reads the text and the window and reports what it found, with the
+strength of each finding. It is not a decision, and the distinction is
+load-bearing rather than pedantic:
+
+* it cannot make a message relevant — relevance is the model's;
+* it cannot make anything happen — only `app/admin_service.py` authorises;
+* it cannot choose the referent — the model chooses, and the chosen id is
+  re-authorised from the actor's Telegram id like every other request.
+
+That last one is why `resolve` reports `ambiguous` instead of picking. When two
+candidates are genuinely close, the honest answer is "the server could not tell
+these apart", and the model is told that so it can ask. A resolver that silently
+picked the higher score would be guessing with extra steps, and a wrong-person
+moderation action is the worst mistake available here.
+
+The module is pure at import time — no `db`, no `config`, no pool, no `rbac` —
+so it is testable against a realistic corpus without a key, a clock or a bot.
+`awareness_context` is its only importer.
+
+### 42.3 The kinds, and why the kind is carried rather than flattened
+
+* **person** — «این کاربر», «همون طرف». The message says "person" outright.
+* **role** — «ادمینه», «مدیره». It names a role, not a person, so the
+  candidates are whoever holds that role now, which is a fact about `rbac` and
+  the window rather than about the text.
+* **prior** — «قبلی», «قبلیش». It points at what came before, which is the one
+  referent `instruction_block` explicitly warns against reusing; the candidates
+  are offered with that warning attached rather than suppressed.
+* **clitic** — the object clitic «ـش» on a moderation verb: «ساکتش کن» says
+  "mute him" with no demonstrative at all. The lexicon is borrowed from
+  `addressing.ACTION_WORDS` rather than copied, late and guarded, so the module
+  stays importable on its own.
+* **deictic** — the bare «این», «اون», «همون». The weakest about personhood: it
+  may point at a message, a config or a link.
+
+The demonstratives are listed as **surfaces** («اینو», «همونو»), not stems. The
+first draft stripped the object marker «و» generically, which turns «اینو» into
+«این» — and also turns «آمو» or any other word ending in «و» into something it
+is not, because «و» is both the object marker and an ordinary letter.
+
+### 42.4 The scoring, and the one case the server actually knows
+
+Each source is a reason to believe one person is the referent, weighted by how
+much the evidence *is* the referent rather than merely correlates with it: a
+reply edge (1.00), a stated id (0.95), a name in the message (0.80), a role the
+message names (0.70), the room's replies having been aimed at them (0.40), and
+recency (0.50/0.30/0.15 by band). Two independent sources agreeing add 0.05, and
+never enough to overtake a strong single signal.
+
+A reply edge short-circuits the verdict rather than merely scoring high: when the
+message *is* a reply, that id is the referent, and reporting it as ambiguous
+because somebody else was also named would be worse than useless.
+
+### 42.5 Anaphora: «همون» is not «این»
+
+The last measured imperfection was ambiguity *precision*: the resolver cried
+"cannot tell" on a room that had plainly settled. The case was «همون کاربر رو بن
+کن» with three replies in a row aimed at رضا.
+
+The reading is linguistic. «همون» and «اون» are **anaphoric** — "that same one",
+the entity already under discussion — and so is the object clitic, because "him"
+can only be somebody already on the table. For those, what the room has been
+about is not a hint among hints; it is what the word means. A bare «این» points
+at whatever is nearest, which may be a message or a link, and «قبلی» points at a
+*position in a sequence* rather than at the room's subject; neither gets the
+reading.
+
+The rule is deliberately strict. It fires only when every reply in the window
+targets one person **and there is more than one of them** — a single incidental
+reply edge is not "what the room has been about", and a room whose replies are
+split between two people is exactly the case where the resolver must stay
+unsure. Both fall back to the ordinary hint-scoring, which reports ambiguity
+when it cannot decide.
+
+### 42.6 The benchmark is the claim
+
+`tools/eval_intent.py` runs a fixed corpus (`tools/eval_cases.json`) through
+addressing and referent resolution and reports the numbers. It runs on a bare
+checkout — it sets placeholder environment variables at import — so the number
+is reproducible by anyone.
+
+On the 41-case corpus, with the anaphoric rule disabled and enabled — the same
+corpus both times, so the delta is the rule and nothing else:
+
+```
+                                rule off   rule on
+expression accuracy               100.0%   100.0%
+addressing accuracy                97.6%    97.6%
+top-1 accuracy                    100.0%   100.0%
+ambiguity recall                  100.0%   100.0%
+ambiguity precision                66.7%   100.0%
+wrong-but-confident                   0        0
+provided before (reply edge)       58.3%    58.3%
+provided after  (resolver)        100.0%   100.0%
+confident and correct              83.3%    91.7%
+block chars mean / max          249 / 503  253 / 527
+resolver us mean                ~0.6-1.7 ms (noisy; floor is 3 ms)
+```
+
+"Provided" is the fraction of answerable cases where the server hands the model
+the right person: 58.3% with only the reply edge, 100.0% with the resolver. That
+pair is a property of the corpus rather than of the rule, which is why it does
+not move. What the rule moves is **ambiguity precision** — 66.7% to 100% — and
+with it the fraction of answerable cases the resolver is both right *and*
+certain about, 83.3% to 91.7%, while `wrong-but-confident` stays at zero.
+
+The resolver's own cost is pure Python and sub-millisecond in the mean, but the
+measurement is noisy on a shared host (the same corpus has read anywhere from
+~0.6 ms to ~1.7 ms), so `tests/test_intent_eval.py` pins a 3 ms ceiling rather
+than the number itself. The block it renders stays under 600 characters.
+
+`tests/test_intent_eval.py` holds those numbers as a floor: `wrong_confident`
+must be 0, top-1 and ambiguity recall **and precision** must be 1.0, and
+`provided_before < provided_after`. A change to the lexicon moves the numbers on
+purpose, by editing the corpus — never by loosening the floor.
+
+The corpus covers the cases the brief names: reference, ambiguity, continuation,
+mixed Persian/English, ordinary chatter, addressing, typo, correction,
+topic-switch, temporal reference, reply chains and slang. One addressing case is
+pinned as a **known gap** — an exact name mid-sentence in a message talking
+*about* Nexus — because every deterministic rule that catches it also demotes a
+real request with the name in the same position.
+
+### 42.7 What the pass now records
+
+The decision the awareness pass returns was `topic`, `summary`, `relevant`,
+`respond`, `message`: a judgement of what the room is doing, expressed as prose
+nobody can count. Two fields now carry the structured half:
+
+* **intent** — what the batch is doing, from a closed vocabulary
+  (`question | instruction | discussion | social | other`);
+* **about** — the Telegram id of the person the batch concerns, or 0.
+
+Both are recorded and neither is obeyed: nothing gates a reply, an action or a
+permission on them. `intent` is clamped in `parse_decision` and again at the
+store, so the column only ever holds the vocabulary. `about` is checked against
+the window by `awareness.about_in_window` — a model that names somebody the room
+never mentioned has not read the room, and storing its guess would let the next
+pass inherit the mistake. The stored id is rendered back as "About then: …" in
+`memory_block`, read out of the stored participants rather than looked up again,
+so the understanding a pass records is what the next pass is handed.
+
+The columns are additive and reach production through `_ensure_column` rather
+than `CREATE TABLE`; a row written before them reads as `''`/`0` rather than
+being guessed at. Rollback is reverting the code: the columns stay and are
+ignored.
+
+---
+
+<a id="s43"></a>
+
+## 43. What is this message doing, and what is unanswered
+
+### 43.1 The gap
+
+The awareness pass is handed a transcript and asked to understand it. What it
+was *not* handed is the cheap half of that understanding, which the server can
+read off the text with no model and no key:
+
+* whether a message is **asking**, **instructing**, **correcting**, **greeting**
+  or **reporting** — «چقدره؟» and «بنش کن» are the same length and opposite in
+  force, and a model reading a transcript has to work that out from the sentence
+  on every pass;
+* which questions in the window **no reply points at an answer for** — the one
+  piece of room state a group most reliably loses track of, and the one a server
+  can read exactly, because the reply edge is a stored column rather than a
+  judgement.
+
+Both are things the brief lists as room state: *"which questions remain
+unanswered"*, and the shape of what is being said.
+
+### 43.2 Evidence, and the vocabulary abstains
+
+`app/discourse.py` is **evidence**, in the same sense `app/addressing.py` and
+`app/referents.py` are evidence. It reads text and rows and reports what it
+found, with the reason. Nothing branches on it: the existing invariant is
+unchanged, and relevance, action and speech remain the model's exclusively.
+
+`read_act` reports `unknown` when nothing it can defend fires, and that is the
+design rather than a gap. A classifier that always guesses puts a wrong act in
+the prompt on every ordinary message, and the prompt is where a wrong label does
+its damage. The benchmark therefore scores **precision on the acts it claims**
+and **coverage** — how often it claims at all — rather than accuracy alone,
+because on a corpus where most messages in a moderation room are instructions,
+accuracy is a number a constant would also get.
+
+### 43.3 The precedence, and why each step is load-bearing
+
+`correction > report > instruction > social > question`.
+
+* **A correction is a statement *about* the conversation.** «نه منظورم مهدی بود،
+  اینو بن کن» corrects and happens to instruct; reading it as an instruction
+  loses the correction. So does «نه گفتم مهدی نه سارا» — a first-person
+  recollection opened by «نه» is fixing what the speaker said, and the rule
+  needs both halves, so «قبلاً گفتم که…» stays a reminder and a bare «نه» stays
+  a disagreement.
+* **A report is a quotation.** «نکسوس گفت اینو بن کن» repeats an order rather
+  than giving one, and reading it as an instruction is exactly the false
+  positive `addressing` already guards against with its reporting-verb rule.
+* **A greeting outranks the question mark inside it.** «سلام بچه ها چطوری» is a
+  greeting, not an interrogation.
+
+### 43.4 Two lexicons, and the suffix rule that was removed
+
+The moderation verbs are **borrowed** from `addressing.ACTION_WORDS` rather than
+copied, late and guarded, for the reason the whole codebase reuses the one fold:
+a second copy drifts the first time either changes. The ordinary imperatives are
+an explicit list — «ببین», «بگو», «بفرست», and the bare «کن» and «بده» that
+carry a directive whose verb is in no lexicon («بررسی کن», «درستش کن»).
+
+The first draft also had a **suffix rule**: a token ending in «کن» was an
+imperative. It read «نمیکن» as an instruction, and so did every other word with
+the syllable at the end, and it bought nothing — the moderation lexicon already
+lists the clitic forms a group types («بنش»، «ساکتش»، «محدودش») and `_bare`
+strips one clitic before the lookup. It was removed. «آیا درسته» read as an
+instruction for the same reason: «درسته» strips to «درست», which was in the
+imperative list and is also an ordinary noun. The noun forms were removed too,
+and «درستش کن» is caught by the «کن» that follows it.
+
+### 43.5 The room's unanswered questions
+
+`open_questions` tests the **reply edge and nothing else**: a question is open
+unless some later message carries a `reply_message_id` equal to its own. A room
+answers questions without using Telegram's reply as often as with it, so this
+over-reports — and the block says so. It is labelled *"no reply pointing at an
+answer"*, never "unanswered", because the second phrasing is a claim about
+meaning and the first is a fact about the rows.
+
+Nexus's own questions are included: a question the assistant asked and nobody
+picked up is exactly the thing a room forgets. The list is bounded at three and
+ordered newest first.
+
+### 43.6 The numbers
+
+`tools/eval_intent.py` scores both, over the same fixed corpus. Measured with the
+discourse reader disabled and enabled:
+
+```
+                                before   after
+cases                               55      55
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.2%   98.2%
+
+the act (abstention is 'unknown')
+  claimed precision                  -  100.0%
+  coverage                           -   90.9%
+  recall on labelled cases           -  100.0%
+  false positives / negatives        -    0 / 0
+  abstentions                        -       5
+  per class (correct/total)          -  question 6/6  instruction 35/35
+                                       correction 2/2  social 3/3
+                                       report 4/4  unknown 5/5
+
+the room's open questions (5 cases that have one)
+  exact match                        -    5 / 5
+  precision / recall                 -  100% / 100%
+  block chars max                    -      134
+
+context overhead per pass            -  +208 chars (~52 tokens)
+reading cost per pass                -  ~0.7 ms mean, ~1.5 ms p95
+Gemini calls added                   -        0
+```
+
+The five abstentions are the implicit complaint («یکی اینجا خیلی داره شلوغ
+میکنه»), the plain statement («امروز خیلی شلوغ بود»), the known addressing gap
+(«من با نکسوس کار نکردم»), and two empty anchors («خب», «باشه»). If coverage
+ever reaches 100%, something started guessing.
+
+The corpus is lopsided — 35 of 55 cases are instructions, because that is what a
+moderation room is — which is why the report prints **per class** beside the
+aggregate. A single accuracy figure would be a number a constant could also get.
+
+### 43.7 Two known boundaries, recorded rather than hidden
+
+* **A polite request phrased as a question** («میشه اینو بررسی کنی؟») reads as a
+  question. The mark is the marker that decides, and second-guessing it needs
+  semantics — which is the model's job, not this module's. It is a corpus case,
+  not a bug report.
+* **Implicit intent** — a complaint that asks for nothing in words — abstains.
+  Every rule that caught it would fire on every complaint in the room, which is
+  the trade `addressing` already refused to make for «about Nexus».
+
+### 43.8 Where it reaches the model
+
+Two **tier-0** sources in `awareness_context.SOURCES`: `anchor_act` (one line,
+renders nothing on an abstention) and `open_questions` (empty unless a question
+is open). Both read `Ctx`, never the database, so a pass pays no extra query.
+The measured cost of both, on a four-message batch, is +208 characters and about
+0.7 ms of pure Python — and zero Gemini calls, so the awareness allowance is
+untouched.
+
+<a id="s44"></a>
+
+## 44. When does «الان» mean? The server's clock, not the model's
+
+### 44.1 The gap, stated in the room's own language
+
+A Persian sentence places itself in time with a word rather than a date: «الان»,
+«همین الان», «قبلاً», «چند دقیقه پیش»، «دیروز»، «فردا»، «هفته پیش»، «بعداً»,
+«دوباره»، «هنوز». A model reading a transcript has no clock. Asked what «قبلاً»
+means, it supplies one — from the date of the last message it read, or from its
+own training. The brief names the failure exactly: **do not extract dates from
+model guessing; use the server clock and real timestamps.**
+
+The server already hands the pass the *absolute* date (§35's calendar block, read
+from `ctx.now`). What it did not hand over was the *relative* reading: that «دیروز»
+points backwards a day, that «چند دقیقه پیش» points backwards at a scale of
+minutes, that «فردا اون موقع» points forwards because «فردا» is the word that
+knows. That is arithmetic on the server's own clock, and it belongs on the server.
+
+### 44.2 It reports a direction and a granularity, never a date
+
+`app/temporal.py` reads the words and returns four things: the **direction**
+(`past` / `now` / `future` / `repeat`), the **granularity** (`minute` … `year`, or
+none), the **offset the words state** (0 for most — «چند دقیقه پیش» states no
+count, «دیروز» states a day), and the **surface** the message actually used.
+
+It deliberately does **not** produce a date. «چند دقیقه پیش» does not contain one,
+and a module that computed one would be inventing the thing the brief forbids. The
+rendered line says so: *"That is the server's clock, not a reading of the words."*
+
+`now` is **passed in** by the caller — the same value the pass already read — so
+there is exactly one notion of "now" in a pass. A second clock is a second answer.
+
+### 44.3 The table, and why its order is the whole argument
+
+The phrases are a tuple scanned **in order, first hit wins**, matched on token
+boundaries against the shared fold. Two orderings are load-bearing and both are
+asserted by tests:
+
+* **Longer before shorter.** «نیم ساعت پیش» must be tried before «ساعت پیش»: the
+  two differ only in `seconds`, so a kind-only assertion would not notice the
+  shorter one winning.
+* **Explicit before demonstrative.** «این هفته» is the present week and «اون
+  موقع» points back at a time the room established — but «فردا اون موقع» is the
+  future, because «فردا» is the word that states a direction. The demonstrative
+  forms are generated from a cross product and placed **last**, so a sentence that
+  carries both reads by the word that knows.
+
+The demonstrative forms are the same near/far split `referents` reads for people,
+applied to time: near is the present, far is the past.
+
+### 44.4 One list, three readers
+
+`TEMPORAL_NOUNS` is the time nouns — «الان»، «هفته»، «موقع»، «مدت» — and it is
+shared rather than copied. Three readers consult it, each borrowing it late and
+guarded as every cross-module reach in this feature does:
+
+* `temporal` builds its demonstrative phrases from it;
+* `referents` will not read a demonstrative before a time noun as a person:
+  «این هفته» is a week, not somebody. The check reads the **raw** token, because
+  the clitic stripper would have turned «هفته» into «هفت»;
+* `discourse` will not read a question word before a time noun as a question:
+  «چند» asks "how many", but «چند دقیقه پیش» says "a few minutes ago". This was a
+  real false positive the temporal work exposed — the act reader called
+  «چند دقیقه پیش فرستادم» a question — and the noun after «چند» is what separates
+  the two readings. The question *mark* is still checked on its own, so a sentence
+  that really asks («چند دقیقه پیش فرستادی؟») still reads as a question.
+
+### 44.5 The numbers
+
+`tools/eval_intent.py`, over the same corpus (now 71 cases — the 55 from §43 plus
+16 temporal ones), with the time reader disabled and enabled:
+
+```
+                                before   after
+cases                               55      71
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.2%   98.6%
+
+the act (abstention is 'unknown')
+  claimed precision              100.0%  100.0%
+  coverage                        90.9%   78.9%
+  recall on labelled cases       100.0%  100.0%
+  false positives / negatives      0 / 0   0 / 0
+  abstentions                         5      15
+  per class (correct/total)  question 6/6  question 10/10  instruction 37/37
+                            instruction 35/35  correction 2/2  social 3/3
+                            correction 2/2  report 4/4  unknown 15/15
+                            social 3/3
+                            report 4/4
+                            unknown 5/5
+
+the room's open questions (5 cases that have one)
+  exact match                        -    5 / 5
+  precision / recall                 -  100% / 100%
+
+time words
+  claimed precision                  -  100.0%
+  coverage                           -   26.8%
+  recall on labelled cases           -  100.0%
+  false positives / negatives        -    0 / 0
+  per kind (correct/total)           -  none 52/52  past 9/9  now 5/5
+                                          future 4/4  repeat 1/1
+  block chars max                    -      292
+
+context overhead per pass            -  +292 chars (~73 tokens), when a time word is present
+reading cost per pass                -  ~0.1 ms mean, ~0.1 ms p95
+Gemini calls added                   -        0
+```
+
+Three things in that table need saying plainly.
+
+**The act coverage fell from 90.9% to 78.9%, and it is a fact about the corpus,
+not the reader.** Sixteen temporal cases were added and nine of them are plain
+statements that place themselves in time («امروز هوا خیلی گرمه», «فردا اون موقع
+میام»), whose act *is* a matter of meaning — exactly the kind of message the act
+reader is built to abstain on. The load-bearing floors did not move: claimed
+precision is still 100% and the false-positive count is still 0. The coverage
+floor in `tests/test_intent_eval.py` was lowered from 0.85 to 0.75 **on purpose**,
+with the reason written beside it.
+
+**The act reader changed too, and the change is a fix.** «چند دقیقه پیش فرستادم»
+used to read as a `question`, because «چند» is a question word. It is now an
+abstention, which is correct: it is a statement with a duration in it. This is the
+only behaviour change to §43's module in this increment, and it is a false positive
+removed rather than a feature added.
+
+**The reading cost fell by ~8× while the reader grew.** The first draft folded all
+88 phrases on every call (~0.9 ms mean, ~1.7 ms p95). The folded table is now built
+once, lazily, on first use — lazily rather than at import so it is folded under the
+same environment the reads happen in. A read is now a substring scan: ~0.1 ms mean
+and p95.
+
+### 44.6 Two known boundaries, recorded rather than hidden
+
+* **«اون موقع» reads as the past on its own.** It points at a time the room
+  established, and that antecedent is usually behind us — but «فردا اون موقع» is
+  the future, and the table handles that because «فردا» is tried first. A sentence
+  with no explicit direction word and an *antecedent that is future* would read as
+  the past. Resolving it properly means reading the antecedent, which is the
+  referent resolver's problem, not this one's.
+* **«چک کردم» still reads as an instruction.** `discourse` lists «check» as an
+  English imperative, and it cannot yet tell «check کن» (an order) from «check
+  کردم» (past tense). This is not temporal and was not fixed here; it is recorded
+  so the next increment that touches the act reader knows to look.
+
+### 44.7 Where it reaches the model
+
+One **tier-0** source, `anchor_when`, declared **last** among the tier-0 sources:
+it is the shortest block and the one that renders least often (only when the anchor
+carries a time word), so it is the cheapest thing to lose if the pass-wide ceiling
+ever bites. It reads `Ctx` — the anchor text, `ctx.now` and `ctx.oldest_at()` — so
+it costs no query. Measured: 118–164 characters for a bare time word, 252–298 with
+the window-age line, and **zero** when the message states no time; about 0.05 ms of
+pure Python; and zero Gemini calls, so the awareness allowance is untouched.
+
+<a id="s45"></a>
+
+## 45. Who is talking to whom, and is this still the same thread
+
+### 45.1 The gap
+
+A person in a group knows, without thinking, three things a transcript does not
+say: **who is answering whom**, **who the room has converged on**, and **whether
+the message in front of them is a continuation of what came before or the start of
+something else**. The model reading the transcript has to reconstruct all three
+from the order of the messages, every pass, and it has no reliable way to know
+that two replies were aimed at the same person rather than at two.
+
+Two of those three the server can read exactly, and one it can read well enough to
+be useful with its evidence attached. That is the whole shape of this increment.
+
+### 45.2 Two records and one reading
+
+* **The reply graph.** Every reply is a stored column — `reply_user_id` on the row.
+  Who replied to whom is not an inference. It is the same fact
+  `awareness.instruction_block` already states for one message, generalised to the
+  window. The assistant's own replies are included: "the assistant answered X" is
+  part of who is talking to whom.
+* **The focus.** The target with the most incoming reply edges; a tie is broken by
+  the most recent edge, which is the only ordering a window can justify. A count,
+  not a judgement.
+* **The thread.** This one *is* a reading: whether the anchor's content words
+  overlap the words of the messages before it. The shared words are the evidence,
+  and they are rendered as the reason rather than hidden behind the verdict.
+
+### 45.3 The restraint is the design
+
+Three rules keep the reading from becoming a guess, and each is asserted by a test:
+
+* **One reply edge is not a convergence.** `converged()` needs more than one reply
+  aimed at the same person. The single-edge case still reports the edge — it is a
+  fact — and says *"that is not a convergence"* rather than borrowing the stronger
+  word.
+* **A short message is not judged.** «باشه» shares no content word with anything,
+  and reading that as "the topic changed" would fire on half the traffic in a
+  moderation room. The thread reading abstains unless the anchor carries at least
+  `MIN_TOPIC_TOKENS` content words, and an abstention renders **nothing** — a line
+  saying "unclear" would spend tokens telling the model what it can already see.
+* **Overlap is only evidence if the words mean something.** «این», «که», «رو»,
+  «میشه» appear in almost every Persian sentence and would make every message
+  continue every other one. The stopword list is explicit and readable rather than
+  derived.
+
+### 45.4 The anchor's own row, and the bug that taught us
+
+The anchor is usually one of the window's own rows — `awareness.anchor` picks it
+from there — so it must be taken **out** of "what came before" before the overlap
+is computed. Left in, its own words overlap themselves and every message looks like
+a continuation of itself.
+
+The exclusion is by `message_id` when the row has one, and by the
+`(user_id, at, text)` triple when it does not — an anchor the pass built by hand.
+A message that arrived **after** the anchor is not prior either, which is what the
+timestamp test is for.
+
+The stopword list carries a second lesson. The first draft had a length floor of
+three characters as a crude proxy for "not a function word". It dropped «چک» —
+two characters, and exactly what a message about a file is about — so
+«فایل رو چک کن» read as too short to judge. The floor is now two, a single
+character is never a topic, and the stopword list does the real work.
+
+### 45.5 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 82 cases — the 71 from §44 plus 11
+room-state ones), with the room-state reader disabled and enabled:
+
+```
+                                before   after
+cases                               71      82
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.6%   98.8%
+
+the act (abstention is 'unknown')
+  claimed precision              100.0%  100.0%
+  coverage                        78.9%   78.0%
+  recall on labelled cases       100.0%  100.0%
+  false positives / negatives      0 / 0   0 / 0
+
+the room's state
+  edges exact                        -   82 / 82
+  edges precision / recall           -  100% / 100%
+  edges false positives / negatives  -    0 / 0
+  focus accuracy                     -  100.0%
+  relation exact                     -   11 / 11
+  per relation (correct/total)       -  none 1/1  continues 5/5
+                                          shifts 2/2  unclear 3/3
+  graph / thread chars max           -      239 / 151
+
+context overhead per pass            -  +169…221 chars (graph)
+                                       +0…143 chars (thread, only when judged)
+reading cost per pass                -  ~0.17 ms mean
+Gemini calls added                   -        0
+```
+
+Two things in that table are worth saying plainly.
+
+**The graph is exact over the whole corpus, not just its own cases.** The reply
+edges are scored on all 82 cases — 19 of them already carried a reply row — and
+the reading is right on every one. The relation is scored only on the 11 cases
+where it was labelled, because it is a reading rather than a record; labelling a
+case it did not judge would be scoring a guess.
+
+**The act coverage moved from 78.9% to 78.0% and the reason is the corpus.** Three
+of the eleven room-state cases are short acknowledgements whose act is a matter of
+meaning. The floors that matter did not move: claimed precision is still 100% and
+the false-positive count is still 0.
+
+### 45.6 Where it reaches the model
+
+Two **tier-0** sources in `awareness_context.SOURCES`:
+
+* `reply_graph` — the edges, the focus (or the explicit "that is not a
+  convergence"), and who spoke, newest first.
+* `thread` — the continuation reading with its shared words, or nothing at all when
+  it abstains.
+
+Both read `Ctx`, never the database. Each calls `read_state` itself rather than
+sharing one cached call, and that is deliberate: a source that raises must cost
+only its own block, and the scan it repeats is a pass over rows already in memory
+— about 0.17 ms for the pair, against a pass that waits on a model. Zero Gemini
+calls, so the awareness allowance is untouched.
+
+<a id="s46"></a>
+## 46. What does «این» point at when it is not a person
+
+### 46.1 The gap, and the mistake it prevents
+
+§42 gave the server a ranked list of **people** a pronoun may mean. But a
+demonstrative in a group very often points at a **thing** — the photograph
+somebody just posted, the link, the file. When an administrator replies «اینو پاک
+کن» to a photograph, the resolver's honest answer is that it found no person it
+could be, and the block it renders offers the room's members as the things «اینو»
+might mean.
+
+That is a wrong lead, and a wrong-person moderation action is the worst mistake
+available here. So the increment has two halves, and both matter:
+
+* the server now reads the **things** a demonstrative may point at, and says so;
+* the person resolver **stops offering a person** when the word after the
+  demonstrative names a thing — «این لینک» is a link, and the room's members are
+  not candidates for it.
+
+### 46.2 Two records and one reading
+
+* **media** — the row's stored `kind` column (`photo`, `video`, `voice` …), which
+  the capture path wrote from `media.describe`. A stored fact, not an inference.
+  The same fact is also written into the text as a `[kind]` prefix, and that is
+  the fallback when the column is empty — a row captured before the column
+  existed.
+* **links** — a URL in a message is a regular expression away. Deliberately
+  narrow: the scheme form, or a bare `www.` host. A rule that guessed at bare
+  domains would match ordinary Persian words with a dot in them.
+* **the message it replies to** — `reply_message_id` is a stored column, so when
+  the anchor *names* a message («این پیام رو پاک کن») the server can point at the
+  exact row. This is the one reading: it is added **only** when the anchor names
+  a message, because a reply edge always has a target and pointing at it
+  unconditionally would print the transcript's own text back to the model on
+  every reply.
+
+Media and links come from the messages **before** the anchor — the thing a
+demonstrative points at is what the room already has — newest first, bounded.
+
+### 46.3 The restraint is the design
+
+* **A thing is not a person, and the block says so.** The rendered block is
+  headed "things, not people" and, when nothing is named, closes with *"do not act
+  on a person unless the message names one."* It is the correction the resolver's
+  person-candidates need. The sentence is evidence framing, not an instruction —
+  the model still decides.
+* **Nothing to point at renders nothing.** A block saying "no things found" would
+  spend tokens telling the model what the transcript already shows.
+* **The noun table holds stems, and exactly one clitic is stripped** — accepted
+  only when the stripped form is a known noun. «لینکشو» is «لینک» + the object
+  marker and is a link; «فایده», «عکاس» and «پیامدش» are not the nouns they begin
+  with, and are not invented into things. The first draft listed clitic forms
+  instead and missed three of ten.
+
+### 46.4 The bug the guard found, twice
+
+The guard in the person resolver — *do not read a demonstrative before a thing
+word as a person pointer* — is the same shape as the time guard of §44.4, and it
+walked into the same trap. The first version checked the **clitic-stripped** token,
+and `referents`' own stripper had already turned «پیام» into «پی» (`ـام` is in its
+clitic list), so «این پیام رو پاک کن» still read as a person reference. The check
+now reads the **raw** token and lets the entity reader do the one strip that is
+safe — the identical lesson «هفته» taught the time guard.
+
+Two of the eight new cases also turned up a labelling error rather than a reader
+error. `entity-media-newest` and `entity-media-and-link` use a bare «اینو» with
+two people who spoke equally recently and no reply edge. The resolver reports
+**ambiguous** there — two candidates at the same score, a margin of zero — and
+that is the module's documented behaviour: *"when two candidates are genuinely
+close, the honest answer is 'the server could not tell these apart'"*. The cases
+had been labelled `ambiguous: false`, which was the mistake; they now say `true`,
+and the note in the corpus records why. The reading never changed — only the
+label.
+
+### 46.5 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 90 cases — the 82 from §45 plus 8
+entity ones), with the entity reader disabled and enabled:
+
+```
+                                before   after
+cases                               82      90
+expression accuracy             100.0%  100.0%
+addressing accuracy              98.8%   98.9%
+
+the act (abstention is 'unknown')
+  claimed precision              100.0%  100.0%
+  coverage                        78.0%   80.0%
+  recall on labelled cases       100.0%  100.0%
+  false positives / negatives      0 / 0   0 / 0
+
+the things a demonstrative may point at
+  media exact                        -   90 / 90
+  link exact                         -   90 / 90
+  named class exact                  -     8 / 8
+  named class accuracy               -  100.0%
+  block chars max                    -      302
+
+referent resolution
+  needs resolution                  34      39
+  answerable (has an answer)        24      24
+  top-1 accuracy                 100.0%  100.0%
+  ambiguity recall               100.0%  100.0%
+  ambiguity precision            100.0%  100.0%
+  wrong-but-confident                0       0
+
+referent block, mean / max       132 / 527      131 / 527
+the entity source
+  cases it renders on                  -       11 / 90
+  chars it adds when it does           -  +224 mean / +302 max
+  chars it adds when it does not       -              0
+reading cost per pass                -  ~0.06 ms mean / ~0.10 ms p95
+Gemini calls added                   -        0
+```
+
+The harness's ``block_chars`` is the **referent candidates** block and nothing
+else — each other reader reports its own size beside its own metrics — and the
+report line now says so. It is quoted here as the referent block, not as "the
+context".
+
+Three things in that table are worth saying plainly.
+
+**The entity block costs nothing on the messages that do not need it.** It renders
+on 11 of the 90 cases; the other 79 pay zero characters, and the largest block it
+ever renders is 302 — well inside the source's own 600-character budget.
+
+**`answerable` did not move; `needs resolution` did.** The eight new cases add
+five whose bare «اینو» leaves the referent open, but none of them has a
+determinate *person* answer — they are about things. So top-1 accuracy is still
+scored over the same 24 cases and still 100%, and the ambiguity precision stayed
+at 100% only after the two labels of §46.4 were corrected.
+
+**Act coverage rose from 78.0% to 80.0%, and that is the corpus, not the reader.**
+The new cases are mostly instructions («این لینک چیه», «این فایل رو بفرست») and the
+act reader gets them right. The floors that matter are unmoved: claimed precision
+100%, false positives 0.
+
+### 46.6 Where it reaches the model
+
+One **tier-0** source in `awareness_context.SOURCES`:
+
+* `entities` — the things the anchor may point at, the class it named, and the
+  "not about a person" correction, or nothing at all when there is neither.
+
+It reads `Ctx`, never the database, and it is pure at import time — no `db`, no
+`config`, no `pool`, no `rbac`, and not even `media`, whose kind table it declines
+to duplicate. `entities` is the only module `awareness_context` imports that
+`referents` also imports, and `referents` reaches it **late and guarded**, the same
+rule every cross-module borrow here follows: a host without the list falls back to
+the reading the resolver gave before the entity reader existed, never to an import
+error. Zero Gemini calls, so the awareness allowance is untouched.
+
+<a id="s47"></a>
+## 47. The question mark was part of the word
+
+### 47.1 The bug, in one line
+
+Every reader in this stage splits a message into tokens with the same idea: a
+token is a run of characters that are not separators, where a separator is
+"anything that is not a word character and not in the Persian block". The
+character class is written `[^\w\u0600-\u06ff]`.
+
+The Persian block, `\u0600-\u06ff`, **contains the punctuation**. «؟» is
+U+061F, «،» is U+060C, «؛» is U+061B — all inside the range. So the class meant
+to *end* a word kept the mark *inside* it, and `این لینک؟` tokenized as
+`["این", "لینک؟"]`.
+
+A trailing question mark is one of the most common things in this room. Every
+lexicon lookup on the last word of a message was failing because of it, and each
+failure landed in the direction that matters here:
+
+* **`entities` named no thing.** `این لینک؟` did not contain the noun «لینک», so
+  the block that says "these are things, not people" was silent.
+* **`referents` offered people instead.** With no thing recognized, the guard
+  added in §46 never fired, and the resolver offered the room's members as the
+  people «این» might mean — the exact wrong lead §46 exists to prevent, defeated
+  by a question mark.
+* **`referents` lost names and ids.** `بن کن سارا؟` did not contain the name
+  «سارا», so a named person was invisible when the name was the last word.
+* **`discourse` lost acts.** `ممنون؟` was not the greeting «ممنون» and
+  `اشتباه؟` was not the correction «اشتباه», so both fell through to the
+  question the mark alone makes — and both *outrank* a question.
+* **`room_state` lost the thread.** `چی شده؟` carried the token «شده؟», which is
+  not the stopword «شده», so two messages that differed only by a question mark
+  shared no content word.
+
+### 47.2 The fix, and why it is five copies
+
+The punctuation of the Arabic block is now named explicitly in the class, so it
+separates like every other separator.
+
+The pattern is **copied** into each reader rather than imported from a shared
+helper, and that is a deliberate trade. Each reader is pure at import — `re`,
+`unicodedata`, `dataclasses` and nothing else — and that property is asserted by
+a test in each file. Importing a shared tokenizer would either break the property
+or add an edge to the import graph that those tests exist to keep small. So the
+five copies stay, and `tests/test_awareness_context.py` **pins them together**:
+one test asserts the five patterns are identical and that each one splits the
+punctuation off. A sixth reader, or an edit to one copy, fails that test.
+
+`addressing` is not touched. It filters each token through `_letters`, which
+keeps only alphanumerics, so «نکسوس؟» was already read as the name — the module
+was immune by construction, and the fix would have been a change with no
+behaviour behind it.
+
+### 47.3 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 96 cases — the 90 from §46 plus 6
+`punctuation` ones), with the old pattern restored and with the fix:
+
+```
+                                 old pattern     fixed
+cases                                     96        96
+expression accuracy                    97.9%    100.0%
+act accuracy                           97.9%    100.0%
+act claimed precision                  97.4%    100.0%
+act recall                             97.4%    100.0%
+act false positives / negatives          0 / 0     0 / 0
+  per class, social                     3 / 4     4 / 4
+  per class, correction                 2 / 3     3 / 3
+relation exact                          11 / 12   12 / 12
+named class exact                        8 / 10   10 / 10
+ambiguity precision                    85.7%    100.0%
+referent top-1 accuracy, answerable    96.0%    100.0%
+referent block chars mean / max      137 / 527 131 / 527
+Gemini calls added                          -         0
+```
+
+Every new case failed before the fix and passes after, and **no existing case
+changed its reading** — the fix is additive on this corpus, which is the shape a
+correctness fix should have:
+
+```
+punctuation-case            before            after
+punctuation-thing-question  kind deictic,     no expression, link named
+                            named ''
+punctuation-message-question kind deictic,    no expression, message named
+                            named ''
+punctuation-name-at-end     referent 22       referent 11 (the named person)
+punctuation-greeting-mark   act question      act social
+punctuation-correction-mark act question      act correction
+punctuation-thread-mark     relation shifts   relation continues
+```
+
+The referent block **shrank** by 240 and 297 characters on the two cases where it
+was offering the wrong lead — the fix removes context the model should never have
+been given, which is why the mean moves down rather than up. Nothing else in the
+context changed size: the other readers' blocks are unchanged, and no source was
+added.
+
+### 47.4 A known boundary this exposed
+
+The fix makes one pre-existing gap visible without causing it: a **multi-word**
+social phrase is not in the lexicon. `_SOCIAL_WORDS` lists «خستهنباشید» as one
+token, so «خسته نباشید» (two words) reads as `unknown`, and with a question mark
+it reads as a question. That is a lexicon-and-segmentation question, not a
+punctuation one — it reads `unknown` with and without the mark — and it is
+recorded here rather than fixed, because fixing it means deciding how multi-word
+phrases enter a token-level lexicon, which is its own change.
+
+## 48. «بنش کن» and «بنش نکن» were the same message
+
+<a id="s48"></a>
+
+### 48.1 The half-truth, in one line
+
+`app/discourse.py` reads *what a message is doing* and reports one closed
+vocabulary. Both of these messages are `instruction` to it, and both quote the
+same directive:
+
+```
+بنش کن    →  instruction, the directive «بنش»
+بنش نکن   →  instruction, the directive «بنش»
+```
+
+One asks for a ban. The other forbids one. To the transcript they are the same
+message, and the transcript is what the model reads. So a room that writes «بنش
+نکن» — the message where it is *protecting* somebody — handed the model a line
+saying the room is asking for a ban, with the directive quoted. A wrong-person
+moderation action is the worst mistake available here, and this was a path to one
+built out of the server's own evidence.
+
+`app/requests.py` closes it. It reads three things the act alone cannot say:
+
+* **the directive** — quoted, not mapped to an action category. The lexicon is
+  `app/discourse.py`'s, borrowed rather than copied, because a second list would
+  be a second answer that drifts;
+* **the polarity** — `affirmative`, `negated`, or `""`;
+* **the manner** — a bare imperative («بنش کن») or a politeness frame
+  («میشه بنش کنی؟»). The same request at a different social distance.
+
+It is evidence in exactly the sense §42–§47 are: it reads text and reports what
+it found with the reason attached. Nothing branches on it, it cannot authorise
+anything, and it holds no path to a permission — no `db`, no `config`, no pool,
+no `rbac`. A test asserts the import set.
+
+### 48.2 Two negation rules, pointing in opposite directions on purpose
+
+This is the part worth reading carefully, because the two rules are not
+symmetric and the asymmetry is the design.
+
+**The rule that claims** — "this directive is negated" — is scoped tightly: the
+prohibitor must be the token *immediately after* the directive. That is the shape
+Persian actually uses («بنش نکن», «پاکش نکنید», «ساکتش نکن»), and the English shape
+is the mirror image, a negator within two tokens *before* it («don't ban him»,
+which the tokenizer delivers as «don» + «t»). «بنش رو نکن» does **not** claim a
+negation, because the word after the directive is «رو»; it falls through to the
+downgrade instead. A wider window would claim a negation the message does not
+make.
+
+**The rule that downgrades** is deliberately broad, and broad in the *safe*
+direction. When a negation appears anywhere else in the message the reader does
+not report `affirmative` — it reports nothing at all, because it cannot tell what
+the negation scopes. «این آدم خوب نیست، بنش کن» has a negation that has nothing to
+do with the directive, and the honest reading is silence. Breadth is affordable
+here in a way it was not in §47: a false hit costs an *abstention*, where a false
+hit in the directive lexicon costs a false instruction. So the downgrade rule is
+a list, two prefixes, and a stem rule for the negative past:
+
+```
+«نمی» / «نی»   +  stem      →  نمیشه, نمیخواد, نیست, نیومد
+«ن» + past stem            →  نکرد, نگفت, ندید, نرفت, نداشت
+```
+
+The stem rule is a stem list rather than forty spelled-out forms, and it is safe
+for the same reason: «نبرد» ("battle") is a false hit and it costs an abstention.
+A bare «ن» would not be safe — «نگاه», «نام», «نوع» all start with it — so the
+stem is what makes it a negation.
+
+**Two directives, two directions.** The reading is about the *first* directive,
+because that is the one whose neighbourhood decides the direction. But a message
+can carry a second, negated directive — «بنش کن، پاکش نکن» asks for a ban *and*
+forbids a deletion — and a one-line summary cannot hold both. Reporting
+`affirmative` for the first half there would be the dangerous direction again, so
+the reader abstains. «پاکش نکن، بنش کن» reports the first directive as negated,
+which is true of the directive it is about; that is pinned by a test rather than
+left to drift.
+
+### 48.3 Where it reaches the model
+
+The polarity is rendered into the **same source** as the act
+(`awareness_context._render_anchor_act`, `anchor_act`, tier 0, budget raised 200 →
+320). That is not tidiness. An act that says *instruction* while the message
+forbids the action is the half-truth this increment exists for, so the direction
+must not be a separate source that a budget could drop while the act survives.
+
+The polarity line comes **first** for the same reason one level down: `_clip`
+keeps whole lines from the front, so if a budget ever did bite, the line that
+survives has to be the one saying the message forbids the action. The act line
+alone is the half-truth; the polarity line alone is a warning.
+
+A bare affirmative command renders **nothing** — the act line already says
+`instruction`, and a line saying "and it is affirmative" would be noise on every
+ordinary moderation message. So the block only grows on the messages where the
+direction is not the obvious one.
+
+### 48.4 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 107 cases — the 96 from §47 plus 11
+`polarity` ones), with the direction reader absent and present:
+
+```
+the directive's direction          before   after
+labelled cases                         16      16
+exact (word · direction · manner)     0/16   16/16
+  word                              (act)   100.0%
+  direction                             -   100.0%
+  manner                                -   100.0%
+negated cases                           6       6
+negated recall                          -   100.0%
+forbidden read as asked-for          6/6       0
+abstained (safe)                        -       0
+block chars max                         -     155
+```
+
+"Before" is the act reader alone, which is what the server had: it reads 15 of
+the 16 as `instruction` and **never** carries a direction, so all six negated
+directives were presented to the model as an instruction to act. That is the
+`6/6` in the table — not a near miss, every one of them. After, it is zero.
+
+The rest of the corpus did not move:
+
+```
+                                  before   after
+cases                                 96     107
+expression accuracy               100.0%  100.0%
+addressing accuracy                98.9%   99.1%
+act accuracy                      100.0%  100.0%
+act false positives / negatives      0 / 0   0 / 0
+relation exact                      12/12   12/12
+named class exact                   10/10   11/11
+referent top-1 accuracy           100.0%  100.0%
+ambiguity precision               100.0%  100.0%
+wrong-but-confident                     0       0
+referent block chars mean / max  131/527  138/527
+Gemini calls added                      0       0
+```
+
+The referent mean moves 131 → 138 for a corpus reason, not a code one: the 11 new
+cases are directive messages with a person in the window, so the referent block
+renders on more of them. `answerable` fell 35 → 33 because two of the new English
+cases carry no Persian deictic expression at all — the label says so rather than
+claiming a resolution the server does not make.
+
+Reading cost, measured apart from the other readers:
+
+```
+polarity reader us mean / p95   ~0.08 ms / ~0.13 ms   (no query, no model call)
+```
+
+### 48.5 Two known boundaries
+
+**A clitic that points at a thing still offers a person.** «فایل رو پاکش نکنید»
+has the object clitic «ـش», which points at the file; the person resolver still
+lists the room's members for it (not confidently — the render says so). §46's
+guard covers a bare *demonstrative* before a thing word, and this is the same
+class of mistake one morpheme over. It is recorded rather than fixed, because the
+fix belongs to the referent reader and would need its own corpus and its own
+numbers. The case that exposed it is labelled for what it is: a message that
+names a thing and leaves no person open.
+
+**A multi-word directive is not in the lexicon.** Same boundary §47.4 recorded,
+seen from the other reader: the directive lexicon is token-level, so a two-word
+phrase is not a directive and the direction reader has nothing to be about.
+
+## 49. What does the request act on?
+
+<a id="s49"></a>
+
+### 49.1 The join that was missing
+
+By §48 the server could say a great deal about a message. It could say what the
+message is *doing*, which way its directive points, what a demonstrative points at
+when it is not a person, and which people a pronoun may mean. What it could not say
+is the one thing a moderation room needs most:
+
+```
+«فایل رو پاک کن»   the server said: instruction, the directive «پاک»
+                   …and, on another line: things — media
+
+«بنش کن»           the server said: instruction, the directive «بنش»
+                   …and, on another line: who «بنش» may mean — the room
+```
+
+Nothing joined them. The model had to work out for itself which of those lines the
+directive was aimed at, and that join is where the worst mistake available here
+happens: acting on a **person** when the message was about a file.
+
+The baseline was measured before any code was written, over a window holding both a
+person and a media row:
+
+```
+the request acts on …                        before
+stated at all                                0 / 13
+a person still offered for a thing-object
+request (the dangerous direction)            5 / 10
+```
+
+Five of ten. Every one of the five used the object clitic on a content verb —
+«پاکش کن», «حذفش کن», «فایل رو پاکش کن» — or a bare demonstrative with one, and
+`referents` read the clitic as a person and offered the room's members.
+
+`app/objects.py` closes the join. One question, one closed answer:
+
+```
+person    the request acts on a person
+media     …on a media message (a file, a photo, a voice note, …)
+link      …on a link
+message   …on a text message
+thing     …on a thing whose kind the message does not state
+""        no reading
+```
+
+plus **how** the server knows — `named` (the message names it), `pointed` (the
+message points at a thing the room holds), or `verb` (only the verb says which
+side). Evidence, never a gate: nothing branches on it, and it is pure at import
+time — no `db`, no `config`, no pool, no `rbac`, asserted by a test.
+
+### 49.2 The verb decides the side, and the shape cannot
+
+This is the load-bearing rule, and the reason the reading needs a lexicon split
+that did not exist before:
+
+```
+پاکش کن    a directive carrying the object clitic «ـش»  →  acts on a file
+بنش کن     a directive carrying the object clitic «ـش»  →  acts on a person
+```
+
+Identical in shape. Only the verb separates them. So `app/discourse.py` — the module
+that already owns the directive lexicon — now states which side each of its words
+falls on, in two lists, and exposes `acts_on(token)` answering `"person"`,
+`"thing"`, or `""`.
+
+The third answer is the important one. `addressing.ACTION_WORDS` is borrowed and
+flat; it holds «بن» and «پاک» side by side, and it arrives without sides. An operator
+can add a word to it through `NEXUS_EXTRA_ACTION_WORDS` and a future release can add
+one to the built-in list, and neither comes with a side attached. **Guessing a side
+is exactly the mistake this increment exists to prevent** — a guessed *person* for a
+message about a file is the worst direction available — so an unclassified word
+answers nothing and both readers that ask abstain. Two tests hold the split to the
+lexicon: it must **cover** `addressing.ACTION_WORDS`, and no word may be on both
+sides. A word added there fails the suite until somebody decides its side.
+
+The order of evidence inside the reader is deliberate too. A **named noun wins over
+the verb**, because the message's own words are what the room actually said while the
+verb only says which side an argument has. And the kind is **not guessed from the
+room**: «پاک کن» acts on a thing and the message does not say which, so the reading
+is `thing` rather than the room's newest photograph. Only a message that actually
+*points* — a clitic or a demonstrative — borrows a kind from the window.
+
+### 49.3 Where it reaches the model
+
+Into the **same source as the act and the direction** (`anchor_act`, budget 320 →
+420). Same reasoning as §48, one join further along: *instruction, the directive
+«پاک»* without *acts on a thing* is the other half-truth, so a budget must never be
+able to keep one and drop the other.
+
+All three lines now render from one source, and the order is: the two lines that
+**contradict a naive reading** first, the naive reading last. `_clip` keeps whole
+lines from the front, so if a budget ever bit, what survives is the warning rather
+than the claim it warns about. The longest block the corpus produces is 297
+characters — a negated request whose object is a named thing — which is why the
+budget is 420.
+
+A request that acts on a person adds no warning, and a message with no directive adds
+nothing at all.
+
+### 49.4 The numbers
+
+`tools/eval_intent.py`, over the corpus (now 120 cases — the 107 from §48 plus 13
+`object` ones), with the object reader absent and present:
+
+```
+the request acts on …                    before   after
+labelled cases                                -      13
+exact (class · source)                        -   13/13
+  class                                       -   100.0%
+  source                                      -   100.0%
+  per class (correct/total)                   -   none 2/2  person 3/3  media 4/4
+                                                  link 2/2  message 1/1  thing 1/1
+person cases read as a person                 -    3/3
+block chars max                               -     123
+reading cost                                  -  ~0.11 ms mean
+```
+
+The other half of the increment is the number that did **not** move, and it is
+reported rather than hidden:
+
+```
+a person still offered for a thing-object request   5 / 10
+```
+
+The object line corrects it in words — *"Do not read it as aimed at anybody in the
+room"* — so the prompt's final word on the target is right. But the lead is still
+*in* the prompt, and the harness counts it in the report and pins it in
+`tests/test_intent_eval.py` so the increment that removes it fails the test and says
+so, exactly as `KNOWN_ADDRESSING_GAPS` does for the addressing miss. Removing it is a
+change to `referents`, and it gets its own baseline.
+
+Nothing else moved:
+
+```
+                                  before   after
+cases                                107     120
+expression accuracy               100.0%  100.0%
+addressing accuracy                99.1%   99.2%
+act accuracy                      100.0%  100.0%
+act false positives / negatives      0 / 0   0 / 0
+relation exact                      12/12   12/12
+named class exact                   11/11   11/11
+referent top-1 accuracy           100.0%  100.0%
+ambiguity precision               100.0%  100.0%
+wrong-but-confident                     0       0
+the direction, exact                16/16   29/29
+Gemini calls added                      0       0
+```
+
+The direction's labelled set grew 16 → 29 because the 13 new cases carry a `request`
+label too — the same messages read by two readers, which is what makes the corpus a
+cross-check rather than two disjoint sets.
+
+---
+
+<a id="s50"></a>
+## 50. The person lead the object reading removed
+
+### 50.1 The number §49 pinned, and what it was
+
+§49 ended with a number it deliberately did not fix:
+
+```
+a person still offered for a thing-object request   5 / 10
+```
+
+Those five were the object clitic on a content verb — «پاکش کن», «حذفش کن» — and the
+bare demonstrative with one — «اینو پاک کن». The object reader had just learned to say
+*"the directive «پاک» acts on media"*; `referents` was still saying *"who «اینو» may
+mean: رضا 0.50, سارا 0.50 — the server could not tell them apart, ask which"*. The
+object line corrected it in words, but the wrong lead was still **in** the prompt, and
+the increment that removed it got its own baseline, as §49 said it would.
+
+### 50.2 The rule, and the half it deliberately does not touch
+
+The split that answers *what a verb acts on* already existed in `app/discourse.py`
+(§49.2). `referents` now borrows it, late and guarded exactly as it borrows
+`addressing`, `temporal` and `entities`:
+
+```python
+def _acts_on_a_thing(text):        # fires only when it is unambiguous
+    found = discourse.directives(text)
+    if not found:
+        return False
+    sides = [discourse.acts_on(word) for _index, word in found]
+    if any(side == discourse.ACTS_ON_PERSON for side in sides):
+        return False
+    return any(side == discourse.ACTS_ON_THING for side in sides)
+```
+
+and the resolver wraps **only the heuristic sources** in `if not thing:`.
+
+That "only" is the whole design. The resolver has two kinds of evidence, and they are
+not the same kind of thing:
+
+* **facts about the message and the room** — a person it *names* («رضا اینو ببین»), an
+  id it *states* («اینو حذف کن 22»), and the **reply edge**. These identify the *author
+  of the thing*, and they are true whether or not the request acts on a thing. «اینو از
+  گروه حذف کن» as a reply to مهدی is about مهدی's message, and the reply edge is still
+  the answer.
+* **guesses from the window** — the recent-speaker baseline (`_recent_scores`), the
+  room's reply convergence (`_about_scores`, the anaphoric `_about_focus`), and the
+  anaphoric reading of the clitic. These are what turned «پاکش کن» into a list of the
+  room's members.
+
+The guard scopes the second kind and leaves the first alone. And it is
+**one-directional**: a message that carries both sides — «پاکش کن، بنش کن» asks for a
+file to go *and* for somebody to be banned — keeps every source, because losing a ban
+target is worse than a lead the object line corrects.
+
+### 50.3 The silence, and why it is not an abstention
+
+When the guard fires and no explicit source found anybody, `render` returns **nothing
+at all** — not the "found no person it could be, if it needs a person, ask which"
+block. Those are different answers and the difference is load-bearing:
+
+* *"the server looked and found nobody"* invites the model to ask which person;
+* *"the question does not apply"* must not — asking which person a file is would be
+  worse than saying nothing, and the object line in the act block already states what
+  the request acts on.
+
+### 50.4 Two corpus labels that had to move
+
+Two cases failed the moment the guard landed, and both were the *labels*:
+
+```
+entity-media-newest    «اینو پاک کن»  with two tied speakers   expected ambiguous: true
+entity-media-and-link  «اینو ببین»    with two tied speakers   expected ambiguous: true
+```
+
+Both labels were written in §46's increment, **before the object reader existed**, and
+their note argued the ambiguity was what steered the model to the thing. The object
+line does that directly and authoritatively; an ambiguous *person* pair for a request
+about a file is the wrong lead this increment exists to remove. The corpus already held
+the correct reading for the same shape: `entity-media-single` is the same text
+(«اینو پاک کن») with one speaker and carries `ambiguous: false`. The labels moved, the
+reader did not. That takes the labelled ambiguity set from 6 cases to 4 — and the
+remaining four are all genuinely person-directed (a role two people hold, a split room,
+three recent speakers, «قبلیش»).
+
+### 50.5 The numbers
+
+`tools/eval_intent.py`, over the corpus (120 cases, version 10), before and after:
+
+```
+                                        before   after
+labelled object cases                       13      13
+exact (class · source)                   13/13   13/13
+referent top-1 accuracy                 100.0%  100.0%
+ambiguity recall                         100.0%  100.0%
+ambiguity precision                      100.0%  100.0%
+wrong-but-confident                          0       0
+referent block chars mean / max        146 / 527  118 / 527
+```
+
+and the line §49 pinned:
+
+```
+a person still offered for a thing-object request    5 / 10  →  0 / 8
+```
+
+The denominator is 8 rather than 10 because "a thing" is now the labelled classes, and
+the **abstention is deliberately not one of them**: a case whose expected class is `""`
+asserts the server has *no* reading of what the request acts on, so a person offered
+there is the resolver doing its ordinary job. Counting it would have made the metric's
+name false in the direction that flatters the guard.
+
+The labelled set is only 13 cases, so the harness's own counter is a small sample. The
+corpus-wide count is the stronger statement — every case whose object is a known thing,
+whether or not it carries an object label:
+
+```
+thing-object requests in the corpus   27
+  a person lead, before               13
+  a person lead, after                 3
+```
+
+and all three survivors are **explicit** — `named-in-text` (the message names رضا),
+`stated-id` (the message states 22), `owner-anchor-deictic` (the message is a reply to
+55). Ten of the thirteen were the recency heuristic alone, and that is exactly what the
+guard removes.
+
+Cost and boundaries:
+
+```
+guard cost                      ~42 µs per message (~24% of the resolver's ~173 µs)
+context/token overhead          the referent block shrinks; max 527 chars unchanged
+new sources / budget change     none (anchor_act stays at 420)
+Gemini / provider calls added   0
+database change                 none
+```
+
+Nothing else moved: expression, addressing, act, open questions, time, room state,
+entities, the direction, the object reading, and `provided_before < provided_after`
+are all identical to §49's report.
+
+### 50.6 What it does not do
+
+* It does not decide anything. It is evidence: it removes candidates from a *list*; the
+  model still chooses, and the chosen id is re-authorised from the actor's Telegram id
+  like every other request.
+* It does not remove the person lead when the lead is a fact. A named person, a stated
+  id and the reply edge survive by design — `tests/test_referents.py` asserts each.
+* It does not fire on a verb nobody classified. `discourse.acts_on` answers `""` for a
+  word in neither half of the split, and **an unknown side is unknown, not a thing**, so
+  «برای اینم همین کارو بکن» keeps its reading. Guessing a side is the mistake the split
+  exists to prevent.
+
+---
+
+<a id="s51"></a>
+## 51. Talking about Nexus, not to it
+
+### 51.1 The last open number
+
+For six increments the benchmark carried exactly one unmet case, and it was the
+addressing column:
+
+```
+[addressing] about-nexus-mid-sentence  addr True/False
+           «من با نکسوس کار نکردم»  ("I have not worked with Nexus")
+```
+
+The strong grade read the exact name and fired, so the assistant would answer a
+statement *about* it as though it were a call. The corpus recorded it as a gap
+**left on purpose**, with the reason written beside it: every deterministic rule
+that catches it also demotes a real request with the name in the same position —
+«میشه نکسوس اینو بررسی کنی؟» — and missing a call is the worse of the two
+mistakes.
+
+That reasoning was checked rather than trusted. The obvious rule, "an exact name
+that is not the first token is a mention", was applied to the corpus and to the
+pinned call list: it fixes the gap and **demotes «میشه نکسوس اینو بررسی کنی؟»**,
+which `tests/test_addressing.py` pins as a call. The note was right about that
+rule. It was not right that *every* rule has that cost.
+
+### 51.2 The rule: a name after a preposition is a complement
+
+A name immediately after a preposition is the **object** of that preposition, so
+the sentence is about the assistant:
+
+```
+من با نکسوس کار نکردم          with Nexus      → about it
+درباره نکسوس چی میدونی         about Nexus     → about it
+i never worked with nexus                       → about it
+میشه نکسوس اینو بررسی کنی؟     «میشه» is not a preposition → to it
+با اجازه نکسوس اینو پاک کن     the token before the name is «اجازه» → to it
+```
+
+`addressing._complement` is the second demotion beside `_quoted`, and it is the
+same **one token wide** for the same reason: only a preposition *immediately*
+before the name makes it a complement. `_PREPOSITIONS` is a **closed
+grammatical class**, not a phrase list — prepositions govern what follows them,
+which is what makes the rule grammatical rather than a list somebody maintains.
+
+Both demotions now share one helper, `_reading`, so a fourth strong-reading
+branch cannot be added without inheriting them.
+
+### 51.3 What is deliberately absent
+
+The English half of the list is short on purpose:
+
+```
+with, about, from, of, without        present
+to, for                               ABSENT
+```
+
+«to nexus: ...» and «for nexus: ...» are how a group writes an *address*, not a
+prepositional phrase about the assistant. Demoting on them would silence a real
+call, which is the worse of the two mistakes — so they are out, and
+`tests/test_addressing.py` asserts that they are.
+
+### 51.4 A demotion is not a silencing
+
+This is the property that makes the change safe, and it is worth stating
+separately: the weak grade is untouched. `mentioned` is still true for every
+demoted message, so the awareness pass still tells the model *"your name came up
+here"* and the model can still decide the room is talking about it. What is
+withdrawn is only the **immediate reply** — the thing that made the assistant
+answer a statement that was not for it.
+
+### 51.5 The numbers
+
+`tools/eval_intent.py`, corpus 120 → 123 cases (version 11; three new
+`addressing` cases — the English form, the protected mid-sentence call, and the
+boundary below):
+
+```
+                                  before   after
+cases                                120     123
+addressing accuracy                99.2%  100.0%
+corpus mismatches                      1       0
+not met                              1       0
+```
+
+Nothing else moved: expression, act, open questions, time, room state, entities,
+the direction, the object reading, the referent top-1 / ambiguity / wrong-but-
+confident, and `provided_before < provided_after` are all identical to §50's
+report. The act-coverage line reads 85.0% → 83.7% and the entity/edge denominators
+grew 120 → 123; both are the new cases, not a reading that changed.
+
+Cost and boundaries:
+
+```
+addressing cost                 +10.2 us/message (346.7 vs 336.5, in-process A/B
+                                with the rule disabled); _complement alone is
+                                ~316 ns/call — a set membership over the closed
+                                class, no extra tokenization
+context/token overhead          none (addressing is a trigger, not a block)
+new sources / budget change     none
+Gemini / provider calls added   0
+database change                 none
+```
+
+The 10 µs is real and measured rather than waved at: it is one extra call plus a
+set test per candidate match, on a `detect` that already costs ~340 µs because
+the shared fold re-imports ``people`` on every call. Addressing runs once per
+group message, not once per pass.
+
+### 51.6 The boundary, stated rather than hidden
+
+«از نکسوس بپرس» ("ask Nexus") is now demoted, and it is in the corpus as
+`about-nexus-preposition-boundary` so the behaviour is visible rather than
+implied. It is a **third-person instruction to the room** — the speaker is
+telling somebody else to go and ask the assistant — so the message is about
+Nexus, and a group that wants the assistant itself says «نکسوس، ...». Anyone who
+disagrees with that reading has one line to change and one case to move, which is
+the point of putting it in the corpus.
+
+---
+
+<a id="s52"></a>
+## 52. A sentence that contradicted itself
+
+### 52.1 The defect, and why nine increments missed it
+
+Every increment so far measured a **reading**. The product the model receives is a
+**sentence**, and nothing had ever scored one. The gap showed up the first time the
+assembled prompt was read rather than the harness:
+
+```
+The message says «فردا», which points forwards, after now at a scale of days
+— about 1 day(s) ago. That is the server's clock, not a reading of the words.
+```
+
+"Points forwards, after now" and "about 1 day(s) ago" are in the same sentence, and
+tomorrow is not in the past. The reading was **right** — `kind="future"`,
+`unit="day"` — and the harness scored 100%, because `when_ok` compares the
+structured fields. The sentence is what the model reads, and it was never compared
+to anything.
+
+The cause was one line: `render` worded the offset with `_ago` whatever the reading
+pointed at, and `_ago` is past-only prose. **8 of the 94 phrases** in the table did
+it — every future phrase that states an offset.
+
+### 52.2 The fix: one magnitude, two tails
+
+```
+_magnitude(seconds)  →  "2 day(s)"          the size, with no direction
+_ago(seconds)        →  "about 2 day(s) ago"
+_ahead(seconds)      →  "about 2 day(s) from now"
+_span(when)          →  _ahead for WHEN_FUTURE, _ago otherwise, "" when seconds <= 0
+```
+
+The two halves of the sentence now share the part they must agree on and differ
+only in the tail that states the direction. A `repeat` reading («دوباره») renders
+**no** offset: its span would be a *period*, not an age, and "about 1 day(s) ago"
+for «هر روز» would be a different wrong sentence.
+
+The window's own age keeps `_ago`, deliberately — it is not the message's
+direction. The window started before the pass read it, always.
+
+### 52.3 The measurement that was missing
+
+`tools/eval_intent.py` now scores the sentence beside the reading:
+
+```
+  the sentence, scored       24 rendered; self-contradictions 0
+```
+
+`_span_contradicts` splits the window's line off first (it is always in the past, so
+a future reading with a window behind it is not a contradiction) and then asks
+whether the message's own sentence states a direction and an offset that point
+opposite ways. A self-contradicting sentence puts its case in `not met`, so a
+regression is reported rather than counted.
+
+**The check was proved non-vacuous by running it against the unfixed renderer**:
+3 contradictions and 3 cases in `not met` — `when-tomorrow`,
+`when-explicit-beats-demonstrative`, and `topic-switch-no-reference`, the last of
+which had not been spotted by reading. It found more than the reading did.
+
+`tests/test_intent_eval.py` holds `when_prose_contradictions == 0` **and**
+`when_prose_cases >= 20`, because zero contradictions is also what a renderer that
+says nothing produces. `tests/test_temporal.py` holds the stronger form: a property
+over **every** phrase in the table, which is what makes the class impossible to
+reintroduce rather than one phrase impossible to reintroduce. Against the unfixed
+renderer, 9 of the new tests fail.
+
+### 52.4 The numbers
+
+`tools/eval_intent.py`, corpus 123 → 127 cases (version 12; four new `temporal`
+cases, one per future magnitude band — day, week, month, year — so the sentence is
+scored per band rather than once):
+
+```
+                                          before   after
+phrases whose sentence contradicts itself   8/94     0/94
+harness self-contradictions (3 cases)          3        0
+harness `not met`                              0        0
+future cases (kind · unit exact)             4/4      8/8
+sentences scored                              20       24
+```
+
+Nothing else moved: expression, addressing, act, open questions, room state,
+entities, the direction, the object reading, the referent columns, and
+`provided_before < provided_after` are all identical to §51's report.
+
+Cost and boundaries:
+
+```
+reading cost                    unchanged (the table scan is untouched)
+rendering cost                  one extra function call per rendered sentence
+context/token overhead          +" from now" (9 chars) on the 8 future phrases;
+                                block chars max 292 → 294
+new sources / budget change     none (anchor_when stays at 300)
+Gemini / provider calls added   0
+database change                 none
+```
+
+The fix eats 9 characters of the block's headroom (292 → 294 against a budget of
+300), and that is left alone rather than bought back with a bigger budget. The
+budget is not what protects the sentence: ``render`` puts the message's own line
+**first** and the window's age last, and ``_clip`` keeps whole lines from the
+front — so if the ceiling ever bites, what is lost is the window's age, which is
+the least important half.
+
+### 52.5 What this says about the method
+
+Nine increments added readers and benchmarked readings, and the benchmark was
+clean. The defect was not in a reader. It was in the **last step** — turning a
+reading into the sentence the model reads — which no test and no metric looked at,
+because a reading and a sentence are different kinds of thing and only one of them
+had a number.
+
+The lesson is recorded rather than generalised into a framework: for every block,
+the sentence is the product, and a property over the *whole* vocabulary is what
+catches a wording that is wrong for a subset. The four new corpus cases exist
+because the magnitude has four branches, and a single case would have proved only
+that the day branch was fixed.
+
+## 53. A correction the evidence did not support
+
+### 53.1 Where this one came from
+
+§52 ended with a method: *for every block, the sentence is the product*. It was
+written about the time block. This is the same method applied one block over, and
+it found a worse defect in less time — because the entity block's product is not
+a sentence about the message, it is a **claim about what the message means**, and
+the claim was being made whether or not the reader had the evidence for it.
+
+The block renders under this header:
+
+> Things this message may point at — things, not people (server-built; evidence,
+> not a decision):
+
+and, when the message names no thing, closes with:
+
+> If the message means one of these, it is not about a person — do not act on a
+> person unless the message names one.
+
+Both are claims about *this message*. Neither was gated on anything about it. The
+renderer printed the header whenever the window held a photograph and the message
+held anything at all, so a greeting reached the model as:
+
+```
+[owner] Ali (1): سلام بچه ها
+…
+Things this message may point at — things, not people (server-built; evidence,
+not a decision):
+- a document by 13 (the newest)
+If the message means one of these, it is not about a person — do not act on a
+person unless the message names one.
+```
+
+### 53.2 The field that existed and was never read
+
+`Entities.pointing` has been computed by `read_entities` since the module was
+written — from `has_demonstrative(anchor["text"])` — and **read by nothing**.
+`grep pointing app/` found the assignment and the docstring and no consumer. The
+field was the answer to exactly this question, and the renderer never asked it.
+
+That is the whole shape of the defect: not a wrong reading, but a reading nobody
+consulted before making a claim. The benchmark could not see it for the same
+reason it could not see §52's: `named_ok` compares the class the message *names*,
+which is a different fact from whether the message *points*.
+
+### 53.3 Two rules, and why both
+
+The fix has two halves, and the second was found by reading the assembled prompt
+rather than by reasoning about the reader.
+
+**The message must point at something.** The header says *may point at*, so it
+may not head a list for a message with no pointing expression. This is not a new
+rule — `app/objects.py` already states it for the object it reports:
+
+> a bare «پاک کن» points at nothing, and the room's newest photograph is not its
+> object just because the room has one
+
+The entity block offers the *candidates* for that object, and it was applying
+none of it.
+
+What counts as pointing is wider than a demonstrative. «پاکش کن» says "delete it"
+with no «این» anywhere — the object clitic «ـش» is the pointer, and
+`referents.find_expression` is the reader that knows the clitic forms. So
+`pointing` is now *a demonstrative **or** an expression the resolver reads*, and
+`app/objects.py` consults the same primitive for the same question.
+
+**The request must not act on a member.** This one was found by printing the
+assembled context for three corpus cases and reading it. For «ساکتش کن» the
+prompt contained, four lines apart:
+
+```
+The request acts on a **person**, not on a thing — read the person from the
+transcript, not from this line.
+…
+Things this message may point at — things, not people …
+If the message means one of these, it is not about a person — do not act on a
+person unless the message names one.
+```
+
+Two blocks, opposite instructions, and the model has to choose. The object reader
+had already decided the side — that is what §49's `discourse.acts_on` split is
+for — and the entity block was not consulting it.
+
+`_acts_on_a_person` is the mirror of the guard §50 added to `referents`, with the
+same three clauses read the other way round: there must be a directive; **no**
+directive may act on a thing, so a message that asks for both («ساکتش کن و اینو
+پاک کن») keeps every candidate, because losing a target is worse than an extra
+one; and at least one must act on a person. An unclassified directive answers
+nothing and never fires it.
+
+### 53.4 What the rules do not touch
+
+`read_entities` still reports every item it found, and `Entities.of_kind` still
+sees every item. Only `Entities.offered` — the one method that answers "what may
+this block put under that header" — is narrowed, and only the rendering consumes
+it. A reader that hid its findings would be lying rather than staying quiet, and
+the harness keeps the two apart on purpose: it reports **candidates offered 19 of
+24 found**, so a guard that suppressed everything would read `0 of 0` and be
+visible as such.
+
+The two readings are also taken **only when there is an item to narrow**. With no
+candidates both answers are inert, and the lexicons they borrow
+(`referents`' expression table, `discourse`'s action words) are most of what this
+reader costs. Measured in-process over the corpus, best of three (the absolute
+baseline moves with host load between runs, so the deltas are the number to read):
+
+| | µs per `read_entities` call |
+|---|---|
+| reader without either guard | 32.3 |
+| reader as it is | 39.9 |
+| **the two guards** | **+7.6** |
+| *(the same guards, taken unconditionally)* | *+60.4* |
+
+One case in five has a candidate, so the conditional call is what keeps the
+reader's cost proportional to what it produces.
+
+### 53.5 The measurement that was missing
+
+`tools/eval_intent.py` gained two checks that read the **rendered block** and
+compare it against the evidence the reader held:
+
+* `_entity_claims_a_pointer(block, state)` — the header is in the text and the
+  message points at nothing.
+* `_entity_offers_things_for_a_person(block, state)` — the header is in the text
+  and the request acts on a member.
+
+Both are reported as should-be-zero counts beside a non-vacuity pair
+(`entity_pointer_header_cases`, `entity_items_offered_total` of
+`entity_items_found_total`), and both are in the failures list. Run against the
+**old** renderer, reconstructed from the same reader, they read:
+
+| | no pointer | for a person |
+|---|---|---|
+| old renderer, old `pointing` (demonstrative only) | **11** | **3** |
+| old renderer, new `pointing` | 6 | 3 |
+| new renderer, new `pointing` | **0** | **0** |
+
+The three rows separate the two halves of the fix: widening `pointing` accounts
+for five of the eleven false headers, the rendering gate for the other six, and
+the side guard for all three of the contradictions.
+
+### 53.6 The numbers
+
+| | before | after |
+|---|---|---|
+| blocks rendered (of 127 cases) | 27 | 22 |
+| — of those, offering a pointer | 11 | 17 |
+| — false headers (message points at nothing) | 11 | **0** |
+| — offering things for a person-directed request | 3 | **0** |
+| candidates offered / found | 24 / 24 | 19 / 24 |
+| entity reader, µs/call | 32.3 | 39.9 (+7.6) |
+| entity block chars max | 302 | 302 |
+| corpus | 127 (v12) | 127 (v12) |
+| suite | 3131 | 3151 |
+
+The corpus did not grow, and that is the point of this one: **the defect was in
+cases the corpus already had.** No new case could have caught it, because the
+reader was right in every one of them. What was missing was a check on the block.
+
+No model calls added, no database change, no source-registry or budget change,
+no change to what the readers report. Every candidate the block suppresses is
+still stated elsewhere — the object block names the class, and the transcript
+names the row.
+
+### 53.7 What it leaves
+
+The entity block's two rules are now about evidence the module already held. The
+same question — *does this block's sentence claim more than its reader found?* —
+has not been asked of the referent, act, object or room-state blocks, and §52's
+check covers only the time block. That is the honest next step, and it is the
+same one §52 named: the product is the prompt, and only one block has been scored
+as prose.
+
+Reading the assembled prompt turned up one other thing, recorded here because it
+was found the same way and is not fixed here. `room_state.content_tokens` counts
+the plural clitic «ها» as a content word, so `content_tokens("سلام بچه ها")`
+returns `("بچه", "ها")` — and the thread block renders *"it shares «بچه», «ها» with
+what came before"*. Two messages with any plural noun in common therefore
+"continue" each other. It is the same class of defect as this one (a claim the
+evidence does not carry) in a different reader, and it wants its own increment.
+
+## 54. The prompt, measured — and the block that never reached it
+
+### 54.1 The measurement §52 and §53 both asked for
+
+Both sections ended by naming the same next step: *the product is the prompt, and
+only one block has been scored as prose*. §52 scored the time sentence, §53 scored
+the entity block's claims. Neither scored the **assembly** — which sources reach
+the model, in what order, within the pass-wide ceiling.
+
+So the harness now builds a `Ctx` per case, the way `main._awareness_context`
+builds it — the window the pass read (which holds the anchor), the roles `rbac`
+answers with, the room the handler cached — calls `blocks()`, and counts what
+rendered. The corpus's own labels configure the authority: a corpus that says a
+speaker is the owner and a harness that gives its world no owner are measuring
+different systems.
+
+### 54.2 The source that never rendered
+
+`referent_candidates` — the block that carries person resolution to the model —
+rendered on **0 of 127 cases**.
+
+The predicate is `_wants_referents`, which asks `is_authority`, which reads
+`app/rbac.py`, which reads `config.OWNER_USER_ID`. The harness had never set it.
+The corpus labels 80 of its 127 anchors as owners; the harness's world had no
+owner, so the block could not fire. Every referent number in the harness — top-1
+accuracy, ambiguity recall, ambiguity precision, wrong-but-confident — was scored
+on `referents.resolve`'s return value and never on the block the model reads.
+
+`admin_activity` is dead for an honest reason: it is a database read and the
+harness holds no audit rows. It is named as such in the report rather than left
+to look like the same defect, and the test asserts the excluded set is exactly
+the database-backed sources — so a *new* source has to be classified before it
+can be dead.
+
+### 54.3 The first thing the measurement found
+
+With the person-candidate block finally rendering, it renders beside the thing
+block on one case — and they contradict. `object-abstain-generic`, «برای اینم
+همین کارو بکن»:
+
+```
+Who «همین» may mean (server-built candidates, strongest first — evidence, not a decision):
+- مهدی (14), 0.30 — they spoke shortly before this message
+- ? (13), 0.30 — they spoke shortly before this message
+- سارا (12), 0.30 — they spoke shortly before this message
+The server is not confident. Choose only if the transcript makes it plain; otherwise ask.
+
+Things this message may point at — things, not people (server-built; evidence, not a decision):
+- a document by 13 (the newest)
+If the message means one of these, it is not about a person — do not act on a person
+unless the message names one.
+```
+
+The verb is «بکن», a generic imperative with no side, so `objects` abstains and
+§53's guard has nothing to fire on — and the resolver's people are live. The thing
+block then orders the model to disregard the block above it.
+
+**The module's own docstring says this cannot happen.** `app/entities.py` states:
+*"The sentence is evidence framing, not an instruction — the model still
+decides."* The sentence was an order. The two had disagreed since the line was
+written, and nothing could see it because the two blocks had never been rendered
+together.
+
+The order belongs to the block that knows the side. `app/objects.py` says "Do not
+read it as aimed at anybody in the room" exactly when the verb decides the object,
+and says nothing when the verb is unclassified — which is precisely when the
+resolver's people are still live. So the entity block now states the implication
+of its own hypothesis and stops:
+
+> If the message means one of these, it is about a thing rather than a person.
+
+### 54.4 The numbers
+
+| | before | after |
+|---|---|---|
+| `referent_candidates` cases | **0** / 127 | **26** / 127 |
+| `entities` cases | 22 | 22 |
+| entity block, cases giving an order | **9** | **0** |
+| entity block chars max | 302 | 264 |
+| assembled context, chars mean / max | unmeasured | 949 / 1498 |
+| ceiling | 1500 | 1500 |
+| suite | 3151 | 3157 |
+
+Per-source coverage over the 127 cases, now reported by the harness:
+
+```
+calendar 127   room 127   anchor_act 103   open_questions 22   reply_graph 127
+thread 32   entities 22   anchor_when 24   referent_candidates 26   referenced_people 26
+never rendered: remembered_people, admin_activity   (both database-backed)
+```
+
+The non-vacuity run reconstructs the old closing line from the same renderer: it
+gives an order on **9** cases, the new one on **0**.
+
+The ceiling itself was measured too, and it bites on **2 of 127** cases — both
+times dropping `referenced_people`, the last source in the registry by design.
+Recorded rather than changed: the order is deliberate and the source that is
+dropped is the cheapest to lose.
+
+### 54.5 What it leaves
+
+The assembly is now measured for *coverage and size*, not for *prose*. §52 scored
+one block's sentence and §53 scored another block's claims; the referent, act,
+object and room-state blocks still make claims nothing checks. And the coverage
+floor now says which sources reach the model — so the next block that stops
+reaching it fails a test instead of being noticed a dozen increments later.
+
+## 55. A clitic is not a content word
+
+### 55.1 The claim the thread reading made
+
+The thread reading is the one heuristic in `app/room_state.py`: whether the
+anchor's **content words** overlap the words of the messages before it. §54 left
+exactly this open — *the room-state block still makes claims nothing checks*.
+The verdict was scored; the words it named as the overlap never were. A word can
+be wrong while the verdict still looks plausible.
+
+### 55.2 The defect
+
+The shared fold turns the zero-width non-joiner into a **space**
+(`people.normalize`, `_SPACE_FOR`), so «بچهها» and «بچه ها» both arrive as two
+tokens. «ها» is two characters and is not a stopword, so it passed the length
+floor and the list and became a **content word**. In the corpus,
+`object-abstain-no-directive` — anchor «سلام بچه ها», with the same greeting in
+the window before it — rendered:
+
+```
+This message continues the thread the room is already on — it shares «بچه», «ها»
+with what came before.
+```
+
+The room's topic is not children; both messages are greetings. The reading's own
+docstring says a greeting is exactly what should abstain (*«باشه» shares nothing
+with anything*). With the clitic gone the anchor has one content word — «بچه» —
+which is below `MIN_TOPIC_TOKENS`, so the reading abstains. That is the honest
+answer for a greeting: it is not about anything to continue.
+
+### 55.3 The fix
+
+`_CLITIC` — the closed plural/possessive paradigm (`ها`, `های`, `هایی`, `هام`,
+`هاش`, `هاشون`, `هایم`, …) — is filtered beside `_STOP` in `content_tokens`. Only
+the **bare** clitic token is dropped: the glued spelling («بچهها» with no
+separator) stays one token, which is a separate *recall* matter (it fails to
+match «بچه»), not this defect. Suffix-stripping is deliberately not done — it
+would over-strip «رها» and «تنها».
+
+### 55.4 The numbers
+
+| | before | after |
+|---|---|---|
+| anchors whose content words include a clitic | **2** / 127 | **0** / 127 |
+| cases reaching a verdict on a clitic | **1** / 127 | **0** / 127 |
+| relation-labelled cases | 12 | 13 |
+| relation exact | 12 / 12 | 13 / 13 |
+| corpus version | 12 | 13 |
+| suite | 3157 | 3171 |
+
+The one case the fix moved — `object-abstain-no-directive` — went from a
+misleading `continues` to the honest `unclear`, and is now labelled for it, so
+the corrected verdict is **scored** rather than merely unpinned.
+
+Non-vacuity: the unfixed reader is reconstructed from the same tokenizer and
+filter, and the check reads **2** and **1** against it.
+
+### 55.5 What it leaves
+
+The act, object, referent and room-state blocks still make claims nothing checks
+— the graph's "converged on" wording, the object's "the verb decides", the
+referent's ranking reasons. §55 scored the thread's *evidence*; the remaining
+blocks' prose is the next thing to hold to the same standard.
+
+## 56. A config is not a person
+
+### 56.1 The wrong lead the room-held nouns did not cover
+
+§46 taught the resolver that a demonstrative immediately followed by a **thing
+word** is a determiner, not a person pronoun: «این لینک چیه» asks about a link,
+and offering the room's members as the people «این» might mean is a wrong lead.
+The thing words it knew were the ones the room *holds as a row* — media, links,
+messages — because `app/entities.py` is the reader that points at those.
+
+A VPN room talks about things it does not hold: «کانفیگ»، «سرور»، «تنظیمات»،
+«اشتراک». The word after the demonstrative is a thing, but not one the entity
+reader can point at, so it was not in the guard's lexicon — and the resolver read
+«همون» in «همون کانفیگ رو بده» as a person pointer. Measured, the block reached
+the prompt as:
+
+```
+Who «همون» may mean (server-built candidates, strongest first — evidence, not a decision):
+- سارا (22), 0.50 — they spoke shortly before this message
+- رضا (11), 0.50 — they spoke shortly before this message
+The server could not tell the top candidates apart. If you must act on a person, ask which one is meant rather than choosing.
+```
+
+for a message about a config. The brief names «همون کانفیگ» among the expressions
+Nexus must resolve; this is that expression.
+
+### 56.2 The fix: a second, closed list
+
+`entities.thing_word` is the union the **resolver** needs: the room-held kinds
+(`thing_kind`) plus `_GENERIC_THING_NOUNS`, the domain's own thing nouns. It is
+deliberately not what the entity block renders — that block points only at things
+the room holds, and the room holds no «کانفیگ» — so `thing_kind`, `KINDS` and the
+entity block are **unchanged**. `referents._thing_named` borrows `thing_word`
+instead of `thing_kind`; the person-noun and time-noun guards still take
+precedence, so «همون کاربر» stays a person.
+
+### 56.3 The numbers
+
+| | before | after |
+|---|---|---|
+| domain expressions read as a person | **8** / 8 | **0** / 8 |
+| `expression_false_positives` (corpus) | **3** / 130 | **0** / 130 |
+| expression accuracy | 97.7% | 100.0% |
+| corpus version | 13 | 14 |
+| corpus cases | 127 | 130 |
+| suite | 3171 | 3189 |
+
+Non-vacuity: the unfixed guard is reconstructed in-process from the same
+`thing_kind`, and the metric reads **3** — exactly the three `thing-noun-*` cases.
+
+### 56.4 What it leaves
+
+The resolver's wrong lead is closed for the nouns the domain names today; the
+list is closed and explicit, so a noun it does not know still reads as a person
+pointer — a false lead the entity block's evidence framing and the transcript
+soften but do not remove. The act, object and room-state blocks' prose remains
+unscored (§55.5).
+
+## 57. The copula is not a clitic
+
+### 57.1 The order the server invented
+
+The act reader (`app/discourse.py`) decides whether a message asks, instructs,
+corrects, greets or reports. It matches words against closed lexicons, and before
+it looks a word up it removes one **clitic** — the bound ending a word carries
+(«بنش» → «بن», «پاکش» → «پاک»). The clitic list held the **copula «ه»**.
+
+### 57.2 The defect
+
+«ه» does not end a noun stem you can peel; it ends a *predicate*. «ادمینه» is
+«ادمین» + «ه» ("is the admin"), «ساکته» is «ساکت» + «ه» ("is muted"), «کنه» is
+the subjunctive ("that he does"). Stripping the «ه» landed each on a moderation
+verb — «ادمین»، «ساکت»، «کن» — so an ordinary question became an instruction and
+the prompt quoted the copula as the word that asked for the ban:
+
+```
+The server reads this message as an instruction (the directive «ادمینه»).
+```
+
+for the anchor «ادمینه کیه؟». The same path turned the subjunctive «کنه» into the
+imperative «کن»: «باید یه کاری کنه» ("[someone] should do something") read as an
+order.
+
+### 57.3 The fix
+
+«ه» is removed from `_CLITICS`; the list is now the object markers («رو»، «را»),
+the plural («ها»، «های»), the indefinite («یه»، «یی») and the possessive («ام»،
+«ات»، «اش»، «ش»، «ای»). The colloquial question words that genuinely take a
+copula — «کیه»، «چقده»، «چقدره»، «کدومه»، «کدامه»، «چطوره» — are listed in
+`_QUESTION_WORDS` explicitly, exactly as «چیه» and «چنده» already were, rather
+than recovered by a suffix rule. That is the module's own call: the same doctrine
+that removed the imperative suffix rule.
+
+The fix reaches three readers, because `discourse.directives`/`acts_on` are
+shared. `requests` (the directive's direction) and `objects` (what the request
+acts on) read the directive the act reader finds; on the three `role-*` cases the
+quoted directive moves from the copula «ادمینه» to the real verb «محدود», and the
+object surface «ادمینه» — the thing the «رو» marks — is found again.
+
+### 57.4 The numbers
+
+The before/after pair is measured on the **same 134-case corpus**, the reader
+reverted in-process for the "before" column, so the four new cases are in both.
+
+| | before | after |
+|---|---|---|
+| directives quoting a copula form | **7** / 134 | **0** / 134 |
+| act claimed precision | 96.4% | 100.0% |
+| act recall | 97.2% | 100.0% |
+| act false positives | 1 | 0 |
+| act accuracy | 97.0% | 100.0% |
+| question class | 17 / 20 | 20 / 20 |
+| unknown class | 24 / 25 | 25 / 25 |
+| instruction class | 77 / 77 | 77 / 77 |
+| corpus version | 14 | 15 |
+| corpus cases | 130 | 134 |
+| suite | 3189 | 3232 |
+
+The new metric is `act_copula_directives`: the count of cases whose *rendered*
+act sentence quotes a directive that ends in «ه» and is not itself a directive
+word. It scores the sentence the model would read, not the token, because the
+sentence is what does the damage. Non-vacuity: re-adding «ه» to the reader's
+clitic list in-process brings the count back to **7** and drops act accuracy
+below 1.0.
+
+The four new corpus cases are the four shapes the defect produced: three
+questions that read as instructions («محدوده کیه»، «چرا ساکته؟»، «فایل پاکه؟»)
+and one subjunctive that read as an imperative («باید یه کاری کنه»).
+
+### 57.5 What it leaves
+
+The copula is fixed where it made a *directive*. The same strip could have made
+a correction, a report or a social word; the corpus shows it did not — the
+`correction`, `report` and `social` classes are unchanged at 3/3, 4/4 and 5/5,
+because those lexicons already list their «ه» forms. The act block's remaining
+prose — the "why" wording — is still unscored beyond the `act_copula_directives`
+floor (§55.5).
+
+## 58. The benchmark scored a different reading than the prompt showed
+
+### 58.1 The claim
+
+`tools/eval_intent.py` is the evidence for every "Nexus understands better" claim
+in this stage. Its referent numbers — top-1 accuracy, ambiguity recall and
+precision, wrong-but-confident — were computed from a resolution that was **not
+the one the prompt renders**.
+
+### 58.2 The defect
+
+`evaluate` resolved with `referents.resolve(anchor, messages=window)` — the
+window **without the anchor**, and **no roles**. The renderer
+(`app/awareness_context.py` `_render_referent_candidates`) resolves with
+`messages=ctx.messages`, which is what `main._awareness_pass` hands in — the
+window **including the anchor** — and `roles=ctx.roles`. That
+`referents._recent_scores` deliberately skips the anchor's own user is the tell:
+the intended input *includes* the anchor.
+
+Underneath it sat a second defect, and the first was hiding it. The role signal
+in `resolve` loops over every speaker and adds `SCORE_ROLE` for anyone whose role
+is `owner`/`admin` — with **no guard for the anchor's own speaker**, unlike
+`_recent_scores`. So the person *giving* «ادمینه رو محدود کن» was offered as a
+candidate for «ادمینه», and the block read:
+
+```
+- نیما (44), 0.75 — holds the role admin; they spoke shortly before this message
+- مالک (33), 0.70 — holds the role owner
+The server could not tell the top candidates apart. If you must act on a person, ask which one is meant rather than choosing.
+```
+
+for a case the corpus labels unambiguous — because the owner (33) is the speaker.
+
+A third, smaller divergence sat in the harness's world: it built the authority
+configuration from the **anchors** only, while `roles_for` overrides a row's own
+`role` field. A window speaker the corpus called an admin but the world called a
+member was a different room than the corpus describes.
+
+### 58.3 The fix
+
+1. `app/referents.py`: the role signal skips the anchor's own speaker — a message
+   is *by* them, not *about* them, the rule `_recent_scores` already applies. The
+   exclusion is for the role **inference**; a name, a stated id and a reply edge
+   still name whoever they name.
+2. `tools/eval_intent.py`: `evaluate` resolves with the renderer's inputs (the
+   window plus the anchor, and `awareness.roles_for`), so the block the model
+   reads and the verdict the benchmark scores are the same object.
+3. `tools/eval_intent.py`: the harness's world is built from **every row the
+   corpus labels**, not only the anchors.
+
+The faithful harness also exposed one **under-labelled** case: `state-anchor-is-reply`
+had `referent: null` while its anchor is a reply to user 11 — and every one of
+the other fourteen reply-anchor cases labels the referent as the reply target.
+Its label was written while the harness saw an empty window. It is now `11`, so
+the reply rule is **scored** rather than merely not contradicted.
+
+### 58.4 The numbers
+
+A = the harness before the fix; B = the renderer's inputs, before the reader fix.
+
+| | A (harness) | B (renderer inputs) | after the reader fix |
+|---|---|---|---|
+| top-1 accuracy | 1.000 | 1.000 | 1.000 |
+| ambiguity recall | 1.000 | 1.000 | 1.000 |
+| ambiguity precision | 1.000 | **0.571** | **1.000** |
+| wrong-but-confident | 0 | 0 | 0 |
+| confident and correct | 0.639 | 0.556 | **0.649** |
+
+Five cases moved between A and B (`role-single-admin`, `member-cannot-be-role`,
+`mixed-role-admin`, `role-two-admins`, `state-anchor-is-reply`); after the reader
+fix the three role cases are confident and correct again, the two-admin tie stays
+ambiguous, and the reply case names its target. Corpus version 15 → 16 (one label
+corrected; 134 cases unchanged). Suite 3232 → 3236.
+
+Latency: the guard only removes a candidate from the scoring loop, and a clean
+interleaved A/B over the corpus puts it **within noise** — 73.7 vs 72.3 µs per
+case (median of 21 runs), 59.0 vs 59.8 (minimum). An earlier reading of 65.3 vs
+77.5 µs was taken while the full test suite was running on the same box and is
+noise-dominated; it is not the number, and the change is not sold as a speed-up.
+0 Gemini calls, no DB change, no source/budget change; the only production file
+touched is `app/referents.py`.
+
+### 58.5 What it leaves
+
+The harness now scores the referent block the model reads. The other rendered
+blocks — the object's "the verb decides", the room-state graph's "converged on",
+the referent ranking's own reason strings — are still scored only where they
+happen to move a labelled verdict, not as prose (§55.5). The object block's one
+prose claim is scored as of §59.
+
+## 59. The object line ordered the model to ignore the block beside it
+
+### 59.1 The claim
+
+The prompt is assembled from several sources, and two of them can make claims
+about the same message. §54.3 found that once already: the entity block's closing
+line ordered the model to disregard the resolver's ranked people, and the fix
+moved the order to the block that "knows the side" — `app/objects.py` says "Do not
+read it as aimed at anybody in the room" exactly when the verb decides the object,
+and says nothing when the verb is unclassified, which is when the resolver's people
+are still live.
+
+That reasoning held only half. `app/objects.py` knows the **object** side. It does
+not know the people side, and `app/referents.py` keeps the **explicit** sources —
+the reply edge, a stated id, a name — *precisely* for the case where the request
+acts on a thing, because they identify who the thing belongs to. On a message that
+is both, the two blocks disagreed inside one prompt:
+
+```
+The request acts on a media message — a thing, not a person. Do not read it as aimed at anybody in the room.
+
+Who «اینو» may mean (server-built candidates, strongest first — evidence, not a decision):
+- مهدی (55), 1.00 — the message is a reply to them
+The server is confident in the first candidate. Use its id, and do not substitute a name from an earlier exchange.
+```
+
+One line orders the model not to read the message as aimed at anybody. Four lines
+below it, the server says it is **confident** who it is aimed at. The model has to
+choose which to believe, and the block that is wrong is the one that was supposed
+to be the correction.
+
+### 59.2 Why nothing could see it
+
+The shape needs both halves at once: a thing the room holds (so the object reading
+is `media`, `link` or `message` — the branches that carried the order) *and* an
+explicit source for a person. **Zero of the 134 cases had both.** The corpus could
+carry the order or the reply edge, never the two together, so the class comparison
+on `objects` scored 100% while the prompt contradicted itself — the same blind spot
+§54 found, one level down: the two blocks had never been rendered side by side.
+
+The reachable shapes are ordinary. A reply edge is the most common way a
+moderation request names its target, and "the object is a file and the target is
+whoever posted it" is the shape the object reading exists for.
+
+### 59.3 The fix
+
+`objects.render`'s room-held branches state their own half and stop:
+
+> The request acts on a media message — a thing, not a person. The thing is not a
+> member of the room.
+
+The half-truth the line exists for is intact — the object is a thing, not a person,
+which is the join the model used to make itself. What is gone is the claim about
+*people*, which this block never read and cannot support. The block that knows the
+object side says the object side; the block that knows the people side is printed
+beside it. The `CLASS_THING` branch already worked this way and was never a
+problem.
+
+The corpus gained the shape, once per explicit source — `object-media-reply-author`,
+`object-link-reply-author`, `object-media-named-author` — and the harness gained
+`object_denies_a_person_cases`: a case where the object line carries the denial
+*and* the referent block names a candidate. It reads both rendered blocks, so it
+cannot pass by agreeing with a mistake inside either reader.
+
+### 59.4 The numbers
+
+| | before | after |
+|---|---|---|
+| corpus cases | 134 | 137 (v17) |
+| `object_denies_a_person_cases` | **3** | **0** |
+| object block chars mean / max | 60.4 / 123 | 59.0 / 123 |
+| assembled context chars mean / max | 923.7 / 1498 | 923.7 / 1498 |
+| object exact (class · source) | 1.0 | 1.0 |
+| resolution top-1 / ambiguity precision | 1.0 / 1.0 | 1.0 / 1.0 |
+| wrong-but-confident | 0 | 0 |
+| a person offered for a thing-object request | 0 of 8 | 3 of 11, **0 wrong** |
+| `objects.render` µs/case (median / min) | 1.085 / 0.448 | 1.064 / 0.438 |
+| suite | 3236 | **3240 passed, 0 failed** |
+
+The "before" is the metric's own baseline, measured by reconstructing the unfixed
+line by string over the same corpus — `tests/test_intent_eval.py` does exactly that
+so the check cannot go vacuous. Non-vacuity: the unfixed renderer reads **3**.
+
+The 3 leads that remain are the labelled ones, and the harness now separates them
+from the guess: `object_person_offered_for_a_thing_wrong` is **0**, and
+`object_person_offered_for_a_thing` is asserted to be **≥ 3** so a corpus that
+quietly lost the explicit shapes fails instead of reading as a win. Before §59 the
+first number could be asserted `== 0` only because the corpus never rendered the
+two blocks together.
+
+Latency is a string swap and lands in the noise; the block is one character shorter
+per case and the assembled prompt is unchanged. 0 Gemini calls, no DB change, no
+source/budget change, no runtime-path change; the only production file touched is
+`app/objects.py`.
+
+### 59.5 What it leaves
+
+The rule the last two increments keep re-learning: **a block may state what its
+reader found and must not order the model about a fact its reader does not hold.**
+Two of the four orders the prompt used to carry are now evidence (the entity
+block's closing line, §54; this one). The two prose claims that were left
+unchecked — the room-state graph's "converged on" wording and the act block's
+"why" wording beyond `act_copula_directives` — are both scored in §60, which
+closes the programme.
+
+---
+
+<a id="s60"></a>
+
+## 60. The room's replies converged — on one member
+
+### 60.1 The sentence, and the count under it
+
+The room-state block renders who replied to whom, and — when the replies gather
+on one person — a sentence:
+
+    - The room's replies have converged on 11 (3 of 3).
+
+The word "converged" is a claim about the **room**. The reader that produced it
+counted **edges**: `RoomState.converged()` was `focus_count >= 2`, where
+`focus_count` is how many reply edges point at the most-replied-to target. Two
+edges, and the sentence said the room had converged.
+
+Those two edges can come from the same member. In the corpus,
+`anaphoric-split-room` is exactly that: one member (55) replying twice to سارا
+(22), and another (33) replying twice to رضا (11). The corpus's own note calls
+that room "**split**". The rendered sentence said the room had "converged on 22
+(2 of 4)" — a plurality of the *edges*, all of them from one person, over a room
+that was in fact divided. This is the same class of overclaim the resolver's
+whole feature exists to avoid, and `converged()`'s own docstring named it for
+the single-edge case while missing it for the single-member one.
+
+### 60.2 The fix
+
+`RoomState` gained a `focus_sources` property — the distinct members whose
+replies were aimed at the focus — and `converged()` now requires **more than one
+member**, not just more than one edge:
+
+    @property
+    def focus_sources(self) -> tuple[int, ...]:
+        return tuple(sorted({e.source_id for e in self.edges
+                             if e.target_id == self.focus_id}))
+
+    def converged(self) -> bool:
+        return len(self.focus_sources) >= 2
+
+`render_graph`'s weaker branch was made accurate for the case it now reaches:
+when two replies point at the focus but from one member, it says so — "2 replies
+were aimed at 22, all from one member; that is not a convergence" — rather than
+borrowing the single-reply wording, which would have been false. The four
+genuine convergences in the corpus (two or three distinct members) still render
+"converged on".
+
+### 60.3 The act sentence, read and left alone
+
+R scored two claims, and the second was already correct. `render_act` reads:
+
+    The server reads this message as {kind phrase} ({act.why[0]}).
+
+All 112 rendered act sentences were read. The template reports `why[0]`
+verbatim, `read_act` always takes its evidence word from the message's own
+tokens, and a claimed act always carries a non-empty `why`. No production change
+was made. The harness now **renders the act sentence** — until this increment it
+held only `act.why` and never the line it becomes — and floors a should-be-zero
+metric, `act_quote_not_in_anchor_cases`, on the quote being a token of the
+message.
+
+### 60.4 The numbers
+
+* `graph_claims_convergence_cases` **1 → 0** (the one case was
+  `anaphoric-split-room`).
+* The four genuine convergences still render "converged on": `room-about`,
+  `clitic-anaphoric-room`, `two-users-reply-chain`, `state-converge`.
+* Graph block chars: mean 115.8 → 116.0, max 239 → 265 (the new, longer
+  sentence on the split case).
+* `act_quote_not_in_anchor_cases` 0; `act_copula_directives` 0.
+* Assembled context mean 940.3 / max 1498, ceiling 1500 — unchanged.
+* `converged()` 0.233 → 0.861 µs, called once per graph render; `read_state` +
+  `render_graph` within noise.
+* 0 Gemini calls; no DB change; no source, budget or runtime-path change. The
+  only production file touched is `app/room_state.py`. Suite 3240 → **3245**.
+
+### 60.5 What it leaves
+
+The "score the rendered product" programme — J's method, applied to every block
+the prompt renders — is now **complete**: the time sentence, the entity block's
+two claims, the thread's named words, the act block's quoted directive, the
+referent block, the object line, the graph's focus sentence and the act
+sentence's evidence word all have a check re-derived from the rendered prose.
+
+One shape R did **not** fix, because no corpus case demonstrates it: a room
+**split evenly** between two people *with distinct members on each side* (say
+22→11, 33→11 and 44→22, 55→22) would still render "converged on 22", chosen by
+the most-recent-edge tie-break. The count is disclosed as "(2 of 4)", but the
+word "converged" may be too strong for a tie. Adding a case is what would settle
+it; until then the single-member rule is the demonstrated defect and the tie is
+recorded as an open thread, not guessed at.
+
+---
+
+<a id="s61"></a>
+
+## 61. Two admins and the tie the resolver refuses to break
+
+### 61.1 The thread
+
+Since P the roadmap carried one open thread: a role word like «ادمینه» ("the
+admin") in a room where **two** people hold the role. The resolver reads it
+`ambiguous` — it refuses to pick between two people who genuinely hold the role
+— and the question was whether it *should*: could the room's reply convergence
+legitimately break that tie?
+
+The question matters because the two mechanisms answer different questions.
+The **role signal** in `referents.resolve()` asks "who holds this role?" and is
+scoped to `KIND_ROLE`. The **anaphoric convergence** (`_about_focus`) asks "who
+has the room been replying to?" and is scoped to anaphoric words — the far
+demonstrative, the object clitic. Convergence is a *conversational* signal: it is
+evidence about the room's topic. A role is not a topic.
+
+### 61.2 The invariant
+
+A role signal must **never** run, replace or override the anaphoric/conversational
+convergence, and must never manufacture certainty from the fact that two people
+share a role. Concretely it must not:
+
+* choose an admin simply *because* they are an admin;
+* turn a genuine ambiguity into false certainty;
+* bypass referent resolution;
+* settle a role word by a mechanism scoped to anaphors.
+
+### 61.3 The baseline — the behaviour was already correct
+
+S measured before it changed anything, and found nothing to change. The runtime
+path proves the two mechanisms are **disjoint by construction**, not by luck:
+
+* the role signal runs only for `KIND_ROLE`, skips the anchor's own speaker, and
+  never calls `_about_focus`;
+* `_about_focus` runs only when `expression.anaphoric()` — so «ادمینه» never
+  reaches it;
+* two admins are tied at 0.75, and `MARGIN` keeps a tie from reading confident;
+  recency orders the candidate list but does not settle it;
+* on the same room, an anaphor («همون کاربر») **is** settled by convergence
+  (candidate 11 at 1.0) while the role holders stay out of the reading.
+
+So the invariant already holds. `app/referents.py` is **unchanged** — the
+increment's own stop rule prefers a no-change outcome when the evidence says the
+reading is already right, and inventing a change would be the thing to avoid.
+
+### 61.4 What S added instead
+
+Four corpus cases (v17 → v18, 137 → 141) pin the six shapes:
+
+* `role-two-admins-converge-one` — two admins, the room converged on one of
+  them, but a role word does not settle on the room's topic → ask;
+* `role-admin-vs-member-converge` — the room converged on a **member** while the
+  word names an admin: the member is not the referent, the admin is not certain
+  → ask;
+* `role-two-admins-recency` — one admin just spoke; recency orders the list but
+  does not settle it → ask;
+* `role-anaphoric-beats-admins` — «همون کاربر» with two admins → referent 11,
+  settled by the anaphor, the role holders excluded.
+
+The harness gained two **should-be-zero** metrics, `role_two_admin_confident_cases`
+and `role_focus_used_cases`, plus a report line and a failures clause. Both read
+the candidate **evidence** (the `why` list), not the final verdict: a
+right-looking answer reached by the wrong mechanism still fails. **Non-vacuity:**
+dropping `CONFIDENT_MIN` *and* `MARGIN` together makes the tied admins read
+confident, and removing the anaphoric gate lets a role tie run convergence — both
+trip their metric.
+
+### 61.5 The numbers
+
+* `role_cases` 7, `role_two_admin_cases` 3,
+  `role_two_admin_confident_cases` **0**, `role_focus_used_cases` **0**.
+* top-1 / ambiguity precision / ambiguity recall 1.0; `wrong_confident` 0;
+  `act_accuracy` 1.0; `edges_exact` 141/141.
+* Assembled context chars mean 940.3 → 953.8, max 1498 (ceiling 1500).
+* 0 Gemini calls; no DB change; no runtime-path change. **No production file
+  touched.** 6 new tests (2 `test_referents.py`, 4 `test_intent_eval.py`, incl. 2
+  non-vacuity). Suite 3245 → **3251**.
+
+---
+
+<a id="s62"></a>
+
+## 62. The same room, read twice — once with a reading and once without
+
+### 62.1 The asymmetry
+
+Two paths read the same room.
+
+The **awareness pass** (`main._awareness_read`) reads the window once and hands
+the model three things: the roster, `awareness.memory_block`, and
+`awareness_context.blocks(ctx)` — the server's *reading* of the anchor: what the
+message is doing, whether it asks for the action or forbids it, what it acts on,
+where its time words point, who replied to whom, whether it is still the same
+thread, what a demonstrative may point at, and who a pronoun may mean.
+
+The **addressed conversation** (`main._answer_conversationally`) — the path that
+runs when somebody actually talks *to* Nexus — built its context from the
+trusted block, the raw transcript (`awareness.room_block`) and the date
+(`_today_block`). It had the room's *words* and none of the server's *reading*.
+
+So the same message, «همون کاربر رو بن کن», reached the model two different ways:
+as an instruction with the resolver's ranked candidates beside it when a pass
+read it, and as raw text with no resolution at all when somebody addressed it.
+The resolver exists precisely to answer "who does «همون» mean", and the path
+where a person is *waiting for an answer* was the one that did not get it. This
+is the same shape as the date (`_today_block`): a deterministic reading the pass
+had and the conversation lacked.
+
+### 62.2 What T does
+
+The conversation borrows the pass's reading. `awareness_context.blocks` grew a
+``skip`` argument, and `main._room_reading` renders the reading of **the message
+being answered** from the window the reply path already reads:
+
+    ctx = awareness_context.build_ctx(chat_id, messages=messages, anchor=anchor)
+    return awareness_context.blocks(ctx, skip=awareness_context.CONVERSATION_SKIP)
+
+``CONVERSATION_SKIP`` names the five sources the conversation does not take, and
+each exclusion has a reason:
+
+* ``calendar`` and ``room`` — the conversation already states the date
+  (``_today_block``) and the room (the trusted block), so a second copy is waste;
+* ``remembered_people``, ``admin_activity`` and ``referenced_people`` — the three
+  **database-backed** sources. Room memory is the pass's job; the conversation
+  reads the window it already read and pays for nothing new.
+
+What it *does* take is the part that answers "what is this message doing, and who
+does «همون» mean": the act and its direction, the reply graph, the thread, the
+entities, the time reading, the open questions and the resolver's candidates.
+
+### 62.3 No database change — and why
+
+T is the roadmap's first DB-sensitive stage, so the question was asked before any
+code: **what persistent state is missing?**
+
+The answer is *none*. The reading is a pure function of three things the server
+already has: the window (`group_messages`, persisted), the anchor (the row for
+the message being answered), and the roles (`rbac`, resolved on demand). Nothing
+about the reading needs to survive the pass — the next pass re-reads the window,
+which contains the previous anchor, and re-derives. Recording it with the
+awareness row would add a column and a write per pass to store something
+``group_messages`` already lets any caller rebuild.
+
+So T adds **no column, no migration and no rollback procedure**, and the
+`151b1e1` precedent (`_ensure_column`, additive only) is not needed. A row from
+before T reads exactly as it did, and code from before T ignores everything T
+added — because T added no schema at all.
+
+### 62.4 The numbers
+
+* The borrowed reading: **141 cases**, chars mean **517** / max **1146** (the pass
+  reading is 954 / 1498 — the borrowed one is smaller by construction).
+* **28** cases carry the resolver's ranked candidates into the borrowed reading —
+  the part that answers "who does this mean".
+* **0** borrowed readings exceed the pass reading; **0** exceed the ceiling
+  (both should be zero, and both are asserted).
+* Latency: the reading is ~0.6 ms per reply (the transcript it sits beside is
+  ~0.5 ms); against a model call that is ~0.02–0.06%.
+* Database: **+1 read per addressed reply** — ``rbac.resolve_many`` →
+  ``db.admin_list()``, once, for the roles the readers need. The window is read
+  **once** and handed to both the transcript and the reading (``room_block`` grew
+  a ``messages`` argument for this), so the transcript's own query is not
+  duplicated.
+* Gemini/provider calls: **0 added**. The reading is Python over data the server
+  already has.
+* A reading that cannot be built — the message is not in the window, the layer is
+  off, the resolver raises — returns ``""``. The answer goes out exactly as it
+  did before T.
+
+### 62.5 What it leaves
+
+The quality effect is a **prompt-content** change: the model answering an
+addressed message now sees the server's reading of that message. The deterministic
+benchmark cannot score a model's answer, so what is measured here is that the
+reading is *delivered* and *bounded*, not that the answers got better. Whether
+they did is a question for a live probe, and it is recorded as open rather than
+claimed.
+
+<a id="s63"></a>
+
+## 63. What the server may remember about a person
+
+### 63.1 The gap the roadmap named
+
+Every layer built so far answers a question about *now*: Intent reads one message,
+Awareness reads the room, the window holds an hour of conversation and is thrown
+away. None of them answers "what durable thing do I know about this person". A
+member who told the room they prefer to be addressed a certain way, or that they
+moderate another group, is a stranger again the next hour.
+
+W is the layer that holds that. It is deliberately the smallest useful version of
+it: a bounded set of clauses, keyed by `(chat_id, user_id)`, that a person
+**explicitly asked to be remembered**.
+
+### 63.2 The existing storage cannot carry it
+
+The roadmap's stop rule says to check first, and the check was done before any
+code:
+
+* `people` is per-room identity metadata — a name, a username, a message
+  **count** — and its docstring makes "no column for a message body" a refusal;
+* `identities` is an opaque per-user uuid;
+* `awareness_state` is a one-row-per-chat cache of the **room**;
+* `chat_messages` is the assistant's own conversation with one person.
+
+None holds a durable fact about a person. So this is the branch's first genuinely
+necessary table — T's turned out to be derivable, W's did not.
+
+### 63.3 The bounded model, chosen by measurement
+
+The brief suggested "20–50 items per user". The roadmap said to benchmark rather
+than copy, and the benchmark changed the reasoning:
+
+* **storage is not the binding constraint.** 202 bytes/row means 3000 members × 30
+  items is **17.4 MB** against a 200 MB budget. Even 100 items each is ~60 MB.
+* **what is actually rationed is attention.** The retrieval block is ~300
+  characters and can surface about four clauses. Storing more than that buys
+  nothing the model will ever read.
+
+So the cap is **30** — inside the brief's range, but chosen because it leaves a
+~7× margin over what can be read while keeping the table a *fact set* rather than
+a log. `NEXUS_MEMORY_MAX_PER_USER`, `NEXUS_MEMORY_RETENTION` and
+`NEXUS_MEMORY_MAX` bound it three ways; the indexed per-person delete runs on the
+write (0.22 ms) and the whole-table bounds run every `PRUNE_EVERY` recordings.
+
+### 63.4 Explicit-only, and why that is the whole safety story
+
+The rule that shapes W is a refusal: **a memory is written only when a person asks
+for it**, matched by a deterministic trigger over the text they typed
+(«یادت باشه …», "remember that …"). The clause is stored verbatim and bounded.
+
+Nothing is inferred from ordinary conversation. Two reasons, and the second is the
+important one:
+
+1. Inferring a durable fact from a passing sentence would need a model call, and
+   the evidence rule forbids one on the ordinary path;
+2. a *guessed* fact can be **wrong about a real person**, and being wrong about a
+   real person is the failure this whole project is built to avoid.
+
+The negative corpus makes that explicit: «من ادمینم» — an ordinary claim of
+authority — stores nothing. The most dangerous thing a memory layer could do is
+let a sentence become a permission, so the detector is built so the sentence never
+becomes anything at all.
+
+A memory **grants nothing**. It is a sentence for the model to read, framed as the
+person's own words rather than as a fact the server asserts, and no authority
+module imports `app/memory.py`.
+
+### 63.5 Isolation is by construction
+
+The key is `(chat_id, user_id)`. There is no read that does not name the room, so:
+
+* one person's memory is never another's;
+* one group's memory is never another's;
+* a private-chat memory can never render in a group.
+
+That is a property of the key rather than of a check, which is the point — a check
+can be forgotten, a key cannot.
+
+### 63.6 The numbers
+
+* Extraction: 12 positive / 13 negative, precision **1.0**, recall **1.0**, **0**
+  false positives.
+* Storage: 202 bytes/row; **17.4 MB** projected at 3000 members × 30 items.
+* Write: **0.22 ms p50 / 0.62 ms p95** per remembered clause.
+* Retrieval: **0.005 ms p50** — one indexed read that returns nothing for most
+  people.
+* Corpus: `user_memory` renders on **141/141** cases (the harness seeds one memory
+  per anchor, so the block is scored on a real render). The assembled context
+  moved mean 954 → **1046** / max 1498 → **1489**; the addressed reading moved
+  mean 517 → **615** / max 1146 → **1244**. Both stay under the 1500 ceiling.
+* Gemini/provider calls: **0**.
+* Suite: 3266 → **3314 passed, 0 failed**.
+
+### 63.7 What it leaves
+
+Two things are deliberately not built **by this increment**, and both are
+recorded rather than half-done:
+
+* **semantic extraction** from ordinary conversation — it needs a model call or a
+  change to the awareness prompt, either of which is a separate increment with its
+  own evidence. **It has since been built**, as a *second write path* rather than
+  a change to this one: see §64 (and AgentMD §54.7). The explicit-only rule above
+  is still the rule for this path; the automatic path adds slots and refusals of
+  its own, and never weakens this one.
+* **memory for a referenced person other than the anchor** — the block follows
+  `ctx.anchor_id()`, so a batch that is *about* somebody other than its anchor
+  does not yet surface that person's memory. This remains unbuilt.
+
+The quality effect is a prompt-content change the deterministic benchmark cannot
+score. What is measured here is that the block is *delivered*, *bounded* and
+*isolated*; whether answers got better is a question for a live probe — and for
+the automatic path that probe still has not been run (§64.10).
+
+<a id="s64"></a>
+
+## 64. Four sources, and the one that learns on its own
+
+### 64.1 Four things that are not one thing
+
+The conversational layer reads four sources, and the first design decision is
+that they stay four. Merging them into one "context" would make each one's cost
+invisible and each one's failure fatal:
+
+| Source | The question it answers | Lifecycle | Scope |
+| --- | --- | --- | --- |
+| Conversation History | what was recently said | one hour | the room |
+| Awareness | what is happening around Nexus now | current, debounced | the room |
+| State | what this interaction is trying to accomplish | not built (increment X) | the interaction |
+| Long-Term Memory | what is worth remembering about this person | months | `(chat_id, user_id)` |
+
+They are complementary rather than layered. A room window says what was said; the
+awareness reading says who was answering whom and what the message being answered
+actually refers to; memory says that this person programs in Python and prefers
+short answers; state — when it exists — will say what the current task is. The
+composition takes the **minimum relevant combination**, and each source
+contributes its own bounded block. Memory's contribution is one block, bounded by
+`NEXUS_MEMORY_ITEMS` rows and `NEXUS_MEMORY_CHARS` characters, and it is the only
+one of the four that outlives the hour.
+
+### 64.2 A second write path, and why it is a *second* one
+
+W v1 stored a clause only when somebody explicitly asked. The obvious next
+question — "why not learn it from ordinary conversation?" — has a cheap answer
+and an expensive one. The cheap answer is a model call per message; the expensive
+answer is a rule set narrow enough to be trusted. The design here takes the
+expensive one, because the failure mode of the cheap one is a *wrong belief about
+a real person*, which is the failure this project is built to avoid.
+
+So the automatic layer is a closed vocabulary of **slots** (`memory.SLOTS`),
+matched by deterministic rules over the message the person typed. A slot is the
+memory's identity: `identity.programming`, `interest.gaming`, `preference.answers`,
+`humor.adult`. Because the slot is the key, a new value **replaces** the old one —
+"more with JavaScript" then "switched to Python" is one row that says Python.
+Create, update, replace, merge and deduplicate are therefore not four algorithms;
+they are what a slot-scoped upsert *is*. And because the vocabulary is closed and
+small, a person's automatic memories are bounded by the vocabulary rather than by
+how much they type: the table stays a fact set, never a log.
+
+### 64.3 What is refused, and how
+
+Four refusals run before any rule does, and each is a whole-message refusal
+rather than a filter:
+
+* **a transient state** — «امروز خسته‌ام» cannot become "tired: yes";
+* **a question** — a message ending in a question mark states nothing;
+* **a request** — «جواب کوتاه بده» is an instruction for one reply, not a
+  preference, so the answer-preference rule demands an actual preference marker;
+* **somebody else** — "my brother is a programmer" is refused at the opening, and
+  a captured value that carries a possessive relative is refused again. The
+  third-party test runs on the value **as written**, before a leading "my " is
+  stripped, because stripping first would hide the word that gives it away.
+
+The remaining rules read *what* somebody is, never how they feel. There is no
+rule that turns "I am smart" or "I am tired" into a memory, and no rule that
+infers a personality from writing style. What is stored is either a
+closed-vocabulary token (a language, a role) or a phrase the person actually
+wrote next to a first-person marker — and the role rule is what makes
+"a programmer" safe while "tired" is not: the captured phrase must end in a word
+from the role vocabulary.
+
+### 64.4 Behaviour is counted, humour is stated
+
+A repeated *behaviour* is different from a stated fact, so it is treated
+differently. `style.playful` and `preference.style` are only remembered after
+`NEXUS_MEMORY_SIGNAL_THRESHOLD` observations, in a separate bounded table
+(`user_memory_signal`) that holds a **number** and never a message, and the
+counters decay by age — demonstrate it again or lose the label. One playful
+message is not a personality.
+
+Humour is the sharpest case, and the design is deliberately narrow. The brief
+allows a compact style flag for adult humour. The one honest way to learn that
+without classifying the content of anybody's jokes is to read the preference the
+person **states** — «شوخی‌های بزرگسال دوست دارم» — so the humour slots are reached
+only by a statement rule. The material is never stored; what is stored is a flag.
+And the flag is not permission: it changes no safety rule, authorises no content
+and grants nothing. A test asserts that the joke itself is absent from the store.
+
+### 64.5 The model seam, off and isolated
+
+For the narrow remainder — a sentence that plainly states something durable in a
+phrasing no rule anticipated — `app/memory_extract.py` can ask a model to
+*structure* it. Three things must all be true before a provider is touched: the
+operator's switch (`NEXUS_MEMORY_EXTRACT_MODEL`), an account in the isolated
+`memory` workload, and a message that looks like self-information and that the
+deterministic layer did not already answer.
+
+The workload is its own end to end: its own key slots, models, timeout, retries,
+backoff, circuit breaker, daily allowance and counters. The module imports nothing
+from chat, awareness, intent, moderation, search, transcription or voice, so a
+memory backlog cannot spend, delay or exhaust the request somebody is waiting on
+an answer to. And its output is **untrusted data**: `memory.validate_candidate`
+re-checks the slot against the closed vocabulary and the value against the same
+rejections, including on the value as the model wrote it. A hallucinated slot, a
+link, an oversized value or somebody else's attribute is dropped there, so there
+is exactly one place where a candidate becomes a memory.
+
+On this host the seam is unexercised — there is no `GEMINI_MEMORY_API_KEY` — which
+is the state the repository ships in.
+
+### 64.6 Off the answer path
+
+The hard requirement is that memory never makes a person wait. So
+`main._schedule_memory_observation` schedules `memory.observe` as a background
+task, and nothing in a handler awaits it. Extraction, the counters, the bounded
+write, the gated provider call and every failure happen off the answer path; the
+worst case is that a memory is not learned. `memory.observe` is written never to
+raise, so there is no result to await and no failure to report.
+
+The **only** synchronous work memory adds to a chat turn is the bounded read and
+render in the context composition: **0.074 ms p50 / 0.176 ms p95** measured
+against **0.0004 ms** with the feature off. That is the whole synchronous delta.
+
+### 64.7 Memory is not a dependency of awareness
+
+Awareness is an optional source. The memory block reaches an addressed answer
+through the room reading when that reading exists — the `user_memory` source is
+one of its blocks — and through `main._memory_context` when awareness is switched
+off, the message is not in the window, or the reading cannot be built. The
+fallback is guarded by `if not reading`, so the block is never duplicated.
+
+The effect is the one the four-source architecture is for: turning awareness off,
+or losing it, no longer takes the person's own memory with it. Regression tests
+drive the real conversational path with awareness off, with the reading forced to
+fail, and with memory empty, and assert that the turn is still answered and the
+memory still arrives.
+
+### 64.8 Retrieval is relevance-first
+
+The whole collection is never injected. Relevance is a deterministic lexical
+overlap between the topic — the message being answered — and the row's label,
+value and a small per-slot hint table, plus a constant for the rows that describe
+**the person** rather than a subject: explicit, identity, preference, style and
+humour. An **interest** is a subject, so it must be mentioned to be shown.
+
+That asymmetry is what makes the two requirements coexist: the brief's own
+example — a Persian question about a Python project — surfaces the programming
+memory even though no lexical overlap can bridge «پایتونم» to "Python", while a
+favourite game stays out of an answer about a programming project. Relevance is a
+lexical hint, not an inference, and the hint table is small and auditable.
+
+### 64.9 The numbers
+
+From `python3 tools/eval_memory.py`, deterministic and offline:
+
+* explicit extraction precision **1.0** / recall **1.0** (12 pos / 13 neg), 0 FP;
+* automatic extraction precision **1.0** / recall **1.0** (16 pos / 15 neg), 0 FP;
+* gate: of 18 ordinary messages, 5 answered by the rules, **1 (5.6%)** reached the
+  seam, **0 provider calls**;
+* storage: 90 000 rows **16.91 MB**, **197 bytes/row**, projected **16.91 MB** at
+  3000 members against the 200 MB budget; write 0.293 ms p50 / 0.678 ms p95;
+* lifecycle over a scripted conversation: 8 accepted / 4 rejected, 2 duplicates,
+  6 replacements, **5 rows** at the end;
+* sync cost: read+render **0.074 ms p50 / 0.176 ms p95** vs **0.0004 ms** disabled;
+* retrieval 0.049 ms p50 / 0.128 ms p95; block mean/max **145** chars (budget 300);
+* suite 3314 → **3417 passed, 0 failed**.
+
+### 64.10 What it leaves
+
+* **The live probe is not run.** It cannot be: there is no `GEMINI_MEMORY_API_KEY`
+  here, so the model seam is disabled and no provider is ever contacted. The
+  numbers above measure the *server's* contribution — what is extracted, stored,
+  rendered and what it costs — and they are **not** evidence that answers got
+  better. The probe methodology is recorded in AgentMD §54.7 and the claim is
+  left unmade.
+* **State was not built yet at W.** Continuity across turns was still the
+  conversation window's job, and memory must not be asked to do state's work.
+  That was increment **X**, which is now built — see §65.
+* **Relevance is lexical.** An interest stored in one script may not match a topic
+  written in another unless the hint table covers it.
+* **The global prune is a whole-table statement** (266 ms measured at 90 k rows)
+  that runs every `PRUNE_EVERY` recordings once the table is over
+  `NEXUS_MEMORY_MAX`. It is off the answer path, but it is the number to revisit
+  first at scale.
+
+## 65. What the conversation is trying to do
+
+Increment **X**, the third of the four context sources. W made Nexus remember a
+fact about a person; X makes it remember *what the two of them are doing right
+now*. The two are not the same thing and the whole section is about keeping them
+apart.
+
+### 65.1 The boundary, in one example
+
+A person's preference for Python is **Memory**. "Currently debugging the Python
+authentication bug" is **State**. The first is durable, about the person, and
+relevant to almost any question they ask; the second is true *now*, about the
+interaction, and ends when the bug is fixed. Memory answers *what durable thing
+do I know about this person*; State answers *what is this interaction trying to
+accomplish*.
+
+That is why State is not a second `user_memory`. It is one active row per
+`(chat_id, user_id)` — a topic, a goal, an unresolved question and a status —
+and it is not a set. "The active topic" has exactly one answer.
+
+### 65.2 It is one row, and that is the bound
+
+The store is `conversation_state`, keyed by `(chat_id, user_id)`. There is no
+"how many tasks" number to configure because the answer is one, and a new task
+**replaces** the old one rather than joining it. A person who says "let's fix
+authentication" and then "now payments" has one active task, not two — which is
+the brief's own example, and the reason the state is unambiguous by
+construction.
+
+The row holds a topic, a goal, an unresolved question, a status from a closed
+vocabulary, the last transition's name, and two integers that make the
+background write safe. There is **no column a message body could fit in**. A
+state is a summary, never a transcript.
+
+### 65.3 The lifecycle is explicit, and completion clears
+
+Six transitions, read deterministically from the message:
+
+* **activate** — a task begins and none is active.
+* **update** — the same task is restated or gains a detail.
+* **replace** — a new task supersedes the old one (one row, not two).
+* **continue** — «خب الان قدم بعدی چیه؟» carries the task on.
+* **complete** — «حل شد» ends it.
+* **reset** — «بحث رو عوض کنیم» abandons it.
+
+A completion or a reset **clears** the row rather than leaving a finished task
+looking active, because "what is this conversation trying to accomplish" has no
+answer once the answer is "nothing". The scripted lifecycle in
+`tools/eval_state.py` ends with **0 rows** — after a task, a continuation, an
+open question, a replacement and a completion, there is no active state, not
+five.
+
+An ordinary message — a greeting, an acknowledgement, a reaction, a claim of
+authority, a request for an action — matches nothing and changes nothing. That
+is the same "a statement, not a guess" rule the memory reader follows, and it is
+what keeps the state path free.
+
+### 65.4 Relevance is freshness and supersession, not word overlap
+
+This is the one place State departs from Memory's retrieval, and the departure is
+the point. Memory is relevance-first by **lexical overlap**: a favourite game
+does not appear in an answer about a programming project. State cannot be, because
+continuation is **pronominal** — «خب الان قدم بعدی چیه؟» and «این قسمت رو چطور
+درست کنیم؟» share no content word with the topic — and a word-overlap filter
+would drop exactly the continuations State exists to serve.
+
+So the gate is two things instead:
+
+* **freshness** — a task older than `NEXUS_STATE_TTL` (72 h) is not "current";
+* **supersession** — a message that starts a new task, completes the current one
+  or resets the subject **withholds** the old state rather than showing it beside
+  the fresh input. Fresh explicit input wins, in the render path as well as the
+  write path.
+
+### 65.5 A stale worker cannot overwrite a newer state
+
+The write is a **compare-and-swap on a version**. The caller reads the row,
+computes the new state and writes naming the version it read; if another writer
+moved the row first, the write is **refused** and the caller drops its update.
+The newer state is the truth, so the older worker's read is discarded rather than
+retried into it. The message id makes a **duplicate delivery a no-op** rather
+than a second transition. Both are counted in the benchmark: the stale write is
+refused, the duplicate leaves the version unchanged, and one row remains.
+
+### 65.6 No model seam, and that is the design
+
+W has an off-by-default `memory` Gemini workload because semantic
+fact-extraction needed one. X deliberately has **no seam and no `state`
+workload**. The roadmap scoped X at "Gemini: 0 expected" and the request
+allowance is rationed, so the deterministic signals are the whole path. The
+consequence is the isolation the brief asks for, by construction rather than by
+a budget: State cannot spend, delay or exhaust the request an answer is waiting
+on, because it never makes one. `tools/eval_state.py` asserts the model-call
+count is **0**.
+
+### 65.7 It is off the answer path, and independent of awareness
+
+`main._schedule_state_observation` schedules `state.observe` as a background
+task, through the same `_schedule_background` helper the memory observation now
+uses — one place a background observation is scheduled, so the two cannot drift.
+Nothing about state is awaited by a handler; the worst case is that a state is
+not learned.
+
+The block reaches an addressed answer through the room reading when that exists
+(the `conversation_state` source is one of its blocks) and through
+`main._state_context` when awareness is off, the message is not in the window, or
+the reading cannot be built — and it is never duplicated. Turning awareness off
+does not take the state with it.
+
+### 65.8 Measured
+
+`python3 tools/eval_state.py`, deterministic and offline:
+
+* transition reader precision **1.0** / recall **1.0** (13 pos / 14 neg), **0**
+  false positives;
+* storage: one row per person, **267.6 bytes/row**, **0.77 MB at 3000 members**
+  (budget 200 MB); write **0.132 ms p50 / 0.374 ms p95**;
+* lifecycle: all five transitions, **0 rows at the end**, no ground-truth
+  mismatch;
+* concurrency: stale write **refused**, duplicate a **no-op**;
+* sync cost: read+render **0.059 ms p50 / 0.115 ms p95** vs **0.0016 ms** off;
+* retrieval **0.038 ms p50**; block mean/max **170 / 171** chars (budget 300);
+* model calls **0**; suite 3417 → **3484 passed, 0 failed**.
+
+### 65.9 What it leaves
+
+* **The live probe is not run.** It is an answer-quality measurement and it needs
+  a provider; the numbers above are the *server's* contribution, not a claim that
+  answers improved. The probe belongs to increment **Y**, whose whole purpose is
+  the controlled before/after evaluation; X supplies the State block it will
+  measure.
+* **The transition reader is a fixed set of phrasings.** A task stated in an
+  unanticipated wording changes nothing — documented, not inferred.
+* **Continuation after 72 h is a new interaction.** `NEXUS_STATE_TTL` is one
+  number; an operator who wants longer continuity changes one environment
+  variable.
+* **One task per person per room.** A person genuinely running two interleaved
+  tasks keeps only the most recent; ambiguity is preserved by *not* guessing
+  rather than by holding both.
+
+## 66. Which room the next request reads
+
+### 66.1 The question, and why it is not a relevance question
+
+The awareness allowance is rationed in **requests**: 200 a day for the whole
+deployment, and it is not going up. Every pass therefore has an opportunity cost,
+and until increment U the scheduler had no answer to the question that follows
+from it — *given several rooms with something unread, which one should the next
+pass spend itself on?* Each room was read on its own debounce deadline, at its own
+share of the allowance, so a room whose conversation never needed reading was read
+exactly as often as one whose conversation did.
+
+U answers that question and nothing else. It is **not** a second semantic reader,
+not a second model call and not a second classifier; it does not touch
+`awareness.due`; and it does not change the allowance. The request that would have
+gone to a room of idle chatter goes instead to a room that needs a fresh reading.
+
+### 66.2 The seam: the content is read once, at capture
+
+`awareness.due` decides *whether* a room may be read, and its signature is asserted
+by a test: it may see timestamps and nothing else, because a function that could
+see the words would inevitably start deciding whether the words matter. That
+boundary is respected rather than moved.
+
+So the content never reaches the decision. It is read **once**, at capture time —
+where the text is already in hand and a row is already being written — and reduced
+to a one-word class before it is stored:
+
+    a message arrives
+          |
+    awareness.capture(...)                 the existing write; unchanged
+          |
+          +--> awareness_schedule.note(chat_id, class)   <- the new seam
+          |
+    awareness.due(row, now=...)            unchanged, still blind
+          |
+    awareness_schedule.defer(chat_id, ...) <- spend, or wait?
+          |
+    the existing pass
+
+`app/awareness_schedule.py` holds `chat_id -> (class, monotonic stamp)` and
+nothing else. The class is the **strongest** seen among the room's *unread*
+messages, so one message that needs the room outweighs the chatter around it, and
+a weaker class still refreshes the stamp because the stronger message it refers to
+is still unread. The class is produced by the project's own `context_plan.read` —
+the single boolean `wants_awareness` — reused precisely so the two layers cannot
+disagree about what "needs the room" means. There is deliberately no numeric score
+and no weight table: two classes, chosen by measurement.
+
+The store is bounded three ways and holds nothing it should not: at most
+`MAX_ROOMS` (512) entries evicted oldest-first, every entry expiring at the
+retention window, and no read that does not name the room. There is no field a
+sentence could be written into.
+
+### 66.3 The decision: spend, or wait
+
+`defer(chat_id, *, waited, waiting, now)` returns `True` only when the room's hint
+is `low`, the oldest unread message has waited less than
+`NEXUS_AWARENESS_RETENTION_SECONDS`, and the server is not waiting on the room.
+It is consulted **after** `due` has said a room is eligible and **before** the
+allowance is checked, on the ordinary path only. It can only ever *postpone*: it
+cannot make an ineligible room eligible, cannot bypass a cooldown, a brake, a
+breaker, the allowance or the switch, and cannot cause a pass the policy would have
+refused. The urgent path — an administrator's actionable-looking message — never
+asks, so the hint can delay a routine reading and never a prompted one.
+
+Four refusals make it safe rather than merely clever:
+
+* **No hint is not low.** A room never classified, or whose hint has expired, or
+  captured through `awareness.capture` directly, is read exactly as before.
+* **The bound is real**, and it is *derived* — `_bound()` is the retention window,
+  the same window whose rows a hint describes — so there is no second number to
+  drift out of step and no knob to reason about.
+* **A room the server is waiting on is never deferred** (see 66.5).
+* **The urgent path always overrides.**
+
+### 66.4 The mechanism that was rejected, and why
+
+The obvious design was to **order** the pending list by class. It was built,
+measured, and removed, and the reason is a fact about the architecture rather than
+a matter of taste: the scheduler is **event-driven per room, not batch-driven**.
+Each room is offered a pass on its own debounce deadline and admitted or refused by
+its own share of the allowance, so at any instant there is about one candidate and
+nothing to sort. Measured over eight seeds of the benchmark's workload, ordering
+changed the outcome by **exactly zero passes**; the spend decision changed it by
+twenty-three percentage points. The honest implementation is the one that does the
+work, not the one that matches the sketch.
+
+A second candidate — defer a low room only while another room holds a message that
+needs the room — is strictly safer (it can only postpone while better work is
+pending) but it is **cross-room influence**, and it is worth about one point,
+because the rooms that need the room are not holding work most of the time. It is
+recorded in the benchmark rather than shipped.
+
+Both rejected mechanisms stay reproducible in
+`tools/eval_awareness_schedule.py` (`--compare-ordering`), and
+`tests/test_awareness_schedule_eval.py` pins the negative result: if ordering ever
+starts to matter, a test fails and the mechanism becomes worth reconsidering.
+
+### 66.5 Two defects the real path found
+
+Neither was visible from the benchmark, and both were caught by running the
+production functions:
+
+1. **The reader-error fallback pointed the wrong way.** `read` fell back to `low`
+   on a reader exception — and `low` is what *causes* a deferral. A reader broken
+   on every message would therefore have deferred every room in the deployment, a
+   deployment-wide slowdown wearing a scheduling choice's clothes. It now falls
+   back to `none` (*no evidence*), which `note` refuses to store, so a broken
+   reader leaves the room read exactly as it was before U existed.
+2. **A deferred room delayed an owner's admin confirmation.** A confirmation
+   («تأیید میکنم») is self-contained, so the classifier is right to call it `low`
+   — but the **pass** is what consumes it. The naive rule postponed an
+   already-approved admin action by up to the retention window, and three
+   `test_nexus.py` confirmation tests caught it. The lesson is the sharp edge of
+   this whole mechanism: *the message does not need the room* is not *the pass does
+   not need to run*. `defer` gained `waiting`, the caller supplies
+   `db.admin_pending_waiting(chat_id)`, and a room the server is waiting on is
+   never deferred.
+
+### 66.6 Measured
+
+`python3 tools/eval_awareness_schedule.py` — deterministic, offline, no Telegram,
+no model. Ten room shapes, 28 rooms, 684 messages, 204 hand-labelled dependent,
+one simulated day at the real 200-request allowance, running the production `due`,
+the production allowance-gap formula, both scheduling paths, and the production
+`defer`. Eight-seed mean, same arrivals and same allowance for both runs:
+
+* **useful passes** (a pass is useful when the batch it read contained a message
+  that cannot be understood without the room): **44.6 % → 67.6 %**; worst seed
+  **41.5 % → 65.0 %**; ordering alone, on the same workload, is **44.6 %**.
+* **requests spent: 200 → 200**; **model calls == passes** in both runs.
+* **fairness improved, not traded**: starved rooms **1.0 → 0.6**; dependent
+  messages left unread **105.4 → 59.1**; max wait **5400 s → 2732 s**; p95 wait
+  **2107 s → 562 s**.
+* **where the passes moved** (default seed): the hog `one_constant` **43 → 14**,
+  `busy_independent` **18 → 11**, while `sparse` **20 → 27**, `many_active`
+  **73 → 84**, `replies_anaphora` **9 → 16**, `addressed` **10 → 16**.
+* **the decision's own cost**: `decide_ms_p95` **< 0.1 ms**; the store is a dict
+  lookup and the class is computed where the message is already being written.
+
+### 66.7 What it leaves
+
+* **The live probe is not run.** U is not deployed (and the brief forbids
+  deploying it), so a live probe would measure the previous build. The numbers
+  above are the *policy's*, not a model's, and are not evidence that any answer
+  improved.
+* **The mechanism trades timeliness for coverage.** A room whose batch reads as
+  chatter is not read for up to the retention window (1 h). Nothing is lost
+  content-wise — the window still holds the messages, and a message that changes
+  the class raises the hint so the room is read on its next deadline — so the
+  exposure is exactly the classifier's false negatives.
+* **The one knowable false negative is closed; a residual remains.** A bare answer
+  to the assistant's own question («بله») carries no room dependency and no server
+  flag, so it can be postponed like any other chatter. Closing it would need an
+  "awaiting an answer" flag the server does not keep. Recorded, not guessed at.
+* **The class is two words from a deterministic reader.** A dependency worded in an
+  unanticipated way reads `low`; the cost of that is a delayed reading, never a
+  wrong action.

@@ -1,0 +1,821 @@
+================================================================================
+TOKEN & AI WORKLOAD AUDIT
+GuardBot
+================================================================================
+Generated : 2026-09-24
+Branch    : develop/nexus-intelligence-evolution
+Base HEAD : b074ddd0c0b18f2c6ed2c39aeb6374e94c247a5c
+Scope     : audit only. No build. No deploy. No merge. No production change.
+Source of truth : the repository (code + live config import). Where older prose
+                  docs disagree with the implementation, the implementation wins
+                  and the discrepancy is recorded in section 8.
+
+SECURITY NOTE
+--------------
+This report contains NO real secret. Every credential is referred to by an
+irreversible fingerprint, defined as:
+
+    fp(value) = sha256( value.strip().encode("utf-8") ).hexdigest()[:8]
+
+An 8-hex-character fingerprint of a 53-character high-entropy API key cannot be
+reversed to the key and is not a usable credential. No `.env` value, no key-store
+value and no bot token appears anywhere in this file, in the commit, or in the
+push. If a value were not readable, the report says so explicitly instead of
+guessing.
+
+Persian one-line summary: ۱۵ کلید یکتای Gemini در `.env` وجود دارد (به‌همراه یک
+کلید runtime در key-store = ۱۶) و یک کلید Tavily جدا؛ ۹ workload مستقل تعریف
+شده؛ دو کلید تکراری/مشترک پیدا شد که در بخش ۷ و ۹ گزارش شده‌اند.
+
+================================================================================
+1) EXECUTIVE SUMMARY
+================================================================================
+
+* There are NINE (9) independent, pool-backed AI workloads, declared in one
+  place: `config.GEMINI_POOLS` (app/config.py:2753). They are:
+  intent, chat, moderation, transcribe, tts, awareness, memory, live_voice,
+  search.
+
+* Every one of them runs on Google Gemini (`google-genai`) EXCEPT the search
+  workload, which is currently switched to a different vendor (Tavily) by
+  `SEARCH_PROVIDER=tavily` in `.env`. Search therefore consumes a Tavily
+  credential at runtime, not a Gemini key.
+
+* There are 15 unique Gemini credential VALUES in `.env`, mapped onto 26 pool
+  assignment slots (see section 3 for the slot-vs-unique distinction). One more
+  unique Gemini credential exists at runtime in the owner-managed key store
+  (`/data/gemini_keys.json`), for awareness. That gives 16 unique Gemini
+  credentials reachable at runtime. Plus 1 Tavily credential = 17 unique
+  AI-vendor credentials in total.
+
+* Two credential VALUES are shared across workloads:
+    - fp 24b50725  is used by BOTH `awareness` (slot 2) AND `chat` (slot 5).
+      This is the duplicate the owner flagged; it is the SAME Google project in
+      two workloads, which is exactly the collision the awareness isolation
+      rationale exists to prevent.
+    - fp 20ed3899  is used by BOTH `live_voice` (slot 1) AND `search` (slot 1).
+      Whether this is intentional is UNKNOWN / NEEDS VERIFICATION.
+
+* The `tts` workload has no key of its own by design: it reuses the chat
+  prefix, so its 9 slots mirror chat's 9 slots exactly. This is a deliberate
+  architectural share (speech synthesis is a fallback, not an authority).
+
+* Isolation that matters structurally is keyed by WORKLOAD in the database:
+  `gemini_accounts (workload, slot)`, `gemini_models (workload, slot, model)`,
+  and daily counters via `db.daily_for(workload, day)`. So even a shared key
+  does not share histories, rate windows, breakers or daily allowances between
+  workloads. What a shared key DOES share is the provider-side (Google project)
+  rate limit, which no per-workload counter can partition.
+
+* `memory` and `state` have NO dedicated AI credential and NO model call in the
+  current configuration: they are deterministic-only. `memory` would need a new,
+  separate-project key to ever make a provider call, and its config var is not
+  even documented in `.env.example` (section 8).
+
+* The shared pool (`GEMINI_KEY_1.._20` + `GEMINI_POOL_KEYS`) is EMPTY on this
+  deployment (SHARED_POOL_KEYS count = 0). Only `intent` opts into it, so the
+  opt-in is currently inert.
+
+* Result: the deployment is broadly well-isolated per workload, with exactly two
+  cross-workload credential collisions to resolve, and one documentation gap.
+
+================================================================================
+2) COMPLETE AI WORKLOAD INVENTORY
+================================================================================
+
+For each workload: what it does, provider, model preference, where it is
+implemented, where it is configured, where its credential comes from, how many
+keys, fallback, rotation, its own budget/limit, its own breaker/retry, and
+whether it shares a credential/budget with another workload.
+
+--------------------------------------------------------------------------------
+2.1  CONVERSATIONAL CHAT  (workload "chat")
+--------------------------------------------------------------------------------
+  Job              : answers a person's addressed message (text; also the
+                     tool-aware path used by awareness).
+  Provider         : Google Gemini (google-genai).
+  Model preference : gemini-flash-lite-latest, gemini-flash-latest,
+                     gemini-3.5-flash-lite, gemini-3.1-flash-lite,
+                     gemini-3.5-flash, gemini-3.6-flash, gemini-3.7-flash,
+                     gemini-pro-latest   (GEMINI_CHAT_MODEL + fallbacks)
+  Implemented      : app/chat.py  (reply / _request / _request_full /
+                     _pooled_full); called from app/main.py
+                     `_answer_conversationally`.
+  Configured       : app/config.py (GEMINI_CHAT_* block; pool entry at 2772).
+  Credential source: GEMINI_CHAT_API_KEY (slot 1) + GEMINI_CHAT_API_KEY_2.._9
+                     (slots 2..9). Shared pool only if
+                     GEMINI_CHAT_ALLOW_SHARED_KEY (default False).
+  Token count      : 9 slots.
+  Fallback?        : Yes — multi-key, multi-model, per-account failover.
+  Rotation?        : Yes — "chat" is in GEMINI_POOL_ROTATE_MODELS (LRU model
+                     rotation across accounts).
+  Own daily budget : Yes — GEMINI_CHAT_DAILY_LIMIT, per account (pool
+                     "daily_budget"), `.env` sets it to 500.
+  Own rate limit   : Yes — GEMINI_CHAT_RATE_LIMIT (6) and
+                     GEMINI_CHAT_USER_RATE_LIMIT (5), window
+                     GEMINI_CHAT_RATE_WINDOW.
+  Own breaker      : Yes — GEMINI_CHAT_CIRCUIT_FAILURES (5) /
+                     GEMINI_CHAT_CIRCUIT_SECONDS (300).
+  Own time budget  : Yes — GEMINI_CHAT_TIME_BUDGET_SECONDS (480).
+  Shared with?     : tts reuses this same key prefix (deliberate). One chat key
+                     (slot 5, fp 24b50725) is ALSO awareness slot 2 (accidental).
+
+--------------------------------------------------------------------------------
+2.2  AWARENESS  (workload "awareness")
+--------------------------------------------------------------------------------
+  Job              : reads a whole room's window and produces an observation
+                     note. Highest-volume workload in a busy group.
+  Provider         : Google Gemini.
+  Model preference : same family as chat (GEMINI_AWARENESS_MODEL defaults to
+                     GEMINI_CHAT_MODEL), with its own fallback list.
+  Implemented      : app/awareness.py (+ app/awareness_context.py,
+                     app/awareness_schedule.py); the model call reaches the pool
+                     via app/main.py:1473 `gemini_pool.pool_for("awareness")`
+                     and the shared tool-aware seam in app/chat.py
+                     `_request_full(workload="awareness")`.
+  Configured       : app/config.py (GEMINI_AWARENESS_* block; pool entry 2851).
+  Credential source: GEMINI_AWARENESS_API_KEY (slot 1) +
+                     GEMINI_AWARENESS_API_KEY_2 (slot 2) + runtime key-store
+                     entries for the awareness workload (1 present).
+                     NO shared-pool fallback (ALLOW_SHARED default False, and
+                     the config comment states the fallback was deliberately
+                     removed).
+  Token count      : 2 from `.env` + 1 from the runtime key store = 3 reachable.
+  Fallback?        : Multi-account failover within awareness only. No fallback
+                     to another workload's credential (fail-closed).
+  Rotation?        : Yes — "awareness" is in GEMINI_POOL_ROTATE_MODELS.
+  Own daily budget : Yes — NEXUS_AWARENESS_DAILY_LIMIT (200), per account.
+  Own rate limit   : Yes — own window/limits in the awareness block.
+  Own breaker      : Yes — GEMINI_AWARENESS_CIRCUIT_FAILURES (5) /
+                     GEMINI_AWARENESS_CIRCUIT_SECONDS (300).
+  Own time budget  : Yes — GEMINI_AWARENESS_TIME_BUDGET_SECONDS (180).
+  Shared with?     : awareness slot 2 (fp 24b50725) is ALSO chat slot 5. This
+                     is the one accidental cross-workload collision.
+
+--------------------------------------------------------------------------------
+2.3  INTENT / ACQUISITION  (workload "intent")
+--------------------------------------------------------------------------------
+  Job              : classifies an incoming message (addressed? actionable?).
+  Provider         : Google Gemini.
+  Model preference : GEMINI_MODEL + GEMINI_FALLBACK_MODELS.
+  Implemented      : app/ai_intent.py (pool_for("intent") at 340, 511; generate
+                     at 486); app/classifier.py.
+  Configured       : app/config.py (pool entry 2754).
+  Credential source: GEMINI_API_KEY (slot 1) + GEMINI_API_KEY_2 (slot 2), and —
+                     uniquely — this is the ONLY workload that opts into the
+                     shared pool (`allow_shared=True`). The shared pool is empty
+                     on this deployment, so the opt-in adds nothing today.
+  Token count      : 2 (+0 shared, because SHARED_POOL_KEYS = 0).
+  Fallback?        : Yes — multi-key, multi-model.
+  Rotation?        : No (not in GEMINI_POOL_ROTATE_MODELS).
+  Own daily budget : Yes — GEMINI_DAILY_LIMIT (400). NOTE: this is the only
+                     workload with a wall-clock ceiling on one logical request:
+                     GEMINI_INTENT_TIME_BUDGET_SECONDS (= 2 x timeout + backoff).
+  Own rate limit   : Yes — GEMINI_RATE_LIMIT (10).
+  Own breaker      : Yes — GEMINI_CIRCUIT_FAILURES (5) /
+                     GEMINI_CIRCUIT_SECONDS (300).
+  Shared with?     : May draw on the shared pool (inert today).
+
+--------------------------------------------------------------------------------
+2.4  SEARCH  (workload "search")
+--------------------------------------------------------------------------------
+  Job              : live web lookup, folded into an answer as data.
+  Provider         : SWITCHED. `SEARCH_PROVIDER=tavily` in `.env`, so the live
+                     path runs on Tavily (https://api.tavily.com/search). The
+                     Gemini grounding path still exists and would run on the
+                     "search" pool if SEARCH_PROVIDER=gemini.
+  Model preference : GEMINI_SEARCH_MODEL (= GEMINI_CHAT_MODEL) + fallbacks
+                     (used only on the Gemini path).
+  Implemented      : app/web_search.py (WORKLOAD = "search"; `provider()`,
+                     `api_key()`, `tavily_api_key()`, `_has_credential()`,
+                     `_tavily_request()`).
+  Configured       : app/config.py (GEMINI_SEARCH_* block; TAVILY_API_KEY;
+                     pool entry 2951).
+  Credential source: Active path — TAVILY_API_KEY (separate vendor, never
+                     eligible for the Gemini shared pool).
+                     Dormant path — GEMINI_SEARCH_API_KEY (slot 1).
+  Token count      : 1 active (Tavily) + 1 dormant (Gemini).
+  Fallback?        : Tavily has no multi-key pool (single key); the Gemini path
+                     has multi-account failover.
+  Rotation?        : No.
+  Own daily budget : Yes — GEMINI_SEARCH_DAILY_LIMIT (150) on the Gemini path.
+  Own rate limit   : Yes — GEMINI_SEARCH_RATE_LIMIT (8).
+  Own breaker      : Yes — GEMINI_SEARCH_CIRCUIT_FAILURES (5) /
+                     GEMINI_SEARCH_CIRCUIT_SECONDS (300).
+  Shared with?     : The dormant Gemini key (fp 20ed3899) is the SAME value as
+                     live_voice slot 1. Whether intended: UNKNOWN.
+
+--------------------------------------------------------------------------------
+2.5  VOICE / CALL  (workload "live_voice")
+--------------------------------------------------------------------------------
+  Job              : real-time bidirectional voice call with the model.
+  Provider         : Google Gemini Live (streaming).
+  Model preference : GEMINI_LIVE_MODEL (gemini-3.8-live) +
+                     GEMINI_LIVE_FALLBACK_MODELS.
+  Implemented      : app/voice_live/session.py (pool_for("live_voice") at 276,
+                     330); app/voice_live/gemini_live.py.
+  Configured       : app/config.py (GEMINI_LIVE_* block; pool entry 2917).
+  Credential source: GEMINI_LIVE_API_KEY (slot 1).
+  Token count      : 1.
+  Fallback?        : Single account; no pool-level retries (a call is a stream,
+                     not a request — the session's own reconnect logic handles
+                     it).
+  Rotation?        : No.
+  Own daily budget : Yes — GEMINI_LIVE_DAILY_LIMIT (60), per account.
+  Own rate limit   : Action cooldown GEMINI_LIVE_ACTION_COOLDOWN_SECONDS (3).
+  Own breaker      : Streaming; bounded by GEMINI_LIVE_MAX_SECONDS.
+  Shared with?     : fp 20ed3899 is shared with the (dormant) search Gemini key.
+  ALSO: Voice Live additionally requires MTProto credentials
+  TELEGRAM_API_ID / TELEGRAM_API_HASH, which are UNSET in `.env`. With them
+  unset, Voice Live cannot run at all (this is a credential blocker independent
+  of the Gemini key).
+
+--------------------------------------------------------------------------------
+2.6  MEDIA / VOICE RESPONSE  (workload "tts")
+--------------------------------------------------------------------------------
+  Job              : synthesises speech for a voice reply; on failure the caller
+                     falls back to text.
+  Provider         : Google Gemini (preview TTS models).
+  Model preference : GEMINI_CHAT_TTS_MODEL (gemini-3.1-flash-tts-preview) +
+                     GEMINI_CHAT_TTS_FALLBACK_MODELS.
+  Implemented      : app/chat.py (`synthesize` / `_tts_request` /
+                     `_pooled_tts_request`; pool_for("tts") at 981).
+  Configured       : app/config.py (pool entry 2836).
+  Credential source: GEMINI_CHAT_API_KEY prefix (slots 1..9) — the SAME keys as
+                     chat, deliberately (no dedicated TTS credential).
+  Token count      : 0 dedicated; 9 borrowed from chat.
+  Fallback?        : Yes — shares chat's multi-key failover.
+  Rotation?        : No.
+  Own daily budget : No dedicated daily_budget on this pool entry.
+  Own rate limit   : No dedicated limit; uses chat's transport settings.
+  Own breaker      : Its OWN pool entry/breaker; a failed synthesis costs a
+                     voice reply and nothing else, and does NOT spend chat's
+                     breaker (documented in app/chat.py).
+  Shared with?     : Deliberately shares chat's credential. This is the intended
+                     architectural share: TTS is the least reliable, most
+                     optional pool, and must not consume the answer's allowance.
+
+--------------------------------------------------------------------------------
+2.7  MEMORY  (workload "memory")
+--------------------------------------------------------------------------------
+  Job              : automatic long-term memory extraction.
+  Provider         : Google Gemini (IF a credential exists) — otherwise
+                     deterministic-only.
+  Model preference : GEMINI_MEMORY_MODEL (= GEMINI_CHAT_MODEL).
+  Implemented      : app/memory_extract.py (WORKLOAD = "memory";
+                     pool_for(WORKLOAD) at 158; generate at 162).
+  Configured       : app/config.py (GEMINI_MEMORY_* block at 2390; pool entry
+                     2883).
+  Credential source: GEMINI_MEMORY_API_KEY — UNSET on this deployment. No
+                     shared-pool fallback (ALLOW_SHARED default False).
+  Token count      : 0.
+  Fallback?        : None.
+  Rotation?        : No.
+  Own daily budget : Yes, configured — NEXUS_MEMORY_MODEL_DAILY_LIMIT (50), but
+                     unreachable while the pool has zero accounts.
+  Own time budget  : GEMINI_MEMORY_TIME_BUDGET_SECONDS (30).
+  Own breaker      : GEMINI_MEMORY_CIRCUIT_FAILURES (5) /
+                     GEMINI_MEMORY_CIRCUIT_SECONDS (300).
+  Shared with?     : No.
+  RESULT: **No dedicated AI credential / no model call** in the current
+  configuration. Memory extraction is deterministic-only and costs 0 provider
+  requests.
+
+--------------------------------------------------------------------------------
+2.8  STATE
+--------------------------------------------------------------------------------
+  Job              : the conversational layer's active-interaction state.
+  Provider         : NONE.
+  Model            : none.
+  Implemented      : app/state.py (deterministic store), consumed via
+                     app/main.py `_state_context`.
+  Credential source: NONE.
+  Token count      : 0.
+  RESULT: **No dedicated AI credential / no model call.**
+
+--------------------------------------------------------------------------------
+2.9  MODERATION  (workload "moderation")
+--------------------------------------------------------------------------------
+  Job              : classifies message content for policy.
+  Provider         : Google Gemini.
+  Model preference : GEMINI_MOD_MODEL + GEMINI_MOD_FALLBACK_MODELS. Text-only
+                     capability (the media pipeline was removed; requiring image
+                     capability would only shrink the candidate set).
+  Implemented      : app/ai_moderation.py (pool_for("moderation") at 301, 437;
+                     generate at 416); app/moderation.py.
+  Configured       : app/config.py (GEMINI_MOD_* block at 1254; pool entry 2799).
+  Credential source: GEMINI_MOD_API_KEY (slot 1). GEMINI_MOD_API_KEY_2 is
+                     documented in `.env.example` but UNSET, so the pool is
+                     single-account.
+  Token count      : 1.
+  Fallback?        : Single account (no slot 2 configured).
+  Rotation?        : No.
+  Own daily budget : Yes — GEMINI_MOD_DAILY_LIMIT (500).
+  Own rate limit   : Yes — GEMINI_MOD_RATE_LIMIT (20).
+  Own breaker      : Yes — GEMINI_MOD_CIRCUIT_FAILURES (5) /
+                     GEMINI_MOD_CIRCUIT_SECONDS (300).
+  Shared with?     : No.
+  NOTE: moderation is deliberately NOT owner-manageable from Telegram
+  (absent from GEMINI_KEY_MANAGED_WORKLOADS).
+
+--------------------------------------------------------------------------------
+2.10  TRANSCRIPTION  (workload "transcribe")
+--------------------------------------------------------------------------------
+  Job              : speech-to-text for voice messages.
+  Provider         : Google Gemini.
+  Model preference : TRANSCRIBE_MODEL + TRANSCRIBE_FALLBACK_MODELS. Requires
+                     capability "audio_in" (a text-only model here would invent
+                     a transcript — the worst possible failure).
+  Implemented      : app/transcribe.py (pool_for("transcribe") at 139, 267;
+                     generate at 255).
+  Configured       : app/config.py (TRANSCRIBE_* block at 1672; pool entry 2818).
+  Credential source: TRANSCRIBE_API_KEY (slot 1). TRANSCRIBE_API_KEY_2 is
+                     documented in `.env.example` but UNSET.
+  Token count      : 1.
+  Fallback?        : Single account.
+  Rotation?        : No.
+  Own daily budget : Yes — TRANSCRIBE_DAILY_LIMIT (300).
+  Own rate limit   : Yes — TRANSCRIBE_RATE_LIMIT (10).
+  Own breaker      : Yes — TRANSCRIBE_CIRCUIT_FAILURES (5) /
+                     TRANSCRIBE_CIRCUIT_SECONDS (300).
+  Shared with?     : No.
+  NOTE: deliberately NOT owner-manageable from Telegram.
+
+--------------------------------------------------------------------------------
+2.11  OTHER AI-ADJACENT WORKLOADS (checked, none make a model call)
+--------------------------------------------------------------------------------
+  * VPN integration (app/vpn_bot or the VPN repo): uses VPNBOT_SHARED_SECRET, a
+    shared secret, NOT an AI credential and NOT a model call.
+  * Agent bridge (app/agent_bridge.py): contains a secret-SCRUBBING regex
+    (including an "openai-ish" sk- pattern). It is a detector, not a provider —
+    no external AI credential, no model call.
+  * Dashboard: reads pool/key status read-only. No model call.
+  * No other AI vendor is present anywhere in app/ (no openai / anthropic /
+    claude / cohere / mistral / groq / deepseek / azure integration).
+
+================================================================================
+3) TOKEN / KEY ALLOCATION TABLE
+================================================================================
+
+Legend
+  ID            : this report's safe alias (never the real name of a secret).
+  Secret alias  : the ENV VAR NAME the value is read from (safe — a name is not
+                  a secret).
+  fp            : sha256(value)[:8]. Irreversible. Same fp = same value.
+  Dedicated/Shared : Dedicated = only this workload uses the value;
+                     Shared = the same value is used by another workload too.
+
+--------------------------------------------------------------------------------
+GEMINI CREDENTIALS PRESENT IN `.env`
+--------------------------------------------------------------------------------
+ID            | Secret alias                  | Workload(s)              | Location                | Ded/Shared | Provider | Model                      | Fallback | Notes
+--------------|-------------------------------|--------------------------|-------------------------|------------|----------|----------------------------|----------|-----------------------------------------
+GEMINI_KEY_01 | GEMINI_API_KEY                | intent:1                 | .env (config.py:378)    | Dedicated  | Gemini   | GEMINI_MODEL               | Yes      | fp 7c707e1b
+GEMINI_KEY_02 | GEMINI_API_KEY_2              | intent:2                 | .env (slot 2)           | Dedicated  | Gemini   | GEMINI_MODEL               | Yes      | fp a3aae772
+GEMINI_KEY_03 | GEMINI_CHAT_API_KEY           | chat:1, tts:1            | .env (config.py:526)    | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp ad4bfbe4; *shared chat<->tts by design
+GEMINI_KEY_04 | GEMINI_CHAT_API_KEY_2         | chat:2, tts:2            | .env (slot 2)           | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 5148caba
+GEMINI_KEY_05 | GEMINI_CHAT_API_KEY_3         | chat:3, tts:3            | .env (slot 3)           | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 23c19e3b
+GEMINI_KEY_06 | GEMINI_CHAT_API_KEY_4         | chat:4, tts:4            | .env (slot 4)           | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 295c2a86
+GEMINI_KEY_07 | GEMINI_CHAT_API_KEY_5         | chat:5, tts:5, awareness:2 | .env (slot 5)         | SHARED !!  | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 24b50725; IDENTICAL to GEMINI_AWARENESS_API_KEY_2 (the duplicate the owner flagged)
+GEMINI_KEY_08 | GEMINI_CHAT_API_KEY_6         | chat:6, tts:6            | .env (slot 6)           | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 2a52d966
+GEMINI_KEY_09 | GEMINI_CHAT_API_KEY_7         | chat:7, tts:7            | .env (slot 7)           | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 4a75741b
+GEMINI_KEY_10 | GEMINI_CHAT_API_KEY_8         | chat:8, tts:8            | .env (slot 8)           | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 599a1072
+GEMINI_KEY_11 | GEMINI_CHAT_API_KEY_9         | chat:9, tts:9            | .env (slot 9)           | Shared*    | Gemini   | GEMINI_CHAT_MODEL          | Yes      | fp 5ff073ee
+GEMINI_KEY_12 | GEMINI_AWARENESS_API_KEY      | awareness:1              | .env (config.py:2355)   | Dedicated  | Gemini   | GEMINI_AWARENESS_MODEL     | Own only | fp 889fc071
+GEMINI_KEY_13 | GEMINI_MOD_API_KEY            | moderation:1             | .env (config.py:1254)   | Dedicated  | Gemini   | GEMINI_MOD_MODEL           | No       | fp 402b8ec3
+GEMINI_KEY_14 | TRANSCRIBE_API_KEY            | transcribe:1             | .env (config.py:1672)   | Dedicated  | Gemini   | TRANSCRIBE_MODEL           | No       | fp 83efcb63
+GEMINI_KEY_15 | GEMINI_LIVE_API_KEY           | live_voice:1             | .env (config.py:2448)   | SHARED !!  | Gemini   | GEMINI_LIVE_MODEL          | No       | fp 20ed3899; IDENTICAL to GEMINI_SEARCH_API_KEY
+GEMINI_KEY_15 | GEMINI_SEARCH_API_KEY         | search:1 (DORMANT)       | .env (config.py:2678)   | SHARED !!  | Gemini   | GEMINI_SEARCH_MODEL        | No       | same value as above; dormant because SEARCH_PROVIDER=tavily
+
+Count of DISTINCT Gemini values in `.env` = 15
+Count of Gemini assignment SLOTS in pools    = 26
+  (intent 2 + chat 9 + moderation 1 + transcribe 1 + tts 9 + awareness 2 +
+   memory 0 + live_voice 1 + search 1)
+
+--------------------------------------------------------------------------------
+RUNTIME KEY STORE (owner-managed, gitignored)
+--------------------------------------------------------------------------------
+ID            | Secret alias                  | Workload  | Location                          | Ded/Shared | fp
+--------------|-------------------------------|-----------|-----------------------------------|------------|----------
+GEMINI_KEY_16 | gemini_keys.json entry        | awareness | /data/gemini_keys.json            | Dedicated  | 6d7861f7
+              | (slot k6d7861f7, label "API ****73sg") |  | (config.py:2993; GEMINI_KEY_STORE_PATH) |       |
+
+The key store may only hold credentials for the workloads in
+GEMINI_KEY_MANAGED_WORKLOADS = {chat, awareness, intent}. moderation, transcribe
+and tts are deliberately refused even if a callback payload names them.
+
+--------------------------------------------------------------------------------
+NON-GEMINI AI / SERVICE CREDENTIALS
+--------------------------------------------------------------------------------
+ID            | Secret alias                  | Workload              | Location             | Provider | Notes
+--------------|-------------------------------|-----------------------|----------------------|----------|-------------------------------
+TAVILY_KEY_01 | TAVILY_API_KEY                | search (ACTIVE)       | .env (config.py:2693)| Tavily   | fp 2b8b3ff9; never eligible for the Gemini shared pool
+BOT_TOKEN     | BOT_TOKEN                     | Telegram transport    | .env                 | Telegram | NOT an AI credential; not counted
+MTProto       | TELEGRAM_API_ID/HASH          | live_voice transport  | .env (config.py:2639)| Telegram | UNSET -> Voice Live cannot run
+VPN secret    | VPNBOT_SHARED_SECRET          | VPN integration       | .env (config.py:175) | —        | NOT an AI credential; not counted
+
+================================================================================
+4) EXACT TOKEN LOCATIONS  (env var -> runtime entry -> consuming workload)
+================================================================================
+
+For every credential, the full path is: `.env` (docker `env_file`) -> read at
+import time in `app/config.py` -> assembled into a pool spec in
+`config.GEMINI_POOLS` via `_pool_key_list(primary, prefix, shared, allow_shared)`
+-> built into a `Pool` by `gemini_pool.build_pools()` -> selected by
+`gemini_pool.pool_for(workload)` -> consumed at the call sites listed below.
+
+  intent        GEMINI_API_KEY, GEMINI_API_KEY_2
+                config.py:378 (_pool_key_list at pool entry 2754)
+                consumed: app/ai_intent.py:486 (gemini_pool.generate),
+                          app/ai_intent.py:340,511 (pool_for),
+                          app/classifier.py
+
+  chat          GEMINI_CHAT_API_KEY, GEMINI_CHAT_API_KEY_2.._9
+                config.py:526 (pool entry 2772)
+                consumed: app/chat.py:686 (_pooled_full via _request_full),
+                          app/chat.py:404,444,717 (pool_for),
+                          app/main.py `_answer_conversationally`
+
+  moderation    GEMINI_MOD_API_KEY
+                config.py:1254 (pool entry 2799)
+                consumed: app/ai_moderation.py:416 (generate), :301,437 (pool_for)
+
+  transcribe    TRANSCRIBE_API_KEY
+                config.py:1672 (pool entry 2818)
+                consumed: app/transcribe.py:255 (generate), :139,267 (pool_for)
+
+  tts           GEMINI_CHAT_API_KEY prefix (slots 1..9)
+                config.py:526 -> pool entry 2836 (deliberate reuse)
+                consumed: app/chat.py:962 (generate), :981 (pool_for("tts"))
+
+  awareness     GEMINI_AWARENESS_API_KEY, GEMINI_AWARENESS_API_KEY_2,
+                + runtime key-store entries (workload=awareness)
+                config.py:2355 (pool entry 2851)
+                consumed: app/main.py:1473 (pool_for("awareness")),
+                          app/chat.py:751 (_request_full with workload=awareness),
+                          app/awareness.py, app/awareness_context.py
+
+  memory        GEMINI_MEMORY_API_KEY (UNSET -> pool disabled)
+                config.py:2390 (pool entry 2883)
+                consumed: app/memory_extract.py:162 (generate) — never reached
+
+  live_voice    GEMINI_LIVE_API_KEY
+                config.py:2448 (pool entry 2917)
+                consumed: app/voice_live/session.py:276,330 (pool_for),
+                          app/voice_live/gemini_live.py
+
+  search        TAVILY_API_KEY (active) / GEMINI_SEARCH_API_KEY (dormant)
+                config.py:2693 / config.py:2678 (pool entry 2951)
+                consumed: app/web_search.py:783 (_tavily_request) on the active
+                          path; app/web_search.py:739 (gemini_pool.generate) on
+                          the dormant Gemini path
+
+Runtime key store: app/key_store.py, path config.GEMINI_KEY_STORE_PATH
+(default /data/gemini_keys.json, inside the docker data volume).
+
+================================================================================
+5) ALLOCATION SUMMARY
+================================================================================
+
+Per workload (keys reachable at runtime; "unique values" excludes duplicates):
+
+  Chat            : 9 slots  -> 8 unique values (slot 5 duplicates awareness's)
+  Awareness       : 3        -> 2 unique in .env + 1 runtime store; but .env
+                                slot 2 (fp 24b50725) is NOT unique (shared with
+                                chat) -> awareness has only 1 fully-isolated key
+  Intent          : 2 slots  -> 2 unique
+  Search          : 1 active (Tavily) + 1 dormant (Gemini, shared with live)
+  Voice/Call      : 1        -> shared with the dormant search Gemini key
+  Media (TTS)     : 0 dedicated -> borrows chat's 9 slots (deliberate)
+  Memory          : 0        -> No dedicated AI credential / no model call
+  State           : 0        -> No dedicated AI credential / no model call
+  Moderation      : 1        -> 1 unique
+  Transcription   : 1        -> 1 unique
+  Other           : 0 AI     -> VPN secret is not an AI credential
+
+Totals (VERIFIED against a live config import on this deployment):
+
+  Unique Gemini credential values ............ 15 (in .env) + 1 (runtime store)
+                                               = 16 reachable at runtime
+  Unique Tavily credential values ............ 1
+  Unique AI-vendor credentials (all vendors) . 17
+  Pool assignment slots ...................... 26
+  Distinct credential VALUES used by >1 workload ... 2
+    - fp 24b50725 : chat:5 == awareness:2   (ACCIDENTAL; also the owner's "duplicate")
+    - fp 20ed3899 : live_voice:1 == search:1 (intent UNKNOWN)
+
+DISTINGUISHING "UNIQUE KEY COUNT" FROM "ASSIGNMENT COUNT"
+---------------------------------------------------------
+These two numbers differ for three legitimate reasons, none of which is a
+double-spend of a provider limit except the two collisions above:
+
+  1. tts deliberately reuses the chat prefix, so 9 chat key values appear twice
+     in the slot list (once for chat, once for tts) — 9 extra assignment slots,
+     0 extra unique keys.
+  2. The two collisions above each add one extra assignment slot for the same
+     value (awareness:2 and live_voice:1/search:1).
+  3. The runtime key store adds a credential that is not in `.env`, so it
+     appears in the "reachable" count but not in the ".env" count.
+
+So: 26 assignment slots, of which the tts 9 and the 2 collision slots are
+reuses; 15 distinct .env values; +1 runtime = 16 distinct values.
+
+================================================================================
+6) BUDGET / LIMIT SEPARATION
+================================================================================
+
+Every number below is the DEFAULT from app/config.py unless noted; the `.env`
+override is stated where one exists. Each is keyed by workload, so no counter
+spans two workloads.
+
+DAILY REQUEST BUDGETS (per account, enforced by the pool where set)
+  chat          GEMINI_CHAT_DAILY_LIMIT            default 200  (.env = 500)
+  awareness     NEXUS_AWARENESS_DAILY_LIMIT        default 200
+  memory        NEXUS_MEMORY_MODEL_DAILY_LIMIT     default 50   (unreachable)
+  live_voice    GEMINI_LIVE_DAILY_LIMIT            default 60
+  search        GEMINI_SEARCH_DAILY_LIMIT          default 150  (Gemini path)
+  intent        GEMINI_DAILY_LIMIT                 default 400
+  moderation    GEMINI_MOD_DAILY_LIMIT             default 500
+  transcribe    TRANSCRIBE_DAILY_LIMIT             default 300
+  tts           (no dedicated daily budget)
+  Note: pool `daily_budget` exists for chat, awareness, memory, live_voice and
+  search only (verified in GEMINI_POOLS). intent/moderation/transcribe/tts use
+  their own workload counters instead.
+
+RATE LIMITS (per workload)
+  intent        GEMINI_RATE_LIMIT                  default 10
+  chat          GEMINI_CHAT_RATE_LIMIT             default 6
+                GEMINI_CHAT_USER_RATE_LIMIT        default 5 (per user)
+  moderation    GEMINI_MOD_RATE_LIMIT              default 20
+  transcribe    TRANSCRIBE_RATE_LIMIT              default 10
+  search        GEMINI_SEARCH_RATE_LIMIT           default 8
+  live_voice    GEMINI_LIVE_ACTION_COOLDOWN_SECONDS default 3.0 (action cooldown)
+
+COOLDOWNS (pool-level, applied to a failing account/model)
+  GEMINI_POOL_TRANSIENT_COOLDOWN   default 60   (transient wobble)
+  GEMINI_POOL_MODEL_COOLDOWN       default 120  (a model that failed)
+  GEMINI_POOL_QUOTA_COOLDOWN       default 900  (quota exhausted)
+  GEMINI_POOL_EVENT_COOLDOWN       default 900  (notification de-dup)
+
+CIRCUIT BREAKERS (per workload)
+  intent        GEMINI_CIRCUIT_FAILURES=5 / GEMINI_CIRCUIT_SECONDS=300
+  chat          GEMINI_CHAT_CIRCUIT_FAILURES=5 / ..._SECONDS=300
+  moderation    GEMINI_MOD_CIRCUIT_FAILURES=5 / ..._SECONDS=300
+  transcribe    TRANSCRIBE_CIRCUIT_FAILURES=5 / ..._SECONDS=300
+  awareness     GEMINI_AWARENESS_CIRCUIT_FAILURES=5 / ..._SECONDS=300
+  memory        GEMINI_MEMORY_CIRCUIT_FAILURES=5 / ..._SECONDS=300
+  search        GEMINI_SEARCH_CIRCUIT_FAILURES=5 / ..._SECONDS=300
+  tts           own pool breaker (shares no breaker state with chat)
+  live_voice    streaming; bounded by GEMINI_LIVE_MAX_SECONDS
+
+RETRIES / ATTEMPTS
+  GEMINI_POOL_MAX_ATTEMPTS         default 12
+  intent/chat/moderation/transcribe/awareness/memory/search: per-workload
+    GEMINI_*_MAX_RETRIES and GEMINI_*_BACKOFF_SECONDS
+  tts           retries = 0 (preview models; failure falls back to text)
+  live_voice    retries = 0 (a call is a stream; the session reconnects)
+
+WALL-CLOCK CEILINGS (time budgets)
+  intent        GEMINI_INTENT_TIME_BUDGET_SECONDS    (= 2 x timeout + backoff)
+  chat          GEMINI_CHAT_TIME_BUDGET_SECONDS      default 480
+  awareness     GEMINI_AWARENESS_TIME_BUDGET_SECONDS default 180
+  memory        GEMINI_MEMORY_TIME_BUDGET_SECONDS    default 30
+  search        deliberately NONE (the ceiling belongs to the conversation
+                handler; asserted by test_only_the_intent_workload_has_a_wall_clock_ceiling)
+
+CONCURRENCY / ROTATION / FAILOVER
+  Model rotation  : GEMINI_POOL_ROTATE_MODELS = {awareness, chat} (LRU across
+                    accounts). All other workloads keep a fixed model order.
+  Account failover: per-workload; least-recently-succeeded-first. A spent
+                    account fails over to a fresh account WITHIN the same
+                    workload; never across workloads (except intent's shared-pool
+                    opt-in, which is inert because the pool is empty).
+  Shared pool     : SHARED_POOL_KEYS = 0 on this deployment.
+
+GLOBAL vs PER-WORKLOAD
+  There is NO global cross-workload budget. Every budget/limit/breaker above is
+  keyed by workload (and the daily ones additionally by account). The only
+  thing that is genuinely global is the provider-side (Google project) rate
+  limit, which is shared whenever a credential VALUE is shared — i.e. for the
+  two collisions in section 7, and for the deliberate chat<->tts share.
+
+================================================================================
+7) SECURITY / ISOLATION AUDIT
+================================================================================
+
+The isolation model has two layers, and it is important to keep them apart:
+
+  LAYER A — structural isolation (ALWAYS holds, keyed by workload in SQLite):
+    * histories, rate windows, circuit breakers, failure state and daily
+      allowances are keyed by WORKLOAD. So awareness never spends chat's
+      allowance, memory never spends awareness's, etc., EVEN IF two workloads
+      share a credential.
+    * tables: `gemini_accounts (workload, slot, ...)`,
+      `gemini_models (workload, slot, model, PRIMARY KEY(workload,slot,model))`,
+      `gemini_discovery (fingerprint)`, and daily counters via
+      `db.daily_for(workload, day)`.
+
+  LAYER B — provider isolation (holds ONLY when the credential VALUE differs):
+    * a shared credential means a shared Google project, and therefore one
+      provider-side rate limit that no per-workload counter can partition.
+
+Per workload:
+
+  Chat
+    - 9 slots, 8 unique values. One of them (slot 5) is NOT unique (see below).
+    - Structural isolation: full. Provider isolation: 8 of 9 keys isolated; the
+      one shared key is shared with awareness.
+
+  Awareness
+    - 2 `.env` values + 1 runtime store value.
+    - Deliberate design: NO shared-pool fallback; with no awareness key the
+      workload does no work at all (fail-closed). This is correct and intended.
+    - DEFECT: awareness slot 2 (fp 24b50725) is the SAME value as chat slot 5.
+      This directly contradicts the stated rationale for awareness having its
+      own key ("sharing a credential means sharing one provider-side rate limit
+      ... the collision cost 26% of conversational turns to rate limits").
+      Effective result: awareness has only ONE fully-isolated key. This is the
+      highest-priority finding of this audit.
+
+  Intent
+    - 2 unique values. The only workload that MAY draw on the shared pool, which
+      is empty here, so no cross-workload credential is actually shared.
+
+  Memory
+    - No credential, no model call, no shared anything. Fully isolated by being
+      absent.
+
+  Transcription
+    - 1 unique value, dedicated, not shared. Capability-gated to audio_in.
+
+  Moderation
+    - 1 unique value, dedicated, not shared.
+
+  Live voice
+    - 1 value shared with the dormant search Gemini key (fp 20ed3899). Since
+      SEARCH_PROVIDER=tavily, search does not currently consume that value, so
+      there is no live collision TODAY — but switching SEARCH_PROVIDER back to
+      gemini would immediately put live_voice and search on one project.
+
+  TTS
+    - Deliberately shares chat's credential. Architecturally justified: TTS is
+      optional and its failure falls back to text; it must not consume the
+      answer's allowance. It has its own pool entry/breaker, so it does not
+      spend chat's breaker even though it shares the key. The residual cost is a
+      shared provider-side limit between chat and TTS — an accepted trade.
+
+DELIBERATE SHARED CREDENTIALS (by design, with reason):
+  * tts -> chat's keys. Reason: speech is a fallback; must not spend the
+    answer's allowance; own breaker.
+  * intent -> shared pool (opt-in). Reason: the classifier is the cheapest,
+    most tolerant workload; inert here because the pool is empty.
+
+ACCIDENTAL / UNVERIFIED SHARED CREDENTIALS:
+  * chat:5 == awareness:2 (fp 24b50725). Likely the owner's "duplicate" token
+    that was meant to be unused. It is IN USE by two workloads. Fix: give
+    awareness a genuinely different key (see section 9).
+  * live_voice:1 == search:1 (fp 20ed3899). Intent unknown.
+
+PRIVACY / LOGGING
+  * No message content is written to logs by the pool or the workloads; this
+    audit found no place where a credential value would be logged. `app/
+    agent_bridge.py` additionally scrubs secret-like strings (including an
+    "openai-ish" sk- pattern) as a defence in depth.
+  * `.env` and `data/` are gitignored; the key store lives inside the data
+    volume and is a separate file from the database, so a support copy of the
+    DB is not also a keyring.
+
+================================================================================
+8) MISSING / AMBIGUOUS CONFIGURATION
+================================================================================
+
+UNKNOWN / NEEDS VERIFICATION (no guessing):
+
+  1. GEMINI_MEMORY_API_KEY is READ by app/config.py:2390 but is NOT documented
+     anywhere in `.env.example`. An operator reading the example file would not
+     know the memory workload can be given a credential. NEEDS VERIFICATION:
+     whether this omission is intentional (memory is meant to stay
+     deterministic) or an oversight.
+
+  2. Is live_voice:1 == search:1 (fp 20ed3899) intentional? The architecture
+     assumes each workload has its own project. UNKNOWN.
+
+  3. Is chat:5 == awareness:2 (fp 24b50725) intentional? It is almost certainly
+     the "duplicate" the owner described, and it is currently IN USE by two
+     workloads. NEEDS VERIFICATION / should be fixed.
+
+  4. GEMINI_MOD_API_KEY_2 and TRANSCRIBE_API_KEY_2 are documented in
+     `.env.example` (lines ~1012-1013) but UNSET, so moderation and transcribe
+     are single-account. UNKNOWN whether a second account is desired.
+
+  5. GEMINI_AWARENESS_ALLOW_SHARED_KEY, GEMINI_LIVE_ALLOW_SHARED_KEY,
+     GEMINI_MEMORY_ALLOW_SHARED_KEY, GEMINI_SEARCH_ALLOW_SHARED_KEY are all
+     ABSENT from `.env`, so they take their default (False). This is the
+     intended fail-closed behaviour, not a defect — recorded for completeness.
+
+  6. TELEGRAM_API_ID / TELEGRAM_API_HASH are UNSET. Voice Live cannot start
+     without them, independent of the Gemini live key. This is a known,
+     documented blocker, restated here so the workload inventory is honest.
+
+  7. GEMINI_CHAT_DAILY_LIMIT is 500 in `.env` but the default is 200. Recorded
+     so the "source of each number" is unambiguous (the .env value is the live
+     one).
+
+DOCUMENTATION DISCREPANCIES (repository is source of truth):
+  * Any older prose that describes awareness as "falling back to the shared
+    pool / GEMINI_API_KEY" is STALE. The implementation deliberately removed
+    that fallback (config.py:2347): with no awareness key, awareness does no
+    work. The repo wins.
+  * The number of workloads has grown from an earlier "sixth workload" comment
+    (config.py:2320) to NINE pool entries today (intent, chat, moderation,
+    transcribe, tts, awareness, memory, live_voice, search). The repo wins.
+  * `.env.example` documents `GEMINI_KEY_1.._20` / `GEMINI_POOL_KEYS` as the
+    shared pool; on this deployment it is empty (count 0).
+
+================================================================================
+9) NEW TOKEN ALLOCATION PLAN
+================================================================================
+
+This plan is derived from the REAL architecture and consumption above, not from
+a guessed percentage. "A token" means one credential value from a Google project
+that is DIFFERENT from every other key in use.
+
+Priority order:
+
+  1st new token -> AWARENESS.
+     Why: awareness is the highest-volume workload and is the one whose entire
+     isolation rationale is a dedicated project. Today it has only ONE
+     fully-isolated key, because slot 2 duplicates chat slot 5 (fp 24b50725).
+     Giving awareness a genuinely different key restores the intended
+     two-account isolation and removes the accidental chat<->awareness provider
+     collision. This is the single highest-value token.
+     Expected effect: awareness stops sharing a provider rate limit with chat;
+     the "26% of turns lost to rate limits" class of failure cannot recur from
+     this cause.
+
+  2nd new token -> LIVE_VOICE.
+     Why: live_voice currently shares its only key with the (dormant) search
+     Gemini key. If SEARCH_PROVIDER is ever switched back to gemini, or if both
+     are used, they collide on one project. A dedicated live key keeps the call
+     workload isolated as the architecture intends.
+     Caveat: Voice Live ALSO needs TELEGRAM_API_ID/API_HASH before it can run at
+     all — a new Gemini key alone does not unblock it.
+
+  3rd new token (OPTIONAL) -> CHAT.
+     Why: chat already has 8 unique keys and a per-account daily budget of 500.
+     It is comparatively well-supplied. A 9th token adds headroom but is not
+     required to fix any collision. Add it only if chat's rate-limit/allowance
+     pressure is observed.
+
+  SHARED POOL (GEMINI_KEY_1.._20 / GEMINI_POOL_KEYS): seed ONLY IF intent needs
+     more capacity. Intent is the only workload that opts in, and the pool is
+     empty today. Adding a key here helps intent (and only intent) without
+     touching any other workload's isolation. Do not put a chat/awareness key
+     here — that would re-couple them.
+
+WORKLOADS THAT NEED NO NEW TOKEN:
+  * Moderation     — 1 dedicated key, low volume (daily 500).
+  * Transcription  — 1 dedicated key, low volume (daily 300).
+  * Search         — runs on Tavily; a Gemini token is irrelevant while
+                     SEARCH_PROVIDER=tavily. If search becomes the bottleneck,
+                     the lever is a second TAVILY key (different vendor), not a
+                     Gemini key.
+  * Memory         — deterministic-only; a token would only be needed if the
+                     owner decides to enable model extraction, and then it must
+                     be a NEW separate-project key (never chat's or awareness's).
+  * State          — no model call; no token ever.
+  * TTS            — deliberately shares chat's keys; do NOT give it a token
+                     (that would break the "fallback must not spend the
+                     answer's allowance" design).
+
+DUPLICATE HANDLING:
+  The owner stated one of the recently-supplied tokens is a duplicate and must
+  not be used. This audit identifies that duplicate concretely: it is the value
+  with fp 24b50725, which is simultaneously GEMINI_AWARENESS_API_KEY_2 and
+  GEMINI_CHAT_API_KEY_5. Because `_pool_key_list` de-duplicates WITHIN a single
+  workload's list but NOT ACROSS workloads, the value is legitimately present in
+  two pools. It should be replaced on the awareness side with a fresh key (see
+  priority 1 above) so awareness regains a unique credential.
+
+================================================================================
+10) BEFORE BUILD
+================================================================================
+
+This phase is AUDIT ONLY.
+
+  * No build performed.
+  * No deploy performed.
+  * `main` not merged.
+  * No production state changed.
+  * No configuration changed as part of this audit.
+  * No secret printed, committed, pushed or logged. All credentials appear only
+    as environment-variable NAMES and irreversible 8-hex fingerprints.
+
+If a follow-up is authorised, the concrete, minimal actions this audit supports
+are: (a) replace the shared awareness key so awareness has a unique credential,
+(b) decide whether live_voice and search should share a key, (c) document
+GEMINI_MEMORY_API_KEY in `.env.example`. None of these are performed here.
+
+================================================================================
+END OF REPORT
+================================================================================

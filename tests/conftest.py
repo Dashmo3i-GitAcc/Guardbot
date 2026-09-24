@@ -43,7 +43,18 @@ def fresh_nexus_state():
     later test capturing nothing and passing no rooms, and the failures would
     read as "awareness is broken" rather than "a test forgot to reset".
     """
-    from app import awareness, db, gemini_keys, main, nexus, vpn_service, web_search
+    from app import (
+        awareness,
+        awareness_schedule,
+        db,
+        gemini_keys,
+        main,
+        memory,
+        nexus,
+        state,
+        vpn_service,
+        web_search,
+    )
 
     # The schema, for every test rather than for whichever test happened to need
     # it first. ``db._conn`` is a module global, so a test that reaches
@@ -79,6 +90,21 @@ def fresh_nexus_state():
     # make the next test's first recorded operation prune (or not prune) for a
     # reason that is not in that test.
     vpn_service.prune_reset()
+    # The memory retention counter, which decides *when* the next whole-table
+    # prune runs. Left behind, a test that recorded enough clauses to trigger it
+    # would make the next test's first write prune (or not) for a reason that is
+    # not in that test.
+    memory.reset_state()
+    # The state retention counter, for the same reason: it decides *when* the
+    # next whole-table prune runs, so a value left behind would make the next
+    # test's first transition prune (or not) for a reason that is not in it.
+    state.reset_state()
+    # The awareness scheduler's per-room hints. A hint is process state keyed by
+    # chat id with a one-hour life, so a hint noted by one test would defer the
+    # next test's room and the failure would read as "awareness stopped
+    # reading" rather than as a leaked hint. This is the same class of state as
+    # ``awareness.reset_timers`` above and is reset for the same reason.
+    awareness_schedule.reset()
     yield
     nexus.reset_state()
     awareness.reset_timers()
@@ -88,4 +114,7 @@ def fresh_nexus_state():
     main._bot_rights_cache.clear()
     web_search.reset_state()
     vpn_service.prune_reset()
+    memory.reset_state()
+    state.reset_state()
+    awareness_schedule.reset()
 

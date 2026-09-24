@@ -1581,7 +1581,11 @@ def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones()
     sharpest version of the same reason: grounding runs *inside* a Gemini
     request, so a search tool switched on for the chat call would silently merge
     the two allowances, breakers and failure domains — the exact thing this
-    test's original assertion was written to prevent. So there are three
+    test's original assertion was written to prevent. Automatic memory
+    extraction changes it a fourth time, and the reason is the same shape again:
+    learning about a person runs on a background task and must never spend,
+    delay or exhaust the allowance the person's own reply is waiting on, so it
+    gets its own workload rather than a corner of chat's. So there are four
     additions — and the five that were there before are still there, unrenamed
     and unmerged, which is the half of this that must never change.
     """
@@ -1605,6 +1609,7 @@ def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones()
         "awareness",
         "live_voice",
         "search",
+        "memory",
     }
 
 

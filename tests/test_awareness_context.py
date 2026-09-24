@@ -70,6 +70,8 @@ def _msg(
     reply_name="",
     directed=False,
     actor=False,
+    message_id=0,
+    reply_message_id=0,
 ):
     """One window row, with the columns ``db.group_window`` returns."""
     return {
@@ -78,8 +80,10 @@ def _msg(
         "role": role,
         "name": name,
         "at": int(at or time.time()),
+        "message_id": int(message_id),
         "reply_user_id": int(reply_user_id),
         "reply_name": reply_name,
+        "reply_message_id": int(reply_message_id),
         "directed": bool(directed),
         "actor": bool(actor),
     }
@@ -108,6 +112,19 @@ def _other_blocks(ctx) -> str:
     date = awareness_context._render_calendar(ctx)
     assert date and out.startswith(date), out
     return out[len(date):]
+
+
+def _source_blocks(ctx, name: str) -> str:
+    """One named source's rendering, through the budget machinery.
+
+    Asserting on the concatenation of every tier-0 block would make a test
+    about *one* source's budget fail the day a second source is added — which is
+    what happened. This asks the machinery for one block by name.
+    """
+    for source in awareness_context.SOURCES:
+        if source.name == name:
+            return awareness_context._rendered(source, ctx, source.budget)
+    raise AssertionError(f"no source named {name!r}")
 
 
 def _audit(action="mute", *, actor=ADMIN, target=TARGET, at=None, chat_id=CHAT):
@@ -284,7 +301,10 @@ def test_the_referenced_people_are_bounded_by_their_own_count(monkeypatch):
         _msg(MEMBER, "c", reply_user_id=TARGET, reply_name="Sara",
              at=time.time() - 10),
     ]
-    out = _other_blocks(ctx_of(messages, anchor=messages[2]))
+    # One source by name: counting every "- " line in the concatenation would
+    # make this test fail the day another source renders a list, which is what
+    # happened when the reply graph was added.
+    out = _source_blocks(ctx_of(messages, anchor=messages[2]), "referenced_people")
     described = [line for line in out.splitlines() if line.startswith("- ")]
     assert len(described) == 1
 
@@ -324,7 +344,7 @@ def test_a_single_source_cannot_exceed_its_own_budget(monkeypatch):
         CHAT, seen_message_id=1, relevant=False, topic="t", summary="s",
         participants=", ".join(f"member:Name{i}:{1000 + i}" for i in range(200)),
     )
-    out = _other_blocks(ctx_of([_msg(MEMBER)]))
+    out = _source_blocks(ctx_of([_msg(MEMBER)]), "remembered_people")
     assert 0 < len(out) <= 400
 
 
@@ -553,6 +573,52 @@ def test_a_clock_reading_of_zero_renders_no_date_rather_than_todays():
 
 
 # ── Wiring, and the boundary that does not move ───────────────────────────
+def test_every_reader_splits_tokens_the_same_way():
+    """Six readers, one tokenizer — pinned together so it cannot drift.
+
+    «؟» «،» «؛» live inside ``\\u0600-\\u06ff``, so a "split on anything that is
+    not a Persian letter" class keeps them glued to the word before it. Every
+    lexicon lookup on the last word of a message then fails: «این لینک؟» names no
+    thing, «سارا؟» names nobody, «ممنون؟» is not a greeting, and «چی شده؟» is not
+    the sentence «چی شده». The polarity reader is the most sensitive of the six,
+    because the prohibitor is usually the *last* word: «میشه بنش نکنی؟» carries
+    «نکنی؟», which is not «نکنی», and the prohibition read as a request *to* act.
+
+    ``app/addressing.py`` is deliberately not in the set: it splits the same
+    string but then keeps only alphanumerics (``_letters``), so the mark is
+    removed either way and it never had the bug.
+
+    The pattern is copied into each reader rather than imported, because each one
+    is pure at import and importing a shared helper would be a new edge in a graph
+    that is asserted elsewhere. The copies are therefore pinned here: if a seventh
+    reader is added, or one of these is edited, the test says so.
+    """
+    import app.discourse as discourse
+    import app.entities as entities
+    import app.objects as objects
+    import app.referents as referents
+    import app.requests as requests
+    import app.room_state as room_state
+
+    readers = {
+        "discourse": discourse,
+        "entities": entities,
+        "objects": objects,
+        "referents": referents,
+        "requests": requests,
+        "room_state": room_state,
+    }
+    patterns = {name: module._TOKEN_SPLIT.pattern for name, module in readers.items()}
+    assert len(set(patterns.values())) == 1, patterns
+
+    # …and the one pattern splits the Arabic block's punctuation off the word.
+    for name, module in readers.items():
+        assert module._TOKEN_SPLIT.split("این لینک؟") == ["این", "لینک", ""], name
+        assert module._TOKEN_SPLIT.split("سارا؟") == ["سارا", ""], name
+        assert module._TOKEN_SPLIT.split("بود،") == ["بود", ""], name
+        assert module._TOKEN_SPLIT.split("اینو بن کن؛") == ["اینو", "بن", "کن", ""], name
+
+
 def test_the_pass_context_carries_the_roster_and_the_staged_blocks():
     awareness_context.note_room(CHAT, "Guard Group", "supergroup")
     db.awareness_set(
@@ -614,3 +680,536 @@ def test_the_context_builder_never_sends_or_acts():
 def test_the_awareness_module_does_not_import_the_context_builder():
     """The dependency points one way: ``main`` wires the two together."""
     assert "awareness_context" not in _imported_names(awareness)
+
+
+# ── Tier 1: the referent candidates ───────────────────────────────────────
+# The block that answers "who does «این» mean" for an instruction the reply edge
+# cannot settle. It is the one conditional source that serves the *correctness*
+# of an action rather than its context, so the tests pin both when it fires and
+# when it deliberately does not.
+def _referent_ctx(anchor, messages):
+    """A context whose window ends with the anchor, as a real pass always has."""
+    return ctx_of([*messages, anchor], anchor=anchor, now=int(anchor["at"]))
+
+
+def test_an_authority_deictic_instruction_renders_the_candidates():
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    messages = [
+        _msg(TARGET, "سلام", name="Reza", at=960),
+        _msg(OTHER, "چطوری", name="Sara", at=980),
+    ]
+    ctx = _referent_ctx(anchor, messages)
+    assert awareness_context._wants_referents(ctx) is True
+    out = awareness_context.blocks(ctx)
+    assert "اینو" in out
+    assert str(TARGET) in out or str(OTHER) in out
+    assert "evidence, not a decision" in out
+
+
+def test_a_reply_instruction_leaves_the_referent_to_instruction_block():
+    """A reply edge is the answer; a candidate list beside it is wasted tokens."""
+    anchor = _msg(
+        ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000,
+        reply_user_id=TARGET, reply_name="Reza",
+    )
+    ctx = _referent_ctx(anchor, [_msg(TARGET, "سلام", name="Reza", at=960)])
+    assert awareness_context._wants_referents(ctx) is False
+    assert "evidence, not a decision" not in awareness_context.blocks(ctx)
+
+
+def test_a_member_deictic_does_not_render_the_candidates():
+    """A member cannot act, so a ranked list of the room's people is pure cost."""
+    anchor = _msg(MEMBER, "اینو بن کن", role="member", name="Someone", at=1000)
+    ctx = _referent_ctx(anchor, [_msg(TARGET, "سلام", name="Reza", at=960)])
+    assert awareness_context._wants_referents(ctx) is False
+
+
+def test_a_directed_member_message_still_gets_the_candidates():
+    """Nexus was asked something, and the referent is what it was asked about."""
+    anchor = _msg(
+        MEMBER, "نکسوس اینو بررسی کن", role="member", name="Someone", at=1000,
+        directed=True,
+    )
+    ctx = _referent_ctx(anchor, [_msg(TARGET, "سلام", name="Reza", at=960)])
+    assert awareness_context._wants_referents(ctx) is True
+
+
+def test_the_candidate_list_is_bounded_by_config(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_REFERENTS", 2)
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    messages = [
+        _msg(uid, "سلام", name=f"User{uid}", at=1000 - uid)
+        for uid in (TARGET, OTHER, 45, 46, 47)
+    ]
+    out = awareness_context._render_referent_candidates(_referent_ctx(anchor, messages))
+    # One line per candidate, plus the header and the verdict line.
+    candidate_lines = [line for line in out.splitlines() if line.startswith("- ")]
+    assert len(candidate_lines) == 2
+
+
+def test_the_candidates_are_read_from_the_context_not_the_database(monkeypatch):
+    """It reads the window the pass already read, so it costs no query."""
+    # TARGET is an administrator in the environment, and the only thing that
+    # makes them a candidate for «ادمینه» is the hand-made window row below.
+    monkeypatch.setattr(
+        config, "CONFIG_ADMINS", [f"{ADMIN}:admin", f"{TARGET}:admin"]
+    )
+    anchor = _msg(ADMIN, "ادمینه رو محدود کن", role="admin", name="Admin", at=1000)
+    messages = [_msg(TARGET, "سلام", role="admin", name="Reza", at=990)]
+    ctx = _referent_ctx(anchor, messages)
+    # Built from a hand-made window and a hand-made anchor: if the source read
+    # the database it would find nothing, because nothing was captured.
+    out = awareness_context._render_referent_candidates(ctx)
+    assert "ادمینه" in out
+    # The id is asserted inside the rendered candidate line rather than as a
+    # bare substring: "43" also occurs inside a score like "0.43".
+    assert f"({TARGET})" in out
+    # And the speaker is not offered as the person they named — a message is
+    # *by* them, not *about* them.
+    assert f"({ADMIN})" not in out
+
+
+def test_the_referent_block_is_bounded_by_the_pass_ceiling(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_CHARS", 120)
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    messages = [_msg(TARGET, "سلام", name="Reza", at=960)]
+    out = awareness_context.blocks(_referent_ctx(anchor, messages))
+    assert len(out) <= 120
+
+
+# ── The batch's own reading, and the room's open questions ────────────────
+def test_the_anchor_act_is_rendered_for_the_model():
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    out = awareness_context.blocks(_referent_ctx(anchor, []))
+    assert "instruction" in out
+
+
+def test_the_anchor_act_renders_nothing_when_the_words_carry_no_reading():
+    """An abstention is silent, not a line saying «unknown» in the prompt."""
+    anchor = _msg(MEMBER, "امروز خیلی شلوغ بود", name="Someone", at=1000)
+    assert awareness_context._render_anchor_act(_referent_ctx(anchor, [])) == ""
+
+
+# ── The act and the direction it points in are one block ──────────────────
+# «بنش کن» and «بنش نکن» are the same reading to the act reader — both are
+# ``instruction`` with the directive «بنش» — and one of them is the message where
+# the room is protecting somebody. The direction therefore has to travel with the
+# act, in the same source, or an "instruction" line can outlive the negation that
+# reverses it.
+def test_a_forbidden_action_renders_both_the_act_and_the_direction():
+    anchor = _msg(ADMIN, "بنش نکن", role="admin", name="Admin", at=1000)
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, []))
+    assert "instruction" in out
+    assert "negates" in out
+
+
+def test_the_direction_line_comes_before_the_act_line():
+    """A clip keeps whole lines from the front, so the warning must be first.
+
+    If a budget ever bit into this block, the line that must survive is the one
+    saying the message forbids the action — the act line alone is the half-truth.
+    """
+    anchor = _msg(ADMIN, "بنش نکن", role="admin", name="Admin", at=1000)
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, []))
+    assert out.index("negates") < out.index("instruction")
+
+
+def test_a_bare_affirmative_command_adds_no_direction_line():
+    """The act line already says ``instruction``; a direction line on every
+    ordinary moderation message would be noise in the prompt."""
+    anchor = _msg(ADMIN, "بنش کن", role="admin", name="Admin", at=1000)
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, []))
+    assert "instruction" in out
+    assert "negates" not in out
+
+
+def test_the_direction_is_not_rendered_by_any_other_source():
+    """One source, so no budget can drop the direction and keep the act."""
+    anchor = _msg(ADMIN, "بنش نکن", role="admin", name="Admin", at=1000)
+    ctx = _referent_ctx(anchor, [])
+    others = [
+        source.name
+        for source in awareness_context.SOURCES
+        if source.name != "anchor_act"
+    ]
+    for name in others:
+        assert "negates" not in _source_blocks(ctx, name), name
+
+
+# ── …and what the request acts on, in the same block ──────────────────────
+# "Instruction, the directive «پاک»" without "acts on a thing" is the other
+# half-truth: the model has to join the directive to the object itself, and that
+# join is where a person gets banned over a photograph.
+def test_the_object_line_travels_with_the_act():
+    anchor = _msg(ADMIN, "پاکش کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "[document] report.pdf", name="Reza", at=960)]
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, window))
+    assert "instruction" in out
+    assert "not a person" in out
+
+
+def test_the_object_line_comes_before_the_act_line():
+    """Both contradicting lines come first: a clip keeps whole lines from the
+    front, so what survives must be what contradicts a naive reading."""
+    anchor = _msg(ADMIN, "پاکش کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "[document] report.pdf", name="Reza", at=960)]
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, window))
+    assert out.index("not a person") < out.index("instruction")
+
+
+def test_a_person_object_says_so_and_does_not_warn_about_a_thing():
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "سلام", name="Reza", at=960)]
+    out = awareness_context._render_anchor_act(_referent_ctx(anchor, window))
+    assert "person" in out
+    assert "not a person" not in out
+
+
+def test_the_object_is_not_rendered_by_any_other_source():
+    anchor = _msg(ADMIN, "پاکش کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "[document] report.pdf", name="Reza", at=960)]
+    ctx = _referent_ctx(anchor, window)
+    for source in awareness_context.SOURCES:
+        if source.name == "anchor_act":
+            continue
+        assert "not a person" not in _source_blocks(ctx, source.name), source.name
+
+
+def test_the_open_questions_are_rendered():
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "قیمت چنده؟", name="Reza", at=900, message_id=5)]
+    out = awareness_context._render_open_questions(_referent_ctx(anchor, window))
+    assert "قیمت چنده؟" in out
+    assert "no reply pointing at an answer" in out
+
+
+def test_an_answered_question_is_not_rendered():
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [
+        _msg(TARGET, "قیمت چنده؟", name="Reza", at=900, message_id=5),
+        _msg(OTHER, "نمیدونم", name="Sara", at=920, reply_user_id=TARGET,
+             reply_message_id=5),
+    ]
+    assert awareness_context._render_open_questions(_referent_ctx(anchor, window)) == ""
+
+
+def test_the_question_block_reads_the_context_not_the_database():
+    """A hand-made window nothing captured: a query would find nothing."""
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "چرا؟", name="Reza", at=900, message_id=5)]
+    ctx = _referent_ctx(anchor, window)
+    out = awareness_context._render_open_questions(ctx)
+    assert "چرا؟" in out
+
+
+def test_the_new_sources_are_bounded_by_their_own_budget(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_CHARS", 10_000)
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [
+        _msg(TARGET, "سوال " + "ب" * 200 + "؟", name="Reza", at=900 + i, message_id=i + 1)
+        for i in range(6)
+    ]
+    ctx = _referent_ctx(anchor, window)
+    assert len(_source_blocks(ctx, "open_questions")) <= 500
+    assert len(_source_blocks(ctx, "anchor_act")) <= 420
+    assert len(_source_blocks(ctx, "anchor_when")) <= 300
+    assert len(_source_blocks(ctx, "reply_graph")) <= 600
+    assert len(_source_blocks(ctx, "thread")) <= 500
+    assert len(_source_blocks(ctx, "entities")) <= 600
+
+
+def test_the_entities_block_corrects_the_person_lead():
+    """The demonstrative may mean the photo, and the block says so.
+
+    As evidence, not as an order: the block's own docstring promises "evidence
+    framing, not an instruction", and the order belongs to the block that knows
+    the side — the object line, which states it when the verb decides.
+    """
+    anchor = _msg(ADMIN, "اینو پاک کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "ببین", name="Reza", at=900, message_id=1)]
+    window[0]["kind"] = "photo"
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "a photo by" in out
+    assert "it is about a thing rather than a person" in out
+    assert "do not" not in awareness_context._render_entities(
+        _referent_ctx(anchor, window)
+    ).lower()
+
+
+def test_the_entities_block_names_the_class_the_message_uses():
+    anchor = _msg(ADMIN, "این لینک چیه", role="admin", name="Admin", at=1000)
+    window = [
+        _msg(TARGET, "https://example.com/x", name="Reza", at=900, message_id=1)
+    ]
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "a link to example.com" in out
+    assert "names «لینک»" in out
+
+
+def test_the_entities_block_is_silent_when_there_is_nothing_to_point_at():
+    anchor = _msg(ADMIN, "سلام", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "سلام", name="Reza", at=900, message_id=1)]
+    assert awareness_context._render_entities(_referent_ctx(anchor, window)) == ""
+
+
+def test_the_entities_block_reads_the_context_not_the_database():
+    anchor = _msg(ADMIN, "اینو پاک کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "ببین", name="Reza", at=900, message_id=1)]
+    window[0]["kind"] = "video"
+    ctx = _referent_ctx(anchor, window)
+    assert "a video by" in awareness_context._render_entities(ctx)
+
+
+def test_the_entities_block_does_not_claim_a_pointer_a_greeting_lacks():
+    """The window holds a photograph, and the message is a greeting.
+
+    The header says the message *may point at* the things under it, so it must
+    not appear — and the block must not carry the "not about a person" line
+    either, which reads as an instruction about a message that has no object.
+    """
+    anchor = _msg(ADMIN, "سلام بچه ها", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "ببین", name="Reza", at=900, message_id=1)]
+    window[0]["kind"] = "photo"
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "Things this message may point at" not in out
+    assert "not about a person" not in out
+
+
+def test_the_entities_block_does_not_contradict_the_object_block():
+    """The two blocks are read together, so they must agree about the side.
+
+    «اینو بن کن» acts on a member. The object block says so; the entities block
+    must not answer with the room's photograph and "do not act on a person".
+    """
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "ببین", name="Reza", at=900, message_id=1)]
+    window[0]["kind"] = "photo"
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "acts on a **person**" in out
+    assert "Things this message may point at" not in out
+    assert "not about a person" not in out
+
+
+# ── Who is talking to whom, and whether this is still the same thread ─────
+def test_the_reply_graph_is_rendered_for_the_model():
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [
+        _msg(TARGET, "فایل رو فرستادم", name="Reza", at=900, message_id=1),
+        _msg(OTHER, "فایل رو دیدم", name="Sara", at=920, message_id=2,
+             reply_user_id=TARGET),
+        _msg(MEMBER, "فایل مشکل داره", name="Nima", at=940, message_id=3,
+             reply_user_id=TARGET),
+    ]
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert f"{OTHER} → {TARGET}" in out
+    assert f"converged on {TARGET} (2 of 2)" in out
+
+
+def test_the_thread_is_rendered_for_the_model():
+    anchor = _msg(ADMIN, "فایل رو دوباره چک کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "فایل مشکل داره", name="Reza", at=900, message_id=1)]
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "continues the thread" in out
+    assert "«فایل»" in out
+
+
+def test_the_thread_renders_nothing_when_it_cannot_be_judged():
+    """An abstention is silent, not a line saying "unclear"."""
+    anchor = _msg(ADMIN, "باشه", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "فایل مشکل داره", name="Reza", at=900, message_id=1)]
+    assert awareness_context._render_thread(_referent_ctx(anchor, window)) == ""
+
+
+def test_the_room_state_reads_the_context_not_the_database():
+    """A hand-made window nothing captured: a query would find nothing."""
+    anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "فایل مشکل داره", name="Reza", at=900, message_id=1,
+                   reply_user_id=OTHER)]
+    ctx = _referent_ctx(anchor, window)
+    assert f"{TARGET} → {OTHER}" in awareness_context._render_reply_graph(ctx)
+
+
+# ── When the anchor's own words point, from the server's clock ────────────
+def test_the_anchor_when_is_rendered_for_the_model():
+    """«دیروز» is placed by the server's clock, not the model's sense of time."""
+    anchor = _msg(MEMBER, "دیروز چرا اینکارو کردی", name="Someone", at=1000)
+    out = awareness_context.blocks(_referent_ctx(anchor, []))
+    assert "دیروز" in out
+    assert "backwards, before now" in out
+    assert "server's clock" in out
+
+
+def test_the_anchor_when_renders_nothing_without_a_time_word():
+    """A message that says nothing about time contributes nothing."""
+    anchor = _msg(MEMBER, "اینو بن کن", name="Someone", at=1000)
+    assert awareness_context._render_anchor_when(_referent_ctx(anchor, [])) == ""
+
+
+def test_the_anchor_when_states_how_old_the_window_is():
+    """«قبلاً» needs something to be earlier *than* — the window's own age."""
+    window = [_msg(TARGET, "سلام", name="Reza", at=700)]
+    anchor = _msg(MEMBER, "قبلاً گفتم اینکارو نکن", name="Someone", at=1000)
+    out = awareness_context._render_anchor_when(_referent_ctx(anchor, window))
+    assert "starts" in out
+
+
+def test_the_anchor_when_reads_the_context_not_the_database():
+    """A hand-made window nothing captured: a query would find nothing."""
+    anchor = _msg(MEMBER, "همین الان بنش کن", name="Someone", at=1000)
+    ctx = _referent_ctx(anchor, [])
+    out = awareness_context._render_anchor_when(ctx)
+    assert "همین الان" in out
+    assert "at the present moment" in out
+
+
+def test_a_time_word_is_not_rendered_as_a_person_reference():
+    """The two readers share the fact: «همین الان» is a time, not somebody.
+
+    The anchor is an administrator's, so the referent source *is* asked — and the
+    assertion is that it has nothing to offer, while the when-block places the
+    time. A message like «همین الان ساعت چنده» names no person, and the temporal
+    noun is what keeps the near demonstrative from being read as one.
+    """
+    anchor = _msg(ADMIN, "همین الان ساعت چنده", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "سلام", name="Reza", at=900)]
+    ctx = _referent_ctx(anchor, window)
+    assert awareness_context._wants_referents(ctx) is True
+    assert awareness_context._render_referent_candidates(ctx) == ""
+    assert "at the present moment" in awareness_context._render_anchor_when(ctx)
+
+
+# ── The conversation borrows the reading (increment T) ────────────────────
+def _conv(ctx) -> str:
+    """The reading the addressed conversation borrows: ``blocks`` with skips."""
+    return awareness_context.blocks(ctx, skip=awareness_context.CONVERSATION_SKIP)
+
+
+def _enable_awareness(monkeypatch):
+    """The switch the addressed path is gated on, on."""
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ENABLED", True)
+    awareness.reset_switch()
+
+
+def test_the_conversation_reading_drops_what_the_conversation_already_states():
+    """The date and the room are in the chat prompt already; a copy is waste."""
+    awareness_context.note_room(CHAT, "Guard Group", "supergroup")
+    message = _msg(MEMBER, message_id=1)
+    ctx = ctx_of([message], anchor=message, now=1_700_000_000)
+    full = awareness_context.blocks(ctx)
+    conv = _conv(ctx)
+    date = awareness_context._render_calendar(ctx)
+    room = awareness_context._render_room(ctx)
+    assert date and date in full
+    assert room and room in full
+    assert date not in conv
+    assert room not in conv
+
+
+def test_the_conversation_reading_drops_the_database_backed_room_memory():
+    """Room memory is the pass's job; the conversation pays for nothing new."""
+    for name in ("remembered_people", "admin_activity", "referenced_people"):
+        assert name in awareness_context.CONVERSATION_SKIP, name
+
+
+def test_the_conversation_reading_keeps_the_readings_of_the_window():
+    """What it takes is the part that answers what this message is, and who."""
+    keep = (
+        "anchor_act", "open_questions", "reply_graph", "thread",
+        "entities", "anchor_when", "referent_candidates",
+    )
+    for name in keep:
+        assert name not in awareness_context.CONVERSATION_SKIP, name
+        assert any(s.name == name for s in awareness_context.SOURCES), name
+
+
+def test_the_conversation_reading_is_never_larger_than_the_pass_reading():
+    messages = [
+        _msg(MEMBER, "سلام", message_id=1),
+        _msg(ADMIN, "اینو بن کن", role="admin", message_id=2),
+    ]
+    ctx = ctx_of(messages, anchor=messages[-1], now=1_700_000_000)
+    conv = _conv(ctx)
+    assert 0 < len(conv) <= len(awareness_context.blocks(ctx))
+
+
+def test_the_conversation_reading_obeys_the_same_ceiling(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_CHARS", 120)
+    messages = [
+        _msg(MEMBER, "یک پیام نسبتا طولانی برای پر کردن بودجه", message_id=i)
+        for i in range(1, 12)
+    ]
+    ctx = ctx_of(messages, anchor=messages[-1], now=1_700_000_000)
+    assert len(_conv(ctx)) <= 120
+
+
+def test_a_skipped_source_is_the_only_difference():
+    """The reading is the pass's reading minus the named blocks, not a re-render."""
+    messages = [
+        _msg(MEMBER, "سلام", message_id=1),
+        _msg(ADMIN, "اینو بن کن", role="admin", message_id=2),
+    ]
+    ctx = ctx_of(messages, anchor=messages[-1], now=1_700_000_000)
+    full = awareness_context.blocks(ctx)
+    conv = _conv(ctx)
+    for source in awareness_context.SOURCES:
+        if source.name in awareness_context.CONVERSATION_SKIP:
+            continue
+        block = awareness_context._rendered(source, ctx, source.budget)
+        if block:
+            assert block in conv, source.name
+            assert block in full, source.name
+
+
+def test_the_room_reading_carries_the_resolvers_candidates(monkeypatch):
+    """An addressed anaphor is resolved, not left to the model over raw text."""
+    _enable_awareness(monkeypatch)
+    messages = [
+        _msg(OTHER, "من کاربرم", message_id=1),
+        _msg(MEMBER, "باشه", message_id=2, reply_user_id=OTHER, reply_name="Other"),
+        _msg(TARGET, "چشم", message_id=3, reply_user_id=OTHER, reply_name="Other"),
+        _msg(ADMIN, "همون کاربر رو بن کن", role="admin", message_id=4),
+    ]
+    out = main._room_reading(CHAT, message_id=4, messages=messages)
+    assert "points back at them" in out, out
+    assert f"({OTHER})" in out, out
+
+
+def test_the_room_reading_is_empty_when_the_message_is_not_in_the_window(monkeypatch):
+    """Nothing to read it against, so nothing is invented."""
+    _enable_awareness(monkeypatch)
+    messages = [_msg(MEMBER, message_id=1)]
+    assert main._room_reading(CHAT, message_id=99, messages=messages) == ""
+
+
+def test_the_room_reading_is_empty_when_the_layer_is_off(monkeypatch):
+    """OFF means off on this path too: no reading, no cost."""
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ENABLED", False)
+    awareness.reset_switch()
+    messages = [_msg(MEMBER, message_id=1)]
+    assert main._room_reading(CHAT, message_id=1, messages=messages) == ""
+
+
+def test_the_room_reading_fails_soft(monkeypatch):
+    """A reading is context, and context is never worth a failed answer."""
+    _enable_awareness(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("no reading today")
+
+    monkeypatch.setattr(awareness_context, "blocks", _boom)
+    messages = [_msg(MEMBER, message_id=1)]
+    assert main._room_reading(CHAT, message_id=1, messages=messages) == ""
+
+
+def test_the_room_reading_does_not_make_an_ambiguous_case_confident(monkeypatch):
+    """Two holders of a role must read as a question, not as an answer."""
+    _enable_awareness(monkeypatch)
+    monkeypatch.setattr(config, "CONFIG_ADMINS", [f"{ADMIN}:admin", f"{OTHER}:admin"])
+    messages = [
+        _msg(ADMIN, "الف", role="admin", message_id=1),
+        _msg(OTHER, "ب", role="admin", message_id=2),
+        _msg(OWNER, "ادمینه رو محدود کن", role="owner", message_id=3),
+    ]
+    out = main._room_reading(CHAT, message_id=3, messages=messages)
+    assert "could not tell the top candidates apart" in out, out
+    assert "is confident in the first candidate" not in out, out

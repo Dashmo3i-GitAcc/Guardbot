@@ -165,4 +165,106 @@ def test_nexus_delegates_to_the_matcher():
     # The weak grade is not a second implementation either: the trigger keeps
     # only the strong reading, and the room renderer asks the matcher itself.
     assert addressing.mentioned("نکسوس گفت که") is True
-    assert addressing.addressed("نکسوس گفت که") is True
+    assert addressing.addressed("نکسی") is True
+
+
+# ── Quotation ─────────────────────────────────────────────────────────────
+# «نکسوس گفت که...» repeats what the assistant said. It is the clearest case
+# there is of a message that is *about* Nexus rather than *to* it, and the
+# strong grade must not fire on it — the assistant answering a quotation is
+# exactly the false positive the two grades exist to prevent.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "نکسوس گفت که فلانی رو ساکت کنه",
+        "نکسوس گفت اینو بن کن",
+        "نکسوس میگه بیا",
+        "نکسوس گفته بود",
+        "نکسی گفت که",
+        "nexus said that",
+    ],
+)
+def test_a_quotation_is_a_mention_not_a_call(text):
+    reading = addressing.detect(text)
+    assert reading.found is True
+    assert reading.addressed is False, text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The rule is one token wide, and these are what that protects.
+        "نکسوس",
+        "نکسوس جان",
+        "هی نکسوس",
+        "نکسوس بگو سلام",
+        "نکسوس اینو بررسی کن",
+        "میشه نکسوس اینو بررسی کنی؟",
+        "سلام نکسوس",
+        "نکسوسو ساکتش کن",
+    ],
+)
+def test_a_call_with_the_name_in_any_position_is_still_a_call(text):
+    assert addressing.addressed(text) is True, text
+
+
+# ── Prepositional complement ──────────────────────────────────────────────
+# The second demotion, beside the quotation, and the corpus's last gap. A name
+# immediately after a preposition is the *object* of that preposition, so the
+# sentence is about the assistant: «من با نکسوس کار نکردم» is a statement, and
+# answering it is the false positive the strong grade exists to avoid.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "من با نکسوس کار نکردم",
+        "درباره نکسوس چی میدونی",
+        "از نکسوس پرسیدم",
+        "برای نکسوس پیام اومده",
+        "i never worked with nexus",
+        "they were talking about nexus",
+    ],
+)
+def test_a_name_after_a_preposition_is_a_mention_not_a_call(text):
+    reading = addressing.detect(text)
+    assert reading.found is True, text
+    assert reading.addressed is False, text
+    assert reading.reason == "complement", text
+
+
+def test_the_preposition_rule_is_one_token_wide():
+    """Only a preposition *immediately* before the name demotes.
+
+    The width is the whole safety of the rule, exactly as it is for the
+    quotation rule. A preposition elsewhere in the sentence governs its own
+    object, not the name.
+    """
+    assert addressing._complement(["با", "نکسوس"], 1) is True
+    assert addressing._complement(["اجازه", "نکسوس"], 1) is False
+    assert addressing._complement(["نکسوس"], 0) is False
+    # «با اجازه نکسوس اینو پاک کن» — the token before the name is «اجازه».
+    assert addressing.addressed("با اجازه نکسوس اینو پاک کن") is True
+
+
+def test_the_weak_grade_survives_the_demotion():
+    """A demotion is not a silencing.
+
+    ``mentioned`` is what the awareness pass reads — "your name came up here" —
+    and it must still be true, so the model can see that the room is talking
+    about the assistant. Only the *immediate* reply is withdrawn.
+    """
+    for text in ("من با نکسوس کار نکردم", "از نکسوس بپرس", "with nexus"):
+        assert addressing.mentioned(text) is True, text
+        assert addressing.addressed(text) is False, text
+
+
+def test_an_english_preposition_is_not_a_free_demotion():
+    """«to» and «for» can head a line that addresses somebody, so they are out.
+
+    «to nexus: ...» and «for nexus: ...» are how a group writes an address, not
+    a prepositional phrase about the assistant. Demoting on them would silence a
+    real call, which is the worse of the two mistakes.
+    """
+    assert addressing.addressed("to nexus: this is broken") is True
+    assert addressing.addressed("for nexus: please check") is True
+    assert addressing._complement(["to", "nexus"], 1) is False
+    assert addressing._complement(["for", "nexus"], 1) is False

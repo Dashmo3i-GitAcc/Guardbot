@@ -40,16 +40,19 @@ from . import (
     ai_moderation,
     awareness,
     awareness_context,
+    awareness_schedule,
     burst,
     chat,
     classifier,
     config,
+    context_plan,
     db,
     decision,
     gemini_keys,
     gemini_pool,
     key_store,
     media,
+    memory,
     mod_policy,
     moderation,
     net,
@@ -58,6 +61,7 @@ from . import (
     persian_calendar,
     rbac,
     responses,
+    state,
     text_filters,
     transcribe,
     vpnbot,
@@ -1132,7 +1136,7 @@ async def _awareness_capture(
         return False
     reply_user_id, reply_name, reply_message_id = _reply_context(msg)
     name = getattr(user, "full_name", "") or getattr(user, "first_name", "") or ""
-    return awareness.capture(
+    recorded = awareness.capture(
         room.id,
         user.id,
         awareness.role_of(principal),
@@ -1146,6 +1150,27 @@ async def _awareness_capture(
         actor=actor,
         kind=kind,
     )
+    if recorded:
+        # Increment U: classify the message for the *scheduler*, once, here,
+        # where the text is already in hand and a row is already being written.
+        # It is the same reading the chat path takes of a message it answers —
+        # "does this need the room" — reduced to one word and stored keyed by
+        # the room, so the pass loop can decide whether the next request is
+        # worth spending without ever letting the words reach ``awareness.due``
+        # (whose signature a test asserts). A failed classification is not a
+        # failed capture: ``read`` never raises, and the caller ignores the
+        # result either way.
+        awareness_schedule.note(
+            room.id,
+            awareness_schedule.read(
+                body,
+                kind=kind,
+                reply=bool(reply_user_id),
+                media=bool(kind),
+                directed=directed,
+            ),
+        )
+    return recorded
 
 
 async def _transcribe_for_awareness(ctx, ref) -> str:
@@ -1180,10 +1205,20 @@ def _awareness_note_reply(chat_id: int, text: str) -> None:
     and would cheerfully answer the same thing twice. A failed send is not
     recorded — ``_send_chat`` returns whether it went out — because a reply that
     nobody saw is not part of the conversation.
+
+    Increment U's residual is closed in the same place. If what Nexus said was a
+    *question*, the room is mid-exchange: the reply to it («بله») is
+    self-contained by every rule the project has, so the scheduler would rightly
+    read it ``LOW`` and postpone the very pass that is supposed to read the
+    answer. The stamp records only that the server asked — it never reads a
+    member's message and never decides which message answers — and ``defer``
+    refuses to postpone a room carrying it. See ``awareness_schedule.awaiting``.
     """
     if not awareness.capture_enabled() or not (text or "").strip():
         return
-    awareness.capture(chat_id, 0, awareness.ROLE_NEXUS, "", text.strip())
+    said = text.strip()
+    awareness.capture(chat_id, 0, awareness.ROLE_NEXUS, "", said)
+    awareness_schedule.awaiting_note(chat_id, said)
 
 
 def _awareness_context(
@@ -1340,13 +1375,25 @@ async def _awareness_read(
         awareness.skip(chat_id, seen_message_id=max_id)
         return
 
+    # The model's claim about *who* the batch concerns is checked against the
+    # window before it is stored: a model that names somebody the room never
+    # mentioned has not understood the room, and recording its guess would let
+    # the next pass inherit the mistake. This is validation, not authority —
+    # nothing acts on the result.
+    decision["about"] = awareness.about_in_window(
+        decision.get("about") or 0, messages
+    )
+
     awareness.record(chat_id, seen_message_id=max_id, decision=decision)
     log.info(
-        "awareness chat=%s relevant=%s respond=%s writes=%d topic=%r",
+        "awareness chat=%s relevant=%s respond=%s writes=%d intent=%s about=%s "
+        "topic=%r",
         chat_id,
         decision.get("relevant"),
         decision.get("respond"),
         counters.get("writes", 0),
+        decision.get("intent") or "-",
+        decision.get("about") or 0,
         (decision.get("topic") or "")[:60],
     )
 
@@ -1484,6 +1531,14 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
       ``awareness.due``), and ``urgent`` only relaxes the wait-for-quiet clause;
     * and the day must still be able to afford it, which is the second timing
       question and a different one — see ``_awareness_allowance_gap``.
+
+    Increment U adds one more, and it is a *selection* question rather than a
+    safety one: a room whose unread batch carries no evidence that it needs the
+    room is **postponed** (``awareness_schedule.defer``) so the rationed request
+    goes to a room that does. It is asked only on the ordinary path — the urgent
+    path never consults it, so a hint can delay a routine reading and never a
+    prompted one — and it can only postpone a room, never admit one, because
+    every gate above it has already run.
     """
     chat_id = int(row.get("chat_id") or 0)
     if not chat_id or chat_id in _awareness_inflight:
@@ -1496,14 +1551,34 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
         # cannot see from being retried forever.
         awareness.skip(chat_id, seen_message_id=int(row.get("max_id") or 0))
         return False
+    now = time.time()
     verdict = awareness.due(
         row,
-        now=time.time(),
+        now=now,
         last_pass_at=_awareness_last_pass.get(chat_id, 0.0),
         urgent=urgent,
     )
     if not verdict:
         return False
+    if not urgent:
+        oldest = int(row.get("oldest_at") or 0)
+        if oldest and awareness_schedule.defer(
+            chat_id,
+            waited=now - oldest,
+            # A room holding an unapproved action is one the pass is *for*:
+            # the confirmation arrives as a self-contained message that the
+            # classifier rightly reads as not needing the room, so without this
+            # the owner's approval would be postponed by up to the retention
+            # window. The server knows it is waiting, so it says so.
+            waiting=bool(db.admin_pending_waiting(chat_id=chat_id)),
+        ):
+            # Eligible, but not worth a request yet: the room's batch is idle
+            # chatter and it has not been waiting long enough to be read
+            # anyway. This is the whole of increment U — the decision that the
+            # 200 requests are better spent elsewhere — and it can only ever
+            # *delay* a pass, because the bound on the delay is the window's
+            # own retention and the room is re-offered on its next deadline.
+            return False
     if not _awareness_affordable(chat_id):
         # The room is ready but the day is not rich enough to read it yet. This
         # is the allowance brake rather than the quiescence one, and it is
@@ -1523,6 +1598,12 @@ async def _awareness_run_room(ctx, row: dict, *, urgent: bool = False) -> bool:
     finally:
         _awareness_inflight.discard(chat_id)
         _awareness_last_pass[chat_id] = time.time()
+        # The batch has been read, so the hint it produced is spent. Dropped
+        # here rather than in ``_awareness_pass`` because this is the one place
+        # that knows a pass actually ran: a room refused above keeps its hint,
+        # which is what stops a room the allowance cannot serve from being
+        # demoted for a reason that had nothing to do with its content.
+        awareness_schedule.forget(chat_id)
         # This room has just been read, so it has no deadline left to meet.
         # Dropping it here is what stops the deadline tick from waking up for a
         # room that the sweeper or the urgency hint already handled.
@@ -2613,6 +2694,117 @@ def _today_block(now: float) -> str:
     )
 
 
+def _room_reading(
+    chat_id: int,
+    *,
+    message_id: int,
+    messages: list[dict],
+    skip: frozenset | None = None,
+    budget: int = 0,
+) -> str:
+    """The server's reading of the message being answered, for the conversation.
+
+    The awareness pass has always been handed this — ``_awareness_context``
+    renders ``awareness_context.blocks`` for the anchor. The addressed path was
+    handed the transcript and nothing else, so a message that *is* a reading
+    problem («همون رو بن کن», «اینو محدود کن») reached the model as raw text with
+    no resolution, while the same room read by a pass got the resolver's
+    candidates, the act, the reply graph and the thread. This hands the
+    conversation the same reading of *its own* message.
+
+    It is derived from the window the caller already read — the anchor is the
+    row for the message being answered, and the reading is pure Python over that
+    window and the roles — so it adds no database query beyond the one the roles
+    need, and no model call. ``skip`` defaults to ``CONVERSATION_SKIP``, which
+    drops the blocks the conversation already carries (the date, the room) and
+    the database-backed room memory it does not pay for; increment Y adds the
+    two personal sources it renders itself. ``budget`` is the ceiling for this
+    caller, defaulting to the pass-wide one.
+
+    Returns ``""`` when the message is not in the window (nothing to read it
+    against), when the layer is off, or on any failure: a reading is context,
+    and context is never worth failing an answer over.
+    """
+    if not awareness.enabled() or not message_id:
+        return ""
+    anchor = next(
+        (row for row in messages if int(row.get("message_id") or 0) == int(message_id)),
+        None,
+    )
+    if anchor is None:
+        return ""
+    try:
+        ctx = awareness_context.build_ctx(
+            chat_id, messages=messages, anchor=anchor
+        )
+        return awareness_context.blocks(
+            ctx,
+            skip=(
+                awareness_context.CONVERSATION_SKIP if skip is None else skip
+            ),
+            budget=budget,
+        )
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the room reading for an addressed reply")
+        return ""
+
+
+def _memory_context(chat_id: int, user_id: int, text: str) -> str:
+    """The person's own long-term memory, as one bounded block.
+
+    A source of its own, deliberately not reached through the awareness layer:
+    the brief's requirement is that a chat answer survives awareness being off,
+    unavailable or failed, and the fallback it falls back *to* includes this.
+    Retrieval is relevance-first — the message being answered is the topic — so
+    an unrelated memory is not shown, and the block is bounded twice (rows and
+    characters).
+
+    It is a read that grants nothing. A failure returns ``""``: memory is an
+    enhancement, and a context block is never worth failing an answer over.
+    """
+    if not config.NEXUS_MEMORY_ENABLED or not chat_id or not user_id:
+        return ""
+    try:
+        rows = memory.about(
+            int(chat_id),
+            int(user_id),
+            limit=int(config.NEXUS_MEMORY_ITEMS),
+            topic=str(text or ""),
+        )
+        if not rows:
+            return ""
+        return memory.render(rows, budget=int(config.NEXUS_MEMORY_CHARS))
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the person's long-term memory")
+        return ""
+
+
+def _state_context(chat_id: int, user_id: int, text: str) -> str:
+    """What this interaction is trying to accomplish, as one bounded block.
+
+    Increment X's fallback, and it sits beside ``_memory_context`` for the same
+    reason: the four sources are independent, so State must survive awareness
+    being off, unavailable or failed. It is a *different* layer from memory —
+    the active task, not a durable fact about the person — and it is bounded
+    twice (one row, and ``NEXUS_STATE_CHARS``).
+
+    It is a read that grants nothing and it is relevance- and freshness-gated:
+    a stale task, or one the message explicitly supersedes, renders nothing. A
+    failure returns ``""`` — state is an enhancement, and a context block is
+    never worth failing an answer over.
+    """
+    if not config.NEXUS_STATE_ENABLED or not chat_id or not user_id:
+        return ""
+    try:
+        row = state.current(int(chat_id), int(user_id), text=str(text or ""))
+        if not row:
+            return ""
+        return state.render(row, budget=int(config.NEXUS_STATE_CHARS))
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the conversation state")
+        return ""
+
+
 async def _answer_conversationally(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -2738,21 +2930,67 @@ async def _answer_conversationally(
     # reply has to be earned by an action having actually run.
     tools, context, on_tool = await _ai_admin_turn(update, ctx, msg, room, user)
 
-    # The room, appended to the trusted block. This is what makes an addressed
-    # answer *informed* rather than isolated: "پس همون کاری که گفتی رو بکن" is
-    # only answerable by somebody who has been following what was said. It goes
-    # in the system instruction, never the user turn, because the transcript is
-    # full of text people typed and text people typed must not be presented to
-    # the model as a statement the server is making.
-    context = (context or "") + awareness.room_block(
-        room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
+    # ── Increment Y: the minimum relevant combination ─────────────────────
+    #
+    # The four sources are independent and are selected, not preloaded. The
+    # message's own shape decides: a self-contained question pays for no room
+    # context at all, while a reply, an anaphor, an instruction or a
+    # continuation is evidence that the message depends on something outside
+    # itself and gets the room. The decision is deterministic (no second model
+    # call), it is a pure function of the message, and it never fails the turn:
+    # every reader it consults is already fail-soft.
+    #
+    # The room goes in the system instruction, never the user turn, because the
+    # transcript is full of text people typed and text people typed must not be
+    # presented to the model as a statement the server is making.
+    plan_reading = context_plan.read(
+        text,
+        kind=kind,
+        reply=getattr(msg, "reply_to_message", None) is not None,
+        media=parts is not None,
     )
 
-    # The server's own date, so the model can date what it reads instead of
-    # treating the newest claim in the room or on a page as today. Appended here,
-    # beside the room block, because this is the one place both the direct answer
-    # and the search-grounded answer pass through.
-    context = context + _today_block(time.time())
+    # The window is read **once** and handed to both the transcript and the
+    # reading beside it. The reading is the server's understanding of the
+    # message being answered — the same ``awareness_context.blocks`` a pass
+    # renders — so an addressed «همون رو بن کن» is resolved by the resolver
+    # rather than left to the model over raw text.
+    room_text = ""
+    reading = ""
+    if plan_reading.wants_awareness and awareness.enabled():
+        room_window = awareness.window(
+            room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
+        )
+        reading = _room_reading(
+            room.id,
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+            messages=room_window,
+            skip=awareness_context.CONVERSATION_SKIP | context_plan.reading_skip(),
+            budget=int(config.NEXUS_AWARENESS_CONTEXT_CHARS),
+        )
+        # The window is bounded by what is left of the *selectable* budget once
+        # the reading and the two personal blocks have their share. It is the
+        # largest, least bounded source, so it is the one that yields. The
+        # administrative roster is not part of that budget: it is never dropped,
+        # so reserving for it would only shrink the room.
+        room_text = awareness.room_block(
+            room.id,
+            limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES)),
+            messages=room_window,
+            budget=context_plan.room_budget(),
+        )
+
+    # Long-term memory and conversational state are their own sources and never
+    # a dependency of the awareness layer. They are rendered here — never inside
+    # the reading, which is told to skip them — so the plan can gate them and
+    # de-duplicate them against the room it selected. Each is a bounded read and
+    # its failure is empty text, never an error.
+    state_block = (
+        _state_context(room.id, user.id, text) if plan_reading.wants_state else ""
+    )
+    memory_block = (
+        _memory_context(room.id, user.id, text) if plan_reading.wants_memory else ""
+    )
 
     # The live web, as its own workload, and only when it is actually wanted.
     # Three outcomes, not two: an explicit request or an explicitly *current*
@@ -2778,6 +3016,7 @@ async def _answer_conversationally(
     # the person sees.
     finding = None
     answer_text = text
+    search_block = ""
     if chat.is_enabled() and web_search.enabled():
         now = time.time()
         pending = web_search.pending_offer(room.id, user.id, now=now)
@@ -2815,11 +3054,29 @@ async def _answer_conversationally(
                     ctx, room.id, config.NEXUS_SEARCH_CONFIRM_TEXT, reply_to
                 )
                 return _timing(True)
+        search_block = ""
         if finding is not None:
             if finding.usable:
-                context = context + web_search.untrusted_block(finding)
+                search_block = web_search.untrusted_block(finding)
             elif finding.attempted:
-                context = context + web_search.failure_block()
+                search_block = web_search.failure_block()
+
+    # The composition, in one deterministic order and under one hard ceiling.
+    # The plan is an application-side decision object: it is logged (names,
+    # reasons and sizes only — never a word of the message) and then discarded.
+    plan = context_plan.compose(
+        plan_reading,
+        admin=context or "",
+        room=room_text,
+        awareness=reading,
+        state=state_block,
+        memory=memory_block,
+        date=_today_block(time.time()),
+        search=search_block,
+        message=text,
+    )
+    context = plan.text
+    log.info("chat context user=%s chat=%s %s", user.id, room.id, plan.summary())
 
     result = await chat.reply(
         room.id,
@@ -2900,6 +3157,66 @@ async def _send_voice(
         return False
 
 
+def _schedule_background(ctx, coro) -> None:
+    """Run one fire-and-forget coroutine off the answer path, and never wait.
+
+    The one place a background task is scheduled, shared by the memory and state
+    observations so the two cannot drift: both are enhancements that must never
+    add a millisecond to the reply somebody is waiting for, and both are written
+    never to raise, so there is no result to await and no failure to report. A
+    host whose context has no scheduler simply learns nothing this message, which
+    is the same outcome as a message that held nothing to learn.
+    """
+    try:
+        schedule = getattr(getattr(ctx, "application", None), "create_task", None)
+        if schedule is None:
+            schedule = asyncio.get_running_loop().create_task
+        schedule(coro)
+    except Exception:  # noqa: BLE001 - a scheduler is never worth a handler
+        coro.close()
+        log.exception("could not schedule a background observation")
+
+
+def _schedule_memory_observation(ctx, user, chat_id: int, text: str) -> None:
+    """Learn from one message **off** the answer path, and never wait for it.
+
+    Long-term memory is an enhancement, so it is deliberately not awaited.
+    Everything the automatic path does — the deterministic rules, the behavioural
+    counters, the bounded write, and the gated provider call an operator may
+    enable — runs in a background task, so none of it can add a millisecond to
+    the reply somebody is waiting for, and a slow or unavailable memory workload
+    cannot delay chat at all.
+    """
+    try:
+        coro = memory.observe(user, chat_id, text)
+    except Exception:  # noqa: BLE001 - building the coroutine must not fail
+        log.exception("could not prepare memory observation")
+        return
+    _schedule_background(ctx, coro)
+
+
+def _schedule_state_observation(
+    ctx, user, chat_id: int, text: str, message_id: int = 0
+) -> None:
+    """Read the interaction's state from one message, off the answer path.
+
+    The same shape as the memory observation and for the same reason: State is
+    an enhancement, so nothing about it is awaited by the handler. The write is a
+    bounded, indexed upsert with no provider call at all, so this task is cheap —
+    but it is still scheduled rather than awaited, because "the answer path never
+    waits for a state write" is a property that should hold by construction and
+    not by a measurement that happens to be small today. ``message_id`` is
+    carried so a retried or duplicated message is a no-op rather than a second
+    transition.
+    """
+    try:
+        coro = state.observe(user, chat_id, text, message_id=message_id)
+    except Exception:  # noqa: BLE001 - building the coroutine must not fail
+        log.exception("could not prepare state observation")
+        return
+    _schedule_background(ctx, coro)
+
+
 async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """The assistant, in a group. The Nexus gate, in order.
 
@@ -2926,6 +3243,30 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 1. Who, resolved from Telegram's own id and this bot's own tables.
     principal = rbac.resolve(user.id)
     text = _message_text(msg)
+
+    # Long-term user memory, also before every gate and also free — and, unlike
+    # everything above it, **off this thread**. The learning is scheduled as a
+    # background task rather than awaited, so neither the regex pass, nor a
+    # memory write, nor the gated provider call the automatic path may make can
+    # add a millisecond to the reply somebody is waiting for. It grants nothing:
+    # a memory is a sentence for the model to read, and authority stays in
+    # ``rbac`` above. Scoped to the group path because that is where the
+    # observation already happens; the key is ``(chat_id, user_id)``, so a
+    # private chat's memory could never render here in any case.
+    _schedule_memory_observation(ctx, user, room.id, text)
+
+    # Conversational state (increment X), the same shape and the same reason: the
+    # transition one message states about the interaction is learned in a
+    # background task, so a state read or write can never add to the reply's
+    # latency. It is a different layer from the memory above — the active task,
+    # not a durable fact about the person — and it is keyed by
+    # ``(chat_id, user_id)``, so one person's task is never another's and a
+    # private task could never render here. The message id is carried so a
+    # retried or duplicated delivery is idempotent. It grants nothing: authority
+    # stays in ``rbac`` above, resolved from the Telegram id.
+    _schedule_state_observation(
+        ctx, user, room.id, text, getattr(msg, "message_id", 0)
+    )
 
     # 1a. Is this aimed at Nexus? Computed once and used twice — by the capture,
     #     which records it as a hint for choosing the pass's anchor, and by the
