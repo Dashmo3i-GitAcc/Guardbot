@@ -1034,6 +1034,37 @@ NEXUS_STATE_VALUE_CHARS = _int("NEXUS_STATE_VALUE_CHARS", 120)
 NEXUS_STATE_CHARS = _int("NEXUS_STATE_CHARS", 300)
 
 
+# ---------------- Nexus context composition (increment Y) ---------------------
+# The hard ceiling on the four **selectable** context sources together: the room
+# window, the server's reading of the message, the active state and the person's
+# memory — the sources the selector chooses between and is therefore allowed to
+# drop.
+#
+# It deliberately does **not** count the administrative roster, the server date
+# or the web findings. Those are never dropped — the roster is a security
+# property, the date is what stops a date being invented, and the findings are
+# the only reason a live answer can be grounded — so counting them would make
+# the ceiling self-defeating: a large roster (an owner's is ~3700 characters on
+# its own) would exceed the limit with nothing left to drop, and the only effect
+# would be to strip the room out of the answer. A ceiling may only bound what
+# the thing enforcing it is able to remove.
+#
+# It is a **safety valve, not a target**. Each source already has its own cap
+# beneath it (``NEXUS_AWARENESS_WINDOW_CHARS`` for the room window,
+# ``NEXUS_AWARENESS_CONTEXT_CHARS`` for the reading, ``NEXUS_STATE_CHARS`` and
+# ``NEXUS_MEMORY_CHARS`` for the two personal blocks), so the sum is already
+# bounded; this number bounds the sum. Y enforces it by **dropping whole
+# sources** in reverse precedence — memory first, then state, then the room
+# window — never by slicing a rendered block in half, because a fragment of a
+# sentence costs tokens and tells the model less than nothing.
+#
+# 3500 sits below the sum of the per-source caps (a worst case near 8100) and
+# well above the ordinary turn (the fast path carries no room window at all).
+# It is measured in ``tools/eval_context.py``; an operator who wants a smaller
+# prompt lowers it, and the ceiling only ever *removes* context.
+NEXUS_CONTEXT_CHARS = _int("NEXUS_CONTEXT_CHARS", 3500)
+
+
 # ---------------- Nexus Awareness: the room, understood -----------------------
 # The observation layer. Everything above decides *who may talk to Nexus and what
 # it may do*; this decides *what Nexus understands about the room it is in*.

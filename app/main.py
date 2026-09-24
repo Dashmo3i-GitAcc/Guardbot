@@ -44,6 +44,7 @@ from . import (
     chat,
     classifier,
     config,
+    context_plan,
     db,
     decision,
     gemini_keys,
@@ -2628,7 +2629,12 @@ def _today_block(now: float) -> str:
 
 
 def _room_reading(
-    chat_id: int, *, message_id: int, messages: list[dict]
+    chat_id: int,
+    *,
+    message_id: int,
+    messages: list[dict],
+    skip: frozenset | None = None,
+    budget: int = 0,
 ) -> str:
     """The server's reading of the message being answered, for the conversation.
 
@@ -2643,10 +2649,11 @@ def _room_reading(
     It is derived from the window the caller already read — the anchor is the
     row for the message being answered, and the reading is pure Python over that
     window and the roles — so it adds no database query beyond the one the roles
-    need, and no model call. ``CONVERSATION_SKIP`` drops the blocks the
-    conversation already carries (the date, the room) and the database-backed
-    room memory it does not pay for. The ceiling is the same hard one the pass
-    obeys.
+    need, and no model call. ``skip`` defaults to ``CONVERSATION_SKIP``, which
+    drops the blocks the conversation already carries (the date, the room) and
+    the database-backed room memory it does not pay for; increment Y adds the
+    two personal sources it renders itself. ``budget`` is the ceiling for this
+    caller, defaulting to the pass-wide one.
 
     Returns ``""`` when the message is not in the window (nothing to read it
     against), when the layer is off, or on any failure: a reading is context,
@@ -2664,7 +2671,13 @@ def _room_reading(
         ctx = awareness_context.build_ctx(
             chat_id, messages=messages, anchor=anchor
         )
-        return awareness_context.blocks(ctx, skip=awareness_context.CONVERSATION_SKIP)
+        return awareness_context.blocks(
+            ctx,
+            skip=(
+                awareness_context.CONVERSATION_SKIP if skip is None else skip
+            ),
+            budget=budget,
+        )
     except Exception:  # noqa: BLE001 - context is never worth a failed answer
         log.exception("could not render the room reading for an addressed reply")
         return ""
@@ -2851,56 +2864,67 @@ async def _answer_conversationally(
     # reply has to be earned by an action having actually run.
     tools, context, on_tool = await _ai_admin_turn(update, ctx, msg, room, user)
 
-    # The room, appended to the trusted block. This is what makes an addressed
-    # answer *informed* rather than isolated: "پس همون کاری که گفتی رو بکن" is
-    # only answerable by somebody who has been following what was said. It goes
-    # in the system instruction, never the user turn, because the transcript is
-    # full of text people typed and text people typed must not be presented to
-    # the model as a statement the server is making.
+    # ── Increment Y: the minimum relevant combination ─────────────────────
     #
+    # The four sources are independent and are selected, not preloaded. The
+    # message's own shape decides: a self-contained question pays for no room
+    # context at all, while a reply, an anaphor, an instruction or a
+    # continuation is evidence that the message depends on something outside
+    # itself and gets the room. The decision is deterministic (no second model
+    # call), it is a pure function of the message, and it never fails the turn:
+    # every reader it consults is already fail-soft.
+    #
+    # The room goes in the system instruction, never the user turn, because the
+    # transcript is full of text people typed and text people typed must not be
+    # presented to the model as a statement the server is making.
+    plan_reading = context_plan.read(
+        text,
+        kind=kind,
+        reply=getattr(msg, "reply_to_message", None) is not None,
+        media=parts is not None,
+    )
+
     # The window is read **once** and handed to both the transcript and the
     # reading beside it. The reading is the server's understanding of the
     # message being answered — the same ``awareness_context.blocks`` a pass
     # renders — so an addressed «همون رو بن کن» is resolved by the resolver
-    # rather than left to the model over raw text. Both are gated on the layer
-    # being on, so switching awareness off still gives the speed back.
-    room_window: list[dict] = []
+    # rather than left to the model over raw text.
+    room_text = ""
     reading = ""
-    if awareness.enabled():
+    if plan_reading.wants_awareness and awareness.enabled():
         room_window = awareness.window(
             room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
-        )
-        context = (context or "") + awareness.room_block(
-            room.id,
-            limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES)),
-            messages=room_window,
         )
         reading = _room_reading(
             room.id,
             message_id=int(getattr(msg, "message_id", 0) or 0),
             messages=room_window,
+            skip=awareness_context.CONVERSATION_SKIP | context_plan.reading_skip(),
+            budget=int(config.NEXUS_AWARENESS_CONTEXT_CHARS),
         )
-        context = context + reading
+        # The window is bounded by what is left of the *selectable* budget once
+        # the reading and the two personal blocks have their share. It is the
+        # largest, least bounded source, so it is the one that yields. The
+        # administrative roster is not part of that budget: it is never dropped,
+        # so reserving for it would only shrink the room.
+        room_text = awareness.room_block(
+            room.id,
+            limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES)),
+            messages=room_window,
+            budget=context_plan.room_budget(),
+        )
 
     # Long-term memory and conversational state are their own sources and never
-    # a dependency of the awareness layer. They reach this turn through the room
-    # reading when that reading was built — the ``user_memory`` and
-    # ``conversation_state`` sources are two of its blocks — so they are rendered
-    # here only when the reading is missing: awareness switched off, the message
-    # not in the window, or the reading failing. Without this, turning awareness
-    # off would silently take the person's own memory and the active task with
-    # it, which is exactly the coupling the four-source architecture exists to
-    # remove. Each is a bounded read and its failure is empty text, never an
-    # error.
-    if not reading:
-        context = (context or "") + _memory_context(room.id, user.id, text)
-        context = context + _state_context(room.id, user.id, text)
-
-    # The server's own date, so the model can date what it reads instead of
-    # treating the newest claim in the room or on a page as today. Appended here,
-    # beside the room block, because this is the one place both the direct answer
-    # and the search-grounded answer pass through.
-    context = context + _today_block(time.time())
+    # a dependency of the awareness layer. They are rendered here — never inside
+    # the reading, which is told to skip them — so the plan can gate them and
+    # de-duplicate them against the room it selected. Each is a bounded read and
+    # its failure is empty text, never an error.
+    state_block = (
+        _state_context(room.id, user.id, text) if plan_reading.wants_state else ""
+    )
+    memory_block = (
+        _memory_context(room.id, user.id, text) if plan_reading.wants_memory else ""
+    )
 
     # The live web, as its own workload, and only when it is actually wanted.
     # Three outcomes, not two: an explicit request or an explicitly *current*
@@ -2926,6 +2950,7 @@ async def _answer_conversationally(
     # the person sees.
     finding = None
     answer_text = text
+    search_block = ""
     if chat.is_enabled() and web_search.enabled():
         now = time.time()
         pending = web_search.pending_offer(room.id, user.id, now=now)
@@ -2963,11 +2988,29 @@ async def _answer_conversationally(
                     ctx, room.id, config.NEXUS_SEARCH_CONFIRM_TEXT, reply_to
                 )
                 return _timing(True)
+        search_block = ""
         if finding is not None:
             if finding.usable:
-                context = context + web_search.untrusted_block(finding)
+                search_block = web_search.untrusted_block(finding)
             elif finding.attempted:
-                context = context + web_search.failure_block()
+                search_block = web_search.failure_block()
+
+    # The composition, in one deterministic order and under one hard ceiling.
+    # The plan is an application-side decision object: it is logged (names,
+    # reasons and sizes only — never a word of the message) and then discarded.
+    plan = context_plan.compose(
+        plan_reading,
+        admin=context or "",
+        room=room_text,
+        awareness=reading,
+        state=state_block,
+        memory=memory_block,
+        date=_today_block(time.time()),
+        search=search_block,
+        message=text,
+    )
+    context = plan.text
+    log.info("chat context user=%s chat=%s %s", user.id, room.id, plan.summary())
 
     result = await chat.reply(
         room.id,

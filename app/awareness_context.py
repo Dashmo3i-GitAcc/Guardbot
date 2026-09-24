@@ -821,7 +821,9 @@ def build_ctx(
     )
 
 
-def blocks(ctx: Ctx, *, skip: frozenset[str] = frozenset()) -> str:
+def blocks(
+    ctx: Ctx, *, skip: frozenset[str] = frozenset(), budget: int = 0
+) -> str:
     """Render every source this batch calls for, within the pass-wide ceiling.
 
     Tier order, then declaration order, and the first tier to be exhausted stops
@@ -835,8 +837,13 @@ def blocks(ctx: Ctx, *, skip: frozenset[str] = frozenset()) -> str:
     and the room it already states, and the database-backed room memory it does
     not pay for. A skipped source is not rendered and not counted against the
     ceiling, so a borrower gets the same reading for less.
+
+    ``budget`` overrides the pass-wide ceiling for a caller that has already
+    spent part of the prompt on something else — increment Y's composed context
+    hands the reading whatever room is left under ``NEXUS_CONTEXT_CHARS``. It
+    defaults to the configured ceiling, so every existing caller is unchanged.
     """
-    total = max(0, int(config.NEXUS_AWARENESS_CONTEXT_CHARS))
+    total = max(0, int(budget or config.NEXUS_AWARENESS_CONTEXT_CHARS))
     deep = bool(config.NEXUS_AWARENESS_CONTEXT_DEEP)
     out: list[str] = []
     used = 0
