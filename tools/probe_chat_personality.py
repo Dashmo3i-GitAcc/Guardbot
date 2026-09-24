@@ -107,18 +107,25 @@ class _Ctx:
 
 # ── The contract, as checks ───────────────────────────────────────────────
 HARD_BANS = (
-    "قربان", "سرور", "جناب", "بنده", "قربون‌سربازیت", "قربونسربازیت",
+    "قربان", "سرور", "جناب", "قربون‌سربازیت", "قربونسربازیت",
     "😂", "🤣", "😅", "خخخ", "ههه",
     "بابا", "داداش", "قربونت", "حرومزاده",
 )
 SOFT_FILLER = ("حتماً", "البته", "در خدمت شما", "با کمال میل", "اگر سؤال دیگری دارید")
 SEXUAL = ("سکس", "جنسی", "لخت", "شهوت", "سکسی", "برهنه")
 _DOC_LINE = re.compile(r"^\s*(#{1,6}\s|[-*•]\s|\d+[.)]\s)")
+# «بنده» is the servile vocative the persona bans. «بنده خدا» ("some poor guy")
+# is an ordinary Persian idiom and must not be flagged — a live run showed the
+# naive substring check reporting it as a violation, which was a checker bug and
+# not a behaviour one.
+_SERVile_RE = re.compile(r"بنده(?![\s\u200c]*خدا)")
 
 
 def _check(answer: str, *, sexual_ok: bool = False) -> dict:
     answer = answer or ""
     violations = [tok for tok in HARD_BANS if tok in answer]
+    if _SERVile_RE.search(answer):
+        violations.append("بنده")
     doc_lines = [
         line for line in answer.splitlines() if _DOC_LINE.match(line)
     ]
