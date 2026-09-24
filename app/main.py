@@ -3181,13 +3181,14 @@ async def _answer_conversationally(
     )
     context = plan.text
     # The owner is recognised by the server, from the configured id, and the
-    # familiarity amendment is prepended to the trusted context here. It is
-    # never inferred by the model, and never from a username, a display name, a
-    # Telegram admin status or anything the speaker wrote — `rbac.is_owner`
-    # compares the id and nothing else. The amendment is tone only; it grants no
-    # capability, and every authority gate above this line has already run.
+    # note is prepended to the trusted context here. It is never inferred by the
+    # model, and never from a username, a display name, a Telegram admin status
+    # or anything the speaker wrote — `rbac.is_owner` compares the id and nothing
+    # else. It is *data* (who is speaking), not a personality: how to talk to
+    # somebody you know lives once in `chat.SYSTEM_INSTRUCTION`, and this grants
+    # no capability. Every authority gate above this line has already run.
     if rbac.is_owner(user.id):
-        context = chat.OWNER_AMENDMENT + context
+        context = chat.OWNER_NOTE + context
     log.info("chat context user=%s chat=%s %s", user.id, room.id, plan.summary())
     # End of context assembly: the plan is built and the system instruction is
     # final. What follows is the model call.

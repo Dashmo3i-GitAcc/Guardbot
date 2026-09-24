@@ -468,10 +468,11 @@ def test_the_prompt_allows_any_topic():
 # The behavioural reference is the historical Chat (commit 3243067). These
 # assert the parts of that behaviour the Nexus-era prompt had let drift — short
 # and conversational, no document structure, no assistant filler, no greeting
-# loops — plus the joking-around layer and its hard boundaries, which the
-# historical persona did not have. They are prompt-text assertions on purpose:
-# the prompt is the behaviour, and a rule that is not in it is a rule the model
-# was never given.
+# loops — plus the parts the rebuild consolidated into the *same* persona rather
+# than leaving as competing layers: reactive humour, the ban on titles and
+# servile address, and the reading of context as data. They are prompt-text
+# assertions on purpose: the prompt is the behaviour, and a rule that is not in
+# it is a rule the model was never given.
 def test_the_prompt_asks_for_a_short_informal_chat():
     text = chat.SYSTEM_INSTRUCTION
     assert "Two or three sentences is usually right" in text
@@ -504,20 +505,31 @@ def test_the_prompt_keeps_the_conversation_on_the_persons_topic():
     assert "If they change the subject, follow the new one" in text
 
 
-def test_the_prompt_allows_playful_banter():
+def test_the_prompt_allows_playful_banter_reactively():
+    """Humour is a principle in the one persona, and it is reactive.
+
+    The earlier version had a separate "Joking around" section with a canned
+    example («خودتی 😂 …»), which is exactly the shape that produced automatic
+    laughter. The rebuild states the principle and makes it conditional on the
+    moment instead of teaching a line.
+    """
     text = chat.SYSTEM_INSTRUCTION
-    assert "Joking around" in text
     assert "tease back" in text
+    assert "because the moment calls for it" in text
+    # The canned example is gone, and laughter-as-punctuation is named.
+    assert "خودتی" not in text
+    assert "laughter as punctuation" in text
+    assert "😂" in text  # named only to forbid it
 
 
 def test_the_prompt_bounds_banter_against_escalation():
     """Playful is not hostile: the hard limits are stated, not implied."""
     text = chat.SYSTEM_INSTRUCTION
     assert "Never threaten anyone" in text
-    assert "Never use slurs" in text
+    assert "never use slurs" in text
     assert "never attack anyone's family" in text
     assert "ناموسی" in text
-    assert "Never humiliate anyone sexually" in text
+    assert "never humiliate anyone sexually" in text
 
 
 def test_the_prompt_drops_banter_when_the_person_is_serious():

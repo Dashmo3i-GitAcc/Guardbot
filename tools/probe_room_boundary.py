@@ -196,8 +196,8 @@ async def run(handler, cid, kind, uid, text, mode, reply_to_bot=True):
         "awareness_calls": len(awareness),
         "remember_calls": len(remembered),
         "caller": (calls[0]["user"] if calls else None),
-        "owner_amendment": bool(
-            calls and calls[0]["context"].startswith(chat.OWNER_AMENDMENT)
+        "owner_note": bool(
+            calls and calls[0]["context"].startswith(chat.OWNER_NOTE)
         ),
     }
 
