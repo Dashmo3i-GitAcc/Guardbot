@@ -3305,7 +3305,7 @@ continuation point), then verify: `git status`, `git rev-parse HEAD`,
 pushed to both remotes (`origin` = mo3iiibest77-hub, `dashmo3i` =
 Dashmo3i-GitAcc). `main` and the annotated tag `release-base/nexus-intel` both
 still `00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is
-untouched**, and it is an ancestor of HEAD. Suite **3564 passed, 0 failed** (was
+untouched**, and it is an ancestor of HEAD. Suite **3568 passed, 0 failed** (was
 3484). **Not merged, not deployed.**
 
 **What Y is, and what it is not.** Y is *not* "give Gemini more context". It is a
@@ -3398,7 +3398,7 @@ path, neither visible from reading the module in isolation:
 * **the selector's own cost**: `read` **~0.15 ms p50 / ~0.5 ms p95**, `compose`
   **~0.02 ms p50 / ~0.08 ms p95** (host-dependent; the test floor is p95 < 5 ms);
   **0** model calls in the module's source (asserted).
-* full suite **3564 passed, 0 failed**.
+* full suite **3568 passed, 0 failed**.
 
 **Live probe — NOT RUN, and why.** The brief's probe compares a baseline against
 Conversation + Awareness + State + relevant Memory and measures answer quality,

@@ -1224,7 +1224,7 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
              the assembly latency (p50 ~15–17 -> ~10–12 ms, p95 ~36–41 -> ~21–29
              ms) moves with host load and is quoted as a range. The selector
              itself: read ~0.15/0.5 ms, compose ~0.02/0.08 ms p50/p95 (the test
-             floor is p95 < 5 ms); 0 model calls (asserted). Suite 3564 passed,
+             floor is p95 < 5 ms); 0 model calls (asserted). Suite 3568 passed,
              0 failed.
   Probe:     NOT RUN — the answer-quality probe needs a chat provider credential
              and a live room; the numbers above are the SERVER's contribution and
@@ -1341,7 +1341,7 @@ HEAD:     see AgentMD.md §54.9 (the after-Y checkpoint). The previous checkpoin
           Docs commits sit on top — a commit that names its own count would be
           wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3564 passed, 0 failed
+Suite:    3568 passed, 0 failed
 Corpus:   141 cases, version 18 (tools/eval_intent.py); 27 labelled cases
           (tools/eval_context.py — increment Y's deterministic context benchmark)
 Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the

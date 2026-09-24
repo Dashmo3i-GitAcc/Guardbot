@@ -292,8 +292,9 @@ against the repository when this file was created.
     relevant combination** of Conversation, Awareness, State and Memory, with a
     fast path (no room window) for simple messages, no second model call and no
     new table. Measured: 27/27 labelled cases in `tools/eval_context.py`, corpus
-    context 29.1 % smaller, real-path context 11.3 % smaller, assembly p50 16.35 →
-    11.09 ms; suite **3564 passed / 0 failed**. Rollback base `main ==
+    context 29.1 % smaller, real-path context 11.3 % smaller
+    (`tools/bench_context_real.py`), assembly p50 ~16 → ~11 ms (host-dependent);
+    suite **3568 passed / 0 failed**. Rollback base `main ==
     release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709`,
     untouched and an ancestor of the branch. See `AgentMD.md` §54.9. Next: **U**
     (adaptive awareness scheduling, same 200-request allowance), then V (not
