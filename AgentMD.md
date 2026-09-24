@@ -5063,6 +5063,77 @@ remotes. The feature's commit chain is `a511ce3` → `69690a0` → `312c07c` →
 
 ---
 
+### 54.22 Checkpoint (2026-09-24, **Chat personality rebuilt + DEPLOYED**) — resume here (supersedes §54.21)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~21:47Z**. Branch **`main`**, commit
+**`f3688e3`** on **both remotes** (`git ls-remote` confirmed), working tree
+clean. **Deployed and live-probed.** This is the current running system.
+
+**The owner's instruction.** Rebuild the Chat behaviour around the exact
+historical baseline **`3243067`** — the old conversational character — as the
+foundation of the *current* implementation. Not a rollback, and not another
+personality layer stacked on the existing one. The persona was to become **one
+coherent behavioural source of truth**, with infrastructure/security/context
+left separate.
+
+**What was wrong.** The Nexus era had grown the persona into a policy document
+with separate tone, joke, owner and repetition sections, and several competed
+over the same decision. The owner's failure example: «نخند حرزاده» answered with
+«چشم قربون‌سربازیت😂 بی‌خیال بابا» — servile address, automatic laughter and
+canned filler instead of a reaction to what was said. Two concrete causes were
+found in the prompt itself: a **canned example** («خودتی 😂 یه سؤال درست حسابی
+بپرس») that *taught* the laughter shape, and an **honorific ban that lived only
+in the owner amendment**, so an ordinary member got no such rule.
+
+**The rebuild.** `chat.SYSTEM_INSTRUCTION` is now the single source: one identity
+(warm, informal, short, Persian, context-driven), reactive humour and register,
+the ban on titles/servile address **for everyone**, the hard boundaries, the
+context-as-data framing, and every security clause verbatim. Removed: the canned
+joke examples, the manufactured-intimacy clause, the separate "Joking around"
+section, the duplicate repetition micro-rule. `OWNER_AMENDMENT` (a competing
+personality) became **`OWNER_NOTE`** — a pure server-stated data line. Kept
+separate as non-personality: `TOOL_AMENDMENT` (a capability correction) and
+`REPETITION_NUDGE` (a retry mechanism). Wiring unchanged: persona + context,
+`temperature=0.8`, `max_output_tokens=1024`.
+
+**Commits.** `3476eea` (persona rebuild + tests, base `fae9604`) and `f3688e3`
+(§53.8 contract). Pushed to both remotes. New
+`tests/test_chat_behavior_contract.py` (20 tests) plus the rewritten
+`test_owner_personality.py` and updated `test_chat.py`. **Full suite: 3757
+passed / 0 failed** (263.4 s; was 3738).
+
+**Deploy.** Rollback tag **`guardbot-guardbot:pre-chat-rebuild`**
+(`5769e3678e0f`). New image **`0b259c42ff33`**; container recreated, **Up**,
+**`RestartCount=0`**. The running `/srv/app/chat.py` is **byte-identical** to
+`HEAD:app/chat.py` (sha256 `76965522a7ddae71…`), and the running module has
+`OWNER_NOTE`, no `OWNER_AMENDMENT`. Production `authorized_groups` still holds
+its **2** rooms; the awareness pass is serving normally.
+
+**Live acceptance probe (self-cleaning, in-container, real model).**
+`tools/probe_chat_personality.py` — **10/10 scenarios passed, 0 violations**.
+Highlights: the failure class «نخند حرزاده» answered «من که نخندیدم، واقعاً هم
+وضعیتت روی اعصابه…» (a reaction, none of the old shape); owner turn «سلام. بد
+نیستم، تو چطوری؟» (familiar, no honorifics, no announcement); user-initiated
+humour teased back with no canned laughter; a user-initiated adult joke declined
+naturally rather than escalated; an innocent message drew no sexual register; the
+normal, serious and slang turns stayed in register. Composition verified
+in-process: member instruction == persona, owner note is data-only. Residue sweep
+across every table for the synthetic ids = **0**; `chat_usage`/`gemini_daily`
+deliberately untouched.
+
+**Architecture preserved.** No Pool, credential, isolation, rate-limit, breaker,
+cooldown, failover, context-assembly, Awareness-allocation, authorization,
+tenant-scoping or acquisition change; V remains **inactive**; the `--arm
+context` probe stays frozen. Rollback: `docker tag
+guardbot-guardbot:pre-chat-rebuild guardbot-guardbot:latest && docker compose up
+-d`.
+
+**NEXT STEP.** The feature is live. Do **not** redeploy without the owner's
+go-ahead. To resume: `git status` (clean), `git rev-parse HEAD` (this
+checkpoint's commit on top of `f3688e3`), `git ls-remote` on both remotes.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or
