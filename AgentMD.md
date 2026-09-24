@@ -3754,8 +3754,13 @@ the continuation point), then verify: `git status`, `git rev-parse HEAD`,
 
 ### 54.12 Checkpoint (2026-09-24, post-audit cleanup) — resume here (supersedes §54.11)
 
-**Where the work is.** Branch `develop/nexus-intelligence-evolution`. This
-increment sits on §54.11 (`06f31a0`, the Token & AI Workload Audit). `main` and
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`, HEAD
+`50a45ee` ("fix: close the U residual and finalize post-audit cleanup"),
+**committed and pushed to both remotes** (`origin` = mo3iiibest77-hub,
+`dashmo3i` = Dashmo3i-GitAcc; both report `50a45ee` and are 0/0 ahead/behind;
+the public raw fetch of `app/awareness_schedule.py` is byte-identical to local,
+sha256 `8f3ced58…`). This increment sits on §54.11 (`06f31a0`, the Token & AI
+Workload Audit). `main` and
 the annotated tag `release-base/nexus-intel` are both still
 `00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
 and is an ancestor of HEAD. **Not merged, not deployed.** No credential was
@@ -3849,8 +3854,10 @@ claimed from a run that did not complete.
 **Tests.** Targeted (this increment's files, run in the project image):
 `tests/test_objects.py tests/test_requests.py tests/test_intent_eval.py
 tests/test_awareness_schedule.py tests/test_awareness_schedule_eval.py` →
-**247 passed, 0 failed**. The full-suite run for this checkpoint is recorded in
-the commit that follows this section (baseline before it: **3640 passed**).
+**247 passed, 0 failed**. Full suite, run in the same image →
+**3658 passed, 0 failed** (baseline before this increment: **3640 passed**; this
+increment adds 16 tests — 13 deterministic, 3 real-path — the remaining +2
+predate the increment).
 
 **V — explicitly, as required.**
 * **NOT IMPLEMENTED** — no routing change, no model allocation, no config
@@ -3864,22 +3871,22 @@ the commit that follows this section (baseline before it: **3640 passed**).
 leave the branch unmerged; `main` at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709`
 is the production state and is an ancestor of HEAD.
 
+**State at checkpoint close.** The commit and the push are **done**: HEAD
+`50a45ee` on both remotes, working tree clean, `main` still `00c5d1d…`, full
+suite **3658 passed / 0 failed**. Nothing is pending except the live run below.
+
 **NEXT STEP (do this first in the next session).**
 1. Read this section, `docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5/U
    RESULT's residual-closed note, §7) and `docs/TOKEN_AI_WORKLOAD_AUDIT.txt`.
-2. Verify: `git status` (clean), `git rev-parse HEAD`, `git rev-parse main`
-   (`00c5d1d…`), and `git ls-remote origin
-   refs/heads/develop/nexus-intelligence-evolution` — the branch tip must equal
-   local HEAD.
-3. Run the full suite in the project image:
-   `docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot bash -lc "pip
-   install -q pytest >/dev/null 2>&1; python -m pytest -q"`. It must be **0
-   failed**; report the new count against the 3640 baseline.
-4. Do **NOT** start V, do **NOT** merge, do **NOT** deploy, do **NOT** raise the
-   200-request allowance, and do **NOT** reallocate tokens. The only outstanding
-   work is a **live** run, and it needs a healthy provider:
+2. Verify (should already hold): `git status` clean, `git rev-parse HEAD` =
+   `50a45ee`, `git rev-parse main` = `00c5d1d…`, and `git ls-remote origin
+   refs/heads/develop/nexus-intelligence-evolution` = local HEAD.
+3. The only outstanding work is a **live** run, and it needs a healthy provider:
    `python tools/eval_chat_quality.py --arm context --samples 2 --max-calls 60`
-   (Y's probe). V's `--arm model` stays unrun until the owner authorises V.
+   (Y's probe). If the provider is healthy, run it and record the before/after.
+4. Do **NOT** start V (its `--arm model` stays unrun until the owner authorises
+   V), do **NOT** merge, do **NOT** deploy, do **NOT** raise the 200-request
+   allowance, and do **NOT** reallocate tokens.
 5. If the provider is still 503, record it again as PROVIDER UNAVAILABLE and
    stop — do not invent a result.
 
