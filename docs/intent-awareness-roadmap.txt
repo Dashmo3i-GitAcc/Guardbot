@@ -876,8 +876,10 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
     * per-user prune-to-cap = 0.021 ms p50; retrieval of one person's items =
       0.033 ms p50 / 0.13 ms p95.
     * a whole-table ``NOT IN`` prune over 90k rows is the one expensive statement
-      (seconds), so the global cap is enforced rarely and the hot-path prune is
-      the indexed per-user one.
+      — measured at **266 ms**, roughly three orders of magnitude above the
+      indexed per-user delete — so the global cap is enforced rarely and the
+      hot-path prune is the indexed per-user one. (The age delete is indexed and
+      cheap: 0.19 ms with no rows to remove.)
   What the cap actually bounds is therefore the *quality property*, not cost: a
   memory is only useful if the relevant item can be surfaced, and retrieval into
   a ~300-character block can surface at most ~4 items. So the cap is set with
