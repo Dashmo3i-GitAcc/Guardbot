@@ -517,6 +517,73 @@ def test_the_object_denial_check_is_not_vacuous():
     assert unfixed["object_denies_a_person_cases"] >= 3
 
 
+# ── The graph's focus sentence, scored against the edges ──────────────────
+def test_the_graph_never_says_the_room_converged_on_one_member():
+    """The word "converged" is a claim about the room, not about the edge count.
+
+    ``anaphoric-split-room`` is one member replying twice to each of two people,
+    and the corpus's own note calls that room "split". The sentence still said
+    the room had "converged on 22", because the focus held two *edges* — both
+    from the same member. The check re-derives the claim from the rendered id
+    and the raw edges, so it cannot pass by agreeing with ``converged()``.
+    """
+    m = result()
+    assert m["graph_claims_convergence_cases"] == 0
+    split = [
+        r["id"]
+        for r in m["detail"]
+        if "all from one member" in r["graph_prose"]
+    ]
+    assert split, "the single-member split shape left the corpus"
+
+
+def test_the_graph_convergence_check_is_not_vacuous():
+    """Putting the edge-count gate back brings the overclaim back.
+
+    The check reads the rendered sentence, so it stays true after the fix. This
+    reconstructs the unfixed gate on the reader, which is the point: the check is
+    on the prose the model reads, not on the reader's internals.
+    """
+    original = room_state.RoomState.converged
+    try:
+        room_state.RoomState.converged = lambda self: self.focus_count >= 2
+        unfixed = eval_intent.evaluate(eval_intent.load_cases())
+    finally:
+        room_state.RoomState.converged = original
+    assert unfixed["graph_claims_convergence_cases"] >= 1
+
+
+# ── The act sentence's evidence word ──────────────────────────────────────
+def test_the_act_sentence_quotes_a_word_the_message_holds():
+    """The parenthetical names a token of the message, or nothing.
+
+    R's baseline read all 112 rendered act sentences: the template reports
+    ``why[0]`` verbatim, and ``read_act`` always takes its evidence word from
+    the message's own tokens. No defect was found — the floor is kept so a
+    reader that interpolates a word the message never held fails here rather
+    than reaching the prompt.
+    """
+    m = result()
+    assert m["act_quote_not_in_anchor_cases"] == 0
+    quoting = [r["id"] for r in m["detail"] if "«" in r["act_why"]]
+    assert len(quoting) >= 50, len(quoting)
+
+
+def test_the_act_quote_check_is_not_vacuous():
+    """A sentence quoting a word the message never held is caught."""
+    original = discourse.render_act
+    try:
+        discourse.render_act = lambda act: (
+            original(act).replace(act.why[0], "the directive «zzz»")
+            if act and act.why
+            else original(act)
+        )
+        broken = eval_intent.evaluate(eval_intent.load_cases())
+    finally:
+        discourse.render_act = original
+    assert broken["act_quote_not_in_anchor_cases"] >= 1
+
+
 # ── The assembled context ─────────────────────────────────────────────────
 def test_the_context_is_assembled_for_every_case():
     m = result()

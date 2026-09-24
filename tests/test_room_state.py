@@ -183,6 +183,29 @@ def test_one_reply_edge_is_not_a_convergence():
     assert "not a convergence" in R.render_graph(state)
 
 
+def test_one_member_replying_twice_is_not_a_convergence():
+    """The word is about the room, and one member is not the room.
+
+    Two replies at the same person used to be enough for "the room's replies
+    have converged on X" — but both edges can come from the same member, which
+    is one voice, not two. The corpus case ``anaphoric-split-room`` is exactly
+    this: one member replying twice to each of two people, and the corpus's own
+    note calls that room "split". The count over the edges is still reported;
+    only the word is withheld.
+    """
+    rows = [
+        row(55, "سارا تو هم", 920, mid=2, reply=22),
+        row(55, "سارا بس کن", 940, mid=3, reply=22),
+    ]
+    state = R.read_state(rows, row(33, "خب", 1000, mid=4))
+    assert (state.focus_id, state.focus_count) == (22, 2)
+    assert state.focus_sources == (55,)
+    assert state.converged() is False
+    out = R.render_graph(state)
+    assert "converged on" not in out
+    assert "all from one member" in out
+
+
 def test_a_tie_is_broken_by_the_most_recent_reply():
     rows = [
         row(22, "الف", 920, mid=2, reply=11),

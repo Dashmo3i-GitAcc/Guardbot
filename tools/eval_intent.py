@@ -187,6 +187,46 @@ def _object_denies_a_person(object_block: str, resolution) -> bool:
     return _OBJECT_DENIES_A_PERSON in object_block and bool(resolution.candidates)
 
 
+def _graph_claims_convergence(graph_block: str, state) -> bool:
+    """Whether the graph says "converged" on evidence one member can give.
+
+    The focus sentence reads "The room's replies have converged on X (N of M)".
+    "The room's replies" is a claim about the *room*, and one member replying
+    twice is not the room — but the sentence was gated on the edge count alone,
+    so ``anaphoric-split-room`` (one member replying twice to each of two people,
+    the corpus's own note calling that room "split") rendered as a convergence.
+
+    The check is re-derived from the **rendered** id and the raw edges, not from
+    ``converged()``, so it cannot pass by agreeing with the reader's own gate —
+    the same independence J's ``_span_contradicts`` and M's ``_CLITIC_FORMS``
+    keep from the reader they score.
+    """
+    marker = "converged on "
+    index = graph_block.find(marker)
+    if index < 0:
+        return False
+    focus = int(graph_block[index + len(marker):].split(" ", 1)[0])
+    sources = {e.source_id for e in state.edges if e.target_id == focus}
+    return len(sources) < 2
+
+
+def _act_quote_not_in_anchor(act_block: str, text: str) -> bool:
+    """Whether the act sentence quotes a word the message does not contain.
+
+    The sentence reads "The server reads this message as X (the directive «W»)"
+    — a claim that W, *in this message*, is what makes it an X. The reader takes
+    W from the message's own tokens, so this is already true; the check is kept
+    so a future reader that interpolates a word the message never held (the
+    copula «ادمینه» was one such candidate, quoting a stem the message did not
+    spell) fails a floor rather than reaching the prompt. R found no defect here
+    — the template reports ``why[0]`` verbatim — so the metric stays 0.
+    """
+    if "«" not in act_block:
+        return False
+    word = act_block.split("«", 1)[1].split("»", 1)[0]
+    return word not in set(discourse._tokens(text))
+
+
 # ── The thread's content words ────────────────────────────────────────────
 # The thread reading is the one heuristic in the room-state reader: whether the
 # anchor's *content words* overlap the words before it. Its verdict was scored;
@@ -427,6 +467,10 @@ def evaluate(cases: dict) -> dict:
         elapsed_us = (time.perf_counter() - started) * 1_000_000
         addressed = addressing.detect(anchor["text"]).addressed
         act = discourse.read_act(anchor["text"])
+        # The act sentence as the model reads it — R scores the rendered product,
+        # and until now the harness held only ``act.why`` and never the line it
+        # becomes.
+        act_block = discourse.render_act(act)
         questions = discourse.open_questions(window)
         questions_block = discourse.render_questions(questions)
 
@@ -536,6 +580,11 @@ def evaluate(cases: dict) -> dict:
                 "act_copula_directive": _copula_directive(
                     _quoted_directive(act.kind, act.why[0] if act.why else "")
                 ),
+                # The act sentence's evidence word, scored against the message:
+                # a quote the message never held is evidence that is not there.
+                "act_quote_not_in_anchor": _act_quote_not_in_anchor(
+                    act_block, anchor["text"]
+                ),
                 "expected_questions": expected_questions,
                 "got_questions": [q.text for q in questions],
                 "questions_block_chars": len(questions_block),
@@ -556,6 +605,13 @@ def evaluate(cases: dict) -> dict:
                 "got_relation": state.relation,
                 "graph_chars": len(graph_block),
                 "thread_chars": len(thread_block),
+                # The graph's focus sentence, scored as prose against the edges
+                # the reader held: the edge/focus comparison above cannot see a
+                # word the sentence chose on evidence too thin to carry it.
+                "graph_prose": graph_block.strip(),
+                "graph_claims_convergence": _graph_claims_convergence(
+                    graph_block, state
+                ),
                 # The words the thread reading named, checked against the
                 # specification of a clitic. Both should be empty; both were not.
                 "anchor_clitic_words": _clitic_content_words(anchor["text"]),
@@ -812,6 +868,12 @@ def _metrics(detail: list[dict]) -> dict:
         "act_copula_directives": sum(
             1 for r in detail if r["act_copula_directive"]
         ),
+        # The act sentence quoting evidence the message does not contain. R
+        # found no defect here; the floor is kept so a reader that interpolates
+        # a word the message never held fails rather than reaching the prompt.
+        "act_quote_not_in_anchor_cases": sum(
+            1 for r in detail if r["act_quote_not_in_anchor"]
+        ),
         # Per class, because the corpus is lopsided — most messages in a
         # moderation room are instructions — and a single accuracy figure would
         # be a number a constant could also get. This is the honest shape.
@@ -898,6 +960,12 @@ def _metrics(detail: list[dict]) -> dict:
         },
         "graph_chars_max": max((r["graph_chars"] for r in detail), default=0),
         "thread_chars_max": max((r["thread_chars"] for r in detail), default=0),
+        # The focus sentence's *word*, scored against the edges. "The room's
+        # replies have converged on X" claims more than the edge count can
+        # support when the replies at X all come from one member. Should be 0.
+        "graph_claims_convergence_cases": sum(
+            1 for r in detail if r["graph_claims_convergence"]
+        ),
         # The content words the thread reading named, scored against the clitic
         # specification. Both should be zero: a clitic is a bound morpheme, not
         # a topic. `anchor_clitic_cases` counts the anchors whose content words
@@ -1099,6 +1167,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  abstentions                {m['act_abstentions']}",
         f"  copula directives          {m['act_copula_directives']} "
         f"(a directive quoting the copula «ه» — should be 0)",
+        f"  quotes the message holds   {m['act_quote_not_in_anchor_cases']} quote a word "
+        "the message does not contain (should be 0)",
         "  per class (correct/total)  "
         + "  ".join(
             f"{kind} {v['correct']}/{v['total']}"
@@ -1145,6 +1215,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  graph / thread chars max   {m['graph_chars_max']} / {m['thread_chars_max']}",
         f"  the words, scored          {m['anchor_clitic_cases']} anchors carry a clitic as a "
         f"content word; {m['thread_shared_clitic_cases']} reach a verdict on one (both should be 0)",
+        f"  the sentence, scored       {m['graph_claims_convergence_cases']} say the room "
+        "converged on one member's replies (should be 0)",
         "",
         f"the things a demonstrative may point at (class over {m['named_cases']} labelled)",
         f"  media exact                {m['media_exact']} / {m['cases']}",
@@ -1257,8 +1329,10 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or r["entity_offers_things_for_a_person"]
         or r["entity_gives_an_order"]
         or r["object_denies_a_person"]
+        or r["graph_claims_convergence"]
         or r["anchor_clitic_words"] or r["shared_clitic_words"]
         or r["act_copula_directive"]
+        or r["act_quote_not_in_anchor"]
         or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])

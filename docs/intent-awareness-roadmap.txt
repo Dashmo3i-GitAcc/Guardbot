@@ -248,6 +248,36 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
               unchanged; objects.render 1.085 -> 1.064 us/case (noise).
               Suite 3240. Only production file touched: app/objects.py.
 
+1.2b INCREMENT R (after the docs commit ef3c561)
+
+  R  (this run)  room_state — the graph's "converged on" word, and the act's why.
+              Finish of the prose-scoring programme. TWO claims scored.
+              (1) the graph overclaimed: anaphoric-split-room (one member
+              replying twice to each of two people; the corpus's own note calls
+              that room "split") rendered "The room's replies have converged on
+              22 (2 of 4)" — two EDGES at the focus, both from member 55.
+              RoomState.converged() was gated on the edge count alone. Fix: a new
+              focus_sources property (the distinct members replying to the
+              focus) and converged() = len(focus_sources) >= 2; render_graph's
+              weaker branch says "N replies were aimed at X, all from one
+              member; that is not a convergence". Metric
+              graph_claims_convergence_cases 1 -> 0; the four genuine
+              convergences still render "converged on". Graph block chars mean
+              115.8 -> 116.0, max 239 -> 265.
+              (2) the act was already correct: all 112 rendered act sentences
+              report why[0] verbatim, the evidence word is always a token of the
+              message, and a claimed act always has a non-empty why. No
+              production change; the harness now renders the act sentence
+              (it held only act.why before) and floors
+              act_quote_not_in_anchor_cases at 0.
+              Harness gained graph_prose, graph_claims_convergence,
+              graph_claims_convergence_cases, act_quote_not_in_anchor,
+              act_quote_not_in_anchor_cases. Tests: 5 new (1 room_state, 4
+              intent_eval incl. 2 non-vacuity). converged() 0.233 -> 0.861 us
+              (called once per graph render; render_graph within noise).
+              0 Gemini calls, no DB change, no source/budget/runtime-path change;
+              only production file touched: app/room_state.py. Suite 3240 -> 3245.
+
 1.3 ARCHITECTURAL / SECURITY BOUNDARIES PRESERVED (verified in AgentMD §53.7)
 --------------------------------------------------------------------------------
 * Readers are EVIDENCE, NEVER A DECISION. Nothing branches on any reader; none
@@ -290,12 +320,14 @@ no runtime path (the readers are pure modules surfaced as prompt sources).
 2. PARTIALLY COMPLETED
 --------------------------------------------------------------------------------
 
-2.1 THE "SCORE THE RENDERED PRODUCT" PROGRAMME — 5 of 7 blocks scored
+2.1 THE "SCORE THE RENDERED PRODUCT" PROGRAMME — COMPLETE (7 of 7 blocks)
 --------------------------------------------------------------------------------
-Started in J, extended by K, L, M, O, P and Q. The method: re-derive the check
-from the rendered prose, independent of the reader's internals, so the check
-cannot pass by agreeing with a mistake inside the reader. It has found a real
-defect EVERY time it was applied.
+Started in J, extended by K, L, M, O, P and Q, finished by R. The method:
+re-derive the check from the rendered prose, independent of the reader's
+internals, so the check cannot pass by agreeing with a mistake inside the
+reader. It found a real defect in almost every application; the two clean ones
+are M's named evidence words (the reader was right and the words were wrong,
+which is the same class) and R's act half (the template reports why[0] verbatim).
 
   SCORED: the time sentence (J, when_prose), the entity block's two claims
           (K/L, entity_claims_a_pointer / entity_offers_things_for_a_person /
@@ -303,10 +335,12 @@ defect EVERY time it was applied.
           thread_shared_clitic_cases), the act block's quoted directive (O,
           act_copula_directives), the referent block (P, referents_prose),
           the object line against the block beside it (Q,
-          object_denies_a_person_cases).
-  NOT SCORED: the ROOM-STATE GRAPH's "converged on" wording, and the ACT
-          BLOCK's remaining "why" wording beyond the quoted-directive floor.
-          Named as the next thing in §55.5, §58.5 and §59.5.
+          object_denies_a_person_cases), the GRAPH's "converged on" sentence
+          (R, graph_claims_convergence_cases), and the act sentence's quoted
+          evidence word (R, act_quote_not_in_anchor_cases).
+  NO LONGER UNSCORED: both of the two claims §59.5 named as remaining are now
+          scored. R found the graph sentence overclaiming (fixed, §60) and the
+          act sentence faithful (no change; a floor keeps it so).
 
 2.2 A DISCOVERED, UNFIXED DEAD FIELD: objects.Object.source
 --------------------------------------------------------------------------------
@@ -501,7 +535,7 @@ the repository actually shows:
 Ordered by dependency and by measured value. Do NOT start a later one early.
 Do NOT invent stages. An increment is accepted only on the evidence named.
 
-  INCREMENT R — "the graph's word and the act's why"
+  INCREMENT R — "the graph's word and the act's why"  [DONE — see §1.3/R]
   ------------------------------------------------------------------------------
   Purpose:   Finish the prose-scoring programme (2.1). Score the two remaining
              rendered claims — the room-state graph's "converged on" sentence
@@ -524,6 +558,24 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
   Stop rule: if neither sentence is found to claim more than its reader found,
              record the finding (a should-be-zero metric that stays 0 with a
              non-vacuity proof) and STOP — do not invent a change.
+  RESULT:    ONE defect found and fixed, ONE claim found already correct.
+             * the GRAPH overclaimed. `anaphoric-split-room` — one member
+               replying twice to each of two people, the corpus's own note
+               calling that room "split" — rendered "The room's replies have
+               converged on 22 (2 of 4)": two *edges* at the focus, both from
+               member 55. `RoomState.converged()` was gated on the edge count
+               alone. Fixed: it now requires the focus's replies to come from
+               **more than one member** (a new `focus_sources` property), and
+               `render_graph`'s weaker branch says "N replies were aimed at X,
+               all from one member; that is not a convergence". Metric
+               `graph_claims_convergence_cases` 1 → 0; the four genuine
+               convergences (2+ distinct members) still render "converged on".
+             * the ACT was already correct. All 112 rendered act sentences read
+               faithfully: `render_act` reports `why[0]` verbatim, `read_act`
+               always takes its evidence word from the message's own tokens, and
+               a claimed act always has a non-empty `why`. No production change;
+               a floor (`act_quote_not_in_anchor_cases == 0`) keeps it so.
+             See §1.2/R and docs/reference/nexus-awareness.md §60.
 
   INCREMENT S — "the tie the resolver refuses to break"
   ------------------------------------------------------------------------------

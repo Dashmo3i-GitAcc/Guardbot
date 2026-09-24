@@ -31,6 +31,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [57. The copula is not a clitic](#s57)
 - [58. The benchmark scored a different reading than the prompt showed](#s58)
 - [59. The object line ordered the model to ignore the block beside it](#s59)
+- [60. The room's replies converged — on one member](#s60)
 
 ---
 
@@ -3762,8 +3763,100 @@ source/budget change, no runtime-path change; the only production file touched i
 The rule the last two increments keep re-learning: **a block may state what its
 reader found and must not order the model about a fact its reader does not hold.**
 Two of the four orders the prompt used to carry are now evidence (the entity
-block's closing line, §54; this one). The remaining prose claims nothing checks
-are the room-state graph's "converged on" wording and the act block's "why"
-wording beyond `act_copula_directives` (§55.5, §58.5) — both candidates for the
-same treatment, both needing a corpus case that renders them beside a block that
-can contradict them.
+block's closing line, §54; this one). The two prose claims that were left
+unchecked — the room-state graph's "converged on" wording and the act block's
+"why" wording beyond `act_copula_directives` — are both scored in §60, which
+closes the programme.
+
+---
+
+<a id="s60"></a>
+
+## 60. The room's replies converged — on one member
+
+### 60.1 The sentence, and the count under it
+
+The room-state block renders who replied to whom, and — when the replies gather
+on one person — a sentence:
+
+    - The room's replies have converged on 11 (3 of 3).
+
+The word "converged" is a claim about the **room**. The reader that produced it
+counted **edges**: `RoomState.converged()` was `focus_count >= 2`, where
+`focus_count` is how many reply edges point at the most-replied-to target. Two
+edges, and the sentence said the room had converged.
+
+Those two edges can come from the same member. In the corpus,
+`anaphoric-split-room` is exactly that: one member (55) replying twice to سارا
+(22), and another (33) replying twice to رضا (11). The corpus's own note calls
+that room "**split**". The rendered sentence said the room had "converged on 22
+(2 of 4)" — a plurality of the *edges*, all of them from one person, over a room
+that was in fact divided. This is the same class of overclaim the resolver's
+whole feature exists to avoid, and `converged()`'s own docstring named it for
+the single-edge case while missing it for the single-member one.
+
+### 60.2 The fix
+
+`RoomState` gained a `focus_sources` property — the distinct members whose
+replies were aimed at the focus — and `converged()` now requires **more than one
+member**, not just more than one edge:
+
+    @property
+    def focus_sources(self) -> tuple[int, ...]:
+        return tuple(sorted({e.source_id for e in self.edges
+                             if e.target_id == self.focus_id}))
+
+    def converged(self) -> bool:
+        return len(self.focus_sources) >= 2
+
+`render_graph`'s weaker branch was made accurate for the case it now reaches:
+when two replies point at the focus but from one member, it says so — "2 replies
+were aimed at 22, all from one member; that is not a convergence" — rather than
+borrowing the single-reply wording, which would have been false. The four
+genuine convergences in the corpus (two or three distinct members) still render
+"converged on".
+
+### 60.3 The act sentence, read and left alone
+
+R scored two claims, and the second was already correct. `render_act` reads:
+
+    The server reads this message as {kind phrase} ({act.why[0]}).
+
+All 112 rendered act sentences were read. The template reports `why[0]`
+verbatim, `read_act` always takes its evidence word from the message's own
+tokens, and a claimed act always carries a non-empty `why`. No production change
+was made. The harness now **renders the act sentence** — until this increment it
+held only `act.why` and never the line it becomes — and floors a should-be-zero
+metric, `act_quote_not_in_anchor_cases`, on the quote being a token of the
+message.
+
+### 60.4 The numbers
+
+* `graph_claims_convergence_cases` **1 → 0** (the one case was
+  `anaphoric-split-room`).
+* The four genuine convergences still render "converged on": `room-about`,
+  `clitic-anaphoric-room`, `two-users-reply-chain`, `state-converge`.
+* Graph block chars: mean 115.8 → 116.0, max 239 → 265 (the new, longer
+  sentence on the split case).
+* `act_quote_not_in_anchor_cases` 0; `act_copula_directives` 0.
+* Assembled context mean 940.3 / max 1498, ceiling 1500 — unchanged.
+* `converged()` 0.233 → 0.861 µs, called once per graph render; `read_state` +
+  `render_graph` within noise.
+* 0 Gemini calls; no DB change; no source, budget or runtime-path change. The
+  only production file touched is `app/room_state.py`. Suite 3240 → **3245**.
+
+### 60.5 What it leaves
+
+The "score the rendered product" programme — J's method, applied to every block
+the prompt renders — is now **complete**: the time sentence, the entity block's
+two claims, the thread's named words, the act block's quoted directive, the
+referent block, the object line, the graph's focus sentence and the act
+sentence's evidence word all have a check re-derived from the rendered prose.
+
+One shape R did **not** fix, because no corpus case demonstrates it: a room
+**split evenly** between two people *with distinct members on each side* (say
+22→11, 33→11 and 44→22, 55→22) would still render "converged on 22", chosen by
+the most-recent-edge tie-break. The count is disclosed as "(2 of 4)", but the
+word "converged" may be too strong for a tie. Adding a case is what would settle
+it; until then the single-member rule is the demonstrated defect and the tie is
+recorded as an open thread, not guessed at.

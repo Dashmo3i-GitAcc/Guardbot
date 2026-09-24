@@ -212,15 +212,30 @@ class RoomState:
     def __bool__(self) -> bool:
         return bool(self.edges or self.participants or self.relation)
 
-    def converged(self) -> bool:
-        """Whether more than one reply has been aimed at the same person.
+    @property
+    def focus_sources(self) -> tuple[int, ...]:
+        """The distinct members whose replies were aimed at the focus.
 
-        One reply edge is not convergence, and saying "the room has converged on
-        X" on the strength of a single reply would be the kind of overclaim this
-        whole feature exists to avoid. The edge is still reported; only the
-        *word* is withheld.
+        One member replying twice is one voice, not two. The count over the
+        edges says how many *replies* point at the focus; this says how many
+        *people* do, which is what "the room's replies have converged" claims.
         """
-        return self.focus_count >= 2
+        return tuple(
+            sorted({e.source_id for e in self.edges if e.target_id == self.focus_id})
+        )
+
+    def converged(self) -> bool:
+        """Whether more than one *member* has replied to the same person.
+
+        Two conditions, and the second was missing: more than one reply (the
+        edge count) **and** those replies from more than one member. The
+        sentence says "the room's replies have converged on X", and one member
+        replying twice is not the room. ``anaphoric-split-room`` — the corpus's
+        own note calls that room "split" — had one member replying twice to each
+        of two people, and the sentence called it a convergence. The edge is
+        still reported; only the *word* is withheld.
+        """
+        return len(self.focus_sources) >= 2
 
 
 def _anchor_key(anchor: dict | None) -> tuple:
@@ -415,8 +430,9 @@ def render_graph(state: RoomState, *, cap: int = 600, people_cap: int = 6) -> st
 
     Two blocks' worth of facts in one, because they are one reading: the edges
     are the raw record and the focus is the count over them. The focus sentence
-    changes with the count — "converged on" needs more than one reply, and the
-    single-edge case says so plainly rather than borrowing the stronger word.
+    changes with the count — "converged on" needs more than one reply *from more
+    than one member*, and the weaker cases say so plainly rather than borrowing
+    the stronger word.
     """
     if not state.edges and not state.participants:
         return ""
@@ -430,10 +446,17 @@ def render_graph(state: RoomState, *, cap: int = 600, people_cap: int = 6) -> st
                 f"({state.focus_count} of {len(state.edges)})."
             )
         elif state.focus_id:
-            lines.append(
-                f"- One reply was aimed at {state.focus_id}; that is not a "
-                "convergence."
-            )
+            if state.focus_count == 1:
+                lines.append(
+                    f"- One reply was aimed at {state.focus_id}; that is not a "
+                    "convergence."
+                )
+            else:
+                lines.append(
+                    f"- {state.focus_count} replies were aimed at "
+                    f"{state.focus_id}, all from one member; that is not a "
+                    "convergence."
+                )
     else:
         lines.append("- No reply in this window was aimed at anyone.")
     if state.participants:
