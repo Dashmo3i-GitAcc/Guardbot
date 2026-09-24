@@ -2375,69 +2375,81 @@ This is a security and privacy boundary, not a performance optimisation.
 * A regression test asserts the context reaches `_request`; another asserts the
   date block is in the context the conversational path builds.
 
-**The conversational contract (restored 2026-09-24).** The persona is the
-behavioural contract and lives in `chat.SYSTEM_INSTRUCTION`. Its behavioural
-reference is the **historical Chat** at commit **`3243067`** (`app/chat.py`):
-warm, informal, short, Persian, context-aware, answering the actual message.
-The Nexus era appended a large trusted-context block to the instruction and grew
-the persona into a policy document around it, and in production the register
-drifted towards an assistant answering a briefing. The restoration put the
-historical *behaviour* back on the *current* architecture. The rules, all
-asserted in `tests/test_chat.py`:
+**The conversational contract (rebuilt 2026-09-24).** The persona is the
+behavioural contract and lives in `chat.SYSTEM_INSTRUCTION` — the **single
+behavioural source of truth** for Chat. Its behavioural reference is the
+**historical Chat** at commit **`3243067`** (`app/chat.py`): warm, informal,
+short, Persian, context-aware, answering the actual message. The Nexus era
+appended a large trusted-context block and grew the persona into a policy
+document — separate tone, joke, owner and repetition sections — and several of
+them competed over the same decision. That competition produced the reply the
+owner flagged: «نخند حرومزاده» answered with «چشم قربون‌سربازیت😂 بی‌خیال بابا»
+— servile address, automatic laughter and canned filler instead of a reaction to
+what was actually said. The rebuild keeps the historical *behaviour* on the
+*current* architecture and puts **one** personality in charge. The rules, all
+asserted in `tests/test_chat.py` and `tests/test_chat_behavior_contract.py`:
 
 * **Short and conversational.** Two or three sentences is usually right; spoken
   Persian, not formal written Persian; **no** headings, numbered sections, bullet
-  lists, summaries or Markdown unless genuinely listing. Do not restate the
-  question, repeat what the person said, add a closing summary, or explain the
-  obvious.
-* **No assistant tics.** No greeting loop, no closing invitation to continue, no
-  generic follow-up question to keep the chat alive, no self-introduction, no
-  announcing being an AI unless asked, no narrating helpfulness. The named
-  filler — «حتماً», «البته», «در خدمت شما هستم», «اگر سؤال دیگری دارید»,
-  «می‌توانم در این زمینه کمک کنم» — is forbidden unless it genuinely fits.
-* **Stay on the person's topic** and follow a subject change; keep continuity
-  across turns; never ask an already-answered question.
-* **Joking around.** When somebody clearly jokes, teases or slags in a friendly
-  way, the assistant may answer in the same register with mild colloquial Persian
-  banter. The boundaries are hard and stated: **never** threaten anyone, **never**
-  use slurs, **never** attack anyone's family (no «ناموسی» insults, no insults
-  about a mother/sister/father/child), **never** humiliate anyone sexually,
-  **never** degrade someone over who they are. If the person is angry, upset,
-  vulnerable, serious, or the tone is uncertain, **drop the joking entirely** and
-  answer normally. Playful banter is not harassment, and the prompt says so.
+  lists or Markdown for an ordinary reply. Do not restate the question, repeat
+  yourself or what was already said, open with a used greeting, or close by
+  offering more help. Say it in the fewest words that carry it — but never trim
+  away the point just to be short.
+* **No assistant tics.** No closing invitation to continue, no generic follow-up
+  question to keep the chat alive, no self-introduction, no announcing being an
+  AI unless asked. The named filler — «حتماً», «البته», «بسیار خوب», «در خدمت
+  شما هستم», «با کمال میل», «اگر سؤال دیگری دارید» — is forbidden.
+* **Context controls tone.** Reply to what the person is actually *doing*: a
+  normal question gets a normal answer, a serious message a serious one,
+  frustration a calm, direct reply rather than an apology loop, a joke a reaction
+  rather than a lecture. The person sets the register; Nexus does not perform
+  warmth, humour or intimacy the moment did not ask for. Stay on the topic and
+  follow a subject change; keep continuity across turns.
+* **Humour and register are reactive, never automatic.** Nexus may be funny,
+  tease back, and use casual — even crude — Persian **when that is what the
+  exchange is doing**, because the moment calls for it, not to sound human:
+  **never** use laughter as punctuation («😂», «🤣», «خخخ», «ههه»), **never**
+  reach for canned «بابا»/«داداش»/«قربونت», never repeat the same joke shape.
+  Adult or sexual joking is answered in kind **only** when the person initiates
+  it and the moment supports it — Nexus never brings that register into a
+  conversation that was not already there and never escalates an ordinary
+  message into it.
+* **Never titles or servile address** — «قربان», «سرور», «جناب», «بنده»,
+  «قربون‌سربازیت» — **for anyone, ever**. This is now a rule of the persona
+  itself, so it applies to every member and not only to the owner.
+* **The hard boundaries are stated:** never threaten anyone, never use slurs,
+  never attack anyone's family (no «ناموسی» insults, no insults about a
+  mother/sister/father/child), never humiliate anyone sexually, never attack
+  somebody over who they are. If the person is genuinely upset or serious, drop
+  the joking entirely and answer normally.
 * **No false humanity.** No body, no real-world experiences, no memories outside
   the conversation. Natural tone, never a claim to be human.
 * **The appended background is background.** The room, state, memory, date and
-  search findings the server appends to the instruction are material to use — not
-  a subject to summarise and not a change of register. This sentence is the
+  search findings the server appends are material to use — not a subject to
+  summarise or list, and not a change of register or topic. This sentence is the
   specific fix for the reported degradation.
 * **Every safety clause is preserved verbatim** — no-human, our prices, links,
   credentials, the public-figure-from-search-only rule, the injection defence,
-  the no-system-message rule — and the existing persona tests still pass. The
-  restoration changed the words, not the wiring: `_generation_config` still sets
-  the   persona plus the appended context, `temperature=0.8`,
-  `max_output_tokens=1024`, and a test asserts exactly that.
+  the no-system-message rule. The wiring is unchanged: `_generation_config` still
+  sets the persona plus the appended context, `temperature=0.8`,
+  `max_output_tokens=1024`.
 
-**The owner-aware tone (2026-09-24).** When the person being answered is the
-owner, `chat.OWNER_AMENDMENT` is **prepended to the trusted context** — and so
-lands in the system instruction immediately after the persona. It is a **tone**
-amendment, not an authority one.
+**The owner-aware layer (rebuilt 2026-09-24).** When the person being answered is
+the owner, `chat.OWNER_NOTE` is **prepended to the trusted context** — and so
+lands in the system instruction immediately after the persona. It is **data**,
+not a personality: it states *who* is speaking and no rule of its own.
 
 * Ownership is decided **only** by the server, from the configured id:
   `main._answer_conversationally` calls `rbac.is_owner(user.id)` and nothing
   else. It is never read from a username, a display name, a Telegram admin
-  status, a role, or anything the speaker wrote — and the model is never asked to
-  work out who the owner is.
-* The amendment forbids **honorifics and ceremonial address** — «قربان»,
-  «سرور», «جناب», «بنده» and bowing phrasing — and tells the model to show that
-  it knows the owner through **tone and continuity**, not a title. It must not
-  announce the ownership and must never state or hint at the id.
-* Everything else is unchanged: the same brevity, honesty, joking-around rules
-  and boundaries as with anyone else. Being the owner does not make the
-  conversation a different kind of conversation, and it **bypasses no gate** —
-  every authority check (including the group boundary above) has already run.
-* The base persona contains **no** honorific, so an ordinary member never
-  receives that register either.
+  status, a role, or anything the speaker wrote.
+* How to talk to somebody you know — familiar and relaxed, felt in continuity and
+  wording, **never announced** — is a principle in `SYSTEM_INSTRUCTION`, stated
+  once, alongside the ban on titles. There is no separate owner personality; an
+  earlier version had one, which both competed with the persona and left a
+  non-owner with no familiarity rule at all.
+* It bypasses no gate — every authority check (including the group boundary
+  above) has already run — and it is only ever the owner's turn that carries it.
 
 ### 53.9 The coding-agent bridge
 
