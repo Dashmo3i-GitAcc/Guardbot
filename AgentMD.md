@@ -4104,6 +4104,133 @@ executable next implementation step**.
 `git rev-parse HEAD`, `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.
 
+> **Superseded by §54.13** — the branch has since been merged into `main` and
+> deployed, so `main` is no longer `00c5d1d`. Read §54.13 for the current state;
+> the `00c5d1d` facts above are kept only as the pre-deploy record.
+
+---
+
+### 54.13 Checkpoint (2026-09-24, **DEPLOYED**) — resume here (supersedes §54.12)
+
+**This is the first increment of the Nexus line to reach production.** The owner
+instructed "deploy the fix and recreate the container", and chose — when asked,
+because the two differ by 63 commits — **"whole branch, via main"**, not
+"only the pool fix". So the entire `develop/nexus-intelligence-evolution` line
+(Q–R–S–T–W–X–Y–U + the post-audit cleanup + the account breaker `26c65ff`) is
+now live. **V is still NOT IMPLEMENTED, NOT ROUTED, NOT ACTIVATED**, and the
+`--arm context` probe is still **FROZEN** — the deploy did not touch either.
+
+**What was deployed.**
+* **Merge:** `git merge --no-ff develop/nexus-intelligence-evolution` into
+  `main` → merge commit **`25ddee81846dcd2da3cb7555c56e96951e591878`**. The tree
+  is byte-identical to the branch tip (`git diff <branch> main` is empty).
+  Pushed to **both** remotes and verified with `git ls-remote`: `origin` and
+  `dashmo3i` both carry `25ddee8` on `main`.
+* **Build:** the documented path (`AgentMD.md` §12) — `docker compose build`,
+  then `docker compose up -d`. The build took **5 s** because
+  `requirements.txt`/`Dockerfile` are unchanged from `main`, so the ffmpeg and
+  `pip install` layers stayed cached; only `COPY app` / `COPY tools` were
+  rebuilt. New image **`guardbot-guardbot:latest` = `8d4c6fc63293`**.
+* **Container:** `guardbot` **recreated** (not just restarted) at
+  `2026-09-24T17:06:21Z`, `RestartCount=0`, no tracebacks. It now loads the
+  current `.env`, which is why the chat pool went from **4 to 9** accounts.
+
+**Migrations ran on the live DB.** The branch's two schema additions were
+applied at startup: **`user_memory`**, **`user_memory_signal`** (W) and
+**`conversation_state`** (X) now exist (32 tables total);
+`pragma integrity_check` → `ok`. `data/guardbot.db` was backed up **before** the
+deploy (`data/guardbot.db.bak-20260924-170535-predeploy-nexus-merge`,
+`integrity_check: ok`) along with the runtime key store.
+
+**Rollback, all still in place.**
+* Image **`guardbot-guardbot:pre-00c5d1d`** = `1a3ccbe0b7af` — the exact image
+  that was running before the deploy.
+* Annotated tag **`release-base/nexus-intel`** still points at
+  **`00c5d1dd412e033c6ac15599b28bc0fbcb54d709`**, the pre-merge production
+  commit. `main`'s first parent is that commit, so `git revert -m 1 25ddee8`
+  (or checking out the tag and rebuilding) is a clean path back.
+* The pre-deploy DB backup above.
+
+**Pool state after the deploy** (from the startup line and the DB):
+`chat 9/9 usable`, `tts 9/9`, `awareness 3/3`, `intent 2 configured / 1 usable`
+(the dead key below), `moderation`/`transcribe`/`live_voice` 1 each,
+`memory 0` (not enabled), `search 0` (dormant, Tavily is the provider). The five
+previously-inert `GEMINI_CHAT_API_KEY_5…_9` are now live.
+
+**The breaker fired in production, on its own.** Within the first 50 s the new
+account breaker benched the awareness pool — `gemini_events` 936 / 937 / 939 are
+`account_failover` with **`reason=repeated_failures`**, and 938 is `pool_critical`
+(`usable=1/3`) then 940 `pool_empty` (`usable=0/3`). It recovered on schedule:
+event **942 `account_recovered`**, and all three awareness accounts are
+`state=UNAVAILABLE` with the cooldown lapsed, i.e. **usable again** — the
+"temporarily" in "temporarily cooled down" is doing real work. An awareness pass
+that had burned **46.5 s** and failed (`gemini_ms=46421`) was followed by one
+that **completed in 13.4 s** (`gemini_ms=13195`) once the bad accounts were out.
+
+**Live end-to-end probe (self-cleaning).** Three real requests through the
+**deployed** container's real `chat.reply` path (not a reimplementation), with
+synthetic ids and a `finally` that restores the baseline:
+**3/3 answered, every one on the first model (`gemini-flash-lite-latest`), no
+failover walk — 9.82 s / 11.35 s / 16.70 s (median 11.35 s)**. The pre-deploy
+baseline was p50 5.3 s but **p90 44.3 s, 15 % over 30 s, and 14–22 sequential
+attempts**; these three are single-attempt and sit inside the provider's own
+11.6–24.4 s range for a trivial call, so the walk overhead is gone. Cleanup
+verified: history rows `0 → 6 → 0`, `chat_usage` counters restored. The
+**Telegram update→reply leg** was not exercised (that needs a real member's
+message; the groups were quiet) — it is unchanged by this work and measured at
+`send_ms ≤ 1.1 s` in the latency diagnosis, but it is honestly **not** part of
+this probe's evidence.
+
+**Verification incident, recorded because it happened.** The probe's first
+cleanup used `delete from gemini_events where id > <row COUNT>`, which is
+unsound — event ids are sparse, so the count is not a boundary. It deleted
+**three** live rows (ids **940**, **941**, **942**; awareness events created by
+the running bot during the probe window). All three were recovered **byte-exactly
+from the SQLite WAL** (the deleted rows were still in the un-checkpointed frames)
+and re-inserted with their original ids: 940 `pool_empty`/`no usable accounts`/
+`usable=0/3`, 941 `model_failover`/`rate_limited`, 942 `account_recovered`.
+`gemini_events` is back to `count=941`, `max id=942`, `integrity_check: ok`. The
+recovery was validated by re-parsing the WAL and confirming the already-restored
+row 940 came back identically. **No further probe run deletes events**; the
+boundary is `max(id)`, and the lesson is that a probe must never delete rows it
+cannot prove it created while the live process is writing to the same table.
+
+**Remaining limitations.**
+1. **The real Telegram reply latency is still unmeasured** for this deploy — no
+   addressed message arrived during the window. The probe covers everything
+   except the update/send legs.
+2. **Awareness is still the weakest workload**: free-tier `generate_content_free_tier`
+   429s and provider 503/504 on all three accounts, and `_awareness_deadline_tick`
+   is still being skipped ("maximum number of running instances reached") when a
+   pass overruns. The breaker shortens the walk; it cannot create quota.
+3. **Not fixed:** the dead `intent` primary `GEMINI_API_KEY` (fp `7c707e1b`, 401)
+   and the two credential collisions (`24b50725` chat:5==awareness:2,
+   `20ed3899` live_voice:1==search:1). Both need the owner's instruction.
+4. **Provider latency and per-project free-tier quota** remain outside our
+   control.
+
+**State at checkpoint close.** `main` = **`25ddee8`** on both remotes;
+`develop/nexus-intelligence-evolution` fast-forwarded to the same content; the
+running container is `8d4c6fc63293` (Up, `RestartCount=0`); `release-base/nexus-intel`
+still `00c5d1d`; the pre-deploy image and DB backup both retained.
+
+**NEXT STEP (do this first in the next session).**
+1. Read this section; then verify `docker ps` shows `guardbot` up on
+   `guardbot-guardbot:latest` and `git rev-parse main` is `25ddee8`.
+2. **Take the missing real-traffic measurement**: watch `docker logs guardbot`
+   for the first addressed chat reply and record its `gemini_ms`/`total_ms`
+   against the pre-deploy p50/p90 (5.3 s / 44.3 s). Do **not** run the frozen
+   `--arm context` probe.
+3. Do **not** re-run a probe that deletes `gemini_events` rows; if one is
+   needed, snapshot `max(id)` and delete only strictly newer rows — and prefer
+   not deleting at all while the live process writes.
+4. V stays unstarted; the 200-request allowance and the token allocation stay as
+   they are; nothing is rotated without instruction.
+
+**To resume after any context loss.** Re-read this section, then verify
+`git status`, `git rev-parse main`, `git rev-parse HEAD`,
+`git ls-remote origin refs/heads/main`, and `docker ps` / `docker inspect guardbot`.
+
 ---
 
 ## 55. Context Preservation & Session Handoff
