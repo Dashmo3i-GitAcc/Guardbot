@@ -1215,13 +1215,16 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
   Measured:  tools/eval_context.py — 27/27 labelled cases (the brief's A–U plus
              an opinion case) exact on mode, selected, omitted, reasons and drops;
              0 isolation leaks with a non-vacuity proof; corpus mean context
-             26.0 -> 18.4 chars (29.1% smaller). On the real path (20-message room,
+             26.0 -> 18.4 chars (29.1% smaller). tools/bench_context_real.py —
+             the same comparison on the REAL addressed path (20-message room,
              owner's roster, state+memory seeded, model stubbed): context 40733 ->
              36127 chars (11.3% smaller), each fast-path message saving the whole
              room window (~1100–1200 chars); room renders 16 -> 8, reading 8 -> 4,
-             memory 8 -> 6 over 8 messages; assembly p50 16.35 -> 11.09 ms, p95
-             37.24 -> 24.56 ms. The selector itself: read 0.19/0.68 ms p50/p95,
-             compose 0.03/0.10 ms; 0 model calls (asserted). Suite 3564 passed,
+             memory 8 -> 6 over 8 messages. The char and read counts are exact;
+             the assembly latency (p50 ~15–17 -> ~10–12 ms, p95 ~36–41 -> ~21–29
+             ms) moves with host load and is quoted as a range. The selector
+             itself: read ~0.15/0.5 ms, compose ~0.02/0.08 ms p50/p95 (the test
+             floor is p95 < 5 ms); 0 model calls (asserted). Suite 3564 passed,
              0 failed.
   Probe:     NOT RUN — the answer-quality probe needs a chat provider credential
              and a live room; the numbers above are the SERVER's contribution and

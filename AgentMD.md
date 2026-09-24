@@ -3356,7 +3356,9 @@ to select context, and **no new table**. The four sources stay four sources.
   parameter (defaulting to the pass-wide cap), so the reading can be bounded by
   its caller. **`app/config.py`** and **`.env.example`** document the new knob.
 * **`tools/eval_context.py`** — the deterministic A–U benchmark (535 lines);
-  **`tests/test_context_eval.py`** (21 tests) holds its floors;
+  **`tools/bench_context_real.py`** — the same comparison on the *real* addressed
+  path, with the model stubbed (the provenance of the real-path figures below);
+  **`tests/test_context_eval.py`** (25 tests) holds the floors under both;
   **`tests/test_context_plan.py`** (59 tests) covers the selector, the composer
   and the real path.
 
@@ -3385,15 +3387,17 @@ path, neither visible from reading the module in isolation:
   own key).
 * **budget (corpus)**: mean context **26.0 → 18.4 chars** (**29.1 %** smaller);
   the fast path is 9 of 27 cases.
-* **budget (the real path** — a 20-message room, an owner's roster, state and
-  memory seeded, model stubbed): context **40733 → 36127 chars** (**11.3 %**
-  smaller); each fast-path message saves the whole room window (**~1100–1200
-  chars**); over 8 messages the room renders **16 → 8**, the reading **8 → 4**,
-  memory **8 → 6**; assembly (DB + composition, model excluded) **p50 16.35 →
-  11.09 ms**, **p95 37.24 → 24.56 ms**.
-* **the selector's own cost**: `read` **0.19 ms p50 / 0.68 ms p95**, `compose`
-  **0.03 ms p50 / 0.10 ms p95**; **0** model calls in the module's source
-  (asserted).
+* **budget (the real path** — `python3 tools/bench_context_real.py`; a
+  20-message room, an owner's roster, state and memory seeded, model stubbed):
+  context **40733 → 36127 chars** (**11.3 %** smaller); each fast-path message
+  saves the whole room window (**~1100–1200 chars**); over 8 messages the room
+  renders **16 → 8**, the reading **8 → 4**, memory **8 → 6**. The char and read
+  counts are exact; the assembly latency (DB + composition, model excluded) is
+  **p50 ~15–17 → ~10–12 ms**, **p95 ~36–41 → ~21–29 ms** across runs — it moves
+  with host load, so it is quoted as a range.
+* **the selector's own cost**: `read` **~0.15 ms p50 / ~0.5 ms p95**, `compose`
+  **~0.02 ms p50 / ~0.08 ms p95** (host-dependent; the test floor is p95 < 5 ms);
+  **0** model calls in the module's source (asserted).
 * full suite **3564 passed, 0 failed**.
 
 **Live probe — NOT RUN, and why.** The brief's probe compares a baseline against

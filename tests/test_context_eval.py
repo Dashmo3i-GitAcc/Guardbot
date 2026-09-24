@@ -217,3 +217,62 @@ def test_the_benchmark_is_not_vacuous(monkeypatch):
     monkeypatch.setattr(eval_context, "CASES", eval_context.CASES + (bad,))
     m = eval_context.evaluate()
     assert m["failed"] >= 1
+
+
+# ── The real-path benchmark, and its floors ───────────────────────────────
+# It mutates the process's config and database, so it runs in a subprocess: the
+# measurement is the point, and leaking its setup into the rest of the suite
+# would make other tests depend on the order they ran in.
+def _real_benchmark():
+    import json
+    import subprocess
+
+    out = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "bench_context_real.py"),
+            "--json",
+            "--iterations",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        timeout=300,
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout)
+
+
+def test_the_real_path_carries_less_context_after_y():
+    """The headline claim, reproduced: the minimum combination is smaller."""
+    report = _real_benchmark()
+    assert len(report["cases"]) == 8
+    assert report["before_chars"] > report["after_chars"]
+    assert report["saved_pct"] >= 5.0, report["saved_pct"]
+
+
+def test_the_fast_path_saves_the_room_and_the_room_dependent_does_not():
+    """The saving is the room window, and only where the room is not needed."""
+    report = _real_benchmark()
+    saved = {row["case"]: row["before"] - row["after"] for row in report["cases"]}
+    for case in ("greeting", "ack", "self-contained question", "continuation"):
+        assert saved[case] > 500, (case, saved[case])
+    for case in ("anaphora", "opinion", "correction", "instruction"):
+        assert saved[case] == 0, (case, saved[case])
+
+
+def test_the_real_path_reads_each_source_fewer_times():
+    """No duplicate retrieval: fewer renders, never more, and state is free."""
+    report = _real_benchmark()
+    before, after = report["reads_before"], report["reads_after"]
+    assert after["window"] < before["window"]
+    assert after["reading"] < before["reading"]
+    assert after["memory"] <= before["memory"]
+    assert after["state"] == before["state"]
+
+
+def test_the_real_path_assembly_is_not_slower():
+    report = _real_benchmark()
+    assert report["assembly_ms_after"]["p50"] <= report["assembly_ms_before"]["p50"] * 1.5
+    assert report["assembly_ms_after"]["p95"] < 500.0
