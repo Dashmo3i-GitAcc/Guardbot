@@ -45,6 +45,7 @@ def fresh_nexus_state():
     """
     from app import (
         awareness,
+        awareness_schedule,
         db,
         gemini_keys,
         main,
@@ -98,6 +99,12 @@ def fresh_nexus_state():
     # next whole-table prune runs, so a value left behind would make the next
     # test's first transition prune (or not) for a reason that is not in it.
     state.reset_state()
+    # The awareness scheduler's per-room hints. A hint is process state keyed by
+    # chat id with a one-hour life, so a hint noted by one test would defer the
+    # next test's room and the failure would read as "awareness stopped
+    # reading" rather than as a leaked hint. This is the same class of state as
+    # ``awareness.reset_timers`` above and is reset for the same reason.
+    awareness_schedule.reset()
     yield
     nexus.reset_state()
     awareness.reset_timers()
@@ -109,4 +116,5 @@ def fresh_nexus_state():
     vpn_service.prune_reset()
     memory.reset_state()
     state.reset_state()
+    awareness_schedule.reset()
 
