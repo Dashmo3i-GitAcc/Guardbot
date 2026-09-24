@@ -3751,3 +3751,139 @@ own question.
 the continuation point), then verify: `git status`, `git rev-parse HEAD`,
 `git rev-parse main` (`00c5d1d…`), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.
+
+### 54.12 Checkpoint (2026-09-24, post-audit cleanup) — resume here (supersedes §54.11)
+
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`. This
+increment sits on §54.11 (`06f31a0`, the Token & AI Workload Audit). `main` and
+the annotated tag `release-base/nexus-intel` are both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
+and is an ancestor of HEAD. **Not merged, not deployed.** No credential was
+added, removed, moved or rotated; no token reallocation was performed. The one
+live deployment (`docker ps` → container `guardbot`, image `guardbot-guardbot`,
+created 2026-09-23T20:15:33) is main-based and carries **neither** U nor V (its
+filesystem has no `app/awareness_schedule.py`, `app/context_plan.py` or
+`tools/eval_chat_quality.py`).
+
+**What this increment is.** The post-audit cleanup: the open items the final
+audit recorded were each inspected against the implementation and either fixed
+(if they were real, bounded, in-repo defects) or documented (if they need a new
+secret or an external provider). It is **not** a new roadmap stage and **not** V.
+
+**What was changed (DONE).**
+
+* **U's residual is CLOSED** — the one item the audit listed as needing an
+  "awaiting an answer" flag.
+  * `app/awareness_schedule.py`: a second, content-free store
+    (`chat_id -> monotonic stamp`), `_AWAIT_QUESTION_RE` (a question mark,
+    `?`/`؟`, at the end of a string), and `awaiting_note` / `awaiting` /
+    `awaiting_size`. `defer` now refuses to postpone a room carrying the stamp;
+    `forget` spends it (a pass read the room) and `reset` clears it; the store is
+    bounded by `MAX_ROOMS` and expires by `_bound()`, exactly like the hint
+    store. **`defer`'s signature is unchanged** — `{chat_id, waited, waiting,
+    now}` — so the structural message-blindness test still passes untouched; the
+    stamp is consulted from the module's own store, the same way `defer` already
+    consulted `priority(chat_id)`.
+  * `app/main.py`: `_awareness_note_reply` — the function that records Nexus's
+    own outbound reply, called only after a successful send — now also calls
+    `awareness_schedule.awaiting_note(chat_id, said)`. The member capture path
+    (`_awareness_capture`) does **not** touch the stamp.
+  * **Design, and why it is not a second state system.** The flag lives in the
+    same module and the same shape as U's hint store, not in `app/state.py`:
+    State is about the *user's* task and question, keyed by `(chat_id, user_id)`;
+    this is about *Nexus's own* outbound question and is room-scoped for
+    scheduling, keyed by `chat_id` alone. It records only *that the server
+    asked* — it never reads a member's message, never decides which message
+    answers, and never guesses between speakers. The pass reads the whole window
+    and does the interpreting with the context it always had. Deterministic, no
+    model call, no new request, does not block Chat, grants nothing, no
+    cross-room or cross-user leakage, bounded, replay-safe (a duplicate delivery
+    re-stamps one entry), and self-limiting (at most **one** undeferred pass per
+    question, because the pass spends the stamp).
+  * Tests: `tests/test_awareness_schedule.py` (+13 tests: the stamp, both
+    question marks, statements and empty text, the deferral refusal, expiry,
+    `forget`, `reset`, room isolation, idempotency, malformed id, and a
+    structural test that the member capture path cannot set it);
+    `tests/test_awareness_schedule_eval.py` (+3 real-path tests through
+    `main._awareness_run_room`: a question un-defers the room and the stamp is
+    spent, a statement does not, and another room's stamp does not).
+* **Roadmap §2.4 (cosmetic duplication) FIXED** — `app/objects.py`'s
+  `CLASS_THING` branch no longer interpolates the label "a thing" into a sentence
+  that already says "a thing, not a person". Meaning and every asserted substring
+  are unchanged and the line is shorter. Sibling branches untouched.
+* **Roadmap §2.2 and §2.3 RECONCILED, NOT changed** (recorded in the roadmap).
+  §2.2's `objects.Object.source` is **not** a dead field — the harness scores
+  `object_source_accuracy == 1.0` (`tests/test_intent_eval.py`) and
+  `tests/test_objects.py` asserts it — so removing it would break both. §2.3's
+  `requests.render` wording (one hardcoded reason for two routes) would rewrite a
+  rendered PROMPT line with an unmeasured corpus effect, so it stays a recorded
+  finding; the accurate reason is available in `request.why`.
+* **`GEMINI_MEMORY_API_KEY` DOCUMENTED** — `.env.example` gained a memory
+  workload section: the credential is memory-only, must never be a chat or
+  awareness key, must not be in the shared pool for memory without the explicit
+  `GEMINI_MEMORY_ALLOW_SHARED_KEY` opt-in, and is **not needed at all** in the
+  shipped deterministic default (setting it alone does not enable the seam;
+  `NEXUS_MEMORY_EXTRACT_MODEL` must also be on). No secret was written.
+
+**What was NOT changed, deliberately.** The two credential collisions remain and
+are **documented, not fixed**, because fixing either needs a NEW secret (a
+genuinely different Google project), which this phase must not invent or move:
+  * `fp 24b50725` = `GEMINI_CHAT_API_KEY_5` **==** `GEMINI_AWARENESS_API_KEY_2`.
+    In use by two workloads; awareness therefore has only one fully-isolated key.
+  * `fp 20ed3899` = `GEMINI_LIVE_API_KEY` **==** `GEMINI_SEARCH_API_KEY`
+    (the search Gemini path is dormant; `SEARCH_PROVIDER=tavily`).
+  No reallocation was done. The 6/5 Chat/Awareness target remains a **plan only**
+  and is **not applied**, pending a trustworthy health probe. `TAVILY_API_KEY`,
+  `BOT_TOKEN`, `TELEGRAM_API_ID/HASH`, `VPNBOT_SHARED_SECRET` are untouched;
+  TTS still mirrors Chat; Search stays on Tavily; Memory and Live Voice stay at
+  zero allocation.
+
+**Provider degradation (external limitation).** The chat provider returns
+`503 UNAVAILABLE` for every chat model on every account (confirmed by a bare
+`google-genai` call outside this application). Every live probe is therefore
+**NOT VERIFIED — PROVIDER UNAVAILABLE**, never "failed" and never "healthy":
+Y's `--arm context`, U's live probe, V's `--arm model`, the memory model seam,
+and Voice Live end-to-end. No fake health result was produced and no number was
+claimed from a run that did not complete.
+
+**Tests.** Targeted (this increment's files, run in the project image):
+`tests/test_objects.py tests/test_requests.py tests/test_intent_eval.py
+tests/test_awareness_schedule.py tests/test_awareness_schedule_eval.py` →
+**247 passed, 0 failed**. The full-suite run for this checkpoint is recorded in
+the commit that follows this section (baseline before it: **3640 passed**).
+
+**V — explicitly, as required.**
+* **NOT IMPLEMENTED** — no routing change, no model allocation, no config
+  default changed, no new production call.
+* **NOT ACTIVATED** — `--arm model` is built and deliberately unrun.
+* **NOT ROUTED** — V itself remains NOT SCOPED. Its evidence base
+  (`tools/eval_chat_quality.py`, the fixture, `tests/test_chat_quality_eval.py`)
+  exists and is unchanged.
+
+**Rollback.** Revert this checkpoint's commits on the branch (`git revert`), or
+leave the branch unmerged; `main` at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709`
+is the production state and is an ancestor of HEAD.
+
+**NEXT STEP (do this first in the next session).**
+1. Read this section, `docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5/U
+   RESULT's residual-closed note, §7) and `docs/TOKEN_AI_WORKLOAD_AUDIT.txt`.
+2. Verify: `git status` (clean), `git rev-parse HEAD`, `git rev-parse main`
+   (`00c5d1d…`), and `git ls-remote origin
+   refs/heads/develop/nexus-intelligence-evolution` — the branch tip must equal
+   local HEAD.
+3. Run the full suite in the project image:
+   `docker run --rm -v "$PWD:/srv" -w /srv guardbot-guardbot bash -lc "pip
+   install -q pytest >/dev/null 2>&1; python -m pytest -q"`. It must be **0
+   failed**; report the new count against the 3640 baseline.
+4. Do **NOT** start V, do **NOT** merge, do **NOT** deploy, do **NOT** raise the
+   200-request allowance, and do **NOT** reallocate tokens. The only outstanding
+   work is a **live** run, and it needs a healthy provider:
+   `python tools/eval_chat_quality.py --arm context --samples 2 --max-calls 60`
+   (Y's probe). V's `--arm model` stays unrun until the owner authorises V.
+5. If the provider is still 503, record it again as PROVIDER UNAVAILABLE and
+   stop — do not invent a result.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5, §7), then verify `git status`,
+`git rev-parse HEAD`, `git rev-parse main` (`00c5d1d…`), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`.

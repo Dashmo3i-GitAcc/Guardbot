@@ -14,7 +14,8 @@ down the three things a scheduler has to be able to promise:
   the allowance, the brake, the breaker — is *above* this decision, and none of
   them is relaxed by it.
 * **It holds nothing it should not.** The store is ``chat_id -> (class, stamp)``
-  — two words and a float — bounded, expiring, and isolated by room.
+  — two words and a float — bounded, expiring, and isolated by room. The second
+  store, the awaiting stamp, is ``chat_id -> stamp`` and holds no text at all.
 
 Nothing here calls a model or reaches the network. ``read`` is the project's
 existing deterministic reader; the scheduler is a lookup and a comparison.
@@ -31,6 +32,7 @@ from app import (
     awareness_schedule,
     config,
     context_plan,
+    main,
     rbac,
 )
 
@@ -464,3 +466,110 @@ def test_the_failure_matrix_a_to_p(monkeypatch):
 
     wrong = {letter: value for letter, value in outcomes.items() if value[0] is not value[1]}
     assert not wrong, wrong
+
+
+# ── The awaiting stamp: U's residual, closed ──────────────────────────────
+#
+# A room Nexus has just asked a question in is the second "the server is
+# waiting" case. The reply («بله») is self-contained by every rule the project
+# has, so the class is correctly LOW — but the pass is what reads the answer, so
+# postponing it is the wrong direction. The stamp records only *that the server
+# asked*, and it never reads a member's message.
+def test_a_question_from_nexus_marks_the_room_awaiting():
+    assert awareness_schedule.awaiting(CHAT) is False
+    assert awareness_schedule.awaiting_note(CHAT, "ادامه بدهم؟", now=100.0) is True
+    assert awareness_schedule.awaiting(CHAT, now=100.0) is True
+
+
+@pytest.mark.parametrize("text", ["مطمئنی؟", "مطمئنی?", "  ادامه بدهم ؟  "])
+def test_both_question_marks_are_recognised(text):
+    assert awareness_schedule.awaiting_note(CHAT, text, now=100.0) is True
+
+
+def test_a_statement_from_nexus_does_not_mark_the_room():
+    """Only a question is evidence. «انجام شد» is a statement, not a question."""
+    assert awareness_schedule.awaiting_note(CHAT, "انجام شد", now=100.0) is False
+    assert awareness_schedule.awaiting(CHAT, now=100.0) is False
+
+
+def test_an_empty_reply_does_not_mark_the_room():
+    assert awareness_schedule.awaiting_note(CHAT, "", now=100.0) is False
+    assert awareness_schedule.awaiting_note(CHAT, "   ", now=100.0) is False
+
+
+def test_an_awaiting_room_is_not_deferred():
+    """The residual itself: a LOW room is deferred until Nexus asks, then is not."""
+    awareness_schedule.note(CHAT, awareness_schedule.P_LOW, now=100.0)
+    assert awareness_schedule.defer(CHAT, waited=1.0, now=100.0) is True
+    assert awareness_schedule.awaiting_note(CHAT, "ادامه بدهم؟", now=100.0) is True
+    assert awareness_schedule.defer(CHAT, waited=1.0, now=100.0) is False
+
+
+def test_a_statement_from_nexus_leaves_a_low_room_deferrable():
+    awareness_schedule.note(CHAT, awareness_schedule.P_LOW, now=100.0)
+    awareness_schedule.awaiting_note(CHAT, "انجام شد", now=100.0)
+    assert awareness_schedule.defer(CHAT, waited=1.0, now=100.0) is True
+
+
+def test_the_awaiting_stamp_expires_on_its_own():
+    """The stamp is bounded by the retention window, exactly as a hint is."""
+    awareness_schedule.note(CHAT, awareness_schedule.P_LOW, now=200.0)
+    awareness_schedule.awaiting_note(CHAT, "ادامه بدهم؟", now=100.0)
+    later = 100.0 + awareness_schedule._bound() + 1
+    # The hint is still live (it was refreshed), but the stamp has expired:
+    assert awareness_schedule.priority(CHAT, now=later) == awareness_schedule.P_LOW
+    assert awareness_schedule.awaiting(CHAT, now=later) is False
+    assert awareness_schedule.defer(CHAT, waited=1.0, now=later) is True
+
+
+def test_forget_spends_the_awaiting_stamp():
+    """A pass that read the room resolved the exchange, so the stamp is spent.
+
+    This is what bounds the cost: the stamp can buy at most one undeferred pass
+    per question Nexus asks, because the pass that reads the answer drops it.
+    """
+    awareness_schedule.awaiting_note(CHAT, "ادامه بدهم؟", now=100.0)
+    assert awareness_schedule.awaiting(CHAT, now=100.0) is True
+    awareness_schedule.forget(CHAT)
+    assert awareness_schedule.awaiting(CHAT, now=100.0) is False
+
+
+def test_reset_empties_the_awaiting_store():
+    awareness_schedule.awaiting_note(CHAT, "ادامه بدهم؟", now=100.0)
+    awareness_schedule.awaiting_note(OTHER_CHAT, "بله یا خیر؟", now=100.0)
+    assert awareness_schedule.awaiting_size() == 2
+    awareness_schedule.reset()
+    assert awareness_schedule.awaiting_size() == 0
+
+
+def test_one_rooms_question_does_not_undefer_another_room():
+    """Isolation by room, like every other per-room structure in the feature."""
+    awareness_schedule.note(CHAT, awareness_schedule.P_LOW, now=100.0)
+    awareness_schedule.awaiting_note(OTHER_CHAT, "ادامه بدهم؟", now=100.0)
+    assert awareness_schedule.awaiting(CHAT, now=100.0) is False
+    assert awareness_schedule.defer(CHAT, waited=1.0, now=100.0) is True
+
+
+def test_a_repeated_note_is_idempotent():
+    """A duplicate delivery re-stamps one entry; it does not accumulate."""
+    awareness_schedule.awaiting_note(CHAT, "ادامه بدهم؟", now=100.0)
+    awareness_schedule.awaiting_note(CHAT, "ادامه بدهم؟", now=100.0)
+    assert awareness_schedule.awaiting_size() == 1
+
+
+def test_a_malformed_room_id_never_raises():
+    assert awareness_schedule.awaiting_note(None, "ادامه بدهم؟") is False
+    assert awareness_schedule.awaiting(None) is False
+
+
+def test_only_nexus_own_reply_can_mark_a_room_awaiting():
+    """A member cannot make a room undeferable by typing a question mark.
+
+    The stamp is written from the text *Nexus* sent. The member capture path must
+    not touch it — only the function that records Nexus's own outbound reply
+    does — so a question mark in a member's message changes nothing here.
+    """
+    capture_src = inspect.getsource(main._awareness_capture)
+    reply_src = inspect.getsource(main._awareness_note_reply)
+    assert "awaiting_note" not in capture_src
+    assert "awaiting_note" in reply_src

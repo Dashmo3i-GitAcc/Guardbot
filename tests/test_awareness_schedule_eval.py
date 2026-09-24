@@ -451,3 +451,58 @@ def test_a_room_the_allowance_cannot_serve_keeps_its_hint(schedule_env, monkeypa
     assert asyncio.run(main._awareness_run_room(ctx, pending_row(CHAT))) is False
     assert passes == []
     assert awareness_schedule.priority(CHAT) == awareness_schedule.P_HIGH
+
+
+# ── U's residual at the real path: a room Nexus asked a question in ───────
+def test_a_room_nexus_asked_a_question_in_is_not_deferred(schedule_env, monkeypatch):
+    """The residual, closed where it actually bites.
+
+    Nexus asks a question; the reply («بله») is self-contained, so the hint is
+    LOW and the naive scheduler would postpone the very pass that should read the
+    answer. The stamp is written where Nexus's own outbound reply is recorded —
+    the production function, not a test double — and the room is read.
+    """
+    passes = install_transport(monkeypatch)
+    ctx = ctx_for(FakeBot())
+
+    assert capture(ctx, "سلام") is True
+    assert awareness_schedule.priority(CHAT) == awareness_schedule.P_LOW
+    # Nexus asked something in this room, exactly as the send path records it.
+    main._awareness_note_reply(CHAT, "ادامه بدهم؟")
+    assert awareness_schedule.awaiting(CHAT) is True
+
+    age_room(CHAT)
+    assert asyncio.run(main._awareness_run_room(ctx, pending_row(CHAT))) is True
+    assert len(passes) == 1
+    # The pass read the room, so the exchange is resolved and the stamp is spent:
+    # the stamp can buy at most one undeferred pass per question.
+    assert awareness_schedule.awaiting(CHAT) is False
+
+
+def test_a_statement_from_nexus_leaves_the_low_room_deferred(schedule_env, monkeypatch):
+    """The negative control: without a question, a LOW room is still postponed."""
+    passes = install_transport(monkeypatch)
+    ctx = ctx_for(FakeBot())
+
+    assert capture(ctx, "سلام") is True
+    main._awareness_note_reply(CHAT, "انجام شد")
+    assert awareness_schedule.awaiting(CHAT) is False
+
+    age_room(CHAT)
+    assert asyncio.run(main._awareness_run_room(ctx, pending_row(CHAT))) is False
+    assert passes == [], "a statement is not a reason to spend the request"
+
+
+def test_an_awaiting_other_room_does_not_undefer_this_room(schedule_env, monkeypatch):
+    """Isolation at the real path: the stamp is keyed by room."""
+    passes = install_transport(monkeypatch)
+    ctx = ctx_for(FakeBot())
+
+    assert capture(ctx, "سلام") is True
+    main._awareness_note_reply(OTHER_CHAT, "ادامه بدهم؟")
+    assert awareness_schedule.awaiting(OTHER_CHAT) is True
+    assert awareness_schedule.awaiting(CHAT) is False
+
+    age_room(CHAT)
+    assert asyncio.run(main._awareness_run_room(ctx, pending_row(CHAT))) is False
+    assert passes == []

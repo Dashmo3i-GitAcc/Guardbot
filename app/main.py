@@ -1205,10 +1205,20 @@ def _awareness_note_reply(chat_id: int, text: str) -> None:
     and would cheerfully answer the same thing twice. A failed send is not
     recorded — ``_send_chat`` returns whether it went out — because a reply that
     nobody saw is not part of the conversation.
+
+    Increment U's residual is closed in the same place. If what Nexus said was a
+    *question*, the room is mid-exchange: the reply to it («بله») is
+    self-contained by every rule the project has, so the scheduler would rightly
+    read it ``LOW`` and postpone the very pass that is supposed to read the
+    answer. The stamp records only that the server asked — it never reads a
+    member's message and never decides which message answers — and ``defer``
+    refuses to postpone a room carrying it. See ``awareness_schedule.awaiting``.
     """
     if not awareness.capture_enabled() or not (text or "").strip():
         return
-    awareness.capture(chat_id, 0, awareness.ROLE_NEXUS, "", text.strip())
+    said = text.strip()
+    awareness.capture(chat_id, 0, awareness.ROLE_NEXUS, "", said)
+    awareness_schedule.awaiting_note(chat_id, said)
 
 
 def _awareness_context(

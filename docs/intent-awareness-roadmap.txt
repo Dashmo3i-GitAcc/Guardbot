@@ -564,15 +564,20 @@ which is the same class) and R's act half (the template reports why[0] verbatim)
           scored. R found the graph sentence overclaiming (fixed, §60) and the
           act sentence faithful (no change; a floor keeps it so).
 
-2.2 A DISCOVERED, UNFIXED DEAD FIELD: objects.Object.source
+2.2 A BENCHMARK-READ FIELD THE PROMPT DOES NOT RENDER: objects.Object.source
 --------------------------------------------------------------------------------
 `objects.read_object` computes `source` (named | pointed | verb) and the harness
-scores it (object_source_accuracy == 1.0), but the PROMPT never renders it. This
-is exactly the tell K found in `entities.pointing` (a field computed and read by
-nothing). Not a defect yet — the line is true without it — but it is the same
-shape, and it is a candidate for the act-block-prose increment. Unresolved
-design question: does the model need "how the server knows", or is the class
-enough?
+scores it (`object_source_accuracy == 1.0`, floored in
+`tests/test_intent_eval.py`), and `tests/test_objects.py` asserts it directly.
+The PROMPT does not render it. This has the same *shape* as the tell K found in
+`entities.pointing`, but it is NOT a dead field: a field the benchmark reads and
+a test asserts is live, and removing it would break both. It is therefore kept
+as-is. The open question is about the *prompt*, not the field: does the model
+need "how the server knows", or is the class enough? That question is a
+candidate for a future prose increment and is not answered here.
+  RECONCILED (post-audit cleanup): not removed — it is read by the benchmark and
+  by tests, so it is not the "computed and read by nothing" shape that justified
+  removing a field. No production change.
 
 2.3 A WEAK, UNFIXED WORDING FINDING: requests.render's "could not scope"
 --------------------------------------------------------------------------------
@@ -583,12 +588,31 @@ ONE reason for both: "also carries a negation the server could not scope". For
 the first route the reader DID scope it (to the other directive). The accurate
 reason is computed in `request.why` and not used. Found while investigating Q,
 judged too weak to fix inside Q, recorded here. Not yet measured.
+  RECONCILED (post-audit cleanup): reviewed against the implementation and
+  deliberately NOT changed. The two routes are `app/requests.py:304` (a later
+  negated directive — `why` says "the later directive «Y» is negated by «Z», so
+  the message carries two directions") and `app/requests.py:324` (a negation
+  elsewhere — `why` says "the server cannot tell what it scopes"); `render`
+  (`app/requests.py:379`) hardcodes the second reason for both. The fix would
+  rewrite a rendered PROMPT line whose effect on the corpus is unmeasured, so it
+  stays a recorded finding rather than a change — the same "do not invent work"
+  rule that left §2.2 and increment S alone. The accurate reason is available in
+  `request.why` for anyone who later measures it.
 
-2.4 A COSMETIC, UNFIXED DUPLICATION
+2.4 A COSMETIC DUPLICATION — FIXED
 --------------------------------------------------------------------------------
-`objects.render`'s CLASS_THING branch produces "The request acts on a thing — a
-thing, not a person." (the label is interpolated and the sentence repeats it).
-Cosmetic; changes the rendered string; not fixed to keep Q narrow.
+`objects.render`'s CLASS_THING branch produced "The request acts on a thing — a
+thing, not a person." (the label for CLASS_THING is literally "a thing", so the
+sentence repeated it). Cosmetic; it changed the rendered string, so it was left
+unfixed to keep Q narrow.
+  RECONCILED (post-audit cleanup): FIXED. The branch now spells the sentence out
+  ("The request acts on a thing, not a person. The message does not say which
+  thing; the transcript does."), so the one line says it once. The meaning and
+  every asserted substring ("a thing, not a person", "does not say which thing")
+  are unchanged and the line is shorter, so `object_chars_max` still holds. The
+  sibling room-held branches are untouched — their labels ("a media message", "a
+  link", "a message") are not "a thing", so they never repeated it. Only
+  production file touched: `app/objects.py`.
 
 2.5 TWO STALE CLAIMS IN AgentMD §53.7 (documentation drift, no behaviour)
 --------------------------------------------------------------------------------
@@ -1338,10 +1362,33 @@ Do NOT invent stages. An increment is accepted only on the evidence named.
                for coverage. A chatter room is not read for up to the retention
                window; the exposure is exactly the classifier's false negatives.
                The one the server can KNOW about (a pending confirmation) is
-               closed. A residual remains: a bare answer to the assistant's own
+               closed. A residual remained: a bare answer to the assistant's own
                question («بله») has no room dependency and no server flag, so it
-               can be postponed like any other chatter — closing it needs an
-               "awaiting an answer" flag the server does not keep.
+               could be postponed like any other chatter.
+               **RESIDUAL CLOSED (post-audit cleanup).** The server now keeps the
+               one flag the residual asked for, and it keeps it in the same
+               module and the same shape rather than in a new state system:
+               `awareness_schedule.awaiting_note(chat_id, text)` records a bare
+               timestamp when *Nexus's own outbound text* ends in a question
+               mark (`main._awareness_note_reply`, where the reply is already in
+               hand and has actually been sent), and `defer` refuses to postpone
+               a room carrying that stamp. It is content-free (a float, never a
+               message), keyed by `chat_id` like every other per-room structure,
+               bounded by `MAX_ROOMS` and by the retention window, and SPENT by
+               `forget` when a pass reads the room — so it can buy at most one
+               undeferred pass per question Nexus asks, and a restart degrades it
+               to no evidence rather than to a wrong decision. It does NOT
+               interpret the reply: it never decides that «بله» answers the
+               question, never attaches one message to another, and never
+               guesses between several speakers — the pass reads the whole window
+               and does the interpreting with the context it always had. A
+               member's own question mark cannot set it; only Nexus's own text
+               can. `defer`'s signature and its message-blindness are unchanged.
+               New tests: `tests/test_awareness_schedule.py` (the stamp, its
+               bound, `forget`, `reset`, room isolation, idempotency, the
+               malformed-id path, and a structural test that the member capture
+               path cannot set it) and `tests/test_awareness_schedule_eval.py`
+               (three real-path tests through `main._awareness_run_room`).
              * LIVE PROBE: NOT RUN — U is not deployed and the brief forbids
                deploying it, so a live probe would measure the previous build.
              * Suite 3619 passed, 0 failed (was 3568). Not merged, not deployed.
@@ -1494,12 +1541,13 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     see AgentMD.md §54.10 (the after-U checkpoint). The previous checkpoint
-          was §54.9 at the after-Y docs commit; the U commits sit on top of it.
-          Docs commits sit on top — a commit that names its own count would be
-          wrong the moment it lands.
+HEAD:     see AgentMD.md §54.12 (the post-audit cleanup checkpoint). The previous
+          checkpoints were §54.11 (after the V evidence base) and §54.10 (after
+          U). Docs commits sit on top — a commit that names its own count would
+          be wrong the moment it lands.
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3619 passed, 0 failed
+Suite:    3619 passed, 0 failed (before the post-audit cleanup; see §54.12 for the
+          count after it)
 Corpus:   141 cases, version 18 (tools/eval_intent.py); 27 labelled cases
           (tools/eval_context.py — increment Y's deterministic context benchmark)
 Runtime-path changes: A–S changed NONE. **T is the first**: app/main.py (the
@@ -1549,7 +1597,7 @@ Next:     INCREMENT V — "only if the numbers say so" (roadmap §5/V). **U is
           forbids deploying it). W, the W extension, X, Y and U are DONE, and
           V's evidence base is BUILT (see §5/W RESULT, §5/W-EXTENSION RESULT,
           §5/X RESULT, §5/Y RESULT, §5/U RESULT, §5/V RESULT).
-Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.11 (the checkpoints).
+Durable context: AgentMD.md §53.7 (invariants) and §54.1–§54.12 (the checkpoints).
                  docs/reference/nexus-awareness.md §52–§66 (the narrative).
                  This file.
 

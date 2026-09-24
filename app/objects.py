@@ -300,8 +300,12 @@ def render(state: Object) -> str:
         CLASS_THING: "a thing",
     }[state.kind]
     if state.kind == CLASS_THING:
+        # The label for CLASS_THING is literally "a thing", so interpolating it
+        # here read "acts on a thing — a thing, not a person": the same word
+        # twice. Spelled out instead, so the one line stays one line and says it
+        # once. The meaning and the length are otherwise unchanged.
         return (
-            f"The request acts on {label} — a thing, not a person. The message does "
+            "The request acts on a thing, not a person. The message does "
             "not say which thing; the transcript does.\n"
         )
     # The room-held branches used to end "Do not read it as aimed at anybody in

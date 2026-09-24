@@ -98,6 +98,28 @@ wrong to postpone it. That distinction — *the message does not need the room*
 versus *the pass does not need to run* — is the one real hazard in this
 mechanism, and the server's own "I am waiting" flag is what closes it.
 
+There is a second room of the same shape, and it is closed the same way: **a
+room Nexus itself has just asked a question in.** The reply to that question is
+the one message in the room that is *about* the exchange rather than about
+anything in its own words — «بله» is self-contained by every rule the project
+has, so the classifier rightly reads it ``LOW``, and the naive scheduler would
+postpone the very pass that is supposed to read the answer. The server knows it
+asked (it wrote the question itself), so ``awaiting_note`` records that fact as
+a bare timestamp when Nexus's own outbound text ends in a question mark, and a
+room carrying it is never deferred.
+
+The flag does **not** interpret the short reply, and that is the point. It does
+not decide that «بله» answers the question, does not attach one message to
+another, and does not guess when several people are talking: it only says *this
+room is mid-exchange, so read it rather than postpone it*, and the pass — which
+reads the whole window — does the interpreting with the context it always had.
+Ambiguity is left to the reader that can see the messages, never resolved here.
+It is set from Nexus's own text (never a member's), keyed by ``chat_id`` alone
+like every other per-room structure, bounded by ``MAX_ROOMS`` and by ``_bound``,
+and spent the moment a pass reads the room — so it can cost at most **one**
+undeferred pass per question Nexus asks, and it degrades to no evidence rather
+than to a wrong decision.
+
 There is no reordering of the pending list. That was built, measured and
 removed, and the reason is worth recording because it is a fact about the
 architecture rather than about this module: **the scheduler is event-driven per
@@ -128,6 +150,13 @@ error and needs no fallback path: ``priority`` returns ``""``, ``defer``
 returns ``False``, and the scheduler behaves exactly as it did before this
 module existed. Stale evidence degrades to no evidence; it never becomes
 authority.
+
+The awaiting stamp is bounded the same way and for the same reason: it describes
+*an exchange that is still open*, so it is dropped when a pass reads the room
+(``forget``) and it expires by ``_bound`` whether or not a pass ever happens. A
+process restart loses it — it is in-process state, like the hints — which is the
+safe direction: a lost stamp means the room is scheduled exactly as it was
+before this existed, never that a reading is skipped.
 
 The boundary this module must not cross
 ----------------------------------------
@@ -163,6 +192,7 @@ The boundary this module must not cross
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from . import config, context_plan
@@ -309,16 +339,25 @@ def priority(chat_id: int, *, now: float | None = None) -> str:
 
 
 def forget(chat_id: int) -> None:
-    """Drop this room's hint. Called when a pass has read the batch it described."""
+    """Drop this room's hint and its awaiting stamp.
+
+    Called when a pass has read the batch the hint described — and, at the same
+    moment, the answer to any question Nexus had asked. The pass is the only
+    thing that can spend the awaiting stamp, which is what bounds its cost to one
+    undeferred pass per question.
+    """
     try:
-        _hints.pop(int(chat_id), None)
+        key = int(chat_id)
     except (TypeError, ValueError):  # pragma: no cover
         return
+    _hints.pop(key, None)
+    _awaiting.pop(key, None)
 
 
 def reset() -> None:
-    """Forget every hint. For tests, and for shutdown."""
+    """Forget every hint and awaiting stamp. For tests, and for shutdown."""
     _hints.clear()
+    _awaiting.clear()
 
 
 def size() -> int:
@@ -333,6 +372,78 @@ def _evict() -> None:
         return
     for chat_id, _ in sorted(_hints.items(), key=lambda item: item[1][1])[:overflow]:
         _hints.pop(chat_id, None)
+
+
+# ── The awaiting stamp: a room Nexus itself has just asked a question in ───
+#
+# ``chat_id -> monotonic stamp``. The same shape as the hint store, and for the
+# same two reasons: it is a duration rather than a time, and there is no field a
+# sentence could be written into. It is written from Nexus's OWN outbound text
+# and never from a member's, so a member cannot make a room undeferable by
+# typing a question mark — the server records only what the server said.
+_AWAIT_QUESTION_RE = re.compile(r"[?؟]\s*$")
+
+_awaiting: dict[int, float] = {}
+
+
+def awaiting_note(chat_id: int, text: str, *, now: float | None = None) -> bool:
+    """Record that Nexus just asked this room a question. Deterministic, cheap.
+
+    Called where Nexus's own reply is already in hand and has already been sent
+    (``main._awareness_note_reply``), so it costs one regex over a string the
+    caller holds and nothing else. Returns whether a stamp was set.
+
+    It records a *fact about the exchange* — the server asked something — and
+    deliberately not a reading of anything: it never inspects a member's message,
+    never decides which message answers the question, and never guesses between
+    several people. A room with no question mark in Nexus's text is left exactly
+    as it was.
+    """
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):  # pragma: no cover - ids are ints here
+        return False
+    if not _AWAIT_QUESTION_RE.search(str(text or "")):
+        return False
+    _awaiting[chat_id] = time.monotonic() if now is None else float(now)
+    if len(_awaiting) > MAX_ROOMS:
+        _evict_awaiting()
+    return True
+
+
+def awaiting(chat_id: int, *, now: float | None = None) -> bool:
+    """Whether Nexus asked this room a question that no pass has read since.
+
+    An expired stamp is dropped on the read, exactly as a hint is, and a missing
+    stamp is ``False``: a room with no evidence is scheduled as it was before
+    this existed. Never raises.
+    """
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):  # pragma: no cover
+        return False
+    stamp = _awaiting.get(chat_id)
+    if stamp is None:
+        return False
+    moment = time.monotonic() if now is None else float(now)
+    if moment - stamp > _bound():
+        _awaiting.pop(chat_id, None)
+        return False
+    return True
+
+
+def awaiting_size() -> int:
+    """How many rooms currently carry an awaiting stamp. For a test or a log."""
+    return len(_awaiting)
+
+
+def _evict_awaiting() -> None:
+    """Drop the oldest awaiting stamps until the store is back under its cap."""
+    overflow = len(_awaiting) - MAX_ROOMS
+    if overflow <= 0:
+        return
+    for chat_id, _ in sorted(_awaiting.items(), key=lambda item: item[1])[:overflow]:
+        _awaiting.pop(chat_id, None)
 
 
 # ── The spend decision ────────────────────────────────────────────────────
@@ -350,7 +461,7 @@ def defer(
     something unread in it and no dependency signal — and the oldest unread
     message has not yet waited past ``_bound``.
 
-    Four refusals are what make this safe rather than merely clever:
+    Five refusals are what make this safe rather than merely clever:
 
     * **No hint is not low.** A room the server has never classified, or whose
       hint has expired, or which the tests captured through ``awareness.capture``
@@ -367,6 +478,14 @@ def defer(
       on a room (``db.admin_pending_waiting``), so ``waiting`` is part of the
       decision rather than left to chance. This is the one place the scheduler
       can be *wrong* rather than merely slow, and it is refused here.
+    * **A room Nexus has just asked a question in is never deferred.** The reply
+      («بله») is self-contained by every rule the project has, so it reads
+      ``P_LOW`` — but the pass is what is supposed to read that reply, so the
+      naive rule would postpone the reading of the answer Nexus is waiting for.
+      The stamp is the server's own record that it asked (``awaiting_note``),
+      and it is consulted here rather than in the caller so that the two "the
+      server is waiting" cases share one decision. It is cleared by ``forget``
+      when a pass runs, so it can cost at most one undeferred pass per question.
     * **The caller can always override.** ``main._awareness_run_room`` consults
       this only on the ordinary path; the urgent path (an administrator's
       actionable-looking message, ``nexus.looks_actionable``) never asks, so
@@ -375,10 +494,12 @@ def defer(
     ``waited`` is how long the oldest unread message has been waiting, in
     seconds — computed by the caller, which already holds the row. ``waiting``
     is whether the server is holding something for this room that only a pass
-    can act on. ``now`` is the monotonic clock for the hint's expiry and exists
-    so a test can age a hint without sleeping.
+    can act on. ``now`` is the monotonic clock for the hint's and the stamp's
+    expiry and exists so a test can age one without sleeping.
     """
     if waiting:
+        return False
+    if awaiting(chat_id, now=now):
         return False
     if priority(chat_id, now=now) != P_LOW:
         return False
@@ -391,6 +512,9 @@ __all__ = [
     "P_LOW",
     "P_NONE",
     "RANK",
+    "awaiting",
+    "awaiting_note",
+    "awaiting_size",
     "defer",
     "forget",
     "note",
