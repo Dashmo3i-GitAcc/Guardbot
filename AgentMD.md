@@ -3754,13 +3754,13 @@ the continuation point), then verify: `git status`, `git rev-parse HEAD`,
 
 ### 54.12 Checkpoint (2026-09-24, post-audit cleanup) — resume here (supersedes §54.11)
 
-**Where the work is.** Branch `develop/nexus-intelligence-evolution`, HEAD
-`50a45ee` ("fix: close the U residual and finalize post-audit cleanup"),
-**committed and pushed to both remotes** (`origin` = mo3iiibest77-hub,
-`dashmo3i` = Dashmo3i-GitAcc; both report `50a45ee` and are 0/0 ahead/behind;
-the public raw fetch of `app/awareness_schedule.py` is byte-identical to local,
-sha256 `8f3ced58…`). This increment sits on §54.11 (`06f31a0`, the Token & AI
-Workload Audit). `main` and
+**Where the work is.** Branch `develop/nexus-intelligence-evolution`. The
+post-audit cleanup is the commits `50a45ee` (the fix), `62474be`, `ac44f62` and
+the freeze clarification, **committed and pushed to both remotes** (`origin` =
+mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc; the branch tip equals local HEAD
+on both and is 0/0 ahead/behind — verify with `git ls-remote`, and do **not**
+pin a HEAD SHA in prose, because every doc commit moves it). This increment sits
+on §54.11 (`06f31a0`, the Token & AI Workload Audit). `main` and
 the annotated tag `release-base/nexus-intel` are both still
 `00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
 and is an ancestor of HEAD. **Not merged, not deployed.** No credential was
@@ -3843,13 +3843,15 @@ genuinely different Google project), which this phase must not invent or move:
   TTS still mirrors Chat; Search stays on Tavily; Memory and Live Voice stay at
   zero allocation.
 
-**Provider degradation (external limitation).** The chat provider returns
-`503 UNAVAILABLE` for every chat model on every account (confirmed by a bare
-`google-genai` call outside this application). Every live probe is therefore
-**NOT VERIFIED / BLOCKED BY PROVIDER**, never "failed" and never "healthy":
-Y's `--arm context`, U's live probe, V's `--arm model`, the memory model seam,
-and Voice Live end-to-end. No fake health result was produced and no number was
-claimed from a run that did not complete.
+**Provider degradation (external limitation).** When first observed
+(2026-09-24 ~13:30) the chat provider returned `503 UNAVAILABLE` for every chat
+model on every account (confirmed by a bare `google-genai` call outside this
+application); the recheck below shows it is in fact **intermittent**, not a
+global outage. Every live probe is therefore **NOT VERIFIED / BLOCKED BY
+PROVIDER**, never "failed" and never "healthy": Y's `--arm context`, U's live
+probe, V's `--arm model`, the memory model seam, and Voice Live end-to-end. No
+fake health result was produced and no number was claimed from a run that did
+not complete.
 
 **Provider recheck (2026-09-24, at checkpoint close).** A fresh bare probe
 changed the picture in two ways, and the live probe was re-attempted on it:
@@ -3875,6 +3877,18 @@ changed the picture in two ways, and the live probe was re-attempted on it:
   PROVIDER.** Do **not** spend another run on it while the provider is still
   intermittently 503 — the owner has explicitly frozen this probe.
 
+**FREEZE — the current, unambiguous state (read this before acting).** The only
+outstanding verification is the live context-quality run
+(`tools/eval_chat_quality.py --arm context`, Y's probe), but it is currently
+**FROZEN by the owner** because the provider is intermittently returning 503.
+It must **NOT** be run until the owner explicitly lifts the freeze. Therefore,
+**while the freeze remains active there is no executable next implementation
+step from the current audit checkpoint** — the next session must not invent one,
+must not re-run the probe, and must not run any new health or provider test to
+"check" it. The other two items recorded in this section (the dead `intent`
+primary and the credential collisions) are likewise **reported, not actionable**
+without the owner's explicit instruction.
+
 **Tests.** Targeted (this increment's files, run in the project image):
 `tests/test_objects.py tests/test_requests.py tests/test_intent_eval.py
 tests/test_awareness_schedule.py tests/test_awareness_schedule_eval.py` →
@@ -3895,25 +3909,28 @@ predate the increment).
 leave the branch unmerged; `main` at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709`
 is the production state and is an ancestor of HEAD.
 
-**State at checkpoint close.** The commit and the push are **done**: HEAD
-`ac44f62` on both remotes, working tree clean, `main` still `00c5d1d…`, full
-suite **3658 passed / 0 failed**. Nothing is pending except the live run below,
-which the owner has **frozen** (do not spend another run on it).
+**State at checkpoint close.** The commit and the push are **done**: the branch
+tip on both remotes equals local HEAD, working tree clean, `main` still
+`00c5d1d…`, full suite **3658 passed / 0 failed**. Nothing is pending except the
+live run, which the owner has **frozen** — see FREEZE above. While the freeze
+holds, **there is no executable next implementation step**.
 
 **NEXT STEP (do this first in the next session).**
 1. Read this section, `docs/intent-awareness-roadmap.txt` (§2.2–§2.4, §5/U
    RESULT's residual-closed note, §7) and `docs/TOKEN_AI_WORKLOAD_AUDIT.txt`.
-2. Verify (should already hold): `git status` clean, `git rev-parse HEAD` =
-   `50a45ee`, `git rev-parse main` = `00c5d1d…`, and `git ls-remote origin
-   refs/heads/develop/nexus-intelligence-evolution` = local HEAD.
-3. The only outstanding work is a **live** run, and it needs a healthy provider:
-   `python tools/eval_chat_quality.py --arm context --samples 2 --max-calls 60`
-   (Y's probe). It was **re-attempted on 2026-09-24 and is still NOT RUN**
-   (503, `usable=0/9`) and is **NOT VERIFIED / BLOCKED BY PROVIDER**. The owner
-   has **frozen** it: do **not** re-run it, and do not repeat the same blocked
-   probe, until the owner lifts the freeze. Also outstanding and **not to be
-   fixed without instruction**: the `intent` primary `GEMINI_API_KEY`
-   (fp `7c707e1b`) is dead (401).
+2. Verify (should already hold): `git status` clean, `git rev-parse main` =
+   `00c5d1d…`, and `git ls-remote origin
+   refs/heads/develop/nexus-intelligence-evolution` = local HEAD (do not pin a
+   HEAD SHA in prose — every doc commit moves it).
+3. **There is no executable next implementation step while the freeze holds.**
+   The only outstanding verification is the live context-quality run
+   (`--arm context`, Y's probe); it was re-attempted on 2026-09-24 and is still
+   **NOT RUN** (503, `usable=0/9`), and it is **FROZEN by the owner**. Do **not**
+   run it, do **not** repeat the blocked probe, and do **not** run a new health
+   or provider test to check it, until the owner explicitly lifts the freeze.
+   Likewise **not to be fixed without instruction**: the `intent` primary
+   `GEMINI_API_KEY` (fp `7c707e1b`) is dead (401), and the credential collisions
+   remain reported-not-fixed.
 4. Do **NOT** start V (its `--arm model` stays unrun until the owner authorises
    V), do **NOT** merge, do **NOT** deploy, do **NOT** raise the 200-request
    allowance, and do **NOT** reallocate tokens.
