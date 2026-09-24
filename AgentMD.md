@@ -2435,8 +2435,9 @@ procedure.
 **State, verified against the repository.** Branch
 `develop/nexus-intelligence-evolution`, HEAD
 `0697ed05e9e6fee6c5fb141a4b242b8eb76075e6` (increment R), pushed to both remotes
-(`origin` = mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc). 27 commits on the
-branch. `main` and the annotated tag `release-base/nexus-intel` both still
+(`origin` = mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc). The branch carries
+27 commits through R's code commit `0697ed0`, plus the checkpoint docs commits
+on top (a commit that names its own count would be wrong the moment it lands). `main` and the annotated tag `release-base/nexus-intel` both still
 `00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
 (the tag is local-only; neither remote carries tags). Suite **3245 passed, 0
 failed**. Corpus **137 cases, version 17**. Benchmark clean: top-1 / ambiguity
