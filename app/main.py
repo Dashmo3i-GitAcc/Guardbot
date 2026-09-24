@@ -2854,7 +2854,19 @@ async def _answer_conversationally(
     # message, never the answer.
     started = time.monotonic()
     prepare_done = started
+    # The marks that decompose the model stage. Each is advanced at the end of
+    # the work it names and left at ``started`` when a turn never reaches it, so
+    # a stage that did not happen reads zero instead of borrowing another's time.
+    #   ctx_done      — context acquisition: the room window/reading, state, memory
+    #   search_done   — the live web lookup, when one ran
+    #   assemble_done — context composition (the plan)
+    #   gemini_done   — the whole model stage, including the pool's own walk
+    ctx_done = started
+    search_done = started
+    assemble_done = started
     gemini_done = started
+    # The network seam's share of the model stage, reported by ``chat.reply``.
+    pool_ms = 0.0
 
     parts: list | None = None
     kind = ""
@@ -2863,25 +2875,53 @@ async def _answer_conversationally(
     problem = PREPARE_OK
 
     def _timing(sent: bool) -> bool:
-        """Log this turn's three stages once, then hand back the caller's answer.
+        """Log this turn's stages once, then hand back the caller's answer.
 
-        The boundaries are the three things that can actually be slow: getting
-        the message ready (download, transcribe), asking the model, and the
-        send. A turn that never reaches the model reports a zero model stage
-        rather than borrowing somebody else's duration, and the total makes
-        whatever is left — this function's own bookkeeping — visible if it ever
-        grows into a problem.
+        The boundaries are the things that can actually be slow: getting the
+        message ready (download, transcribe), acquiring the context, composing
+        it, asking the model, and the send. A turn that never reaches the model
+        reports a zero model stage rather than borrowing somebody else's
+        duration, and the total makes whatever is left — this function's own
+        bookkeeping — visible if it ever grows into a problem.
+
+        ``gemini_ms`` keeps its original meaning — everything from the end of
+        preparation to the end of the model call — so existing readers are
+        unchanged; ``ctx_ms``/``search_ms``/``assemble_ms``/``model_ms``
+        decompose it, and ``pool_ms``/``proc_ms`` split ``model_ms`` into the
+        network seam and this function's own processing. ``pool_ms`` is the
+        pool's own time (selection + provider + retry), reported by ``chat.reply``
+        and zero when there was no model call to report.
         """
         now = time.monotonic()
+
+        def stage(first: float, second: float) -> float:
+            # A stage can never be negative. A mark that was never reached
+            # leaves its stage at zero rather than subtracting from the next.
+            return max(0.0, (second - first) * 1000.0)
+
+        prepare_ms = stage(started, prepare_done)
+        ctx_ms = stage(prepare_done, ctx_done)
+        search_ms = stage(ctx_done, search_done)
+        assemble_ms = stage(search_done, assemble_done)
+        model_ms = stage(assemble_done, gemini_done)
+        gemini_ms = stage(prepare_done, gemini_done)
         log.info(
-            "chat timing user=%s chat=%s prepare_ms=%.0f gemini_ms=%.0f "
-            "send_ms=%.0f total_ms=%.0f sent=%s kind=%s",
+            "chat timing user=%s chat=%s prepare_ms=%.0f ctx_ms=%.0f "
+            "search_ms=%.0f assemble_ms=%.0f gemini_ms=%.0f model_ms=%.0f "
+            "pool_ms=%.0f proc_ms=%.0f send_ms=%.0f total_ms=%.0f "
+            "sent=%s kind=%s",
             user.id,
             room.id,
-            (prepare_done - started) * 1000.0,
-            (gemini_done - prepare_done) * 1000.0,
-            (now - gemini_done) * 1000.0,
-            (now - started) * 1000.0,
+            prepare_ms,
+            ctx_ms,
+            search_ms,
+            assemble_ms,
+            gemini_ms,
+            model_ms,
+            pool_ms,
+            max(0.0, model_ms - pool_ms),
+            stage(gemini_done, now),
+            stage(started, now),
             sent,
             kind or "text",
         )
@@ -2991,6 +3031,10 @@ async def _answer_conversationally(
     memory_block = (
         _memory_context(room.id, user.id, text) if plan_reading.wants_memory else ""
     )
+    # End of context acquisition: the room window/reading, the personal state
+    # and the personal memory. Everything above this line reads the database;
+    # nothing below it does until the answer is written.
+    ctx_done = time.monotonic()
 
     # The live web, as its own workload, and only when it is actually wanted.
     # Three outcomes, not two: an explicit request or an explicitly *current*
@@ -3061,6 +3105,12 @@ async def _answer_conversationally(
             elif finding.attempted:
                 search_block = web_search.failure_block()
 
+    # End of context acquisition proper — the web lookup is the only acquisition
+    # step that can leave the process, so it is named separately from the
+    # database reads above. Set unconditionally so the stages after it align
+    # whether or not a search was wanted.
+    search_done = time.monotonic()
+
     # The composition, in one deterministic order and under one hard ceiling.
     # The plan is an application-side decision object: it is logged (names,
     # reasons and sizes only — never a word of the message) and then discarded.
@@ -3077,6 +3127,9 @@ async def _answer_conversationally(
     )
     context = plan.text
     log.info("chat context user=%s chat=%s %s", user.id, room.id, plan.summary())
+    # End of context assembly: the plan is built and the system instruction is
+    # final. What follows is the model call.
+    assemble_done = time.monotonic()
 
     result = await chat.reply(
         room.id,
@@ -3090,6 +3143,8 @@ async def _answer_conversationally(
         on_tool=on_tool,
     )
     gemini_done = time.monotonic()
+    # The network seam's share of the model stage, when the turn reported it.
+    pool_ms = float((getattr(result, "timing", None) or {}).get("pool_ms") or 0.0)
 
     if result:
         log.info(

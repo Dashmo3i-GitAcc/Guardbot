@@ -299,6 +299,12 @@ class ChatReply:
     # The caller sends it with send_voice; the text is still in ``text`` and is
     # sent as the caption-less fallback if the upload fails.
     voice: bytes | None = None
+    # Where the model stage's time went, in milliseconds, on an answered turn:
+    # ``pool_ms`` is the network seam (pool selection + provider + retry), so
+    # the caller's own ``model_ms`` minus this is the pre-call bookkeeping and
+    # the response processing. None when there is nothing to report — a skipped
+    # turn consulted no model. Durations only; never a word of the answer.
+    timing: dict | None = None
 
     def __bool__(self) -> bool:
         return self.answered
@@ -1337,6 +1343,11 @@ async def reply(
         stamp = time.monotonic()
         _recent_calls.append(stamp)
         _user_calls.setdefault((chat_id, user_id), []).append(stamp)
+        # The network seam's own clock. It is measured here rather than inside
+        # the pool so the caller can tell the seam apart from its own
+        # bookkeeping and response processing, which are the other two parts of
+        # the model stage it reports.
+        pool_started = time.monotonic()
         try:
             if tools and on_tool is not None:
                 # A turn that may call administrative tools. It takes a
@@ -1370,6 +1381,7 @@ async def reply(
             if not _is_transient(exc):
                 break
         else:
+            pool_ms = (time.monotonic() - pool_started) * 1000.0
             body = _clean(raw)
             if not body:
                 # An empty answer is a failure to answer, not a reply that
@@ -1389,6 +1401,7 @@ async def reply(
             # followed by a timeout had nowhere left to go.
             if not nudged and _is_repetitive(body, previous):
                 nudged = True
+                nudge_started = time.monotonic()
                 retry = await _nudged_attempt(
                     chat_id,
                     user_id,
@@ -1398,6 +1411,10 @@ async def reply(
                     kind=kind,
                     context=context,
                 )
+                # The re-ask is a second real provider call, so its time belongs
+                # in the same stage as the first rather than being attributed to
+                # response processing.
+                pool_ms += (time.monotonic() - nudge_started) * 1000.0
                 if retry:
                     body = retry
                     repeated = True
@@ -1438,6 +1455,7 @@ async def reply(
                 truncated=truncated,
                 repeated=repeated,
                 voice=voice,
+                timing={"pool_ms": pool_ms},
             )
 
         if attempt + 1 < attempts:

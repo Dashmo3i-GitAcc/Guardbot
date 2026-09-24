@@ -166,6 +166,42 @@ def test_an_answered_turn_logs_its_stages(monkeypatch, caplog):
     assert "sent=True" in line
 
 
+def test_the_timing_line_decomposes_the_model_stage(monkeypatch, caplog):
+    """The model stage must be separable from the context work around it.
+
+    The line used to carry three numbers, and ``gemini_ms`` was all of the
+    context work plus the model call — so "why was this slow" could not be
+    answered from the log. The four stages now name the parts, and
+    ``pool_ms``/``proc_ms`` split the model stage into the network seam and this
+    function's own processing.
+    """
+    install_model(
+        monkeypatch,
+        chat.ChatReply(
+            answered=True, text="باشه", turns=1, timing={"pool_ms": 12.0}
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="guardbot"):
+        run(private_update(), FakeBot())
+
+    line = timing_lines(caplog)[0]
+    for field in ("ctx_ms=", "search_ms=", "assemble_ms=", "model_ms=",
+                  "pool_ms=", "proc_ms="):
+        assert field in line, f"{field} decomposes the model stage"
+    # The seam's own report reaches the line rather than being inferred.
+    assert "pool_ms=12" in line
+
+
+def test_a_skipped_turn_reports_no_pool_time(monkeypatch, caplog):
+    """A turn the model never served may not borrow the seam's clock."""
+    install_model(monkeypatch, chat.ChatReply(answered=False, skipped="disabled"))
+    with caplog.at_level(logging.INFO, logger="guardbot"):
+        run(private_update(), FakeBot())
+
+    line = timing_lines(caplog)[0]
+    assert "pool_ms=0" in line
+
+
 def test_the_timing_line_carries_no_words(monkeypatch, caplog):
     """A log line about durations must not become a log line about content."""
     secret_in = "این سؤال محرمانه است"
