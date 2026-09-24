@@ -4644,6 +4644,91 @@ the owner's explicit go-ahead. To resume: re-read this section, verify
 
 ---
 
+### 54.18 Checkpoint (2026-09-24, **Chat personality DEPLOYED & live-probed**) — resume here (supersedes §54.17)
+
+**CHECKPOINT STATUS.** Date **2026-09-24 ~19:40Z**. Branch **`main`**. The
+restoration is committed as **`067c417`** (`feat(chat): restore the historical
+conversational persona`, `app/chat.py` + `tests/test_chat.py`) and **`0a80015`**
+(`docs(agents)`, §53.8 contract + §54.17). Both were already pushed to both
+remotes. This checkpoint records the **deploy and the live probe**.
+
+**Scope verified before deploy.** `git show 067c417 -- app/chat.py` contains
+**zero** non-comment, non-string changed lines — the persona text and its
+comment only. No credential, auth, rate-limit, breaker, cooldown, failover,
+context-assembly, persistence or provider-routing line changed. Range
+`bb3f8e5..HEAD` = `AgentMD.md`, `app/chat.py`, `tests/test_chat.py`.
+
+**Deployed.** `docker compose build && docker compose up -d` (§12). Container
+`guardbot` recreated **2026-09-24T19:35:45Z** on image
+**`guardbot-guardbot:latest = a976bb4c2a7a`**, `RestartCount=0`, `Running=true`,
+no tracebacks. Startup loaded the expected pools — `[pool] chat: accounts=7
+usable=7`, `[pool] awareness: accounts=5 usable=5`, `[pool] tts: accounts=7` —
+and `Conversational AI active`. **0 `pool_empty`** events since deploy. The image
+was verified to contain the new persona *before* the swap (throwaway container:
+`Joking around`/`Background the server gives you` present, the old opening line
+absent). Rollback tag **`guardbot-guardbot:pre-chat-personality`** = `0a0e4636a624`
+(the previous image; tagged *before* the build because the disk is at 86 % and
+the build GCs the old image).
+
+**Live probe (self-cleaning, inside the deployed container, real pool + real
+model, synthetic ids `chat=-100999900001 user=999900001`).** 12/12 answered;
+deleted exactly the **8** `chat_messages` rows it created (`rows_left=0`). The
+`chat_usage` counters were deliberately **not** rewritten — the owner was
+chatting organically at deploy time and decrementing a shared counter would
+erase real spend; the probe's ~12 calls are honest spend. Results (Persian):
+
+| # | scenario | reply (verbatim) |
+|---|---|---|
+| 1 | greeting | سلام، مرسی. تو چطوری؟ چه خبر؟ |
+| 2 | short | سلامتی، همه‌چی آرومه جز این اینترنت کذایی! تو چه خبر، کار و بار چطوره؟ |
+| 3 | name set-up | خوشبختم رضا، منم که اینجا پای ثابتِ کل‌کل‌های اینترنتی! … |
+| 4 | follow-up (memory) | مگه می‌شه یادم بره؟ گفتی رضایی دیگه. انقدر زود حافظه‌ام رو دست‌کم نگیر! |
+| 5 | topic start | بستگی داره چی بخوای بسازی. برای هوش مصنوعی … پایتون بهتره، ولی … جاوا … قوی‌تره. |
+| 6 | topic continue | معمولاً پایتون رو برای شروع بهتر می‌دونن چون سینتکسش خیلی روون‌تره … |
+| 7 | topic switch | آره، امسال سرما بدجوری دندون‌گیر شده. پاشو یه چای داغ بریز … |
+| 8 | light joke | (a short doctor joke) |
+| 9 | playful teasing | خودتی 😂 یه سؤال درست حسابی بپرس تا نشونت بدم. |
+| 10 | serious | ای بابا، ناراحت شدم. اگه دوست داری تعریف کن، شاید با همفکری یه راهی براش پیدا کردیم. |
+| 11 | unknown | خب اینو دیگه از کجا باید بدونم؟ خودت تا حالا نگفته بودی که! اسمش چیه حالا؟ |
+| 12 | repeat | اسممو نگفته بودی که یادم باشه! اسم چیه اصلاً؟ |
+
+**Assessment — the restoration is confirmed live.** Casual and informal, short
+and warm; continuity held inside the window (#4); topic start/continue/switch all
+followed; a joke was told for the joke; **#9 teased back in the same register**;
+**#10 dropped the joking immediately and answered the person normally**; **#11
+did not invent the cat's name**; **#12 was a different, concise answer, not
+boilerplate**. Across all 12: **no** «حتماً» / «البته» / «در خدمت شما هستم» /
+«اگر سؤال دیگری دارید» / generic assistant endings, and **no** claim to be human.
+
+**One honest nuance (NOT a regression).** At #12 the name given at #3 had fallen
+out of the bounded history window, so the model said it had not been told.
+`GEMINI_CHAT_HISTORY_TURNS=8` / `HISTORY_TTL=1800` are **identical to the
+historical default** (verified at `3243067`), so this is the intended
+bounded-history design, unchanged — not a personality defect. No correction made.
+
+**Regression verification after deploy.** `tests/test_chat.py` +
+`test_gemini_pool.py` + `test_chat_latency.py` + `test_web_search.py` +
+`test_admin_continuation.py` + `test_requests.py` → **380 passed / 0 failed**;
+`test_rbac.py` + `test_ai_admin.py` + `test_admin_commands.py` +
+`test_vpn_admin.py` → **299 passed / 0 failed**. (Full suite before deploy:
+3692 passed.)
+
+**Preserved / frozen.** Current Gemini/Nexus architecture, security boundaries,
+credential isolation, pool allocation, Awareness and context assembly all
+untouched. **V remains inactive** (`GEMINI_LIVE_ENABLED=False`); the `--arm
+context` probe stays frozen; the Telegram group/member authorization task is
+**unchanged**; no Phase Two; no new workloads; no Pool-allocation change.
+
+**NEXT STEP.** The owner's remaining phase is the **broader integration test** —
+do **not** start it without the owner's word. Rollback is one command
+(`docker tag guardbot-guardbot:pre-chat-personality guardbot-guardbot:latest &&
+docker compose up -d`). To resume: verify `git status` (clean), `git rev-parse
+HEAD` (this checkpoint's commit), `git ls-remote` on both remotes, `docker ps`
+(image `a976bb4c2a7a`, Up, `RestartCount=0`), and `[pool] chat: accounts=7` /
+`[pool] awareness: accounts=5` in the startup log.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or
