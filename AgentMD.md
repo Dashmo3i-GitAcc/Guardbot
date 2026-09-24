@@ -2634,8 +2634,8 @@ not a personality: it states *who* is speaking and no rule of its own.
 
 ### 53.13 The Admin Control Center (`app/web`)
 
-The panel is built in stages (M1…M8, §54.24/§54.25). These rules are
-non-negotiable for every stage:
+The panel is built in stages (M1…M8 — the plan is §54.24, and the newest
+checkpoint is §54.26). These rules are non-negotiable for every stage:
 
 * The dashboard is a **separate process** from the bot — its own compose service
   running `python -m app.web`. It must **never** run inside the bot's event loop,
@@ -2691,7 +2691,11 @@ non-negotiable for every stage:
   `requirements-dashboard.txt`, in their own Docker layer.
 * Every state-changing request is **server-authorized** and carries the
   session's **CSRF token**; both are middlewares, so a new route cannot forget
-  either.
+  either. The **only** exception is the public set, and in practice `/login`
+  alone: it is a POST that must be reachable *before* there is a session, so it
+  has no session to authorize against and no token to check. That is a deliberate
+  exception with one member, not a category — a second public POST would need to
+  be argued for, not added.
 * A password, an API key or `DASHBOARD_SECRET` is **never** logged, returned in a
   response, rendered, or placed in a URL. Only a masked fingerprint may be shown.
 * The session cookie is **`HttpOnly` + `SameSite=Lax`**, and **`Secure` whenever
@@ -5272,7 +5276,7 @@ checkpoint's commit on top of `6bdebab`), `git ls-remote` on both remotes.
 
 ---
 
-### 54.24 Checkpoint (2026-09-24, **Admin Control Center — A-to-Z audit + staged plan**) — audit DONE, implementation NOT STARTED
+### 54.24 Checkpoint (2026-09-24, **Admin Control Center — A-to-Z audit + staged plan**) — audit DONE, plan locked; superseded by §54.25
 
 **CHECKPOINT STATUS.** Date **2026-09-24 ~22:16Z**. Branch **`main`**, working
 tree clean. The **A-to-Z system audit is complete**; the **dashboard itself has
@@ -5466,7 +5470,7 @@ workload boundaries.
 
 ---
 
-### 54.25 Checkpoint (2026-09-24, **M1 — the panel's foundation is built**) — M1 DONE, NOT DEPLOYED, M2 NEXT
+### 54.25 Checkpoint (2026-09-24, **M1 — the panel's foundation is built**) — M1 DONE, NOT DEPLOYED; superseded by §54.26
 
 **CHECKPOINT STATUS.** Date **2026-09-24 ~22:40Z**. Branch **`main`**. M1 of the
 Admin Control Center (§54.24) is **implemented, tested and committed**. The
@@ -5581,15 +5585,18 @@ workload boundaries.
 
 ---
 
-### 54.26 Checkpoint (2026-09-24, **M2 — authorization + audit**) — M2 DONE, NOT DEPLOYED, M3 NEXT
+### 54.26 Checkpoint (2026-09-24, **M2 — authorization + audit**) — **resume here** (supersedes §54.25); M2 DONE, NOT DEPLOYED, M3 NEXT
 
-**CHECKPOINT STATUS.** Date **2026-09-24 ~23:05Z**. Branch **`main`**. Base /
-rollback commit **`e50ec5c`** (M1 — the panel's foundation). M2 of the Admin
-Control Center (§54.24/§54.25) is **implemented, tested and committed**. The
-dashboard is still **defined but not started**: the running bot is untouched
-(`guardbot`, image `f36e60bf3971`, `RestartCount=0`, verified before and after
-the rebuild). Nothing in Chat, the pools, the credentials, the limits, the
-breakers, tenant isolation or the workload boundaries was modified.
+**CHECKPOINT STATUS.** Date **2026-09-24 ~23:05Z**. Branch **`main`**. HEAD
+**`3fb63fa`** — M2's commit, on both remotes (`origin` and `dashmo3i`); the
+documentation correction that follows it is **`913089a`**. Base / rollback commit
+**`e50ec5c`** (M1 — the panel's foundation). Current task: **M2 complete; M3 not
+started.** M2 of the Admin Control Center (§54.24/§54.25) is **implemented,
+tested and committed**. The dashboard is still **defined but not started**: the
+running bot is untouched (`guardbot`, image `f36e60bf3971`, `RestartCount=0`,
+verified before and after the rebuild). Nothing in Chat, the pools, the
+credentials, the limits, the breakers, tenant isolation or the workload
+boundaries was modified.
 
 **What M2 ships.**
 
@@ -5615,7 +5622,9 @@ payload with extra `role`/`permissions` fields grants nothing). The **cross-grou
 half is **not written, and cannot be**: M2 exposes no group-scoped object for a
 route to take an id for, so a cross-group test would have nothing to exercise and
 would pass by construction. It arrives with the first page that takes an object id
-(M3/M4), and it is recorded here rather than claimed.
+— **M4** (a specific provider/credential) or **M5** (a specific group), which are
+the first pages that name one object rather than aggregate many — and it is
+recorded here rather than claimed.
 
 **Decisions taken during M2 (all reversible, none touching the bot).**
 
@@ -5661,6 +5670,26 @@ would pass by construction. It arrives with the first page that takes an object 
   the bot uses — not through a second path. §54.25's NEXT STEP named
   `admin_service` here; that is deferred, not dropped, and this checkpoint says so
   rather than implying a mutation path that does not exist.
+
+**Reconciling §54.24 decision 4.** The plan proposed new tables "as needed" —
+`dashboard_sessions` / `dashboard_credentials` / `dashboard_audit`. **Only the
+third exists**, and the other two are not outstanding work:
+
+* there is no **session** table because there are no server-side sessions. The
+  cookie is a signed stateless payload (§54.25), so a restart does not sign
+  anyone out and there is no row to expire, sweep or migrate.
+* there is no **credential** table because the credential is a file,
+  `/data/dashboard_credentials.json`, mode 600, written atomically (§54.25 and
+  the rationale in `app/web/credentials.py`): the SQLite database is backed up,
+  copied to a laptop and attached to bug reports, and the panel's password must
+  not travel with it.
+* `dashboard_audit` is the only table the panel creates, and it is created with
+  `CREATE TABLE IF NOT EXISTS` plus an index rather than the `_ensure_column`
+  half of decision 4 — the table is new, so there is no existing column to add,
+  and `_ensure_column` is the call that actually races the bot's boot (§53.13).
+
+A reader comparing the plan with the repository should find this paragraph rather
+than an absent table.
 
 **A bug the live probe found and the suite did not.** Container smoke scenario B
 (panel bound to a non-owner id, on a database where the bot had never run) returned
@@ -5730,6 +5759,18 @@ state, and the 403 sentence names `DASHBOARD_OPERATOR_ID` to make it diagnosable
 (e) Still no multi-bot support (§54.24 decision 5); the seam arrives with the bot
 page in M6. (f) SQLite is still single-writer: every later analytics page must
 aggregate at the DB layer and paginate.
+
+**Frozen / prohibited.** Nothing in this project was frozen by M2 and M2 froze
+nothing new; the one standing freeze is the `--arm context` probe (§54), which M2
+neither used nor touched. Prohibited in every panel stage, per §54.24 decision 6:
+modifying Chat, the pools, the credentials, the limits, the breakers, tenant
+isolation or the workload boundaries — and deploying the panel without the
+owner's go-ahead.
+
+**Pending verification: none.** The suite, the three live probes on the named
+image, the secret scan, both remote refs and the bot's untouched state were all
+verified and are recorded above. The one thing not yet done is the **deploy**,
+which is not a pending check but an action awaiting the owner's word.
 
 **NEXT STEP (exact).** Implement **M3 — Overview**: the panel's first *read*
 pages over the existing modules — bot/service status, the groups it serves, the
