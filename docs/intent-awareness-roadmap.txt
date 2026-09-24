@@ -714,23 +714,23 @@ that is not proven by a measurement.
 7. CONTINUATION POINT
 --------------------------------------------------------------------------------
 Branch:   develop/nexus-intelligence-evolution
-HEAD:     a0e4f3bb4701981b3f656b521f43442339ca744e
+HEAD:     0697ed05e9e6fee6c5fb141a4b242b8eb76075e6 (increment R)
 Rollback: main == release-base/nexus-intel == 00c5d1dd412e033c6ac15599b28bc0fbcb54d709
-Suite:    3240 passed, 0 failed
+Suite:    3245 passed, 0 failed
 Corpus:   137 cases, version 17
-Runtime-adjacent files A–Q touch: app/awareness_context.py only (one Source
+Runtime-adjacent files A–R touch: app/awareness_context.py only (one Source
           entry per reader — the documented seam). The only DB change on the
           branch is the foundation's 151b1e1 (two additive columns).
-Next:     INCREMENT R — "the graph's word and the act's why".
-          Start with the BASELINE: render the room-state graph block and the act
-          block for every corpus case and read the sentences, exactly as J, K,
-          L, M, O, P and Q did. If neither claims more than its reader found,
-          record the finding with a non-vacuity proof and stop.
-Durable context: AgentMD.md §53.7 (invariants) and §54 (the running checkpoint).
-                 docs/reference/nexus-awareness.md §52–§59 (the narrative).
+Next:     INCREMENT S — "the tie the resolver refuses to break".
+          Resolve thread 4.1 with evidence: decide whether the room's reply
+          convergence should be able to break a ROLE tie, and either implement it
+          with a corpus case that proves the desired behaviour, or record why not.
+          Do NOT start S without the owner's explicit go-ahead.
+Durable context: AgentMD.md §53.7 (invariants) and §54.1/§54.2 (the checkpoints).
+                 docs/reference/nexus-awareness.md §52–§60 (the narrative).
                  This file.
 
-To resume: re-read AgentMD.md §53.7 and §54 and this file, then verify
+To resume: re-read AgentMD.md §53.7 and §54.1/§54.2 and this file, then verify
 `git status`, `git rev-parse HEAD`, `git rev-parse main`, and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution` before
 doing anything else.

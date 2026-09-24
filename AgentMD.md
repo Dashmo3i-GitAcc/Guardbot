@@ -2429,3 +2429,84 @@ procedure.
 `git rev-parse HEAD` (a0e4f3b…), `git rev-parse main` (00c5d1d…), and
 `git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
 (a0e4f3b…). Then start R's baseline.
+
+### 54.2 Checkpoint (2026-09-24, after R) — resume here (supersedes §54.1)
+
+**State, verified against the repository.** Branch
+`develop/nexus-intelligence-evolution`, HEAD
+`0697ed05e9e6fee6c5fb141a4b242b8eb76075e6` (increment R), pushed to both remotes
+(`origin` = mo3iiibest77-hub, `dashmo3i` = Dashmo3i-GitAcc). 27 commits on the
+branch. `main` and the annotated tag `release-base/nexus-intel` both still
+`00c5d1dd412e033c6ac15599b28bc0fbcb54d709` — **the rollback point is untouched**
+(the tag is local-only; neither remote carries tags). Suite **3245 passed, 0
+failed**. Corpus **137 cases, version 17**. Benchmark clean: top-1 / ambiguity
+precision / ambiguity recall 1.0, `wrong_confident == 0`, `act_accuracy == 1.0`,
+`object_accuracy == 1.0`, `expression_accuracy == 1.0`, `edges_exact == 137`,
+`graph_claims_convergence_cases == 0`, `act_quote_not_in_anchor_cases == 0`,
+assembled context mean/max 940.3/1498 under the 1500 ceiling. **Not merged, not
+deployed.**
+
+**What R did.** The last increment of the "score the rendered product" programme
+(J's method). Two claims scored:
+
+1. **The graph overclaimed.** `room_state.render_graph`'s "The room's replies
+   have converged on X (N of M)" was gated on `focus_count >= 2` — the *edge*
+   count — so two replies from one member read as the room converging. The
+   corpus case `anaphoric-split-room` (one member replying twice to each of two
+   people; the corpus's own note calls that room "split") rendered "converged on
+   22 (2 of 4)". Fix: `RoomState.focus_sources` (distinct members at the focus)
+   and `converged()` now requires `len(focus_sources) >= 2`; `render_graph`'s
+   weaker branch says "N replies were aimed at X, all from one member; that is
+   not a convergence". Metric `graph_claims_convergence_cases` **1 → 0**; the
+   four genuine convergences still render "converged on".
+2. **The act was already correct.** All 112 rendered act sentences read: the
+   template reports `why[0]` verbatim, the evidence word is always a token of
+   the message, and a claimed act always has a non-empty why. **No production
+   change.** The harness now renders the act sentence (it held only `act.why`
+   before) and floors `act_quote_not_in_anchor_cases` at 0.
+
+Only production file touched: `app/room_state.py`. 0 Gemini calls; no DB change;
+no source, budget or runtime-path change. Graph block chars mean 115.8 → 116.0,
+max 239 → 265. `converged()` 0.233 → 0.861 µs (called once per graph render);
+`read_state` + `render_graph` within noise. 5 new tests (1 `test_room_state.py`,
+4 `test_intent_eval.py` incl. 2 non-vacuity). Narrative: §60 of
+`docs/reference/nexus-awareness.md`.
+
+**The programme is complete.** Every block the prompt renders now has a check
+re-derived from the rendered prose: the time sentence, the entity block's two
+claims, the thread's named words, the act block's quoted directive, the referent
+block, the object line, the graph's focus sentence, and the act sentence's
+evidence word. See roadmap §2.1.
+
+**Unresolved (do not guess at):**
+- **The tie.** A room split evenly between two people *with distinct members on
+  each side* (e.g. 22→11, 33→11 and 44→22, 55→22) still renders "converged on
+  22" via the most-recent-edge tie-break. No corpus case demonstrates it, so R
+  did not change it. Open thread.
+- **`role-two-admins`** (thread 4.1) — still `ambiguous: true` by design; the
+  role signal never runs the anaphoric convergence. → increment **S**.
+- The partially-completed findings still open: the dead field
+  `objects.Object.source`, `requests.render`'s weak reason wording, the
+  `objects.render` CLASS_THING duplication (roadmap §2.2–§2.4).
+
+**Exact next step.** INCREMENT **S** — "the tie the resolver refuses to break":
+decide, with a corpus case, whether the room's reply convergence may break a
+**role** tie; implement it only if the case proves the desired behaviour,
+otherwise record why not. Do NOT start S without the owner's explicit go-ahead.
+Do not start T, U or V.
+
+**Rollback.** Every increment is independently revertable: `git revert <sha>` on
+this branch. The whole evolution reverts by leaving the branch unmerged — `main`
+at `00c5d1dd412e033c6ac15599b28bc0fbcb54d709` is the production state and is an
+**ancestor** of the branch. **No lettered increment (A–R) changed the DB schema
+or the runtime path**; the only DB change on the branch is the foundation's
+`151b1e1` (two ADDITIVE `awareness_state` columns via `_ensure_column`). Increment
+T would be the first DB change since it and must carry its own forward/backward
+proof and rollback procedure.
+
+**To resume after any context loss.** Re-read this section and
+`docs/intent-awareness-roadmap.txt`, then verify: `git status` (clean),
+`git rev-parse HEAD` (0697ed0…, the R increment, or a docs commit on top of it),
+`git rev-parse main` (00c5d1d…), and
+`git ls-remote origin refs/heads/develop/nexus-intelligence-evolution`
+(0697ed0… or later).
