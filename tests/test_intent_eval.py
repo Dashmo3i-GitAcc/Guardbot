@@ -279,6 +279,43 @@ def test_the_time_sentence_check_is_not_vacuous():
     assert any("ago" in r["when_prose"] for r in past)
 
 
+def test_the_entity_block_never_claims_a_pointer_the_message_lacks():
+    """The block's header is a claim, and it must be backed.
+
+    The header says the message *may point at* the things under it, so it may
+    only appear for a message that points at something. Nothing scored the
+    rendered block before this: ``named_ok`` compares the class the message
+    names, which is a different fact — the reader could be right while the prompt
+    told the model a greeting had things to point at.
+    """
+    m = result()
+    assert m["entity_claims_a_pointer_cases"] == 0
+
+
+def test_the_entity_block_never_offers_things_for_a_person():
+    """…and it must not contradict the block printed beside it.
+
+    The closing line says "do not act on a person unless the message names one".
+    Next to the object block's "acts on a **person**" that is the opposite claim,
+    and the model has to choose which to believe.
+    """
+    m = result()
+    assert m["entity_offers_things_for_a_person_cases"] == 0
+
+
+def test_the_entity_block_check_is_not_vacuous():
+    """A zero is also what a block that never renders produces.
+
+    Measured against the renderer before the fix, these two counts were **11** and
+    **3**; splitting the two halves of the fix, the reader's widened pointer
+    accounts for five of the eleven and the rendering gate for the other six.
+    """
+    m = result()
+    assert m["entity_pointer_header_cases"] >= 15, "no block offers a pointer at all"
+    assert m["entity_items_offered_total"] >= 10, "the guard suppressed everything"
+    assert m["entity_items_found_total"] >= m["entity_items_offered_total"]
+
+
 def test_the_time_reader_is_fast_enough_to_run_on_every_pass():
     """The folded table is cached, so a read is a substring scan and no more."""
     assert result()["when_us_mean"] < 1000

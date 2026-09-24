@@ -24,6 +24,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [50. The person lead the object reading removed](#s50)
 - [51. Talking about Nexus, not to it](#s51)
 - [52. A sentence that contradicted itself](#s52)
+- [53. A correction the evidence did not support](#s53)
 
 ---
 
@@ -3073,3 +3074,185 @@ the sentence is the product, and a property over the *whole* vocabulary is what
 catches a wording that is wrong for a subset. The four new corpus cases exist
 because the magnitude has four branches, and a single case would have proved only
 that the day branch was fixed.
+
+## 53. A correction the evidence did not support
+
+### 53.1 Where this one came from
+
+§52 ended with a method: *for every block, the sentence is the product*. It was
+written about the time block. This is the same method applied one block over, and
+it found a worse defect in less time — because the entity block's product is not
+a sentence about the message, it is a **claim about what the message means**, and
+the claim was being made whether or not the reader had the evidence for it.
+
+The block renders under this header:
+
+> Things this message may point at — things, not people (server-built; evidence,
+> not a decision):
+
+and, when the message names no thing, closes with:
+
+> If the message means one of these, it is not about a person — do not act on a
+> person unless the message names one.
+
+Both are claims about *this message*. Neither was gated on anything about it. The
+renderer printed the header whenever the window held a photograph and the message
+held anything at all, so a greeting reached the model as:
+
+```
+[owner] Ali (1): سلام بچه ها
+…
+Things this message may point at — things, not people (server-built; evidence,
+not a decision):
+- a document by 13 (the newest)
+If the message means one of these, it is not about a person — do not act on a
+person unless the message names one.
+```
+
+### 53.2 The field that existed and was never read
+
+`Entities.pointing` has been computed by `read_entities` since the module was
+written — from `has_demonstrative(anchor["text"])` — and **read by nothing**.
+`grep pointing app/` found the assignment and the docstring and no consumer. The
+field was the answer to exactly this question, and the renderer never asked it.
+
+That is the whole shape of the defect: not a wrong reading, but a reading nobody
+consulted before making a claim. The benchmark could not see it for the same
+reason it could not see §52's: `named_ok` compares the class the message *names*,
+which is a different fact from whether the message *points*.
+
+### 53.3 Two rules, and why both
+
+The fix has two halves, and the second was found by reading the assembled prompt
+rather than by reasoning about the reader.
+
+**The message must point at something.** The header says *may point at*, so it
+may not head a list for a message with no pointing expression. This is not a new
+rule — `app/objects.py` already states it for the object it reports:
+
+> a bare «پاک کن» points at nothing, and the room's newest photograph is not its
+> object just because the room has one
+
+The entity block offers the *candidates* for that object, and it was applying
+none of it.
+
+What counts as pointing is wider than a demonstrative. «پاکش کن» says "delete it"
+with no «این» anywhere — the object clitic «ـش» is the pointer, and
+`referents.find_expression` is the reader that knows the clitic forms. So
+`pointing` is now *a demonstrative **or** an expression the resolver reads*, and
+`app/objects.py` consults the same primitive for the same question.
+
+**The request must not act on a member.** This one was found by printing the
+assembled context for three corpus cases and reading it. For «ساکتش کن» the
+prompt contained, four lines apart:
+
+```
+The request acts on a **person**, not on a thing — read the person from the
+transcript, not from this line.
+…
+Things this message may point at — things, not people …
+If the message means one of these, it is not about a person — do not act on a
+person unless the message names one.
+```
+
+Two blocks, opposite instructions, and the model has to choose. The object reader
+had already decided the side — that is what §49's `discourse.acts_on` split is
+for — and the entity block was not consulting it.
+
+`_acts_on_a_person` is the mirror of the guard §50 added to `referents`, with the
+same three clauses read the other way round: there must be a directive; **no**
+directive may act on a thing, so a message that asks for both («ساکتش کن و اینو
+پاک کن») keeps every candidate, because losing a target is worse than an extra
+one; and at least one must act on a person. An unclassified directive answers
+nothing and never fires it.
+
+### 53.4 What the rules do not touch
+
+`read_entities` still reports every item it found, and `Entities.of_kind` still
+sees every item. Only `Entities.offered` — the one method that answers "what may
+this block put under that header" — is narrowed, and only the rendering consumes
+it. A reader that hid its findings would be lying rather than staying quiet, and
+the harness keeps the two apart on purpose: it reports **candidates offered 19 of
+24 found**, so a guard that suppressed everything would read `0 of 0` and be
+visible as such.
+
+The two readings are also taken **only when there is an item to narrow**. With no
+candidates both answers are inert, and the lexicons they borrow
+(`referents`' expression table, `discourse`'s action words) are most of what this
+reader costs. Measured in-process over the corpus, best of three (the absolute
+baseline moves with host load between runs, so the deltas are the number to read):
+
+| | µs per `read_entities` call |
+|---|---|
+| reader without either guard | 32.3 |
+| reader as it is | 39.9 |
+| **the two guards** | **+7.6** |
+| *(the same guards, taken unconditionally)* | *+60.4* |
+
+One case in five has a candidate, so the conditional call is what keeps the
+reader's cost proportional to what it produces.
+
+### 53.5 The measurement that was missing
+
+`tools/eval_intent.py` gained two checks that read the **rendered block** and
+compare it against the evidence the reader held:
+
+* `_entity_claims_a_pointer(block, state)` — the header is in the text and the
+  message points at nothing.
+* `_entity_offers_things_for_a_person(block, state)` — the header is in the text
+  and the request acts on a member.
+
+Both are reported as should-be-zero counts beside a non-vacuity pair
+(`entity_pointer_header_cases`, `entity_items_offered_total` of
+`entity_items_found_total`), and both are in the failures list. Run against the
+**old** renderer, reconstructed from the same reader, they read:
+
+| | no pointer | for a person |
+|---|---|---|
+| old renderer, old `pointing` (demonstrative only) | **11** | **3** |
+| old renderer, new `pointing` | 6 | 3 |
+| new renderer, new `pointing` | **0** | **0** |
+
+The three rows separate the two halves of the fix: widening `pointing` accounts
+for five of the eleven false headers, the rendering gate for the other six, and
+the side guard for all three of the contradictions.
+
+### 53.6 The numbers
+
+| | before | after |
+|---|---|---|
+| blocks rendered (of 127 cases) | 27 | 22 |
+| — of those, offering a pointer | 11 | 17 |
+| — false headers (message points at nothing) | 11 | **0** |
+| — offering things for a person-directed request | 3 | **0** |
+| candidates offered / found | 24 / 24 | 19 / 24 |
+| entity reader, µs/call | 32.3 | 39.9 (+7.6) |
+| entity block chars max | 302 | 302 |
+| corpus | 127 (v12) | 127 (v12) |
+| suite | 3131 | 3151 |
+
+The corpus did not grow, and that is the point of this one: **the defect was in
+cases the corpus already had.** No new case could have caught it, because the
+reader was right in every one of them. What was missing was a check on the block.
+
+No model calls added, no database change, no source-registry or budget change,
+no change to what the readers report. Every candidate the block suppresses is
+still stated elsewhere — the object block names the class, and the transcript
+names the row.
+
+### 53.7 What it leaves
+
+The entity block's two rules are now about evidence the module already held. The
+same question — *does this block's sentence claim more than its reader found?* —
+has not been asked of the referent, act, object or room-state blocks, and §52's
+check covers only the time block. That is the honest next step, and it is the
+same one §52 named: the product is the prompt, and only one block has been scored
+as prose.
+
+Reading the assembled prompt turned up one other thing, recorded here because it
+was found the same way and is not fixed here. `room_state.content_tokens` counts
+the plural clitic «ها» as a content word, so `content_tokens("سلام بچه ها")`
+returns `("بچه", "ها")` — and the thread block renders *"it shares «بچه», «ها» with
+what came before"*. Two messages with any plural noun in common therefore
+"continue" each other. It is the same class of defect as this one (a claim the
+evidence does not carry) in a different reader, and it wants its own increment.

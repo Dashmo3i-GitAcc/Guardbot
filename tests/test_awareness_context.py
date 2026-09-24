@@ -942,6 +942,36 @@ def test_the_entities_block_reads_the_context_not_the_database():
     assert "a video by" in awareness_context._render_entities(ctx)
 
 
+def test_the_entities_block_does_not_claim_a_pointer_a_greeting_lacks():
+    """The window holds a photograph, and the message is a greeting.
+
+    The header says the message *may point at* the things under it, so it must
+    not appear — and the block must not carry the "not about a person" line
+    either, which reads as an instruction about a message that has no object.
+    """
+    anchor = _msg(ADMIN, "سلام بچه ها", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "ببین", name="Reza", at=900, message_id=1)]
+    window[0]["kind"] = "photo"
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "Things this message may point at" not in out
+    assert "not about a person" not in out
+
+
+def test_the_entities_block_does_not_contradict_the_object_block():
+    """The two blocks are read together, so they must agree about the side.
+
+    «اینو بن کن» acts on a member. The object block says so; the entities block
+    must not answer with the room's photograph and "do not act on a person".
+    """
+    anchor = _msg(ADMIN, "اینو بن کن", role="admin", name="Admin", at=1000)
+    window = [_msg(TARGET, "ببین", name="Reza", at=900, message_id=1)]
+    window[0]["kind"] = "photo"
+    out = awareness_context.blocks(_referent_ctx(anchor, window))
+    assert "acts on a **person**" in out
+    assert "Things this message may point at" not in out
+    assert "not about a person" not in out
+
+
 # ── Who is talking to whom, and whether this is still the same thread ─────
 def test_the_reply_graph_is_rendered_for_the_model():
     anchor = _msg(ADMIN, "خب", role="admin", name="Admin", at=1000)

@@ -333,6 +333,131 @@ def test_the_block_is_bounded():
     assert len(out) <= 600
 
 
+# ── The block is a claim, and it needs evidence ───────────────────────────
+# The header says the message *may point at* the things under it. It used to be
+# printed whenever the window held a photograph and the message held anything at
+# all — a greeting reached the model as "Things this message may point at … do not
+# act on a person unless the message names one". The reader was right; the block
+# was making a claim the reader never made.
+def _photo_window():
+    return [row(11, "ببین", 900, mid=1, kind="photo")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "سلام بچه ها",       # a greeting points at nothing
+        "پاک کن",            # a bare imperative points at nothing
+        "حذف کن",
+        "کاربر رو محدود کن",  # a member, and nothing to point at
+    ],
+)
+def test_a_message_that_points_at_nothing_offers_no_candidates(text):
+    out = E.render(E.read_entities(_photo_window(), row(33, text, 1000, mid=2)))
+    assert "Things this message may point at" not in out
+    assert "not about a person" not in out
+
+
+def test_the_reader_still_reports_what_it_found():
+    """The rule narrows the block, not the reading.
+
+    ``of_kind`` and the items are facts the rest of the system reads; suppressing
+    them here would be the reader lying rather than the block staying quiet.
+    """
+    state = E.read_entities(_photo_window(), row(33, "پاک کن", 1000, mid=2))
+    assert [i.kind for i in state.items] == [E.KIND_MEDIA]
+    assert state.of_kind(E.KIND_MEDIA)
+    assert state.offered() == ()
+
+
+def test_the_object_clitic_counts_as_pointing():
+    """«پاکش کن» points with «ـش» and no demonstrative anywhere."""
+    state = E.read_entities(_photo_window(), row(33, "پاکش کن", 1000, mid=2))
+    assert state.pointing is True
+    assert len(state.offered()) == 1
+
+
+def test_a_demonstrative_still_counts_as_pointing():
+    state = E.read_entities(_photo_window(), row(33, "اینو پاک کن", 1000, mid=2))
+    assert state.pointing is True
+    assert len(state.offered()) == 1
+
+
+def test_a_request_that_acts_on_a_person_offers_no_things():
+    """The mirror of the guard ``referents`` applies, read the other way round.
+
+    «ساکتش کن» asks for a member to be muted. A list of the room's photographs
+    beside it — carrying "do not act on a person unless the message names one" —
+    says the opposite of the object block next to it.
+    """
+    for text in ("ساکتش کن", "اینو بن کن", "میشه اینو محدود کنی؟"):
+        state = E.read_entities(_photo_window(), row(33, text, 1000, mid=2))
+        assert state.acts_on_a_person is True, text
+        assert state.offered() == (), text
+        out = E.render(state)
+        assert "Things this message may point at" not in out, text
+
+
+def test_a_request_that_asks_for_both_keeps_every_candidate():
+    """Losing a target is worse than an extra one — the same call H made."""
+    state = E.read_entities(
+        _photo_window(), row(33, "ساکتش کن و اینو پاک کن", 1000, mid=2)
+    )
+    assert state.acts_on_a_person is False
+    assert len(state.offered()) == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "سلام",              # no directive
+        "برای اینم همین کارو بکن",  # a directive with no side
+        "کارو بکن",
+    ],
+)
+def test_the_guard_needs_a_directive_with_a_known_side(text):
+    """An unclassified verb answers nothing, so it must not fire the guard."""
+    state = E.read_entities(_photo_window(), row(33, text, 1000, mid=2))
+    assert state.acts_on_a_person is False
+
+
+def test_the_named_line_stands_without_the_pointer_header():
+    """«فایل رو چک کن» names a file without pointing at one.
+
+    The header belongs to the item list, so the named line carries its own
+    framing when there is no list to head — and must not borrow the header.
+    """
+    rows = [row(11, "فایل مشکل داره", 900, mid=1)]
+    out = E.render(E.read_entities(rows, row(33, "فایل رو چک کن", 1000, mid=2)))
+    assert "names «فایل»" in out
+    assert "Things this message may point at" not in out
+    assert out.startswith("\n")
+
+
+def test_the_pointer_reading_is_borrowed_lazily_and_guarded():
+    """The clitic forms live in ``referents``; a second copy here would drift."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(E))
+    top = _imports(tree, top_level_only=True)
+    lazy = _imports(tree, top_level_only=False) - top
+    assert "referents" in lazy
+    assert lazy & top == set()
+
+
+def test_the_side_guard_is_borrowed_lazily_and_guarded():
+    """The verb's side lives in ``discourse``, beside the lexicon it splits."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(E))
+    top = _imports(tree, top_level_only=True)
+    lazy = _imports(tree, top_level_only=False) - top
+    assert "discourse" in lazy
+    assert lazy & top == set()
+
+
 # ── Purity ────────────────────────────────────────────────────────────────
 def _imports(tree, *, top_level_only: bool) -> set[str]:
     import ast

@@ -103,6 +103,32 @@ def _span_contradicts(line: str) -> bool:
     return False
 
 
+# The entity block's header, which is the claim the two checks below are about.
+_POINTER_HEADER = "Things this message may point at"
+
+
+def _entity_claims_a_pointer(block: str, state) -> bool:
+    """Whether the block offers candidates for a message that points at nothing.
+
+    The header says the message *may point at* the things under it, so a message
+    with no pointing expression at all — a greeting, a bare «پاک کن» — must not
+    carry it. ``named_ok`` compares the class the message names, which is a
+    different fact, so the reader could be right while the prompt was wrong.
+    """
+    return _POINTER_HEADER in block and not state.pointing
+
+
+def _entity_offers_things_for_a_person(block: str, state) -> bool:
+    """Whether the block offers things beside a request that acts on a member.
+
+    The block's closing line tells the model not to act on a person unless the
+    message names one. Printed next to the object block's "acts on a **person**"
+    it says the opposite of its neighbour, and the model has to choose which to
+    believe. The evidence to know better was in the reader all along.
+    """
+    return _POINTER_HEADER in block and state.acts_on_a_person
+
+
 def _row(raw: dict) -> dict:
     """One window row, with every column the resolver, the matcher and the
     discourse reader consult."""
@@ -273,6 +299,18 @@ def evaluate(cases: dict) -> dict:
                 "expected_named": expected_named,
                 "got_named": ent.named,
                 "entity_chars": len(entity_block),
+                # The block, scored as a block. Its two claims are checked
+                # against the evidence the reader held, because the class
+                # comparison above cannot see a claim the reader never made.
+                "entity_prose": entity_block.strip(),
+                "entity_claims_a_pointer": _entity_claims_a_pointer(
+                    entity_block, ent
+                ),
+                "entity_offers_things_for_a_person": (
+                    _entity_offers_things_for_a_person(entity_block, ent)
+                ),
+                "entity_items_offered": len(ent.offered()),
+                "entity_items_found": len(ent.items),
                 "has_request_label": has_request_label,
                 "expected_directive": expected_directive,
                 "got_directive": request.directive,
@@ -558,6 +596,23 @@ def _metrics(detail: list[dict]) -> dict:
         "named_correct": sum(1 for r in named_cases if r["named_ok"]),
         "named_accuracy": rate(named_cases, lambda r: r["named_ok"]),
         "entity_block_chars_max": max((r["entity_chars"] for r in detail), default=0),
+        # The block as a claim, not as a reading. Both counts should be zero, and
+        # both were non-zero: the header rendered for messages that point at
+        # nothing, and the correction rendered beside a request that acts on a
+        # person. `entity_items_found` is kept beside `entity_items_offered` so a
+        # guard that suppresses everything is visible as such rather than as a
+        # clean zero.
+        "entity_pointer_header_cases": sum(
+            1 for r in detail if _POINTER_HEADER in r["entity_prose"]
+        ),
+        "entity_claims_a_pointer_cases": sum(
+            1 for r in detail if r["entity_claims_a_pointer"]
+        ),
+        "entity_offers_things_for_a_person_cases": sum(
+            1 for r in detail if r["entity_offers_things_for_a_person"]
+        ),
+        "entity_items_found_total": sum(r["entity_items_found"] for r in detail),
+        "entity_items_offered_total": sum(r["entity_items_offered"] for r in detail),
         "request_cases": len(request_cases),
         "request_correct": sum(1 for r in request_cases if r["request_ok"]),
         "request_accuracy": rate(request_cases, lambda r: r["request_ok"]),
@@ -756,6 +811,13 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  named class exact          {m['named_correct']} / {m['named_cases']}",
         f"  named class accuracy       {_pct(m['named_accuracy'])}",
         f"  block chars max            {m['entity_block_chars_max']}",
+        f"  the block, scored          {m['entity_pointer_header_cases']} offer a pointer; "
+        f"for a message that points at nothing {m['entity_claims_a_pointer_cases']}, "
+        f"for a request acting on a person {m['entity_offers_things_for_a_person_cases']} "
+        "(both should be 0)",
+        f"  candidates offered         {m['entity_items_offered_total']} of "
+        f"{m['entity_items_found_total']} found (a guard that suppressed everything "
+        "would read 0 of 0)",
         "",
         f"the directive's direction (over {m['request_cases']} labelled cases)",
         f"  exact (word·direction·manner)  {m['request_correct']} / {m['request_cases']}",
@@ -823,6 +885,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
         if not r["kind_ok"] or not r["addressed_ok"] or not r["act_ok"]
         or not r["when_ok"] or not r["edges_ok"] or not r["focus_ok"]
         or r["when_prose_contradicts"]
+        or r["entity_claims_a_pointer"]
+        or r["entity_offers_things_for_a_person"]
         or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])

@@ -40,6 +40,27 @@ one are read together, and the failure mode this prevents is the model acting on
 a person when the message was about a photograph. The sentence is evidence
 framing, not an instruction — the model still decides.
 
+Why the correction has conditions
+---------------------------------
+A correction is a claim, and this one was being made whether or not the evidence
+supported it. Two rules narrow it, and both are in ``Entities.offered``:
+
+* **the message must point at something.** A greeting and a bare imperative
+  («پاک کن») point at nothing, so the room's newest photograph is not a candidate
+  for them. This is the same rule ``app/objects.py`` applies to the object it
+  reports — *"a bare «پاک کن» points at nothing, and the room's newest photograph
+  is not its object just because the room has one"* — applied to the candidates
+  this block offers.
+* **the request must not act on a member.** When the object reader has read the
+  request as acting on a person, offering things beside it — with the sentence
+  "do not act on a person unless the message names one" — tells the model the
+  opposite of the block next to it. This is the mirror of the guard
+  ``app/referents.py`` applies, and it is written with the same three clauses so
+  a message that asks for both keeps every candidate.
+
+Neither rule touches what the reader *found*: ``read_entities`` reports every
+item and ``Entities.of_kind`` sees every item. Only the rendering is narrowed.
+
 Why it only names the reply target when the anchor says "message"
 ----------------------------------------------------------------
 A reply edge always has a target, so pointing at it unconditionally would print
@@ -191,6 +212,67 @@ def has_demonstrative(text: str | None) -> bool:
     return any(token in _DEMONSTRATIVES for token in _tokens(text))
 
 
+def _points_at_something(text: str | None) -> bool:
+    """Whether the message carries any expression that points at something.
+
+    Two kinds, and the block needs both:
+
+    * a **demonstrative** — «اینو»، «همون»، «قبلی» — which this module reads for
+      its own sake; and
+    * the **object clitic on an action verb**. «پاکش کن» says "delete it" with no
+      demonstrative anywhere. ``referents.find_expression`` is the reader that
+      knows the clitic forms, and ``app/objects.py`` consults it for the same
+      question, so it is borrowed late and guarded rather than re-implemented
+      here as a second copy of the clitic table.
+
+    What it *excludes* is the point of it. A bare imperative («پاک کن») points at
+    nothing, and neither does a greeting — the room's newest photograph is not
+    their object just because the room has one. ``app/objects.py`` states that
+    rule and applies it to the object it reports; this applies it to the
+    candidates this block offers.
+    """
+    if has_demonstrative(text):
+        return True
+    try:
+        from . import referents
+
+        return bool(referents.find_expression(text))
+    except Exception:  # noqa: BLE001 - a pointer we cannot read is not one
+        return False
+
+
+def _acts_on_a_person(text: str | None) -> bool:
+    """Whether the message's directives act on a member and on no thing.
+
+    The mirror of the guard ``app/referents.py`` applies one level down, read the
+    other way round. That one stops the resolver offering a *person* for a request
+    that acts on a thing; this one stops this block offering *things* for a
+    request that acts on a person. «ساکتش کن» asks for a member to be muted, and a
+    list of the room's photographs beside it — carrying the sentence "do not act
+    on a person unless the message names one" — is the same wrong lead with the
+    sides swapped.
+
+    Three clauses, and each is load-bearing: there must be a directive; **no**
+    directive may act on a thing, so a message that asks for both («ساکتش کن و
+    اینو پاک کن») keeps every candidate, because losing a target is worse than an
+    extra one; and at least one must act on a person. An unclassified directive
+    answers nothing, so it never fires this guard — the same abstention
+    ``discourse.acts_on`` makes for ``app/objects.py``.
+    """
+    try:
+        from . import discourse
+
+        found = discourse.directives(text)
+        if not found:
+            return False
+        sides = [discourse.acts_on(word) for _index, word in found]
+        if any(side == discourse.ACTS_ON_THING for side in sides):
+            return False
+        return any(side == discourse.ACTS_ON_PERSON for side in sides)
+    except Exception:  # noqa: BLE001 - a missing lexicon is not a failure
+        return False
+
+
 def _is_media(row: dict) -> tuple[bool, str]:
     """Whether a row is a media message, and which kind.
 
@@ -231,18 +313,42 @@ class Entity:
 
 @dataclass(frozen=True)
 class Entities:
-    """The things a demonstrative may mean, and the class the anchor named."""
+    """The things a demonstrative may mean, and the class the anchor named.
+
+    ``pointing`` and ``acts_on_a_person`` are the two readings the *block* needs
+    to decide what it may offer. Both are taken only when there is at least one
+    item — with no candidates they cannot change anything, and taking them costs
+    more than the rest of the reader — so both are ``False`` on a state whose
+    ``items`` is empty. Read them through :meth:`offered`, which is the only
+    thing that consumes them.
+    """
 
     named: str = ""
     named_surface: str = ""
     items: tuple[Entity, ...] = ()
     pointing: bool = False
+    acts_on_a_person: bool = False
 
     def __bool__(self) -> bool:
         return bool(self.items)
 
     def of_kind(self, kind: str) -> tuple[Entity, ...]:
         return tuple(item for item in self.items if item.kind == kind)
+
+    def offered(self) -> tuple[Entity, ...]:
+        """The items the block may offer, under its own two rules.
+
+        The header says the message **may point at** these, so they are offered
+        only when the message carries a pointer at all, and only when the object
+        reader has not already read the request as acting on a member.
+
+        Both rules are about what the *block claims*, not about what the reader
+        found: ``read_entities`` still reports every item, and ``of_kind`` still
+        sees every item. The rendering is the only thing narrowed.
+        """
+        if not self.pointing or self.acts_on_a_person:
+            return ()
+        return self.items
 
 
 def _prior(messages, anchor: dict | None) -> list[dict]:
@@ -353,11 +459,31 @@ def read_entities(
         )
         for item in capped
     )
+    # The two readings the *block* needs, kept apart from the items: the reader
+    # reports everything it found, and ``Entities.offered`` narrows what may be
+    # put under the "may point at" header.
+    #
+    # They are taken **only when there are candidates**, and that is a decision
+    # about cost rather than about meaning: with no items both answers are
+    # already inert — ``offered`` returns nothing whatever they say — and the two
+    # lexicons they borrow (``referents``' expression table, ``discourse``'s
+    # action words) are most of what this reader costs. Measured in-process over
+    # the corpus, best of three: taken unconditionally they cost **+60 µs** a
+    # call, taken here **+7.6 µs** — and only one case in five has a candidate
+    # for them to narrow.
+    if capped:
+        text = anchor.get("text")
+        pointing = _points_at_something(text)
+        acts_on_a_person = _acts_on_a_person(text)
+    else:
+        pointing = False
+        acts_on_a_person = False
     return Entities(
         named=named,
         named_surface=surface,
         items=capped,
-        pointing=has_demonstrative(anchor.get("text")),
+        pointing=pointing,
+        acts_on_a_person=acts_on_a_person,
     )
 
 
@@ -379,34 +505,56 @@ def _reply_target_row(prior: list[dict], anchor: dict) -> dict | None:
 
 # ── Rendering ─────────────────────────────────────────────────────────────
 def render(state: Entities, *, cap: int = 600) -> str:
-    """The things the anchor may mean, and the class it named. Evidence only.
+    """The things the anchor may point at, and the class it named. Evidence only.
+
+    Two claims, and each is now backed by its own evidence.
+
+    The **item list** is offered under a header that says the message *may point
+    at* these, so it renders only when the message carries a pointer at all and
+    the object reader has not already read the request as acting on a member —
+    both rules in ``Entities.offered``. It used to render whenever the window had
+    a photograph and the message had anything at all: a greeting («سلام بچه ها»)
+    reached the model as *"Things this message may point at … If the message means
+    one of these, it is not about a person — do not act on a person unless the
+    message names one."*
+
+    The **named class** is a different fact and stands on its own: «فایل رو چک
+    کن» names a file without pointing at one, so the line renders with no header
+    when there is no list to head. The header belongs to the list, not to the
+    block.
 
     Renders nothing when there is nothing to point at *and* nothing named: a
     block that says "no things found" would spend tokens to tell the model what
     the transcript already shows.
     """
-    if not state.items and not state.named:
+    items = state.offered()
+    if not items and not state.named:
         return ""
-    lines = [
-        "\nThings this message may point at — things, not people "
-        "(server-built; evidence, not a decision):"
-    ]
-    for item in state.items:
-        who = f" by {item.user_id}" if item.user_id else ""
-        where = " (the newest)" if item.newest else ""
-        if item.kind == KIND_MEDIA:
-            what = f"a {item.detail}{who}{where}"
-        elif item.kind == KIND_LINK:
-            what = f"a link to {item.detail}{who}{where}"
-        else:
-            what = f"the message it replies to{who}"
-        lines.append(f"- {what}: «{item.text}»" if item.text else f"- {what}")
-    if state.named:
+    lines: list[str] = []
+    if items:
         lines.append(
+            "\nThings this message may point at — things, not people "
+            "(server-built; evidence, not a decision):"
+        )
+        for item in items:
+            who = f" by {item.user_id}" if item.user_id else ""
+            where = " (the newest)" if item.newest else ""
+            if item.kind == KIND_MEDIA:
+                what = f"a {item.detail}{who}{where}"
+            elif item.kind == KIND_LINK:
+                what = f"a link to {item.detail}{who}{where}"
+            else:
+                what = f"the message it replies to{who}"
+            lines.append(f"- {what}: «{item.text}»" if item.text else f"- {what}")
+    if state.named:
+        named_line = (
             f"The message names «{state.named_surface}», so the "
             f"{_CLASS_WORDS[state.named]} is what it is about."
         )
-    if state.items and not state.named:
+        # The header above belongs to the item list, so the named line carries
+        # its own leading break when it is the whole block.
+        lines.append(named_line if lines else f"\n{named_line}")
+    if items and not state.named:
         lines.append(
             "If the message means one of these, it is not about a person — do not "
             "act on a person unless the message names one."

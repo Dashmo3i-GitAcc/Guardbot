@@ -1741,6 +1741,31 @@ reference file is stale and this list is the one to fix first.
   is the correction the resolver's person-candidates need, because acting on a
   person when the message was about a photograph is the worst mistake available
   here.
+* **The entity block's correction has conditions, and it is a claim like any
+  other.** Two rules narrow it, and both are in `Entities.offered`:
+  * **the message must point at something.** The header says the message *may
+    point at* the things under it, so it may not appear for a message that
+    carries no pointing expression — a greeting, a bare «پاک کن». This is the
+    same rule `app/objects.py` states for the object it reports ("a bare «پاک
+    کن» points at nothing, and the room's newest photograph is not its object
+    just because the room has one"), applied to the candidates this block
+    offers. `pointing` is a demonstrative **or** an expression
+    `referents.find_expression` reads (which is how «پاکش کن» qualifies with no
+    demonstrative at all).
+  * **the request must not act on a member.** `«ساکتش کن»` asks for a member to
+    be muted, and offering the room's photographs beside it — carrying "do not
+    act on a person unless the message names one" — says the opposite of the
+    object block printed next to it. `_acts_on_a_person` is the mirror of
+    `referents`' guard with the same three clauses, so a message that asks for
+    both (`«ساکتش کن و اینو پاک کن»`) keeps every candidate.
+  * Both rules narrow the **rendering only**: `read_entities` still reports
+    every item and `Entities.of_kind` still sees every item. And both readings
+    are taken **only when there is an item to narrow** — with no candidates they
+    cannot change anything, and the lexicons they borrow are most of the
+    reader's cost (measured: +60 µs/call unconditional, +7.6 µs/call taken only
+    where they can matter). `tools/eval_intent.py` scores the rendered block
+    against the reader's own evidence and fails on either count, and its
+    non-vacuity floor keeps a guard that suppressed everything visible as such.
 * The Arabic block's **punctuation is a separator, not part of a word**: «؟»
   «،» «؛» sit *inside* `\u0600-\u06ff`, so a "split on anything that is not a
   Persian letter" class keeps them glued to the word before it. Every reader that
