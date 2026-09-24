@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import statistics
 import sys
@@ -56,7 +57,9 @@ sys.path.insert(0, str(ROOT))
 
 from app import (  # noqa: E402
     addressing,
+    awareness_context,
     config,
+    db,
     discourse,
     entities,
     objects,
@@ -68,9 +71,20 @@ from app import (  # noqa: E402
 
 CASES_PATH = Path(__file__).resolve().parent / "eval_cases.json"
 
+# The harness prints its numbers to stdout; this is only for the paths that
+# degrade rather than fail — a source whose render raises is context the model
+# would have lost, and the harness says so instead of counting it as "did not
+# render".
+log = logging.getLogger("eval_intent")
+
 # The names the matcher answers to, pinned so the addressing column is
 # reproducible regardless of the host's .env.
 EVAL_NAMES = ("nexus", "نکسوس")
+
+# One room for the whole corpus. The context is assembled per case and the room
+# cache is keyed by chat id, so a fixed id keeps every case in the same room —
+# which is what the corpus's windows already assume.
+EVAL_CHAT = -1001234567890
 
 
 def load_cases(path: Path = CASES_PATH) -> dict:
@@ -127,6 +141,112 @@ def _entity_offers_things_for_a_person(block: str, state) -> bool:
     believe. The evidence to know better was in the reader all along.
     """
     return _POINTER_HEADER in block and state.acts_on_a_person
+
+
+def _entity_gives_an_order(block: str) -> bool:
+    """Whether the entity block instructs the model instead of reporting.
+
+    The module's contract, in its own docstring, is *"evidence framing, not an
+    instruction — the model still decides"*. The closing line was an order:
+    "do not act on a person unless the message names one". Under the resolver's
+    ranked people — the two blocks answer the same question — that orders the
+    model to disregard the block above it, and it is the opposite of what that
+    block exists for.
+
+    The order belongs to the block that knows the side. ``app/objects.py`` states
+    it when the verb decides the object, and is silent when the verb is
+    unclassified — which is exactly when the resolver's people are still live.
+    """
+    return "do not" in block.lower()
+
+
+# ── The assembled context ─────────────────────────────────────────────────
+# Every section above scores one reader. None of them scored the *assembly* —
+# which sources actually reach the model, in what order, within the ceiling — and
+# two of them turned out never to reach it at all in the whole corpus:
+#
+# * **the referent candidates.** ``_wants_referents`` asks ``is_authority``,
+#   which reads ``app/rbac.py``; the harness had never given its world an owner,
+#   so the block that carries person resolution to the model rendered on 0 of
+#   127 cases — including the 80 whose anchor the corpus labels an owner.
+# * **the administrative history**, which is a database read the harness has no
+#   rows for.
+#
+# The first is a coverage hole in the *benchmark*, not in the code: the resolver
+# itself is scored above. The second is a fact the harness cannot hold, and it is
+# named rather than left to look like a defect.
+_CONTEXT_DB_BACKED = frozenset(
+    {"remembered_people", "admin_activity", "referenced_people"}
+)
+
+
+def _context(cases: list[dict]) -> dict:
+    """Render the assembled context for every case, and count what rendered.
+
+    The context is built the way ``main._awareness_context`` builds it: the
+    window the pass read (which holds the anchor), the roles ``rbac`` answers
+    with, and the room the handler cached. The authority configuration comes from
+    the corpus's own labels, because a corpus that says a speaker is the owner
+    and a harness that gives its world no owner are measuring different systems.
+    """
+    owner_ids = sorted(
+        {
+            int(c["anchor"].get("user_id") or 0)
+            for c in cases
+            if str(c["anchor"].get("role") or "") == "owner"
+        }
+        - {0}
+    )
+    admin_ids = sorted(
+        {
+            int(c["anchor"].get("user_id") or 0)
+            for c in cases
+            if str(c["anchor"].get("role") or "") == "admin"
+        }
+        - {0}
+    )
+    config.OWNER_USER_ID = owner_ids[0] if owner_ids else 0
+    config.CONFIG_ADMINS = [f"{uid}:admin" for uid in admin_ids]
+    try:
+        db.init()
+    except Exception:  # noqa: BLE001 - a missing schema is not a harness failure
+        log.exception("could not open the harness database")
+    awareness_context.reset_rooms()
+    awareness_context.note_room(EVAL_CHAT, "Guard Group", "supergroup")
+
+    rendered: dict[str, int] = {}
+    sizes: list[int] = []
+    for case in cases:
+        window = [_row(row) for row in case.get("window") or ()]
+        anchor = _row(case["anchor"])
+        rows = [*window, anchor]
+        now = max((int(r.get("at") or 0) for r in rows), default=0) + 600
+        try:
+            ctx = awareness_context.build_ctx(
+                EVAL_CHAT, messages=rows, anchor=anchor, now=now
+            )
+            text = awareness_context.blocks(ctx)
+        except Exception:  # noqa: BLE001 - one case is never worth the run
+            log.exception("could not assemble the context for %s", case["id"])
+            continue
+        sizes.append(len(text))
+        for source in awareness_context.SOURCES:
+            if not awareness_context._wanted(source, ctx):
+                continue
+            if awareness_context._rendered(source, ctx, source.budget):
+                rendered[source.name] = rendered.get(source.name, 0) + 1
+
+    names = [source.name for source in awareness_context.SOURCES]
+    return {
+        "context_cases": len(sizes),
+        "context_chars_mean": statistics.fmean(sizes) if sizes else 0.0,
+        "context_chars_max": max(sizes, default=0),
+        "context_ceiling": int(config.NEXUS_AWARENESS_CONTEXT_CHARS),
+        "context_source_names": names,
+        "context_sources": {name: rendered.get(name, 0) for name in names},
+        "context_sources_rendered": [name for name in names if name in rendered],
+        "context_sources_dead": [name for name in names if name not in rendered],
+    }
 
 
 def _row(raw: dict) -> dict:
@@ -309,6 +429,7 @@ def evaluate(cases: dict) -> dict:
                 "entity_offers_things_for_a_person": (
                     _entity_offers_things_for_a_person(entity_block, ent)
                 ),
+                "entity_gives_an_order": _entity_gives_an_order(entity_block),
                 "entity_items_offered": len(ent.offered()),
                 "entity_items_found": len(ent.items),
                 "has_request_label": has_request_label,
@@ -362,7 +483,7 @@ def evaluate(cases: dict) -> dict:
             }
         )
 
-    return {"detail": detail, **_metrics(detail)}
+    return {"detail": detail, **_metrics(detail), **_context(cases["cases"])}
 
 
 def _metrics(detail: list[dict]) -> dict:
@@ -611,6 +732,9 @@ def _metrics(detail: list[dict]) -> dict:
         "entity_offers_things_for_a_person_cases": sum(
             1 for r in detail if r["entity_offers_things_for_a_person"]
         ),
+        "entity_gives_an_order_cases": sum(
+            1 for r in detail if r["entity_gives_an_order"]
+        ),
         "entity_items_found_total": sum(r["entity_items_found"] for r in detail),
         "entity_items_offered_total": sum(r["entity_items_offered"] for r in detail),
         "request_cases": len(request_cases),
@@ -813,8 +937,8 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  block chars max            {m['entity_block_chars_max']}",
         f"  the block, scored          {m['entity_pointer_header_cases']} offer a pointer; "
         f"for a message that points at nothing {m['entity_claims_a_pointer_cases']}, "
-        f"for a request acting on a person {m['entity_offers_things_for_a_person_cases']} "
-        "(both should be 0)",
+        f"for a request acting on a person {m['entity_offers_things_for_a_person_cases']}, "
+        f"as an order {m['entity_gives_an_order_cases']} (all should be 0)",
         f"  candidates offered         {m['entity_items_offered_total']} of "
         f"{m['entity_items_found_total']} found (a guard that suppressed everything "
         "would read 0 of 0)",
@@ -866,6 +990,29 @@ def report(result: dict, *, verbose: bool = False) -> str:
         f"  provided after  (resolver)         {_pct(m['provided_after'])}",
         f"  confident and correct              {_pct(m['confident_and_correct'])}",
         "",
+        # The assembly, which every section above this one left unmeasured. A
+        # source that never renders is a block the model never sees, and nothing
+        # said so: `referent_candidates` — the block that carries person
+        # resolution to the model — read 0 of 127 until this section existed.
+        f"the assembled context (over {m['context_cases']} cases)",
+        f"  chars mean / max           {m['context_chars_mean']:.0f} / "
+        f"{m['context_chars_max']} (ceiling {m['context_ceiling']})",
+        "  sources rendering          "
+        + "  ".join(
+            f"{name} {count}"
+            for name, count in m["context_sources"].items()
+            if count
+        ),
+        f"  never rendered             "
+        + (
+            ", ".join(
+                f"{name} (database-backed)"
+                for name in m["context_sources_dead"]
+                if name in _CONTEXT_DB_BACKED
+            )
+            or "none"
+        ),
+        "",
         "cost",
         # ``block_chars`` is the **referent candidates** block and nothing else —
         # the other readers report their own sizes beside their own metrics. The
@@ -887,6 +1034,7 @@ def report(result: dict, *, verbose: bool = False) -> str:
         or r["when_prose_contradicts"]
         or r["entity_claims_a_pointer"]
         or r["entity_offers_things_for_a_person"]
+        or r["entity_gives_an_order"]
         or not r["media_ok"] or not r["link_ok"]
         or (r["has_relation_label"] and not r["relation_ok"])
         or (r["has_named_label"] and not r["named_ok"])

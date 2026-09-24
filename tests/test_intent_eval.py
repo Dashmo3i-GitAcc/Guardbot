@@ -316,6 +316,74 @@ def test_the_entity_block_check_is_not_vacuous():
     assert m["entity_items_found_total"] >= m["entity_items_offered_total"]
 
 
+def test_the_entity_block_states_evidence_and_never_an_order():
+    """The block's contract, in its own docstring, is evidence.
+
+    It closed with "do not act on a person unless the message names one" — an
+    order, printed under the resolver's ranked people, telling the model to
+    disregard the block above it. The order belongs to the block that knows the
+    side; the object line states it when the verb decides and is silent when the
+    verb is unclassified, which is exactly when the resolver's people are live.
+    """
+    m = result()
+    assert m["entity_gives_an_order_cases"] == 0
+
+
+def test_the_entity_order_check_is_not_vacuous():
+    """Nine cases render the line the check is about."""
+    m = result()
+    assert m["entity_items_offered_total"] >= 10, "no block renders the closing line"
+
+
+# ── The assembled context ─────────────────────────────────────────────────
+def test_the_context_is_assembled_for_every_case():
+    m = result()
+    assert m["context_cases"] == m["cases"]
+
+
+def test_every_window_source_renders_in_the_benchmark():
+    """A source that never renders is a block the model never sees.
+
+    Two of them were dead in the whole corpus and nothing said so. The referent
+    candidates were the worse of the two: ``_wants_referents`` asks
+    ``is_authority``, which reads ``rbac``, and the harness had never given its
+    world an owner — so the block that carries person resolution to the model
+    read 0 of 127, including the 80 cases whose anchor the corpus labels an
+    owner. The database-backed sources are excluded by name, and the assertion
+    below is what keeps a new source from being added and forgotten.
+    """
+    m = result()
+    dead = [
+        name
+        for name in m["context_source_names"]
+        if name not in m["context_sources_rendered"]
+        and name not in eval_intent._CONTEXT_DB_BACKED
+    ]
+    assert dead == [], f"these sources never rendered: {dead}"
+    # …and the exclusion set is exactly the database-backed sources, so a new
+    # source has to be classified before it can be dead.
+    assert set(m["context_source_names"]) == (
+        set(m["context_sources_rendered"]) | set(m["context_sources_dead"])
+    )
+
+
+def test_the_person_candidates_reach_the_model():
+    """The block the whole resolver exists for, asserted by name.
+
+    It rendered on no case at all before the harness was given an owner, so every
+    referent number in this file was scored on the resolver's return value and
+    never on the block.
+    """
+    m = result()
+    assert m["context_sources"]["referent_candidates"] >= 1
+
+
+def test_the_context_stays_within_its_ceiling():
+    m = result()
+    assert m["context_chars_max"] <= m["context_ceiling"]
+    assert m["context_chars_mean"] < m["context_ceiling"]
+
+
 def test_the_time_reader_is_fast_enough_to_run_on_every_pass():
     """The folded table is cached, so a read is a substring scan and no more."""
     assert result()["when_us_mean"] < 1000

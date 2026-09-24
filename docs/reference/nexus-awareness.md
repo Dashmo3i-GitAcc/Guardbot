@@ -25,6 +25,7 @@ in place — `git log -- docs/reference/` records each correction, and §53 of
 - [51. Talking about Nexus, not to it](#s51)
 - [52. A sentence that contradicted itself](#s52)
 - [53. A correction the evidence did not support](#s53)
+- [54. The prompt, measured — and the block that never reached it](#s54)
 
 ---
 
@@ -3256,3 +3257,110 @@ returns `("بچه", "ها")` — and the thread block renders *"it shares «بچ
 what came before"*. Two messages with any plural noun in common therefore
 "continue" each other. It is the same class of defect as this one (a claim the
 evidence does not carry) in a different reader, and it wants its own increment.
+
+## 54. The prompt, measured — and the block that never reached it
+
+### 54.1 The measurement §52 and §53 both asked for
+
+Both sections ended by naming the same next step: *the product is the prompt, and
+only one block has been scored as prose*. §52 scored the time sentence, §53 scored
+the entity block's claims. Neither scored the **assembly** — which sources reach
+the model, in what order, within the pass-wide ceiling.
+
+So the harness now builds a `Ctx` per case, the way `main._awareness_context`
+builds it — the window the pass read (which holds the anchor), the roles `rbac`
+answers with, the room the handler cached — calls `blocks()`, and counts what
+rendered. The corpus's own labels configure the authority: a corpus that says a
+speaker is the owner and a harness that gives its world no owner are measuring
+different systems.
+
+### 54.2 The source that never rendered
+
+`referent_candidates` — the block that carries person resolution to the model —
+rendered on **0 of 127 cases**.
+
+The predicate is `_wants_referents`, which asks `is_authority`, which reads
+`app/rbac.py`, which reads `config.OWNER_USER_ID`. The harness had never set it.
+The corpus labels 80 of its 127 anchors as owners; the harness's world had no
+owner, so the block could not fire. Every referent number in the harness — top-1
+accuracy, ambiguity recall, ambiguity precision, wrong-but-confident — was scored
+on `referents.resolve`'s return value and never on the block the model reads.
+
+`admin_activity` is dead for an honest reason: it is a database read and the
+harness holds no audit rows. It is named as such in the report rather than left
+to look like the same defect, and the test asserts the excluded set is exactly
+the database-backed sources — so a *new* source has to be classified before it
+can be dead.
+
+### 54.3 The first thing the measurement found
+
+With the person-candidate block finally rendering, it renders beside the thing
+block on one case — and they contradict. `object-abstain-generic`, «برای اینم
+همین کارو بکن»:
+
+```
+Who «همین» may mean (server-built candidates, strongest first — evidence, not a decision):
+- مهدی (14), 0.30 — they spoke shortly before this message
+- ? (13), 0.30 — they spoke shortly before this message
+- سارا (12), 0.30 — they spoke shortly before this message
+The server is not confident. Choose only if the transcript makes it plain; otherwise ask.
+
+Things this message may point at — things, not people (server-built; evidence, not a decision):
+- a document by 13 (the newest)
+If the message means one of these, it is not about a person — do not act on a person
+unless the message names one.
+```
+
+The verb is «بکن», a generic imperative with no side, so `objects` abstains and
+§53's guard has nothing to fire on — and the resolver's people are live. The thing
+block then orders the model to disregard the block above it.
+
+**The module's own docstring says this cannot happen.** `app/entities.py` states:
+*"The sentence is evidence framing, not an instruction — the model still
+decides."* The sentence was an order. The two had disagreed since the line was
+written, and nothing could see it because the two blocks had never been rendered
+together.
+
+The order belongs to the block that knows the side. `app/objects.py` says "Do not
+read it as aimed at anybody in the room" exactly when the verb decides the object,
+and says nothing when the verb is unclassified — which is precisely when the
+resolver's people are still live. So the entity block now states the implication
+of its own hypothesis and stops:
+
+> If the message means one of these, it is about a thing rather than a person.
+
+### 54.4 The numbers
+
+| | before | after |
+|---|---|---|
+| `referent_candidates` cases | **0** / 127 | **26** / 127 |
+| `entities` cases | 22 | 22 |
+| entity block, cases giving an order | **9** | **0** |
+| entity block chars max | 302 | 264 |
+| assembled context, chars mean / max | unmeasured | 949 / 1498 |
+| ceiling | 1500 | 1500 |
+| suite | 3151 | 3157 |
+
+Per-source coverage over the 127 cases, now reported by the harness:
+
+```
+calendar 127   room 127   anchor_act 103   open_questions 22   reply_graph 127
+thread 32   entities 22   anchor_when 24   referent_candidates 26   referenced_people 26
+never rendered: remembered_people, admin_activity   (both database-backed)
+```
+
+The non-vacuity run reconstructs the old closing line from the same renderer: it
+gives an order on **9** cases, the new one on **0**.
+
+The ceiling itself was measured too, and it bites on **2 of 127** cases — both
+times dropping `referenced_people`, the last source in the registry by design.
+Recorded rather than changed: the order is deliberate and the source that is
+dropped is the cheapest to lose.
+
+### 54.5 What it leaves
+
+The assembly is now measured for *coverage and size*, not for *prose*. §52 scored
+one block's sentence and §53 scored another block's claims; the referent, act,
+object and room-state blocks still make claims nothing checks. And the coverage
+floor now says which sources reach the model — so the next block that stops
+reaching it fails a test instead of being noticed a dozen increments later.

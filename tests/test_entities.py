@@ -298,10 +298,17 @@ def test_the_media_block_names_the_kind_and_the_poster():
 
 
 def test_the_block_says_the_things_are_not_people():
-    """The correction the module exists to make."""
+    """The correction the module exists to make — stated, not ordered.
+
+    The line used to read "do not act on a person unless the message names one",
+    which is an order, in a block whose docstring promises "evidence framing, not
+    an instruction". Printed under the resolver's ranked people it ordered the
+    model to disregard the block above it.
+    """
     rows = [row(11, "ببین", 900, mid=1, kind="photo")]
     out = E.render(E.read_entities(rows, row(33, "اینو پاک کن", 1000, mid=2)))
-    assert "not about a person" in out
+    assert "it is about a thing rather than a person" in out
+    assert "do not" not in out.lower()
 
 
 def test_the_named_class_replaces_the_not_a_person_line():

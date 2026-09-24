@@ -909,13 +909,21 @@ def test_the_new_sources_are_bounded_by_their_own_budget(monkeypatch):
 
 
 def test_the_entities_block_corrects_the_person_lead():
-    """The demonstrative may mean the photo, and the block says so."""
+    """The demonstrative may mean the photo, and the block says so.
+
+    As evidence, not as an order: the block's own docstring promises "evidence
+    framing, not an instruction", and the order belongs to the block that knows
+    the side — the object line, which states it when the verb decides.
+    """
     anchor = _msg(ADMIN, "اینو پاک کن", role="admin", name="Admin", at=1000)
     window = [_msg(TARGET, "ببین", name="Reza", at=900, message_id=1)]
     window[0]["kind"] = "photo"
     out = awareness_context.blocks(_referent_ctx(anchor, window))
     assert "a photo by" in out
-    assert "not about a person" in out
+    assert "it is about a thing rather than a person" in out
+    assert "do not" not in awareness_context._render_entities(
+        _referent_ctx(anchor, window)
+    ).lower()
 
 
 def test_the_entities_block_names_the_class_the_message_uses():

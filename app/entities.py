@@ -40,6 +40,15 @@ one are read together, and the failure mode this prevents is the model acting on
 a person when the message was about a photograph. The sentence is evidence
 framing, not an instruction — the model still decides.
 
+That last sentence was true of the docstring and not of the code. The block
+closed with *"do not act on a person unless the message names one"*, which is an
+order, and printed under the resolver's ranked people it ordered the model to
+disregard the block above it. The order belongs to the block that knows the side:
+``app/objects.py`` states it when the verb decides the object, and says nothing
+when the verb is unclassified — which is exactly the case where the resolver's
+people are still live. This block states the implication of its own hypothesis
+and stops there.
+
 Why the correction has conditions
 ---------------------------------
 A correction is a claim, and this one was being made whether or not the evidence
@@ -555,9 +564,18 @@ def render(state: Entities, *, cap: int = 600) -> str:
         # its own leading break when it is the whole block.
         lines.append(named_line if lines else f"\n{named_line}")
     if items and not state.named:
+        # Evidence framing, not an instruction — the module's own contract, and
+        # the sentence was an order. "Do not act on a person unless the message
+        # names one" printed under `referent_candidates`' three ranked people is
+        # an order to disregard the block above it, and it is the opposite of
+        # what that block exists for. The order belongs to the block that knows
+        # the side: `app/objects.py` states it when the verb decides, and it says
+        # nothing when the verb is unclassified — which is exactly when the
+        # resolver's people are still live and this block must not contradict
+        # them.
         lines.append(
-            "If the message means one of these, it is not about a person — do not "
-            "act on a person unless the message names one."
+            "If the message means one of these, it is about a thing rather than a "
+            "person."
         )
     return _clip("\n".join(lines) + "\n", cap)
 

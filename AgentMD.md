@@ -1740,7 +1740,13 @@ reference file is stale and this list is the one to fix first.
 * The entity block states the things and then says **"not about a person"**: it
   is the correction the resolver's person-candidates need, because acting on a
   person when the message was about a photograph is the worst mistake available
-  here.
+  here. It states it as **evidence, never as an order** — the module's own
+  contract — and the order belongs to `app/objects.py`, which knows the side
+  because the verb decided it. The block closed with "do not act on a person
+  unless the message names one" for a dozen increments; under the resolver's
+  ranked people it ordered the model to disregard the block above it, and nothing
+  could see it because the two blocks had never been rendered together. The
+  benchmark now assembles the context and fails if the block gives an order.
 * **The entity block's correction has conditions, and it is a claim like any
   other.** Two rules narrow it, and both are in `Entities.offered`:
   * **the message must point at something.** The header says the message *may
@@ -1766,6 +1772,16 @@ reference file is stale and this list is the one to fix first.
     where they can matter). `tools/eval_intent.py` scores the rendered block
     against the reader's own evidence and fails on either count, and its
     non-vacuity floor keeps a guard that suppressed everything visible as such.
+* **The benchmark assembles the context, and no source may be silently dead.**
+  `tools/eval_intent.py` builds a `Ctx` per case the way `main._awareness_context`
+  does and counts which sources render. `referent_candidates` read **0 of 127**
+  until this existed — `_wants_referents` asks `is_authority`, which reads
+  `rbac`, which reads `config.OWNER_USER_ID`, which the harness had never set, so
+  the block carrying person resolution to the model never fired. The
+  database-backed sources (`remembered_people`, `admin_activity`,
+  `referenced_people`) are excluded **by name**, and the test asserts that set
+  plus the rendered set is exactly `SOURCES` — so a new source must be classified
+  before it can be dead.
 * The Arabic block's **punctuation is a separator, not part of a word**: «؟»
   «،» «؛» sit *inside* `\u0600-\u06ff`, so a "split on anything that is not a
   Persian letter" class keeps them glued to the word before it. Every reader that
