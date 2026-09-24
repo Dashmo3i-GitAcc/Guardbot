@@ -4774,12 +4774,12 @@ HEAD` (this checkpoint's commit), `git ls-remote` on both remotes, `docker ps`
 
 ### 54.19 Checkpoint (2026-09-24, **owner tone + group authorization**) — resume here (supersedes §54.18)
 
-**CHECKPOINT STATUS.** Date **2026-09-24 ~19:55Z**. Branch **`main`**,
-base/rollback **`660e27c`** (the Chat-personality deploy checkpoint). Two
-features implemented and tested, in the owner's order. **NOT DEPLOYED** — the
-repository's established workflow does not require a deploy at commit time; the
-running container is still `a976bb4c2a7a` and does **not** yet contain these two
-features. Deployment needs the owner's go-ahead.
+**CHECKPOINT STATUS.** Date **2026-09-24 ~20:05Z**. Branch **`main`**, HEAD
+**`af6930e`** (both remotes). Two features implemented, tested, **DEPLOYED and
+live-probed** in the owner's order. Image **`84583581d0dd`**; rollback tag
+**`guardbot-guardbot:pre-owner-group` = `a976bb4c2a7a`** (`docker tag
+guardbot-guardbot:pre-owner-group guardbot-guardbot:latest && docker compose up
+-d`). Container healthy, `RestartCount=0`.
 
 **Feature One — owner-aware tone.** Files: `app/chat.py`, `app/main.py`,
 `tests/test_owner_personality.py`.
@@ -4810,17 +4810,38 @@ features. Deployment needs the owner's go-ahead.
 `test_chat` + `test_chat_activation` + `test_conversation_media` = **483 passed**.
 Full suite **3716 passed / 0 failed** (272.17 s; was 3692, +24).
 
+**Live probe (2026-09-24, self-cleaning, in-container).** Drove the real
+`on_group_chat` / `on_private_text` against the real config and the real model,
+with synthetic ids; only the rows it created were deleted. Results:
+* an **unregistered** room (member *and* owner) → **0** model calls, **0**
+  awareness captures, **0** identity writes — refused before anything;
+* a registered room with an **addressed** member → answered; the owner's turn
+  carried `chat.OWNER_AMENDMENT` and the member's did not; real replies were
+  short, informal and contained **no** honorific/ceremonial term («قربان»,
+  «سرور», «جناب», «بنده») and no filler;
+* a registered, **unaddressed** member message → no model call (awareness only);
+* private: a stranger → refused before the model; the owner → answered.
+
+**Known nuance (unchanged behaviour, flagged for the owner).** In the deployed
+configuration `NEXUS_ACTORS_ONLY=false`, so an ordinary member in a **registered**
+room who addresses Nexus **is** answered by `nexus.accepts` — the deliberate
+"answer anybody" behaviour of a registered public group. Feature Two's new
+guarantee is the **room** boundary; the *speaker* boundary is unchanged, so the
+regression test `registered + unauthorized member → denied` holds only under
+`NEXUS_ACTORS_ONLY=true`. Enforcing member-level gating would be a behaviour
+change and needs the owner's explicit decision.
+
 **Architecture preserved.** No Pool, credential, isolation, rate-limit, breaker,
 cooldown, failover, context-assembly, persistence or deployment change. V remains
 **inactive**; the `--arm context` probe stays frozen; Awareness allocation
 unchanged; no acquisition change; no new workload; no Phase Two.
 
-**Unresolved / next.** Nothing blocking. The two features are committed but not
-live; the next step is the owner's go-ahead to **deploy** (then a self-cleaning
-live probe), and after that the **broader integration test**. Rollback remains
-`docker tag guardbot-guardbot:pre-chat-personality guardbot-guardbot:latest &&
-docker compose up -d`. To resume: verify `git status` (clean), `git rev-parse
-HEAD` (this checkpoint's commit), `git ls-remote` on both remotes.
+**Unresolved / next.** The two features are **deployed** (image `84583581d0dd`,
+live-probed). Open: (1) the owner's decision on member-level gating above; (2) the
+**broader integration test**, to be run only on the owner's go-ahead. Rollback is
+`docker tag guardbot-guardbot:pre-owner-group guardbot-guardbot:latest && docker
+compose up -d`. To resume: verify `git status` (clean), `git rev-parse HEAD`,
+`git ls-remote` on both remotes.
 
 ---
 
