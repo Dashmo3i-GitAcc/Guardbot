@@ -464,6 +464,96 @@ def test_the_prompt_allows_any_topic():
     )
 
 
+# ── The persona: the restored conversational contract ─────────────────────
+# The behavioural reference is the historical Chat (commit 3243067). These
+# assert the parts of that behaviour the Nexus-era prompt had let drift — short
+# and conversational, no document structure, no assistant filler, no greeting
+# loops — plus the joking-around layer and its hard boundaries, which the
+# historical persona did not have. They are prompt-text assertions on purpose:
+# the prompt is the behaviour, and a rule that is not in it is a rule the model
+# was never given.
+def test_the_prompt_asks_for_a_short_informal_chat():
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Two or three sentences is usually right" in text
+    assert "not an essay" in text
+    assert "informal" in text
+
+
+def test_the_prompt_forbids_turning_a_chat_into_a_document():
+    text = chat.SYSTEM_INSTRUCTION
+    assert "headings" in text
+    assert "bullet lists" in text
+    assert "Markdown" in text
+
+
+def test_the_prompt_forbids_assistant_filler_and_loops():
+    text = chat.SYSTEM_INSTRUCTION
+    assert "assistant filler" in text
+    # The exact tics the owner called out.
+    assert "حتماً" in text
+    assert "در خدمت شما" in text
+    assert "اگر سؤال دیگری دارید" in text
+    # No greeting loop, no closing invitation.
+    assert "do not close by" in text
+    assert "continue later" in text
+
+
+def test_the_prompt_keeps_the_conversation_on_the_persons_topic():
+    text = chat.SYSTEM_INSTRUCTION
+    assert "staying on the topic" in text
+    assert "If they change the subject, follow the new one" in text
+
+
+def test_the_prompt_allows_playful_banter():
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Joking around" in text
+    assert "tease back" in text
+
+
+def test_the_prompt_bounds_banter_against_escalation():
+    """Playful is not hostile: the hard limits are stated, not implied."""
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Never threaten anyone" in text
+    assert "Never use slurs" in text
+    assert "never attack anyone's family" in text
+    assert "ناموسی" in text
+    assert "Never humiliate anyone sexually" in text
+
+
+def test_the_prompt_drops_banter_when_the_person_is_serious():
+    text = chat.SYSTEM_INSTRUCTION
+    assert "drop the joking entirely" in text
+    assert "answer normally" in text
+
+
+def test_the_prompt_forbids_false_human_experience():
+    text = chat.SYSTEM_INSTRUCTION
+    assert "you do not have a body" in text
+    assert "no memories outside this conversation" in text
+
+
+def test_the_prompt_frames_the_appended_background_as_background():
+    """The fix for the degradation: context is material, not a subject."""
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Background the server gives you" in text
+    assert "not as a subject to summarise" in text
+
+
+def test_the_persona_is_the_system_instruction_and_the_context_follows_it():
+    """The architecture the restoration kept: the persona, then the context.
+
+    Guards that the restoration changed the words and not the wiring — the
+    system instruction is still the persona with the trusted context appended,
+    at the same temperature and token ceiling.
+    """
+    from google.genai import types
+
+    cfg = chat._generation_config(types, context="\nROOM")
+    assert cfg.system_instruction == chat.SYSTEM_INSTRUCTION + "\nROOM"
+    assert cfg.temperature == 0.8
+    assert cfg.max_output_tokens == 1024
+
+
 # ── The output boundary ───────────────────────────────────────────────────
 # The prompt forbids links and formatting. Everything below is the part that
 # does not depend on the model obeying, which is the part that matters: the
