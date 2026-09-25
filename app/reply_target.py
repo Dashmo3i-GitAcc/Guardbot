@@ -16,14 +16,27 @@ model reading «این چیه» as four characters and reading what «این» *
 transcript marker (``app/awareness.py``) gave the author's name but never the
 words, and only when the parent happened to still be inside the room window.
 
-The second is a policy decision, and the default is deliberately the **current**
-message: somebody who writes «@Nexus ببین این چیه» has asked Nexus a question,
-and the answer belongs under their question. The destination changes to the
-resolved target only when the message actually asks for that — «به این جواب بده»,
-«جواب اینو بده», «با این صحبت کن», «سر به سر این بذار», «میلاد رو جواب بده» —
-because then the person is asking Nexus to address somebody else, and an answer
-that is not a reply to them has not done the thing that was asked. «این رو ببین»
-and «این چیه» are *lookups*, not replies, and they change nothing.
+The second is a policy decision, and it is graded rather than boolean. The
+default is still the **current** message — a message that refers to nothing else
+belongs under itself — but the destination moves to the replied-to message on two
+grades of evidence:
+
+* **explicit** — the message asks for the answer to go there: «به این جواب بده»,
+  «جواب اینو بده», «با این صحبت کن», «سر به سر این بذار», «میلاد رو جواب بده».
+  Somebody who says this is asking Nexus to address somebody else, and an answer
+  that is not a reply to them has not done the thing that was asked.
+* **reference** — the message does not ask for anything, but it is *about* the
+  replied-to message: a deictic («این چیه؟», «این طرف کیه؟», «ببین این چیه»), a
+  possessive back-reference («حرفش درسته؟», «عکسش»), a third-person report of
+  what the parent said («ببین چی گفته»), or an elliptical agreement («آره
+  دقیقاً»). Here the reply edge is the evidence, and attaching the answer to the
+  message it is about is the natural thing a person would do.
+
+A reference only moves the destination when nothing competes with it: if the
+message mentions a *different* person, or the parent is Nexus's own message, the
+reading is ambiguous and the destination stays where it is. A message that merely
+replies — with no reference of its own and no directive — is not about the
+parent, and nothing moves.
 
 What this module will not do
 ----------------------------
@@ -62,6 +75,56 @@ _ADDRESS_PHRASES = (
     "بنویس به",
     "بهش بنویس",
 )
+
+# ── The implicit reference vocabulary ─────────────────────────────────────
+# A message can be *about* the replied-to message without asking for anything.
+# These are the shapes that refer back, and they are grammatical rather than
+# topical: none of them is a word that would make Nexus answer, and every one of
+# them needs the reply edge to have a referent at all. A message with no reply
+# edge matches none of them and moves nothing.
+#
+# Possessive back-references: a content noun carrying the third-person clitic
+# «ـش». «حرفش» (their word), «پیامش» (their message), «عکسش» (the photo) all
+# point at something already mentioned, and in a reply that something is the
+# parent. The list is content nouns only — a clitic on any word would match half
+# the language.
+_POSSESSIVE_STEMS = (
+    "حرف", "پیام", "عکس", "جواب", "نظر", "کار", "متن", "صدا", "ویدیو", "فیلم",
+    "رفتار", "کلام", "سخن", "قول", "تصویر", "حال",
+)
+
+# Third-person reports of what the parent did or said. Only the forms that are
+# unambiguously third person are here: «گفته» and «میگه» cannot be first person,
+# while «گفت» can («من گفتم»), so «گفت» is deliberately absent. The list is
+# matched after the shared fold, which maps «آ»→«ا» and drops the zero-width
+# joiner, so these are the folded spellings.
+_THIRD_PERSON_VERBS = ("گفته", "میگه", "میگفت", "فرستاده", "کرده", "نوشته", "پرسیده")
+
+# Elliptical agreement: a turn that adds no content of its own and only agrees
+# with what came before. In a reply, what came before is the parent — «آره
+# دقیقاً» under somebody's photo is agreement *with the photo*. Both the folded
+# and the unfolded spelling are listed because the fold is borrowed and a missing
+# fold degrades to a plain casefold, which would leave «آره» unfolded.
+_AGREEMENT_TOKENS = frozenset(
+    {
+        "اره", "آره", "بله", "دقیقا", "دقیقاً", "درسته", "موافقم", "همینه",
+        "واقعا", "واقعاً", "صحیح", "اوکی", "اکی", "دقیقه", "ارهه",
+    }
+)
+# Words that may sit beside an agreement without adding a subject of their own.
+_AGREEMENT_FILLERS = frozenset(
+    {
+        "خب", "خیلی", "چه", "که", "هم", "و", "بابا", "دمت", "گرم", "جدا",
+        "کاملا", "کاملآ", "حرفت", "حرفتو", "باریک", "عالی", "چه",
+    }
+)
+
+# How many tokens a *deictic* reference may span before it stops counting. The
+# listed references are short conversational turns; a long message that happens
+# to contain «این» has a subject of its own and the deictic is not enough to
+# claim the parent. The other three signals are about the parent by construction
+# and carry no such cap.
+_REFERENCE_TOKEN_CAP = 12
 
 # Words that are never somebody's name here, so a name lookup does not spend a
 # query on them. The fold has already mapped «آ» to «ا» and dropped the
@@ -168,6 +231,13 @@ class Target:
     surface: str = ""
     reply_to: int = 0
     explicit: bool = False
+    # The grade of the evidence for ``reply_to``: ``"explicit"`` when the message
+    # asked for the reply, ``"reference"`` when it merely referred back to the
+    # parent, and ``""`` when nothing moved. The two grades exist because the
+    # caller may want to treat them differently — the model is told which one it
+    # was, and a future caller could choose not to move on a weak reference
+    # without having to re-derive the reading.
+    confidence: str = ""
     why: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
@@ -320,6 +390,133 @@ def _reply_directive(text: str) -> bool:
     if any(stem in folded for stem in _REPLY_STEMS):
         return True
     return any(phrase in folded for phrase in _ADDRESS_PHRASES)
+
+
+# ── The implicit reference ────────────────────────────────────────────────
+def _word(token: str) -> str:
+    """A token reduced to its letters, so trailing punctuation cannot hide it.
+
+    «آره،» and «آره» are the same word to a reader, and a fold that leaves the
+    comma attached would make the agreement vocabulary miss the commonest way
+    people write it. Only letters are kept; the fold has already normalised them.
+    """
+    return "".join(ch for ch in token if ch.isalpha())
+
+
+def _names_nexus(token: str) -> bool:
+    """Whether a token is the assistant's name, so it is a call and not content.
+
+    «نکسوس آره دقیقاً» is agreement plus a call, and a check that counted the
+    name as content would miss the agreement. The matcher is ``addressing``'s, so
+    the fold, clitic, typo and skeleton evidence is the same one that routes the
+    message.
+    """
+    try:
+        from . import addressing
+
+        return bool(addressing.is_name(token))
+    except Exception:  # noqa: BLE001 - a name we cannot read is not content
+        return False
+
+
+def _agreement(text: str) -> bool:
+    """Whether the message is pure agreement and nothing else.
+
+    Every content token has to be an agreement or a filler beside one, because
+    the claim being made is that the turn has no subject of its own — «آره
+    دقیقاً» agrees with what came before, while «آره ولی فردا میام» introduces a
+    new statement and is not about the parent at all. A mention (``@guardbot``)
+    and the assistant's own name are dropped rather than counted, because
+    addressing the assistant is not content: «نکسوس آره دقیقاً» is still pure
+    agreement.
+    """
+    tokens: list[str] = []
+    for raw in _fold(text).split():
+        if raw.startswith("@"):
+            continue
+        word = _word(raw)
+        if not word or _names_nexus(word):
+            continue
+        tokens.append(word)
+    if not tokens:
+        return False
+    if not any(token in _AGREEMENT_TOKENS for token in tokens):
+        return False
+    return all(
+        token in _AGREEMENT_TOKENS or token in _AGREEMENT_FILLERS for token in tokens
+    )
+
+
+def _possessive(text: str) -> str:
+    """The stem of a possessive back-reference, or ``""``.
+
+    One token wide: the clitic has to be attached to the noun, so «حرفش» matches
+    and «حرف من» does not. That is the point — the clitic is what makes it a
+    reference to something already mentioned rather than a fresh subject.
+    """
+    for token in _fold(text).split():
+        token = _word(token)
+        for stem in _POSSESSIVE_STEMS:
+            if token in (stem + "ش", stem + "شو", stem + "شه", stem + "هش"):
+                return stem
+    return ""
+
+
+def _third_person(text: str) -> str:
+    """A third-person report of what the parent said or did, or ``""``."""
+    for token in _fold(text).split():
+        if _word(token) in _THIRD_PERSON_VERBS:
+            return _word(token)
+    return ""
+
+
+def _implicit_reference(text: str) -> str:
+    """How the message refers back to the replied-to message, or ``""``.
+
+    Returns the evidence as a short phrase rather than a boolean, because the
+    reason is carried into ``Target.why`` and into the block the model reads. The
+    order is strength: a deictic is the weakest claim on its own (any message can
+    contain «این»), and the other three are about something prior by
+    construction.
+    """
+    if _points_at_something(text):
+        return "deictic"
+    stem = _possessive(text)
+    if stem:
+        return f"possessive «{stem}»"
+    verb = _third_person(text)
+    if verb:
+        return f"third-person «{verb}»"
+    if _agreement(text):
+        return "agreement"
+    return ""
+
+
+def _competing_person(incoming: Incoming, *, replied, bot_id: int, bot_username: str) -> bool:
+    """Whether the message points at somebody other than the parent's author.
+
+    Only Telegram's own mention entities are consulted, and deliberately so: this
+    runs on the common reply path, and a name-memory lookup per token would put a
+    query on every group message. A message that mentions a third person is
+    ambiguous — «این» could be about them — so nothing moves. An ``@username``
+    the server cannot turn into an id without a query is treated as competing
+    too, because the safe direction is to stay where the message was written.
+    """
+    parent_id = int(getattr(replied, "user_id", 0) or 0)
+    for mention in incoming.mentions:
+        if mention.user_id:
+            if mention.user_id not in (bot_id, parent_id):
+                return True
+            continue
+        if (
+            mention.username
+            and bot_username
+            and mention.username.casefold() == bot_username.casefold()
+        ):
+            continue
+        if mention.username:
+            return True
+    return False
 
 
 def needs_window(incoming: Incoming | None, text: str) -> bool:
@@ -501,7 +698,11 @@ def resolve(
 
     # The Telegram destination. The default is the message being answered, which
     # is what the caller passes as ``current_message_id``; a destination is set
-    # here only when the directive resolves to a real, server-known message.
+    # here only when the reading resolves to a real, server-known message.
+    #
+    # Two grades of evidence, and the order is the design. An explicit directive
+    # is read first, because a message that asks for a reply to go somewhere is
+    # not ambiguous about it.
     #
     # The directive must also *point* at something — a demonstrative, or a person
     # it names. That conjunction is what keeps a stray reply verb out: «جواب
@@ -509,8 +710,9 @@ def resolve(
     # quote the parent, and with the verb alone it would have moved the
     # destination. Nothing resolves in that case, so the condition is False and
     # the answer stays under the message that was written.
-    pointing = bool(expression) or _points_at_something(text)
+    confidence = ""
     reply_to = 0
+    pointing = bool(expression) or _points_at_something(text)
     if directive and (pointing or named_id):
         if person_id and replied is not None and person_id == replied.user_id:
             reply_to = replied.message_id
@@ -519,7 +721,42 @@ def resolve(
         elif message_id:
             reply_to = message_id
         if reply_to:
+            confidence = "explicit"
             why.append(f"the message asks for a reply, so the answer goes to {reply_to}")
+
+    # The implicit grade. The message does not ask for anything, but it is *about*
+    # the replied-to message — a deictic, a possessive, a third-person report or a
+    # bare agreement. Here the reply edge itself is the evidence, and the answer
+    # belongs attached to the message it is about.
+    #
+    # The destination only moves when nothing competes: the parent must not be
+    # Nexus's own message (an answer that quotes itself is a loop nobody asked
+    # for), and the message must not point at a third person (then «این» is
+    # ambiguous and the honest answer is to stay put). A deictic is the weakest
+    # signal on its own, so it is bounded by length — a long message that happens
+    # to contain «این» has a subject of its own.
+    if not reply_to and replied is not None and replied.message_id:
+        evidence = _implicit_reference(text)
+        if evidence == "deictic" and len(_fold(text).split()) > _REFERENCE_TOKEN_CAP:
+            evidence = ""
+        if evidence:
+            if replied.user_id and int(replied.user_id) == int(bot_id):
+                why.append(
+                    "it is a reply to your own message, so the answer stays here"
+                )
+            elif _competing_person(
+                incoming, replied=replied, bot_id=bot_id, bot_username=bot_username
+            ):
+                why.append(
+                    "it also points at somebody else, so the answer stays here"
+                )
+            else:
+                reply_to = replied.message_id
+                confidence = "reference"
+                why.append(
+                    f"it refers back to the replied-to message ({evidence}), so the "
+                    f"answer goes to {reply_to}"
+                )
 
     return Target(
         person_id=person_id,
@@ -531,7 +768,8 @@ def resolve(
         message_kind=message_kind,
         surface=surface,
         reply_to=reply_to,
-        explicit=bool(reply_to),
+        explicit=confidence == "explicit",
+        confidence=confidence,
         why=tuple(why),
     )
 
@@ -591,9 +829,13 @@ def render(target: Target, *, cap: int = RENDER_CAP) -> str:
         )
 
     if target.reply_to:
+        if target.confidence == "explicit":
+            reason = "the message asks for a reply to it"
+        else:
+            reason = "it is about that message"
         lines.append(
             f"Send the answer as a Telegram reply to message id {target.reply_to} — "
-            "the message asks for a reply to it.\n"
+            f"{reason}.\n"
         )
 
     text = "".join(lines)

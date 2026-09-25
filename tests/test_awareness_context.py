@@ -287,7 +287,11 @@ def test_a_reply_edge_makes_its_target_worth_describing():
     ]
     out = awareness_context.blocks(ctx_of(messages, anchor=messages[1]))
     assert "People this batch refers to" in out
-    sara = [line for line in out.splitlines() if f"Sara ({TARGET})" in line]
+    # Scoped to the block under test: the subject source also names the person
+    # the conversation is about, and it renders first. The assertion is about
+    # what the referenced-people block says, so it reads that block.
+    block = out.split("People this batch refers to", 1)[1]
+    sara = [line for line in block.splitlines() if f"Sara ({TARGET})" in line]
     assert sara, out
     assert "role " in sara[0]
     assert "@sara" in sara[0]

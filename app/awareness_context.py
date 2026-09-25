@@ -68,6 +68,7 @@ from . import (
     requests,
     room_state,
     state,
+    subject,
     temporal,
 )
 
@@ -128,6 +129,12 @@ class Ctx:
     now: int = 0
     chat_title: str = ""
     chat_type: str = ""
+    # The assistant's own Telegram id, so a source can recognise a reply edge
+    # that points at Nexus. It is an id the caller already holds (the bot's own),
+    # never one read from a message, and it is 0 when the caller did not say —
+    # in which case the subject reading simply cannot see the reply-to-Nexus
+    # signal rather than inventing one.
+    nexus_id: int = 0
 
     def anchor_id(self) -> int:
         return int((self.anchor or {}).get("user_id") or 0)
@@ -245,6 +252,41 @@ def _render_calendar(ctx: Ctx) -> str:
         f"- Gregorian: {persian_calendar.gregorian_text(moment)}\n"
         f"- Persian (Jalali): {persian_calendar.jalali_text(moment)}\n"
     )
+
+
+def _render_subject(ctx: Ctx) -> str:
+    """What the conversation is currently about, and whether it is about Nexus.
+
+    The self-awareness block. It is the server's own reading (``app/subject.py``)
+    — a deterministic walk of the window that follows the subject from a call to
+    Nexus, through a reply edge, through the name coming up, through a deictic
+    that points at the assistant present, and through turns that only agree — and
+    it is stated to the model as evidence with its confidence rather than left
+    for the model to reconstruct from a transcript on every pass.
+
+    Tier 0, and first in the registry, because it is the one block whose absence
+    is a *behavioural* loss rather than a missing detail: without it the model can
+    still read the conversation, but it has no server-side answer to "is this
+    about me", which is the whole of the requirement. It costs no query beyond
+    the state read the pass already makes, and it renders nothing when the
+    conversation has no subject.
+
+    Evidence, never a gate: nothing branches on it here.
+    """
+    try:
+        reading = awareness.subject_of(
+            ctx.chat_id,
+            messages=list(ctx.messages),
+            bot_id=ctx.nexus_id,
+            # The stored row is read once, here, and reused by
+            # ``_render_remembered_people`` beside it — the two describe the same
+            # room and must not be allowed to disagree by being read twice.
+            previous=_state(ctx.chat_id),
+        )
+    except Exception:  # noqa: BLE001 - a reading is never worth a pass
+        log.exception("could not render the subject block")
+        return ""
+    return subject.render(reading)
 
 
 def _render_room(ctx: Ctx) -> str:
@@ -662,6 +704,13 @@ def _ago(then: int, now: int) -> str:
 # short, it costs no query, and the ceiling below is a hard one that stops
 # sources — so the one that must not be stopped goes first.
 SOURCES: tuple[Source, ...] = (
+    # The subject reading goes first, ahead of even the date, because it is the
+    # one tier-0 block that answers the question this feature exists for — "is
+    # this conversation about me" — and the ceiling below is a hard one that
+    # stops sources. Everything else in the registry is a detail about the room;
+    # this is the room's subject. It costs no query beyond the state read the
+    # pass already makes, and it renders nothing when there is no subject.
+    Source("subject", TIER_ALWAYS, subject.RENDER_CAP, _render_subject),
     Source("calendar", TIER_ALWAYS, 400, _render_calendar),
     Source("room", TIER_ALWAYS, 200, _render_room),
     Source("remembered_people", TIER_ALWAYS, 400, _render_remembered_people),
@@ -795,6 +844,7 @@ def build_ctx(
     anchor: dict | None = None,
     roles: dict[int, str] | None = None,
     now: int = 0,
+    nexus_id: int = 0,
 ) -> Ctx:
     """Resolve everything a source may read, in one place.
 
@@ -803,6 +853,11 @@ def build_ctx(
     three, and a builder that read them again would be a second query per pass
     for an answer it was handed. Only the room's name comes from elsewhere, and
     that is a dictionary lookup — the handler cached it.
+
+    ``nexus_id`` is the assistant's own id, which the caller holds for the same
+    reason: it is the one value that lets the subject source recognise a reply
+    edge pointing at Nexus. It defaults to 0, and a caller that does not say
+    leaves the subject reading without that signal rather than inventing one.
     """
     rows = list(messages if messages is not None else awareness.window(chat_id))
     if anchor is None:
@@ -818,6 +873,7 @@ def build_ctx(
         now=int(now or time.time()),
         chat_title=title,
         chat_type=chat_type,
+        nexus_id=int(nexus_id or 0),
     )
 
 

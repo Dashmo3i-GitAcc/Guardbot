@@ -789,6 +789,23 @@ def init() -> None:
     # permission, an authorisation or a gate.
     _ensure_column("awareness_state", "intent", "TEXT NOT NULL DEFAULT ''")
     _ensure_column("awareness_state", "about_user_id", "INTEGER NOT NULL DEFAULT 0")
+    # The subject reading — what the room is currently talking about, and whether
+    # it is talking about Nexus. Written by the *server* (``app/subject.py``),
+    # not by the model, and persisted so the reading has continuity across passes
+    # even when the window has aged past the message that established it. All
+    # additive and rollback-safe: code from before these columns existed never
+    # reads them. None of them is a permission, an authorisation or a gate.
+    _ensure_column("awareness_state", "subject_kind", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(
+        "awareness_state", "subject_confidence", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        "awareness_state", "subject_user_id", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column("awareness_state", "subject_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(
+        "awareness_state", "subject_message_id", "INTEGER NOT NULL DEFAULT 0"
+    )
     # One coding-agent task. The row is the *index*: it is written by the
     # container, which is the only writer, and read by the host runner, which
     # executes the agent. Everything the runner needs is here, and everything
@@ -3923,7 +3940,9 @@ def awareness_get(chat_id: int) -> dict | None:
     with _lock:
         row = _conn.execute(
             "SELECT chat_id, updated_at, seen_message_id, passes, relevant, "
-            "topic, summary, participants, intent, about_user_id "
+            "topic, summary, participants, intent, about_user_id, "
+            "subject_kind, subject_confidence, subject_user_id, subject_name, "
+            "subject_message_id "
             "FROM awareness_state WHERE chat_id=?",
             (int(chat_id),),
         ).fetchone()
@@ -3940,6 +3959,11 @@ def awareness_get(chat_id: int) -> dict | None:
         "participants": str(row[7] or ""),
         "intent": str(row[8] or ""),
         "about_user_id": int(row[9] or 0),
+        "subject_kind": str(row[10] or ""),
+        "subject_confidence": int(row[11] or 0),
+        "subject_user_id": int(row[12] or 0),
+        "subject_name": str(row[13] or ""),
+        "subject_message_id": int(row[14] or 0),
     }
 
 
@@ -3953,20 +3977,30 @@ def awareness_set(
     intent: str = "",
     about_user_id: int = 0,
     participants: str = "",
+    subject_kind: str = "",
+    subject_confidence: int = 0,
+    subject_user_id: int = 0,
+    subject_name: str = "",
+    subject_message_id: int = 0,
 ) -> dict:
     """Record what a completed pass understood about one room.
 
     Every field is truncated here rather than by the caller: the values come
     from a model, and a model that answers at length must not be able to grow a
-    row without bound.
+    row without bound. The subject fields are the exception in *origin* — they
+    are the server's own reading (``app/subject.py``) — but they are clamped here
+    all the same, because a column that can only hold a sane value is a column
+    no later reader has to defend against.
     """
     now = int(time.time())
     with _lock:
         _conn.execute(
             "INSERT INTO awareness_state "
             "(chat_id, updated_at, seen_message_id, passes, relevant, topic, "
-            " summary, participants, intent, about_user_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            " summary, participants, intent, about_user_id, subject_kind, "
+            " subject_confidence, subject_user_id, subject_name, "
+            " subject_message_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(chat_id) DO UPDATE SET "
             "updated_at=excluded.updated_at, "
             # Monotonic: a pass over an older window must never move the
@@ -3980,7 +4014,12 @@ def awareness_set(
             "summary=excluded.summary, "
             "participants=excluded.participants, "
             "intent=excluded.intent, "
-            "about_user_id=excluded.about_user_id",
+            "about_user_id=excluded.about_user_id, "
+            "subject_kind=excluded.subject_kind, "
+            "subject_confidence=excluded.subject_confidence, "
+            "subject_user_id=excluded.subject_user_id, "
+            "subject_name=excluded.subject_name, "
+            "subject_message_id=excluded.subject_message_id",
             (
                 int(chat_id),
                 now,
@@ -3992,6 +4031,11 @@ def awareness_set(
                 (participants or "")[:400],
                 (intent or "")[:24],
                 max(0, int(about_user_id or 0)),
+                (subject_kind or "")[:16],
+                max(0, min(100, int(subject_confidence or 0))),
+                max(0, int(subject_user_id or 0)),
+                (subject_name or "")[:120],
+                max(0, int(subject_message_id or 0)),
             ),
         )
         _conn.commit()

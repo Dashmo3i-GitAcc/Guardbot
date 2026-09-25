@@ -1205,6 +1205,21 @@ NEXUS_AWARENESS_REFERENCED_PEOPLE = _int("NEXUS_AWARENESS_REFERENCED_PEOPLE", 4)
 # one or two names, or an honest "these are too close to tell apart".
 NEXUS_AWARENESS_REFERENTS = _int("NEXUS_AWARENESS_REFERENTS", 4)
 
+# How confident the server must be that a reply would be a natural continuation
+# before an ambient pass is allowed to speak. It is the answer to "do not reply
+# to every conversation": the model still decides *whether* a reply is called for,
+# but a `respond` with no confidence behind it — from either the server's own
+# subject reading or the model's own participation score — stays silent.
+#
+# The two are combined as a maximum, so either can carry the decision and neither
+# is a veto. 60 is chosen against the server's own grades: a call (95), a reply
+# edge (88), the name coming up (78) and a deictic pointing at the assistant (72)
+# all clear it, a subject that has merely been continued for several turns does
+# not clear it on continuity alone, and a general discussion (0) never does.
+NEXUS_AWARENESS_PARTICIPATION_FLOOR = _int(
+    "NEXUS_AWARENESS_PARTICIPATION_FLOOR", 60
+)
+
 # Sent when an awareness pass actually performed an action but the model gave no
 # wording for it. Rare, and the alternative is worse: an administrator whose
 # instruction was carried out and never acknowledged believes it was ignored,

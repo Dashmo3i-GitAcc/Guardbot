@@ -484,3 +484,16 @@ def addressed(text: str) -> bool:
 def mentioned(text: str) -> bool:
     """Whether Nexus came up at all. The weak signal, for context only."""
     return detect(text).found
+
+
+def is_name(token: str) -> bool:
+    """Whether one token is the assistant's name in any of its spellings.
+
+    The readers that judge what is *left* of a message once the vocative is
+    removed need this: «نکسوس آره دقیقاً» is a call plus pure agreement, and a
+    check that counted the name as content would miss the agreement. It is a
+    single-token ``detect``, so it carries exactly the same fold, clitic, typo
+    and skeleton evidence as every other reading of the name — there is no
+    second name matcher.
+    """
+    return detect(str(token or "")).found

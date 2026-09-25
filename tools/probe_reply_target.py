@@ -2,16 +2,21 @@
 
 Boundary under test (2026-09-25): the **semantic target** (who/what a message is
 about) and the **Telegram reply destination** (which message id the answer is sent
-as a reply to) are two readings of one message. The default destination is the
-message being answered; it moves to the resolved target only when the message
-actually asks for that («جواب اینو بده», «با این صحبت کن», «میلاد رو جواب بده»),
-and only when the target resolves to a message the server already holds.
+as a reply to) are two readings of one message. The destination is graded:
+
+* **explicit** — the message asks for the reply to go there («جواب اینو بده»,
+  «با این صحبت کن», «میلاد رو جواب بده»); and
+* **reference** — the message does not ask for anything but is *about* the
+  replied-to message: a deictic («این چیه»), a possessive («حرفش»), a third-person
+  report («ببین چی گفته») or a bare agreement («آره دقیقاً»).
+
+A message with no reference of its own stays under itself, and a reference never
+moves when it also points at a third person or when the parent is Nexus's own.
 
 The scenario the owner reported is case ``reply_then_this``: somebody replies to
-Zahra's message and writes «@Nexus ببین این چیه». Before the fix the assistant
-answered under the asker's own message and the model never saw Zahra's words; now
-the model is handed the parent's text and the destination stays the asker's, while
-an explicit «جواب اینو بده» moves the destination onto Zahra's message.
+Zahra's message and writes «@Nexus ببین این چیه». Before the fix the model never
+saw Zahra's words; now it is handed the parent's text and the answer is attached
+to the message it is about.
 
 There is no real Telegram round trip here — the harness has no second account to
 reply from. The probe drives the **real** ``on_group_chat`` handler with real
@@ -225,6 +230,15 @@ async def _cases(out):
     out["reply_then_this"] = await run("نکسوس ببین این چیه", reply_to=parent)
     # A lookup about a person: «این آدم».
     out["reply_then_this_person"] = await run("نکسوس این آدم کیه؟", reply_to=parent)
+    # The implicit grade: the message refers back without asking for anything.
+    out["reply_then_what_is_this"] = await run("نکسوس این دیگه چیه؟", reply_to=parent)
+    out["reply_then_what_says_it"] = await run("نکسوس این چی میگه؟", reply_to=parent)
+    out["reply_then_agreement"] = await run("نکسوس آره دقیقاً 😂", reply_to=parent)
+    out["reply_then_possessive"] = await run("نکسوس حرفش درسته؟", reply_to=parent)
+    out["reply_then_third_person"] = await run("نکسوس ببین چی گفته", reply_to=parent)
+    # ... and the cases where nothing must move.
+    out["reply_no_reference"] = await run(
+        "نکسوس لطفا فردا ساعت ۵ یادم بنداز", reply_to=parent)
     # Explicit reply requests move the destination onto the parent.
     out["reply_then_answer_it"] = await run("نکسوس جواب اینو بده", reply_to=parent)
     out["reply_then_answer_this_msg"] = await run(

@@ -2301,6 +2301,44 @@ This is a security and privacy boundary, not a performance optimisation.
   temperature is 0.8, so it reports samples and spread rather than one number as
   a verdict. Nothing else may justify a routing change (V).
 
+* **The room's semantic subject is read on the server, and the reader is not a
+  keyword matcher.** `app/subject.py` answers *what is this room talking about,
+  and is Nexus the subject of it* from the persisted window alone — no model call,
+  no database handle, no authority. Its kinds are `direct`, `implicit`, `about`,
+  `other`, `general` and `none`, and `NEXUS_KINDS` is the first three. A generic
+  word («ربات»، «هوش مصنوعی»، «بات») is a **candidate referent, never a trigger**:
+  the word alone cannot make Nexus the subject, and the word's absence cannot make
+  it not the subject. There is deliberately **no** `if "نکسوس"` and no `if "ربات"`
+  anywhere in the reader, and a new slang word needs no code change to be
+  understood as context.
+* **The evidence is reference and continuity, read in a fixed order.** A directed
+  row (`row["directed"]`, the same addressing reader the answer path uses) is
+  `direct`; a reply edge to the bot's own message is `implicit`; a name mention is
+  `about`; a reply edge to somebody else is `other`; a self-reference (a
+  demonstrative bound to an assistant noun, or a generic plural/scope) either
+  **establishes** a subject or **continues** the one already established; a
+  continuation that keeps a Nexus subject is demoted to `about` and loses
+  confidence. The assistant's own rows are skipped — its own words can never make
+  it the subject.
+* **Confidence is the boundary, and it is deliberately conservative.** Each kind
+  starts from a base confidence (`direct` 95, `implicit` 88, `about` 78, a
+  demonstrative bound to an assistant noun 72, `other` 65); a merely continued
+  subject loses `_CONTINUATION_PENALTY` and a subject carried in from the previous
+  pass loses `_PASS_PENALTY`; anything under `_CONF_FLOOR` is not a reading at all.
+  The reading is **evidence for the model**, never a gate that speaks on its own.
+* **The reading is a context source like any other.** `awareness_context` renders
+  it through `Source("subject", TIER_ALWAYS, …)`, registered **first** in
+  `SOURCES`, so it obeys the same character ceiling and the same fail-soft rule as
+  every other block: a source that raises is logged and skipped, and a room with
+  no reading renders nothing. It reads the stored window (`previous=_state(chat_id)`),
+  never a second query.
+* **The reading is persisted with the pass, additively.** `db.awareness_set`
+  writes `subject_kind`, `subject_confidence`, `subject_user_id`, `subject_name`
+  and `subject_message_id` (columns added by `_ensure_column`, so an older
+  database keeps working), and `awareness.record` stores what the pass decided. It
+  is **understanding, not authority**: nothing in `rbac`, `admin_service` or a
+  permission check reads it, and it grants nothing.
+
 ### 53.8 The assistant
 
 * `main._nexus_directed` decides the assistant answers; the word «ربات» is not an
@@ -2418,6 +2456,46 @@ This is a security and privacy boundary, not a performance optimisation.
   block use, so the fix belongs there and not in a second list.
 * A regression test asserts the context reaches `_request`; another asserts the
   date block is in the context the conversational path builds.
+
+* **An implicit reference can move the destination, and the move is graded.**
+  `reply_target.resolve` carries a `confidence`: `"explicit"` for a spoken
+  directive (unchanged), `""` for nothing, and `"reference"` for a reply whose
+  content points back at the parent without asking for it — a bare demonstrative
+  («این دیگه چیه؟»، «این چی میگه؟»), a possessive back-reference («حرفش»،
+  «پیامش»، «عکسش»), a third-person reporting verb («ببین چی گفته») or agreement
+  («آره دقیقاً») that only makes sense against the parent. The parent's **content
+  and author are always handed to the model** whether or not the destination
+  moves; the move is the server's, and the model never names an id.
+* **A reference moves nothing when it would be a guess.** The destination stays on
+  the current message when the parent is Nexus's own message, when a third person
+  competes for the reference (`_competing_person`), and when a bare demonstrative
+  arrives in a long message (over `_REFERENCE_TOKEN_CAP`), because a demonstrative
+  in a paragraph is more likely to point at the paragraph than at the parent.
+  Agreement tokens are matched after the same fold and punctuation strip as every
+  other reader, and a vocative name («نکسوس آره دقیقاً») is recognised through
+  `addressing.is_name`, not a second name list.
+* **Participation is the model's judgement, filtered by a server confidence
+  floor.** The awareness pass computes the subject reading, hands it to the model
+  in the awareness prompt, and the model states `subject` and `participation`
+  (0–100) beside `respond`. The server takes the stronger of the reading's own
+  confidence (only when the reading says Nexus is the subject) and the model's
+  `participation`, and refuses to speak below
+  `NEXUS_AWARENESS_PARTICIPATION_FLOOR` (default 60). The floor can only
+  **silence** a decision the model already made; it can never make Nexus speak.
+* **The floor cannot swallow a confirmation.** `wants_to_speak = writes or
+  speaking`, so a pending write confirmation is still consumed even when the
+  subject reading is weak; the duplicate guard still wins over both, and the room
+  boundary, the awake gate, the allowance, cooldowns, brakes and breakers are all
+  *above* this decision and are untouched.
+* **The subject and the destination are still two readings.** When the pass does
+  speak, `subject.destination(reading, messages, bot_id=…)` returns a message id
+  **only** from the stored window or the message being answered, and only when the
+  subject points at one; otherwise the send goes out with no `reply_to`, exactly
+  as before. The reading chooses *what the answer is about*; the destination is
+  the server's choice among ids it already holds.
+* **Self-awareness changes nothing about the voice.** No new persona rule, no
+  announcement of detection, no restructure — §54.28's rebuilt persona stays the
+  baseline. The model is *told* the subject; it is never told to say it noticed.
 
 **The conversational contract (rebuilt 2026-09-24).** The persona is the
 behavioural contract and lives in `chat.SYSTEM_INSTRUCTION` — the **single
@@ -5946,7 +6024,7 @@ step per §54.27, and the deploy gate for it is unchanged.
 
 ---
 
-### 54.29 Checkpoint (2026-09-25, **reply targets — semantic target vs Telegram destination**) — **resume here** (supersedes §54.28); CODE COMMITTED AND PUSHED, NOT DEPLOYED (commit `ffacd06`, both remotes)
+### 54.29 Checkpoint (2026-09-25, **reply targets — semantic target vs Telegram destination**) — superseded by §54.30; CODE COMMITTED AND PUSHED, NOT DEPLOYED (commit `ffacd06`, both remotes)
 
 **CHECKPOINT STATUS.** 2026-09-25. Branch `main`. Task: make Nexus understand what
 an incoming message is *about* and resolve **which Telegram message its answer
@@ -6014,6 +6092,86 @@ reconciled in exactly one recorded case.
 
 **NEXT STEP (exact).** Deploy only on the owner's explicit go-ahead. Dashboard
 **M4 — AI control + credentials** remains the next *product* step per §54.27.
+
+---
+
+### 54.30 Checkpoint (2026-09-25, **semantic subject + self-awareness + implicit reply targets**) — **resume here** (supersedes §54.29); CODE COMMITTED AND PUSHED, NOT DEPLOYED
+
+**CHECKPOINT STATUS.** 2026-09-25. Branch `main`. Task: extend §54.29 in the two
+directions the owner clarified afterwards — (1) reply-target resolution must
+**infer** the intended target implicitly from the Telegram reply structure and the
+semantic context, not only from explicit directives; (2) Awareness must carry a
+**semantic subject** reading that can tell when the room is talking about Nexus
+itself, and may join a conversation on the model's own judgement when that is the
+natural next turn. No parallel awareness system, no keyword detector, no change to
+the persona (§54.28 stays the behavioural baseline), no boundary weakened. **The
+owner said not to deploy this commit yet.**
+
+**What was built.**
+- `app/subject.py` (**new**): the deterministic semantic-subject reader — kinds
+  `direct`/`implicit`/`about`/`other`/`general`/`none`, a confidence per kind, the
+  continuation and pass penalties, `render`, and `destination`. Pure, fail-soft,
+  no model, no DB handle, no authority.
+- `app/reply_target.py`: the implicit grade — `Target.confidence`
+  (`explicit`/`reference`/`""`), the possessive / third-person / agreement /
+  demonstrative vocabularies, and the guards that keep a reference from becoming a
+  guess (own-message parent, competing person, long-message cap).
+- `app/awareness.py`: `parse_decision` now records `subject` and `participation`;
+  `subject_of(...)` is the pure reading; `record` persists the five subject
+  columns.
+- `app/awareness_context.py`: `Ctx.nexus_id` and the `subject` source, registered
+  first at `TIER_ALWAYS`.
+- `app/db.py`: the five additive `awareness_state` columns.
+- `app/main.py`: the awareness pass computes the reading, records it, logs
+  `subject=…/… participation=…`, applies `NEXUS_AWARENESS_PARTICIPATION_FLOOR`,
+  and sends the ambient reply with the resolved destination.
+- `app/chat.py`: the awareness instruction now states the subject and the
+  participation contract; the JSON schema gains `subject` and `participation`.
+- `app/config.py`: `NEXUS_AWARENESS_PARTICIPATION_FLOOR` (default 60).
+
+**Tests.** `tests/test_subject.py` (**new**, 31 tests) is the self-awareness
+matrix — a direct mention, an explicit reply, about-Nexus without the name,
+without a reply, «ربات»/«هوش مصنوعی», a pronoun, a multi-turn subject that becomes
+Nexus and then drops the name, another bot, general AI that must **not** trigger,
+«ربات» about something else, a «نکسوس» message about a different entity, an
+implicit question, a low-confidence silence case, and a participate-with-destination
+case. `tests/test_awareness_subject.py` (**new**, 14 tests) drives the real
+`main._awareness_pass` and asserts the reading reaches the model, is persisted, a
+reply-to-Nexus reads `implicit`, the floor silences a weak decision, a confirmation
+is not filtered, the duplicate guard still wins, and the contract clamps.
+`tests/test_reply_target.py` grew to **65 tests** with the implicit grade and its
+handler-level destination assertions. Full suite: **4018 passed / 0 failed**
+(`pytest tests -q`).
+
+**Live probes.** `tools/probe_awareness_subject.py` (**new**) runs two real passes
+per scenario — a stub decline to prove the server reading is recorded, then a
+confident decision to exercise the floor and the destination — for `this_bot`,
+`the_bot_why`, `pronoun`, `question_no_name`, `natural_entry`, `general_bots`,
+`general_ai` and `unrelated`; every scenario correct, **0 rows left**.
+`tools/probe_reply_target.py` gained the implicit cases (`reply_then_what_is_this`,
+`reply_then_what_says_it`, `reply_then_agreement`, `reply_then_possessive`,
+`reply_then_third_person`, and `reply_no_reference`) — each moves or holds the
+destination as specified, **0 rows left**. One real-model awareness pass returned
+`{"subject":"nexus","participation":20,"respond":false,…}` — proof that the model
+receives the server reading and identifies the subject, and a legitimate decision
+not to interrupt.
+
+**Architecture preserved — nothing weakened.** The reading is evidence, not
+authority; ids still come only from Telegram metadata or the stored window; the
+participation floor can only silence; the write-confirmation path and the
+duplicate guard are untouched; every rate limit, cap, cooldown, brake, breaker,
+isolation boundary, retention rule and the persona are unchanged.
+
+**Known limitations.** A demonstrative in a long message deliberately abstains
+rather than guess. A room whose subject is Nexus but whose evidence is only a
+generic plural stays at the low end of `about` and usually does not reach the
+floor — the deliberate bias toward silence. There is no `message_thread_id`
+handling (inherited from §54.29). The participation floor is a single global
+number; per-room tuning is not implemented and is not needed yet.
+
+**NEXT STEP (exact).** Deploy only on the owner's explicit go-ahead — the owner
+said **not to deploy this commit yet**. Dashboard **M4 — AI control +
+credentials** remains the next *product* step per §54.27.
 
 ---
 

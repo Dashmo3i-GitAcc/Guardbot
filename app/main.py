@@ -64,6 +64,7 @@ from . import (
     reply_target,
     responses,
     state,
+    subject,
     text_filters,
     transcribe,
     vpnbot,
@@ -1269,7 +1270,10 @@ def _awareness_context(
     in is what keeps this from becoming a second read of the room per pass.
     """
     context = awareness_context.build_ctx(
-        chat_id, messages=messages, anchor=anchor
+        chat_id,
+        messages=messages,
+        anchor=anchor,
+        nexus_id=int(_bot_identity.get("id") or 0),
     )
     return (
         awareness.roster()
@@ -1408,16 +1412,32 @@ async def _awareness_read(
         decision.get("about") or 0, messages
     )
 
-    awareness.record(chat_id, seen_message_id=max_id, decision=decision)
+    # The server's own reading of the conversation's subject — what the room is
+    # talking about, and whether it is talking about Nexus. Computed once here,
+    # before the record, so the row the next pass inherits is the reading that
+    # produced this pass's decision rather than a second one taken later.
+    reading = awareness.subject_of(
+        chat_id,
+        messages=messages,
+        bot_id=int(_bot_identity.get("id") or 0),
+        bot_username=str(_bot_identity.get("username") or ""),
+    )
+
+    awareness.record(
+        chat_id, seen_message_id=max_id, decision=decision, reading=reading
+    )
     log.info(
         "awareness chat=%s relevant=%s respond=%s writes=%d intent=%s about=%s "
-        "topic=%r",
+        "subject=%s/%d participation=%d topic=%r",
         chat_id,
         decision.get("relevant"),
         decision.get("respond"),
         counters.get("writes", 0),
         decision.get("intent") or "-",
         decision.get("about") or 0,
+        reading.kind,
+        reading.confidence,
+        int(decision.get("participation") or 0),
         (decision.get("topic") or "")[:60],
     )
 
@@ -1452,9 +1472,36 @@ async def _awareness_read(
             max_id,
             bool(decision.get("respond")),
         )
-    wants_to_speak = bool(counters.get("writes")) or (
-        bool(decision.get("respond")) and not already_answered
+    # The participation floor, and the answer to "do not reply to every
+    # conversation". ``respond`` is the model's claim that a reply is called for;
+    # the server weighs that claim against its own reading of the subject and
+    # against the model's own stated confidence, and speaks only when one of them
+    # stands behind it. The two are combined as a maximum because they are
+    # independent readings of the same room — the server's is deterministic and
+    # the model's is semantic — and either being sure is enough, while neither
+    # being sure is exactly the weak case that must stay silent.
+    #
+    # A write tool's confirmation is never filtered by this: the action has
+    # already happened, and an unacknowledged change is worse than a sentence
+    # nobody needed.
+    confidence = max(
+        reading.confidence if reading.is_nexus else 0,
+        int(decision.get("participation") or 0),
     )
+    floor = max(0, int(config.NEXUS_AWARENESS_PARTICIPATION_FLOOR))
+    speaking = bool(decision.get("respond")) and not already_answered
+    if speaking and confidence < floor:
+        log.info(
+            "awareness stayed silent: participation below the floor chat=%s "
+            "subject=%s/%d participation=%d floor=%d",
+            chat_id,
+            reading.kind,
+            reading.confidence,
+            int(decision.get("participation") or 0),
+            floor,
+        )
+        speaking = False
+    wants_to_speak = bool(counters.get("writes")) or speaking
     if not wants_to_speak:
         return
     if not nexus.accepts_in_group(room_authorized=authorized_group(chat_id)):
@@ -1477,7 +1524,15 @@ async def _awareness_read(
         message = config.NEXUS_AWARENESS_ACTION_TEXT
     if not message:
         return
-    if await _send_chat(ctx, chat_id, message):
+    # Which message the ambient reply quotes, resolved server-side from the
+    # stored window. The subject reading names the conversational turn it is
+    # about, and the id can only be one already on a row — the model has no part
+    # in choosing it. 0 means "no destination", which stays a plain group
+    # message exactly as before.
+    destination = subject.destination(
+        reading, messages, bot_id=int(_bot_identity.get("id") or 0)
+    )
+    if await _send_chat(ctx, chat_id, message, destination or None):
         _awareness_note_reply(chat_id, message)
     trace.mark("send")
 
@@ -2784,7 +2839,10 @@ def _room_reading(
         return ""
     try:
         ctx = awareness_context.build_ctx(
-            chat_id, messages=messages, anchor=anchor
+            chat_id,
+            messages=messages,
+            anchor=anchor,
+            nexus_id=int(_bot_identity.get("id") or 0),
         )
         return awareness_context.blocks(
             ctx,

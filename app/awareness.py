@@ -54,7 +54,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from . import addressing, config, db, rbac
+from . import addressing, config, db, rbac, subject
 
 log = logging.getLogger("guardbot.awareness")
 
@@ -738,6 +738,14 @@ _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 # nuance a linguist could draw.
 INTENTS = ("question", "instruction", "discussion", "social", "other")
 
+# What the model judged the batch to be *about*. A second closed vocabulary, and
+# a smaller one than the server's own subject kinds on purpose: the model is
+# asked the question a person would ask — is this about you, about somebody else,
+# a general discussion, or nothing in particular — and the server's richer
+# reading (``app/subject.py``) stays the server's. The two are compared, never
+# merged: the model's answer is a claim, the server's is evidence.
+SUBJECTS = ("nexus", "other", "general", "none")
+
 
 def _intent(value) -> str:
     """The model's classification of the batch, clamped to the vocabulary.
@@ -765,6 +773,33 @@ def _claimed_id(value) -> int:
     except (TypeError, ValueError):
         return 0
     return number if number > 0 else 0
+
+
+def _subject(value) -> str:
+    """The model's classification of what the batch is about, clamped.
+
+    Same rule as ``_intent``: a value outside the vocabulary — a new word, a
+    sentence, ``null`` — becomes ``none``, which reads as "the model did not say"
+    rather than as a silent pass-through. ``none`` is also the honest answer when
+    the model is unsure, which is what the participation floor wants.
+    """
+    word = str(value or "").strip().casefold()
+    return word if word in SUBJECTS else "none"
+
+
+def _percent(value) -> int:
+    """A model-reported confidence, clamped to 0–100. 0 when unreadable.
+
+    The clamp is the whole function: a model that answers ``150``, ``"high"`` or
+    ``-3`` must not be able to widen the gate it is feeding. 0 is the safe
+    direction — it means "the model did not claim confidence", which the
+    participation floor reads as "do not speak on this alone".
+    """
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, number))
 
 
 def about_in_window(value: int, messages) -> int:
@@ -819,6 +854,14 @@ def parse_decision(text: str) -> dict | None:
         # confirms it.
         "intent": _intent(data.get("intent")),
         "about": _claimed_id(data.get("about")),
+        # The self-awareness half of the contract. ``subject`` is the model's own
+        # reading of what the batch is about — the answer to "is this about you"
+        # — and ``participation`` is how strongly it believes a reply would be a
+        # natural continuation. Both are *claims*, normalised and clamped here,
+        # and the server combines them with its own reading rather than obeying
+        # either: see ``main._awareness_read``.
+        "subject": _subject(data.get("subject")),
+        "participation": _percent(data.get("participation")),
     }
     if decision["message"] is not None:
         decision["message"] = str(decision["message"]).strip() or None
@@ -856,6 +899,42 @@ def state(chat_id: int) -> dict:
     except Exception:  # noqa: BLE001 - a state read is context, not a decision
         log.exception("could not read the awareness state")
         return {}
+
+
+def subject_of(
+    chat_id: int,
+    *,
+    messages: list[dict] | None = None,
+    bot_id: int = 0,
+    bot_username: str = "",
+    previous: dict | None = None,
+) -> subject.Subject:
+    """The room's current subject, read from the window. Never raises.
+
+    The one place the server-side subject reading is computed, so the awareness
+    pass, the addressed conversation and the persisted row all describe the same
+    thing. It is pure Python over a window the caller usually already holds, it
+    invents no identifier, and it grants nothing — it is the reading the model is
+    handed and the evidence the participation floor weighs.
+
+    ``previous`` defaults to the stored row, which is what gives the reading its
+    continuity: a subject established two passes ago is still the subject, even
+    once the message that established it has aged out of the window.
+    """
+    try:
+        rows = list(messages if messages is not None else window(chat_id))
+        if previous is None:
+            previous = state(chat_id)
+        return subject.read_subject(
+            chat_id,
+            rows,
+            bot_id=int(bot_id or 0),
+            bot_username=str(bot_username or ""),
+            previous=previous,
+        )
+    except Exception:  # noqa: BLE001 - a reading is never worth a failed pass
+        log.exception("could not read the room subject")
+        return subject.Subject()
 
 
 def anchor(chat_id: int, *, messages: list[dict] | None = None) -> dict | None:
@@ -1118,8 +1197,21 @@ def pending() -> list[dict]:
         return []
 
 
-def record(chat_id: int, *, seen_message_id: int, decision: dict) -> dict:
-    """Store a completed pass: the understanding, and how far it read."""
+def record(
+    chat_id: int,
+    *,
+    seen_message_id: int,
+    decision: dict,
+    reading: subject.Subject | None = None,
+) -> dict:
+    """Store a completed pass: the understanding, and how far it read.
+
+    ``reading`` is the server's own subject reading (``app/subject.py``), stored
+    beside the model's judgement rather than instead of it. The two answer
+    different questions — the model says what it made of the batch, the server
+    says what the conversation's subject is — and keeping both means the next
+    pass inherits the server's continuity without inheriting the model's guess.
+    """
     return db.awareness_set(
         chat_id,
         seen_message_id=seen_message_id,
@@ -1129,6 +1221,11 @@ def record(chat_id: int, *, seen_message_id: int, decision: dict) -> dict:
         intent=_intent(decision.get("intent")),
         about_user_id=_claimed_id(decision.get("about")),
         participants=participants_of(chat_id),
+        subject_kind=(reading.kind if reading is not None else ""),
+        subject_confidence=(reading.confidence if reading is not None else 0),
+        subject_user_id=(reading.subject_user_id if reading is not None else 0),
+        subject_name=(reading.subject_name if reading is not None else ""),
+        subject_message_id=(reading.message_id if reading is not None else 0),
     )
 
 

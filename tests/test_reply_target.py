@@ -344,10 +344,56 @@ def test_a_reply_chain_uses_the_immediate_parent():
 # ══════════════════════════════════════════════════════════════════════════
 # Part 3 — resolution: the Telegram reply destination
 # ══════════════════════════════════════════════════════════════════════════
-def test_a_plain_question_does_not_move_the_destination():
+def test_a_plain_deictic_reply_moves_the_destination_to_the_parent():
+    """«ببین این چیه» replying to a message is *about* that message.
+
+    The earlier reading kept the answer under the asker's own message and only
+    moved on an explicit directive. That was too literal: the reply edge plus
+    «این» is already a reference, and the natural place for the answer is under
+    the message it is about.
+    """
     target = _resolve("ببین این چیه", replied=parent())
-    assert target.reply_to == 0
-    assert target.destination(CURRENT) == CURRENT
+    assert target.reply_to == 480
+    assert target.confidence == "reference"
+    assert target.explicit is False
+    assert target.destination(CURRENT) == 480
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "این چیه؟",
+        "این چی میگه؟",
+        "این رو ببین",
+        "این دیگه چیه؟",
+        "این طرف کیه؟",
+        "اون چیه؟",
+    ],
+)
+def test_a_lookup_reply_moves_the_destination_to_the_parent(text):
+    target = _resolve(text, replied=parent())
+    assert target.reply_to == 480
+    assert target.confidence == "reference"
+    assert target.destination(CURRENT) == 480
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "حرفش درسته؟",
+        "پیامش چیه؟",
+        "عکسش رو ببین",
+        "ببین چی گفته",
+        "آره دقیقاً",
+        "آره واقعاً 😂",
+    ],
+)
+def test_a_back_reference_moves_the_destination_to_the_parent(text):
+    """A possessive, a third-person report or an agreement is about the parent."""
+    target = _resolve(text, replied=parent())
+    assert target.reply_to == 480
+    assert target.confidence == "reference"
+    assert target.destination(CURRENT) == 480
 
 
 @pytest.mark.parametrize(
@@ -366,14 +412,8 @@ def test_an_explicit_directive_moves_the_destination_to_the_replied_to_message(t
     target = _resolve(text, replied=parent())
     assert target.reply_to == 480
     assert target.explicit is True
+    assert target.confidence == "explicit"
     assert target.destination(CURRENT) == 480
-
-
-@pytest.mark.parametrize("text", ["این چیه؟", "این چی میگه؟", "این رو ببین"])
-def test_a_lookup_directive_does_not_move_the_destination(text):
-    target = _resolve(text, replied=parent())
-    assert target.reply_to == 0
-    assert target.destination(CURRENT) == CURRENT
 
 
 def test_a_stray_reply_verb_without_a_target_does_not_move_the_destination():
@@ -461,14 +501,51 @@ def test_the_block_is_bounded():
 # ══════════════════════════════════════════════════════════════════════════
 # Part 5 — the real handler: the destination reaches the send call
 # ══════════════════════════════════════════════════════════════════════════
-def test_a_plain_reply_is_sent_under_the_current_message(monkeypatch):
+def test_a_plain_reply_is_sent_under_the_replied_to_message(monkeypatch):
     calls = install_model(monkeypatch)
     bot = FakeBot()
     run_group(message("@guardbot ببین این چیه", reply_to_message=parent()), bot)
     assert bot.sent, "the assistant answered"
-    assert bot.sent[0]["reply_to_message_id"] == CURRENT
+    assert bot.sent[0]["reply_to_message_id"] == 480
     # ... and the model was handed the parent's words.
     assert "این عکس خیلی قشنگه" in calls[0]["context"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["این دیگه چیه؟", "این چی میگه؟", "آره دقیقاً", "حرفش درسته؟", "ببین چی گفته"],
+)
+def test_an_implicit_reference_reaches_the_send_call(text, monkeypatch):
+    install_model(monkeypatch)
+    bot = FakeBot()
+    run_group(message(f"@guardbot {text}", reply_to_message=parent()), bot)
+    assert bot.sent, "the assistant answered"
+    assert bot.sent[0]["reply_to_message_id"] == 480
+
+
+def test_a_reply_with_no_reference_stays_under_the_current_message(monkeypatch):
+    install_model(monkeypatch)
+    bot = FakeBot()
+    run_group(
+        message("@guardbot لطفا فردا ساعت ۵ یادم بنداز", reply_to_message=parent()),
+        bot,
+    )
+    assert bot.sent, "the assistant answered"
+    assert bot.sent[0]["reply_to_message_id"] == CURRENT
+
+
+def test_a_reply_that_also_mentions_a_third_person_stays_put(monkeypatch):
+    install_model(monkeypatch)
+    bot = FakeBot()
+    entity = SimpleNamespace(
+        type="text_mention",
+        user=SimpleNamespace(id=MILAD, full_name="میلاد", username=""),
+    )
+    run_group(
+        message("@guardbot این چیه؟", reply_to_message=parent(), entities=[entity]),
+        bot,
+    )
+    assert bot.sent[0]["reply_to_message_id"] == CURRENT
 
 
 def test_an_explicit_reply_is_sent_under_the_replied_to_message(monkeypatch):
@@ -483,7 +560,7 @@ def test_this_person_reaches_the_model_as_the_replied_to_author(monkeypatch):
     calls = install_model(monkeypatch)
     bot = FakeBot()
     run_group(message("@guardbot این آدم کیه؟", reply_to_message=parent()), bot)
-    assert bot.sent[0]["reply_to_message_id"] == CURRENT
+    assert bot.sent[0]["reply_to_message_id"] == 480
     assert "زهرا" in calls[0]["context"]
     assert "111" in calls[0]["context"]
 
