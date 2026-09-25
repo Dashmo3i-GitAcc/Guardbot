@@ -5946,7 +5946,7 @@ step per §54.27, and the deploy gate for it is unchanged.
 
 ---
 
-### 54.29 Checkpoint (2026-09-25, **reply targets — semantic target vs Telegram destination**) — **resume here** (supersedes §54.28); CODE COMMITTED AND PUSHED, NOT DEPLOYED
+### 54.29 Checkpoint (2026-09-25, **reply targets — semantic target vs Telegram destination**) — **resume here** (supersedes §54.28); CODE COMMITTED AND PUSHED, NOT DEPLOYED (commit `ffacd06`, both remotes)
 
 **CHECKPOINT STATUS.** 2026-09-25. Branch `main`. Task: make Nexus understand what
 an incoming message is *about* and resolve **which Telegram message its answer
