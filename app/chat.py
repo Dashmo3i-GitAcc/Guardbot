@@ -118,6 +118,10 @@ SYSTEM_INSTRUCTION = (
     "rather than a lecture. Let them set the register — casual when they are "
     "casual, plainer when they are formal — and do not perform warmth, humour "
     "or intimacy the moment did not ask for.\n"
+    "* Do not drag the product into a conversation that is not about it. If the "
+    "subject is something else — a film, a game, their day — answer that subject "
+    "and leave VPNs, internet access and this community out of it; never tack on "
+    "a related mention to seem useful.\n"
     "* You can be funny, tease back, and use casual — even crude — Persian when "
     "that is what the exchange is doing. Do it because the moment calls for it, "
     "not to sound human: never use laughter as punctuation (no «😂», «🤣», "
@@ -316,6 +320,53 @@ _LINK_PATTERNS = (
 _CONTROL = re.compile(
     "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069\ufeff]"
 )
+
+# A reply that opens with a bare @handle on a line of its own is an addressing
+# artifact, not content: the model wrote a salutation nobody gave it. The match
+# is anchored at the very start and must be the whole line, so an @ inside real
+# text — an address, a handle quoted mid-sentence — is never touched, and a
+# handle that shares its line with real words is left alone on purpose: cutting
+# there could eat a legitimate «به @ali سلام برسون».
+_LEADING_HANDLE = re.compile(r"\A[ \t]*@[A-Za-z0-9_]{1,32}[ \t]*(?:\r?\n|\Z)")
+
+
+def _leading_self_name() -> "re.Pattern[str] | None":
+    """The bot's own configured names, as a whole first line (server config).
+
+    Requires a *following* line, so a reply that is only the bot's name — a
+    legitimate one-word answer — is not mistaken for an addressing artifact.
+    Names shorter than three characters are skipped: a very short name is more
+    likely to be an ordinary word than an address.
+    """
+    names = [
+        re.escape(str(name).strip())
+        for name in (config.NEXUS_NAMES or ())
+        if len(str(name).strip()) >= 3
+    ]
+    if not names:
+        return None
+    return re.compile(
+        r"\A[ \t]*(?:" + "|".join(names) + r")[ \t]*\r?\n", re.IGNORECASE
+    )
+
+
+def _strip_leading_address(text: str) -> str:
+    """Drop a leading bare-handle (or self-name) line, if the reply opens with one.
+
+    A reply that is nothing but such a line becomes empty, which the caller
+    already treats as the ``empty_response`` failure.
+    """
+    value = text or ""
+    for _ in range(4):  # bounded: each pass removes characters, so it terminates
+        before = value
+        value = _LEADING_HANDLE.sub("", value, count=1)
+        pattern = _leading_self_name()
+        if pattern is not None:
+            value = pattern.sub("", value, count=1)
+        if value == before:
+            break
+    return value
+
 
 # How the reply is described when something went wrong, so the caller can say
 # something useful without leaking internals to a stranger.
@@ -1087,10 +1138,14 @@ def _clean(text: str) -> str:
     be escaped and sent, and an invisible reordering character would let the
     text read as something other than what it says. Runs of blank lines are then
     collapsed, because a model asked for two sentences that answers with four
-    paragraphs separated by empty lines reads as a wall of text.
+    paragraphs separated by empty lines reads as a wall of text. A leading
+    addressing line — a bare handle, or the bot's own name on a line by itself —
+    is dropped last: it is a salutation the model was never given, not content.
     """
     text = _CONTROL.sub("", text or "")
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _strip_leading_address(text)
+    return text.strip()
 
 
 def looks_like_a_link(text: str) -> bool:

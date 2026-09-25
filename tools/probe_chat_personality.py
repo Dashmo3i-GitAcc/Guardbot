@@ -107,18 +107,30 @@ class _Ctx:
 
 # ── The contract, as checks ───────────────────────────────────────────────
 HARD_BANS = (
-    "قربان", "سرور", "جناب", "قربون‌سربازیت", "قربونسربازیت",
+    "قربان", "جناب", "قربون‌سربازیت", "قربونسربازیت",
     "😂", "🤣", "😅", "خخخ", "ههه",
     "بابا", "داداش", "قربونت", "حرومزاده",
 )
 SOFT_FILLER = ("حتماً", "البته", "در خدمت شما", "با کمال میل", "اگر سؤال دیگری دارید")
 SEXUAL = ("سکس", "جنسی", "لخت", "شهوت", "سکسی", "برهنه")
 _DOC_LINE = re.compile(r"^\s*(#{1,6}\s|[-*•]\s|\d+[.)]\s)")
+# A reply that opens with a bare @handle on its own line is an addressing
+# artifact, not content: the model wrote a salutation nobody gave it. Observed
+# live as a leading «@Nexus_ai» line, which the boundary had no rule for.
+_LEADING_HANDLE = re.compile(r"\A\s*@[A-Za-z0-9_]{1,32}\s*(?:\n|\Z)")
 # «بنده» is the servile vocative the persona bans. «بنده خدا» ("some poor guy")
 # is an ordinary Persian idiom and must not be flagged — a live run showed the
 # naive substring check reporting it as a violation, which was a checker bug and
 # not a behaviour one.
 _SERVile_RE = re.compile(r"بنده(?![\s\u200c]*خدا)")
+# «سرور» is both the servile vocative the persona bans and the ordinary word for
+# a *server* — and this community talks about servers constantly. A substring
+# check cannot tell them apart, so the ban is matched only where an address
+# actually sits: at the very start, or after an interjection. Same class of
+# instrument bug as the «بنده خدا» false positive above.
+_SERVILE_SERVER_RE = re.compile(
+    r"(?:\A\s*سرور(?=[\s،,!؟.]|$))|(?:(?:^|[\s،,])(?:ای|بله|چشم|قربان)\s+سرور\b)"
+)
 
 
 def _check(answer: str, *, sexual_ok: bool = False) -> dict:
@@ -126,6 +138,10 @@ def _check(answer: str, *, sexual_ok: bool = False) -> dict:
     violations = [tok for tok in HARD_BANS if tok in answer]
     if _SERVile_RE.search(answer):
         violations.append("بنده")
+    if _SERVILE_SERVER_RE.search(answer):
+        violations.append("سرور")
+    if _LEADING_HANDLE.match(answer):
+        violations.append("leading-handle")
     doc_lines = [
         line for line in answer.splitlines() if _DOC_LINE.match(line)
     ]
@@ -217,7 +233,7 @@ async def main():
             chat._generation_config(types, context="").system_instruction
             == chat.SYSTEM_INSTRUCTION
         ),
-        "has_owner_amendment_symbol": hasattr(chat, "OWNER_AMENDMENT"),
+        "has_owner_note_symbol": hasattr(chat, "OWNER_NOTE"),
     }
     out["cleanup_deleted"] = deleted
     out["summary"] = {"passed": passed, "failed": failed, "total": len(SCENARIOS)}

@@ -505,6 +505,13 @@ def test_the_prompt_keeps_the_conversation_on_the_persons_topic():
     assert "If they change the subject, follow the new one" in text
 
 
+def test_the_prompt_forbids_dragging_the_product_into_unrelated_talk():
+    """Topic freedom is not a licence to steer every chat back to VPNs."""
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Do not drag the product into a conversation that is not about it" in text
+    assert "leave VPNs, internet access and this community out" in text
+
+
 def test_the_prompt_allows_playful_banter_reactively():
     """Humour is a principle in the one persona, and it is reactive.
 
@@ -645,6 +652,92 @@ def test_an_answer_of_only_control_characters_is_a_failure(monkeypatch):
 
     assert result.answered is False
     assert result.error == "empty_response"
+
+
+def test_a_leading_handle_line_is_stripped(monkeypatch):
+    """A reply that opens with a bare @handle is addressing nobody, not content.
+
+    Observed live: the model prefixed an answer with a hallucinated «@Nexus_ai»
+    line. Nothing in the pipeline constructed it, so the boundary must drop it.
+    """
+    install(monkeypatch, "@Nexus_ai\nچیزی نگفتم که بخندی")
+
+    result = ask("نخند")
+
+    assert result.answered is True
+    assert result.text == "چیزی نگفتم که بخندی"
+    assert "@Nexus_ai" not in result.text
+
+
+def test_a_reply_that_is_only_a_handle_is_a_failure(monkeypatch):
+    """A bare handle is not an answer, so stripping it leaves nothing to send."""
+    install(monkeypatch, "@Nexus_ai")
+
+    result = ask("سلام")
+
+    assert result.answered is False
+    assert result.error == "empty_response"
+
+
+def test_a_handle_inside_real_text_is_untouched(monkeypatch):
+    """Only a whole opening line is an artifact; an @ in prose is content."""
+    install(monkeypatch, "به @ali سلام برسون")
+
+    result = ask("سلام")
+
+    assert result.answered is True
+    assert "@ali" in result.text
+
+
+def test_a_handle_on_a_later_line_is_untouched(monkeypatch):
+    """Only the opening line can be an addressing artifact."""
+    install(monkeypatch, "سلام\n@Nexus_ai")
+
+    result = ask("سلام")
+
+    assert result.answered is True
+    assert result.text == "سلام\n@Nexus_ai"
+
+
+def test_a_leading_self_name_line_is_stripped(monkeypatch):
+    """A bare «نکسوس» line is the same artifact without the @."""
+    install(monkeypatch, "نکسوس\nسلام، خوبم")
+
+    result = ask("سلام")
+
+    assert result.answered is True
+    assert result.text == "سلام، خوبم"
+
+
+def test_a_reply_that_is_only_the_bots_name_is_kept(monkeypatch):
+    """A one-word answer to «اسمت چیه؟» is an answer, not an artifact."""
+    install(monkeypatch, "نکسوس")
+
+    result = ask("اسمت چیه؟")
+
+    assert result.answered is True
+    assert result.text == "نکسوس"
+
+
+def test_the_leading_address_is_stripped_on_the_nudged_retry(monkeypatch):
+    """The retry goes through the same boundary as the first answer."""
+    repeated = "اینترنتت وصل شده یا هنوز قطعی؟"
+    db.chat_append(-100, 7, "user", "خوبی؟")
+    db.chat_append(-100, 7, "model", repeated)
+    install(monkeypatch, repeated, "@Nexus_ai\nیه جواب کاملاً تازه و متفاوت")
+
+    result = ask("دوباره بپرسم؟")
+
+    assert result.answered is True
+    assert result.repeated is True
+    assert result.text == "یه جواب کاملاً تازه و متفاوت"
+
+
+def test_clean_strips_a_leading_address():
+    assert chat._clean("@Nexus_ai\nمتن") == "متن"
+    assert chat._clean("@Nexus_ai") == ""
+    assert chat._clean("نکسوس\nمتن") == "متن"
+    assert chat._clean("متن با @ در وسط") == "متن با @ در وسط"
 
 
 # ── One person's own brake ────────────────────────────────────────────────

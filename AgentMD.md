@@ -2338,6 +2338,14 @@ This is a security and privacy boundary, not a performance optimisation.
   credentials. A **public** figure (crypto, gold, FX, stock, index) may be stated
   **only** when it is in that turn's web search results — never from memory, never
   estimated — and the results stay untrusted data.
+* A reply that opens with a **bare `@handle` line** — or with a line that is only
+  one of the bot's own configured names (`NEXUS_NAMES`) — loses that line in
+  `_clean` (`_strip_leading_address`): it is an addressing artifact the model was
+  never given, not content. A reply that is *nothing but* such a line is an
+  `empty_response`. The match is start-anchored and whole-line, so an `@` inside
+  real text is untouched, and a one-word answer that happens to be the bot's name
+  survives. This is enforced in `_clean`, so it runs on **both** paths (the first
+  answer and the repetition retry) and **before** the turn is remembered.
 * **Never** ask an already-answered question, re-greet, close by offering more,
   repeat a sentence, or narrate helpfulness.
 * **Do not** pretend to be human; **do not** announce being an AI.
@@ -2405,6 +2413,11 @@ asserted in `tests/test_chat.py` and `tests/test_chat_behavior_contract.py`:
   rather than a lecture. The person sets the register; Nexus does not perform
   warmth, humour or intimacy the moment did not ask for. Stay on the topic and
   follow a subject change; keep continuity across turns.
+* **The product is not dragged into unrelated talk.** Topic freedom is not a
+  licence to steer every conversation back: if the subject is something else — a
+  film, a game, somebody's day — the answer is about that subject, and VPNs,
+  internet access and this community stay out of it. A related mention tacked on
+  to seem useful is the assistant shape the rebuild removed, not helpfulness.
 * **Humour and register are reactive, never automatic.** Nexus may be funny,
   tease back, and use casual — even crude — Persian **when that is what the
   exchange is doing**, because the moment calls for it, not to sound human:
@@ -5782,6 +5795,118 @@ page has a status to label (§54.25 deferred it for exactly that reason). Then
 M4 … M8. Do **not** deploy the dashboard without the owner's go-ahead, and do
 **not** modify Chat, pools, credentials, limits, breakers, tenant isolation or
 workload boundaries.
+
+### 54.28 Checkpoint (2026-09-25, **legacy-parity diagnosis + output guard + one persona rule**) — **resume here** (supersedes §54.27); CODE NOT DEPLOYED, Dashboard M4 still NEXT
+
+**CHECKPOINT STATUS.** Date **2026-09-25 ~09:55Z**. Branch **`main`**. Base HEAD
+**`610cab9`**. The owner asked to bring Nexus's *conversational behaviour* as
+close as possible to the historical Chat (`3243067`) **on the current
+architecture**, and to first determine *which mechanism* — not which sentence —
+holds it back. The investigation and the resulting changes are **complete,
+tested and live-probed**; **nothing is deployed** and the running bot is
+untouched (`guardbot`, image `cf693ce46047`, `RestartCount=0`).
+
+**The investigation (read-only) settled the mechanism question.** The persona was
+**already** rebuilt on the legacy baseline (`067c417` → `5fbd116` → `3476eea`;
+`app/chat.py` at HEAD is byte-identical to `3476eea`). Comparing legacy → HEAD,
+the only real mechanism differences are:
+
+| Mechanism | Legacy `3243067` | HEAD | Verdict |
+|---|---|---|---|
+| `system_instruction` | persona only | persona **+ up to 7 context blocks** | **deliberate security property** (`chat.py:693-698`, `main.py:3037-3039`); the transcript is people's text and must never enter the user turn |
+| `temperature` / `max_output_tokens` | 0.8 / 1024 | 0.8 / 1024 | identical |
+| history turns / TTL | 8 / 1800 s | 8 / 1800 s | identical (HEAD adds same-role merge — required by awareness turns) |
+| `_clean` / `_fit_reply` / `looks_like_a_link` | same | same | identical |
+| repetition | prompt only | prompt **+ programmatic guard** | HEAD strictly stronger |
+
+So the one difference that *could* be a drift mechanism is the appended context —
+and it cannot be moved without weakening prompt-injection resistance. That is why
+an experiment (below) was run instead of a rewrite.
+
+**What was changed (two behaviour items, both narrow).**
+
+1. **A leading addressing line is dropped at the output boundary.** A live probe
+   had produced a reply that opened with a hallucinated `@Nexus_ai` line. It was
+   constructed nowhere — 0 hits in all git history, the config and the live
+   SQLite DB — it was pure model output, and the boundary had **no rule for a
+   bare handle**, so it was sent verbatim and the probe scored it 10/10. New
+   `chat._LEADING_HANDLE`, `chat._leading_self_name()` and
+   `chat._strip_leading_address()`, called **inside `_clean`**, so both paths
+   (first answer and repetition retry) inherit it and it runs **before** the turn
+   is remembered. The match is start-anchored and **whole-line**, so an `@` inside
+   real text is untouched and a one-word answer that happens to be the bot's name
+   survives; a reply that is *nothing but* a handle becomes `empty_response`.
+2. **One persona rule** — the single gap in the owner's behavioural list: do not
+   drag the product into a conversation that is not about it
+   (`SYSTEM_INSTRUCTION`, after the register bullet). Persona 5640 → **5901**
+   chars. Not an adjective, and it does not duplicate the topic-freedom bullet.
+
+**Instrument fixes (measurement only, no behaviour).** The probe checkers had two
+false positives of the same class as the earlier «بنده خدا» bug, both found by
+this run and both fixed in `tools/probe_chat_personality.py` **and**
+`tools/probe_persona_context_ab.py`:
+
+* «سرور» is both the servile vocative the persona bans and the ordinary word for
+  a **server** — which this community talks about constantly. It is now matched
+  only where an address actually sits (start of the reply, or after
+  ای/بله/چشم/قربان), not as a substring. A real answer
+  («...کارهای سرور رو رو به راه کردی؟») had been mis-flagged.
+* a greeting opener is a **loop** only when the person did not greet Nexus; the
+  greeting scenarios are marked, so a correct «سلام. خوبم» is no longer counted.
+* `tools/probe_chat_personality.py` also gained the `leading-handle` check, and
+  its stale `has_owner_amendment_symbol` key (a permanently-False test for a
+  symbol renamed in §54.22) became `has_owner_note_symbol`.
+
+**The experiment that decided the mechanism question — `tools/probe_persona_context_ab.py` (new).**
+Three arms over the same 10 scenarios, through the **real** path and the real
+model, each `(arm, scenario)` on its **own fresh room and person** (the older
+one-room probe let history bleed between scenarios), DB forced to `:memory:`,
+everything swept in `finally`:
+
+* **A** current persona + context (the live baseline) → **10/10** legacy_likeness,
+  mean **98.8** chars / **2.2** sentences, 0 filler, 0 honorific, 0 doc-shape;
+* **B** literal legacy persona text (1832 chars) + context → **5/10**, mean
+  **157.6** chars / **3.2** sentences, 1 filler («حتماً»), 1 greeting loop — the
+  literal legacy prompt produced the *assistant shape* the rebuild removed
+  («چطور می‌تونم کمکت کنم؟», «مخلصیم», «😅», and an apology loop for the
+  «نخند حرومزاده» case);
+* **C** current persona + **no context** → **9/10**, mean 108.8 chars / 2.7
+  sentences.
+
+**Conclusion, stated plainly: neither persona density nor context presence is the
+drift mechanism.** The current rebuild scores *higher* against the legacy
+behavioural target than the literal legacy prompt does on today's model, and
+removing the trusted context does not improve the shape. **No further mechanism
+change is justified, and restoring the legacy prompt text would be a
+regression.** The artifact appeared in **0 of 30** raw model outputs this run —
+it is model variance, and the new guard covers it when it appears.
+
+**Verification.** Focused Chat tests **181 passed**; isolation/authorization/room
+**151 passed**; **full suite 3908 passed / 0 failed** (36 subtests, 4 m 19 s). The
+8 new tests in `tests/test_chat.py` pin the guard by **mechanism** (leading handle
+stripped; handle-only → `empty_response`; `@` in prose untouched; handle on a
+later line untouched; self-name stripped; one-word name answer kept; the nudge
+retry stripped; direct `_clean` asserts) plus the persona-rule assertion. Live
+acceptance probe on the **new code** (throwaway container from the production
+image, repo mounted, production env): **10/10**, persona 5901, `OWNER_NOTE` data,
+member instruction == persona, cleanup exact — and the «نخند حرومزاده» answer is
+now a reaction («من که نمی‌خندم، جدی گفتم...»), not an addressing artifact.
+**No DB residue**: 0 rows for every synthetic room across 9 tables.
+
+**Architecture preserved — nothing weakened.** Context placement in the system
+instruction, `temperature=0.8`, `max_output_tokens=1024`, the pools, credentials,
+counters, rate limits, breakers, cooldowns, workload isolation (`chat.py` never
+reads `db.ai_*`), acquisition/awareness isolation, authorization, room boundary,
+tenant isolation, moderation, tool authority and `OWNER_NOTE`-as-data are all
+**unchanged**. The two behaviour edits are output-boundary + prompt text only.
+
+**NEXT STEP (exact).** The owner's go-ahead is required before **commit/push**
+(and separately before any deploy). If granted: commit the code, tests, the two
+tools and this documentation, push to **both** remotes (`origin` =
+`mo3iiibest77-hub`, `dashmo3i` = `Dashmo3i-GitAcc`) and verify the exact commit on
+GitHub. Dashboard **M4 — AI control + credentials** remains the next *product*
+step per §54.27, and the deploy gate for it is unchanged.
+
 
 ---
 
