@@ -7,6 +7,22 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Prove the real voice-chat transport is loadable *here*, at build time.
+#
+# `app/voice_live/telegram_voice.py` imports these three by name and only ever
+# lazily, so a broken wheel would not surface at import of the bot — it would
+# surface at the first join, mid-call, which is the worst possible moment. The
+# native half (`ntgcalls`) is the one that can fail for a reason no Python-level
+# check catches: a wheel built for the wrong ABI, or linked against a libstdc++
+# this base image does not carry. Importing it now turns that into a failed
+# build rather than a failed call.
+#
+# This does not weaken the runtime's graceful degradation: the transport still
+# reports `library_missing` and the bot still boots if the packages are ever
+# absent from an environment. It only guarantees that *this* image — the one
+# built from this file — is one that can hold a call.
+RUN python -c "import telethon, pytgcalls, ntgcalls; from importlib.metadata import version; print('voice transport importable:', version('telethon'), version('py-tgcalls'), version('ntgcalls'))"
+
 # The Admin Control Center's dependencies, in their own layer.
 #
 # This is the same image the bot runs from — not a second one. The split exists

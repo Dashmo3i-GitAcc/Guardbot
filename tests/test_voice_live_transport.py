@@ -103,6 +103,24 @@ def test_the_image_copies_the_session_bootstrap():
     assert re.search(r"^COPY\s+tools\b", text, re.M), "the Dockerfile does not copy tools/"
 
 
+def test_the_image_proves_the_transport_imports_at_build_time():
+    """Declaring the packages is not the same as the image being able to load
+    them. The native wheel can fail for a reason a declaration cannot catch — a
+    wheel built for the wrong ABI, or a missing libstdc++ — and the adapter
+    imports it lazily, so that failure would arrive at the first join, mid-call,
+    rather than at build time. The Dockerfile imports all three in a RUN step so
+    it fails the build instead; this asserts that guard is still there."""
+    text = open(os.path.join(ROOT, "Dockerfile"), encoding="utf-8").read()
+    run_lines = [
+        line for line in text.splitlines() if line.lstrip().startswith("RUN")
+    ]
+    assert any(
+        "import" in line
+        and all(name in line for name in ("telethon", "pytgcalls", "ntgcalls"))
+        for line in run_lines
+    ), "the Dockerfile does not import the voice transport at build time"
+
+
 # ══ Availability, decided without touching the network ════════════════════
 def test_a_missing_library_is_reported_as_a_missing_library(monkeypatch):
     transport = _transport()

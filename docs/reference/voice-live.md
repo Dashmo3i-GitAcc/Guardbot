@@ -488,6 +488,18 @@ created at runtime under `/data`, and both `.gitignore` and the Dockerfile's
 explicit `COPY` paths keep it out. A credential baked into a layer would be
 readable by anyone who can pull the image and would survive every rotation.
 
+The build also **proves** the transport is loadable instead of assuming it.
+Declaring the packages is not the same as the image being able to run them: the
+native half (`ntgcalls`) can fail for a reason no Python-level declaration
+catches — a wheel built for the wrong ABI, or linked against a `libstdc++` the
+base image does not carry — and `telegram_voice.py` imports it lazily, so that
+failure would surface at the first join rather than at build time. The
+`Dockerfile` therefore imports all three in a `RUN` step immediately after the
+install, so a broken wheel fails the build. This does not weaken the runtime's
+graceful degradation — the transport still reports `library_missing` and the bot
+still boots if the packages are ever absent from an environment — it only
+guarantees that *this* image, built from this file, is one that can hold a call.
+
 ### 51.17 Creating the MTProto session (once, by hand)
 
 The last thing between this feature and a real call is a logged-in user session.
@@ -535,3 +547,11 @@ The session file is a credential and is treated as one everywhere: it is in
 appear in a document, a log, a test fixture or a Telegram message. Rotating it
 means running the command again with `--force`, or deleting the file and
 re-running — the account's own Telegram session list can revoke it.
+
+**Where this stands (2026-09-24).** The `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`
+pair is provisioned in the host's `.env` (mode `0600`, gitignored) — never in
+Git, never in the image. `GEMINI_LIVE_ENABLED` is still `false`, and the session
+file does not exist yet: creating it is the one step that has to be run by hand,
+because it needs the code Telegram sends to the operator's phone. After it
+exists, the gate is flipped by setting `GEMINI_LIVE_ENABLED=true` and recreating
+the container (`env_file` is read at start), not by rebuilding.
