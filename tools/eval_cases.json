@@ -5079,7 +5079,7 @@
     {
       "id": "polarity-unscoped-negation",
       "category": "polarity",
-      "note": "A negation that has nothing to do with the directive. The reader abstains rather than claiming the message asks for the action — the fail-safe direction.",
+      "note": "A negation that has nothing to do with the directive. The reader abstains rather than claiming the message asks for the action — the fail-safe direction. The expression kind is `person`, not `clitic`: «این آدم» names a person outright and is the stronger pointer, and it only read as the clitic «بنش» while the fold/list mismatch of 2026-09-25 was live (the shared fold maps «آ» to «ا», so the «آدم» entry could never match). The referent is the same either way — this case is about the polarity abstaining, which it still does.",
       "window": [
         {
           "user_id": 11,
@@ -5105,7 +5105,7 @@
         "reply_message_id": 0
       },
       "expect": {
-        "expression_kind": "clitic",
+        "expression_kind": "person",
         "referent": 11,
         "requires_resolution": true,
         "ambiguous": false,

@@ -2380,6 +2380,42 @@ This is a security and privacy boundary, not a performance optimisation.
   newest date it read — in the room or in a web brief — as today, and answers
   "امروز چندمه" from its training. Awareness has always done this for its pass;
   the direct answer path must too.
+* **The semantic target and the Telegram reply destination are two readings of one
+  message, and they are kept apart.** The target is who or what the message is
+  about; the destination is which message id Telegram attaches the answer to.
+  `app/reply_target.py` is the single server-side reader: it reads Telegram's own
+  metadata (`reply_to_message` — the parent's id, author, words and media kind)
+  and the mention entities, and it resolves a spoken name through
+  `identity`/`people`. **The default destination is the message being answered**;
+  it moves to the resolved target only when the message asks for that («جواب اینو
+  بده»، «به این پیام جواب بده»، «با این صحبت کن»، «سر به سر این بذار»، «فلانی رو
+  جواب بده») and only when the target resolves to a message the server already
+  holds. «این چیه» and «این رو ببین» are **lookups**: they improve the target and
+  move nothing.
+* **The target reader never invents an identifier.** Every message id it can return
+  comes from exactly three places: Telegram's `reply_to_message`, the stored room
+  window (`db.group_window`), or the message being answered. It never parses an id
+  out of the message text and never reads one from model output. The relationship
+  reaches the model as **context**; the ids that reach a `send_message` call are
+  the server's, so no model output can widen them.
+* **The relationship is stated to the model, never left to be reconstructed.**
+  `context_plan.compose(target=…)` carries the block right after the administrative
+  roster, and it is **not** one of the four selectable sources: it is a structural
+  fact about the message being answered (read from the message and Telegram's own
+  metadata), not retrieved content, so the ceiling never drops it. It renders
+  nothing for a self-contained message.
+* **The resolved destination must survive all the way to the send call.**
+  `_answer_conversationally` computes `destination = target.destination(reply_to)`
+  and every send on that path (`_send_chat`, `_send_voice`, the search offer, the
+  decline notice) uses it. Resolving a target and then sending with
+  `msg.message_id` has done nothing: the regression tests assert the
+  `reply_to_message_id` the bot was **actually handed**, not the text it generated.
+* **«آدم» and «ادم» are both in `referents._PERSON_NOUNS`**, and that is not
+  redundancy: those tokens are matched after the shared fold (`people.normalize`),
+  which maps «آ» to «ا», so the unfolded spelling alone could never match and «این
+  آدم» fell through to the bare demonstrative — pointing at the message instead of
+  at the person. `referents` is the reader both `reply_target` and the awareness
+  block use, so the fix belongs there and not in a second list.
 * A regression test asserts the context reaches `_request`; another asserts the
   date block is in the context the conversational path builds.
 
@@ -5907,6 +5943,77 @@ tools and this documentation, push to **both** remotes (`origin` =
 GitHub. Dashboard **M4 — AI control + credentials** remains the next *product*
 step per §54.27, and the deploy gate for it is unchanged.
 
+
+---
+
+### 54.29 Checkpoint (2026-09-25, **reply targets — semantic target vs Telegram destination**) — **resume here** (supersedes §54.28); CODE COMMITTED AND PUSHED, NOT DEPLOYED
+
+**CHECKPOINT STATUS.** 2026-09-25. Branch `main`. Task: make Nexus understand what
+an incoming message is *about* and resolve **which Telegram message its answer
+should quote**, from Telegram's own reply/mention metadata rather than text
+guessing — without weakening any security boundary and without rebuilding the
+persona (§54.28 stays the behavioural baseline).
+
+**The defect, located exactly.** `on_group_chat` called
+`_answer_conversationally(update, ctx, reply_to=msg.message_id)` — the reply
+destination was hard-wired to the **current** message. `_reply_context` read the
+parent's id and author and deliberately dropped its *content*, and
+`context_plan.read` received `reply` as a **boolean only**, so the parent's words
+never reached the model and the id/name reached only the admin/awareness paths.
+The information was in the update and was discarded at one seam.
+
+**What was built.**
+- `app/reply_target.py` (**new**): `read_incoming` (parent id/author/words/media
+  kind + `text_mention`/`mention` entities), `replied_identity` (the narrow
+  reading `_reply_context` now delegates to), `resolve` (semantic target **and**
+  reply destination, with `why`), `render` (the block the model reads),
+  `needs_window`. Pure, fail-soft, no DB handle, no model, **no authority**.
+- `app/main.py`: the inbound metadata is read once; the window is read when the
+  reading wants it **or** when a reply directive needs it; the target is resolved
+  and `destination` is threaded to every send on the path; a content-free
+  `chat target` log line (ids only).
+- `app/context_plan.py`: `compose(target=…)`, placed after the admin roster and
+  **never dropped by the ceiling** (a structural fact, not retrieved content).
+- `app/referents.py`: `_PERSON_NOUNS` gains the folded «ادم» — the list is matched
+  after `people.normalize`, which maps «آ»→«ا», so «آدم» could never match and
+  «این آدم» fell through to the bare demonstrative.
+- `tools/eval_cases.json`: `polarity-unscoped-negation`'s recorded
+  `expression_kind` corrected `clitic` → `person` (the referent is unchanged at 11
+  and the case's polarity abstention still holds).
+- `tests/test_reply_target.py` (**new**, 49 tests) and `tools/probe_reply_target.py`
+  (**new** live probe).
+
+**Tests.** Focused set (12 files incl. the new one): **657 passed**. Full suite:
+**3957 passed / 0 failed** (`pytest tests -q`). The one interim failure was the
+`test_context_eval` real-path **timing** benchmark under CPU contention — it
+passes in isolation and the measured p50 ratio is 0.55 (limit 1.5). Both new
+behaviours were shown to **fail against the defect** before the fix: the send
+assertion read `assert 500 == 480`, and «این آدم» read `person_id 0 != 111`.
+
+**Live probe** (`tools/probe_reply_target.py`; in-container, synthetic room,
+self-cleaning, real `telegram.Message` objects through the real `on_group_chat`):
+the reported scenario `reply_then_this` keeps the destination on the asker's
+message **and** hands the model Zahra's words; the four explicit directives move
+the destination onto the parent; a named person with no reply resolves to their
+newest stored message; a plain mention and an unknown name move nothing. **0 rows
+left** in every synthetic table.
+
+**Architecture preserved — nothing weakened.** No change to Telegram
+authentication, admin authorization, user/tenant isolation, moderation, anti-spam,
+rate limits, daily caps, cooldowns, breakers, acquisition/awareness isolation,
+credential/workload isolation, prompt-injection resistance, retention, the room
+boundary, or the persona. Context still goes in the **system instruction**; the
+model's output remains **data** — it is *told* the relationship and cannot choose
+an id.
+
+**Known limitations.** A bare «این پیام» with no reply and no resolvable person
+**abstains** (destination unchanged) rather than guessing. A named person with no
+message in the stored window abstains. There is no forum-topic
+(`message_thread_id`) handling. The `referents` fold fix is corpus-visible and was
+reconciled in exactly one recorded case.
+
+**NEXT STEP (exact).** Deploy only on the owner's explicit go-ahead. Dashboard
+**M4 — AI control + credentials** remains the next *product* step per §54.27.
 
 ---
 

@@ -132,7 +132,15 @@ _FAR_SURFACES = frozenset(
 )
 _PERSON_NOUNS = frozenset(
     {
-        "کاربر", "یوزر", "شخص", "طرف", "آدم", "بنده", "کاربره", "یوزره", "طرفه",
+        # Both spellings of «آدم», and that is not redundancy: the tokens this
+        # list is matched against have already been through the shared fold,
+        # which maps «آ» to «ا» — so the bare «آدم» could never match and the
+        # folded «ادم» is the form that actually appears. «این آدم» is one of the
+        # phrases the reply-target reader must resolve to the replied-to author,
+        # and with only the unfolded spelling it fell through to the bare
+        # demonstrative and pointed at the message instead of at the person.
+        "کاربر", "یوزر", "شخص", "طرف", "آدم", "ادم", "بنده", "کاربره", "یوزره",
+        "طرفه",
         # The Latin half. A group that writes Persian and English in one
         # sentence is the norm here, not the exception, and «این user» points at
         # a person exactly as «این کاربر» does.

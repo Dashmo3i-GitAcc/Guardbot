@@ -1,0 +1,334 @@
+"""Self-cleaning live probe of Telegram reply-target resolution, in-container.
+
+Boundary under test (2026-09-25): the **semantic target** (who/what a message is
+about) and the **Telegram reply destination** (which message id the answer is sent
+as a reply to) are two readings of one message. The default destination is the
+message being answered; it moves to the resolved target only when the message
+actually asks for that («جواب اینو بده», «با این صحبت کن», «میلاد رو جواب بده»),
+and only when the target resolves to a message the server already holds.
+
+The scenario the owner reported is case ``reply_then_this``: somebody replies to
+Zahra's message and writes «@Nexus ببین این چیه». Before the fix the assistant
+answered under the asker's own message and the model never saw Zahra's words; now
+the model is handed the parent's text and the destination stays the asker's, while
+an explicit «جواب اینو بده» moves the destination onto Zahra's message.
+
+There is no real Telegram round trip here — the harness has no second account to
+reply from. The probe drives the **real** ``on_group_chat`` handler with real
+``telegram.Message`` objects carrying real ``reply_to_message`` metadata, and the
+send seam records the ``reply_to_message_id`` the bot was actually handed. One
+optional real-model turn (``--real``) proves the parent's words reach the model.
+
+Synthetic group/user ids only. Everything it creates is deleted in a finally. One
+real turn, when asked for, is the cost of a live probe and stays visible.
+
+Run it against the **running** container (WORKDIR is ``/srv``, so the package is
+not on ``sys.path`` for a script under ``/tmp`` — hence the explicit
+``PYTHONPATH``)::
+
+    docker cp tools/probe_reply_target.py guardbot:/tmp/
+    docker exec -w /srv -e PYTHONPATH=/srv guardbot python /tmp/probe_reply_target.py
+
+Add ``--real`` for the one real-model turn. Or locally from the repo root.
+"""
+import asyncio
+import datetime
+import json
+import sys
+
+from telegram import Chat, Message, Update, User
+from telegram.constants import ChatType
+
+from app import chat, config, db, groups, nexus, people
+from app import main as m
+from app import rbac
+
+ROOM = -1009000000021          # registered by this probe, revoked in cleanup
+MEMBER = 900000201             # the person asking
+ZAHRA = 900000202              # the person whose message is replied to
+MILAD = 900000203              # a person named outright
+BOT_ID = 8342690579
+SYNTH_ROOMS = (ROOM,)
+SYNTH_USERS = (MEMBER, ZAHRA, MILAD)
+
+PARENT_ID = 900001480          # Zahra's message
+CURRENT_ID = 900001500         # the asker's message
+MILAD_MSG_ID = 900001490       # Milad's newest stored message
+PARENT_TEXT = "این عکس از سفر زعفران‌کاریمه"
+
+# One synthetic speaker sending rapidly: lift the brake for this process only.
+config.GEMINI_CHAT_USER_RATE_LIMIT = 100
+config.GEMINI_CHAT_USER_RATE_WINDOW = 1.0
+config.GEMINI_CHAT_RATE_LIMIT = 100
+config.GEMINI_CHAT_RATE_WINDOW = 1.0
+
+_seq = [900001600]
+
+
+def _next_id():
+    _seq[0] += 1
+    return _seq[0]
+
+
+def _user(uid, name="Probe", is_bot=False):
+    return User(id=uid, is_bot=is_bot, first_name=name)
+
+
+def _chat():
+    return Chat(id=ROOM, type=ChatType.SUPERGROUP, title="probe")
+
+
+def _parent(mid=PARENT_ID, uid=ZAHRA, name="زهرا", text=PARENT_TEXT):
+    return Message(
+        message_id=mid,
+        date=datetime.datetime.now(datetime.timezone.utc),
+        chat=_chat(),
+        from_user=_user(uid, name),
+        text=text,
+    )
+
+
+def _msg(text, *, reply_to=None, message_id=CURRENT_ID, uid=MEMBER):
+    return Message(
+        message_id=message_id,
+        date=datetime.datetime.now(datetime.timezone.utc),
+        chat=_chat(),
+        from_user=_user(uid, "Asker"),
+        text=text,
+        reply_to_message=reply_to,
+    )
+
+
+class _Member:
+    status = "administrator"
+    can_restrict_members = True
+    can_delete_messages = True
+    can_promote_members = True
+    can_manage_chat = True
+
+
+sent: list[dict] = []
+
+
+class _FakeBot:
+    id = BOT_ID
+    username = "mo3i_protect_bot"
+
+    async def send_message(self, chat_id, text, **k):
+        sent.append({"chat": chat_id, "text": text,
+                     "reply_to": k.get("reply_to_message_id")})
+        return None
+
+    async def send_voice(self, chat_id, voice=None, **k):
+        sent.append({"chat": chat_id, "text": "", "voice": True,
+                     "reply_to": k.get("reply_to_message_id")})
+        return None
+
+    async def send_chat_action(self, *a, **k):
+        return None
+
+    async def get_chat_member(self, *a, **k):
+        return _Member()
+
+
+class _FakeCtx:
+    bot = _FakeBot()
+
+
+CTX = _FakeCtx()
+
+calls: list[dict] = []      # chat.reply invocations (the model seam)
+REAL_REPLY = chat.reply
+MODE = "stub"
+
+
+class _FakeResult:
+    def __init__(self, text):
+        self.text = text
+        self.turns = 0
+        self.timing = {}
+        self.error = None
+        self.skipped = False
+        self.truncated = False
+        self.repeated = False
+        self.voice = None
+
+    def __bool__(self):
+        return True
+
+
+async def _fake_reply(chat_id, user_id, text, **kw):
+    calls.append({"chat": chat_id, "user": user_id, "text": text,
+                  "context": kw.get("context", "") or ""})
+    if MODE == "real":
+        return await REAL_REPLY(chat_id, user_id, text, **kw)
+    return _FakeResult("[stubbed — no model call]")
+
+
+async def _fake_capture(ctx, room, user, msg, text, principal, directed=False):
+    return False
+
+
+def _noop_schedule(*a, **k):
+    return None
+
+
+async def _false_cmd(*a, **k):
+    return False
+
+
+async def _noop(*a, **k):
+    return None
+
+
+def _fake_observe(room, user, msg, text):
+    return True
+
+
+def _install():
+    chat.reply = _fake_reply
+    m._awareness_capture = _fake_capture
+    m._schedule_memory_observation = _noop_schedule
+    m._schedule_state_observation = _noop_schedule
+    m._awareness_schedule = _noop_schedule
+    m._owner_voice_command = _false_cmd
+    m._owner_state_command = _false_cmd
+    m._awareness_promptly = _noop
+    m._nexus_observe = _fake_observe
+    # No live web lookup: the probe is about targets, not search, and a search
+    # would spend a real request and could offer to search instead of answering.
+    m.web_search.enabled = lambda: False
+
+
+async def run(text, *, reply_to=None, mode="stub", uid=MEMBER):
+    global MODE
+    MODE = mode
+    calls.clear()
+    sent.clear()
+    upd = Update(update_id=_next_id(), message=_msg(text, reply_to=reply_to, uid=uid))
+    await m.on_group_chat(upd, CTX)
+    return {
+        "answer_sent": bool(sent),
+        "reply_to": sent[0]["reply_to"] if sent else None,
+        "context_has_parent_text": bool(calls and PARENT_TEXT in calls[0]["context"]),
+        "context_has_zahra_id": bool(calls and str(ZAHRA) in calls[0]["context"]),
+        "context_has_reply_to": bool(calls and "reply to message id" in calls[0]["context"]),
+        "answer": sent[0]["text"] if sent else "",
+        "context": calls[0]["context"] if calls else "",
+    }
+
+
+async def _cases(out):
+    parent = _parent()
+
+    # The reported scenario: reply to Zahra, mention Nexus, «این چیه».
+    out["reply_then_this"] = await run("نکسوس ببین این چیه", reply_to=parent)
+    # A lookup about a person: «این آدم».
+    out["reply_then_this_person"] = await run("نکسوس این آدم کیه؟", reply_to=parent)
+    # Explicit reply requests move the destination onto the parent.
+    out["reply_then_answer_it"] = await run("نکسوس جواب اینو بده", reply_to=parent)
+    out["reply_then_answer_this_msg"] = await run(
+        "نکسوس به این پیام جواب بده", reply_to=parent)
+    out["reply_then_talk_to_this"] = await run("نکسوس با این صحبت کن", reply_to=parent)
+    out["reply_then_tease_this"] = await run("نکسوس سر به سر این بذار", reply_to=parent)
+    # A named person with no reply: their newest stored message is the destination.
+    out["named_person_no_reply"] = await run("نکسوس میلاد رو جواب بده")
+    # A plain mention with no reply: nothing moves.
+    out["plain_mention"] = await run("نکسوس سلام")
+    # Reply to Nexus's own message: addressed, destination stays the asker's.
+    own = _parent(mid=900001470, uid=BOT_ID, name="Nexus", text="در خدمتم")
+    out["reply_to_bot"] = await run("این چیه", reply_to=own)
+    # An unresolvable name must not invent a target.
+    out["unknown_name"] = await run("نکسوس رضا رو جواب بده")
+
+    # One real-model turn, to show the parent's words actually reach the model.
+    if "--real" in sys.argv:
+        out["real_reply_then_this"] = await run(
+            "نکسوس ببین این چیه", reply_to=_parent(), mode="real")
+        body = out["real_reply_then_this"]["answer"]
+        out["real_reply_then_this"]["answer_mentions_parent_token"] = (
+            "زعفران" in body or "سفر" in body or "عکس" in body
+        )
+
+
+def _cleanup():
+    deleted = {}
+    with db._lock:
+        for table, col in (
+            ("authorized_groups", "chat_id"),
+            ("group_messages", "chat_id"),
+            ("chat_messages", "chat_id"),
+            ("people", "chat_id"),
+            ("awareness_state", "chat_id"),
+            ("conversation_state", "chat_id"),
+            ("user_memory", "chat_id"),
+            ("admin_audit", "chat_id"),
+        ):
+            try:
+                ph = ",".join("?" * len(SYNTH_ROOMS))
+                cur = db._conn.execute(
+                    f"DELETE FROM {table} WHERE {col} IN ({ph})", SYNTH_ROOMS)
+                deleted[table] = cur.rowcount
+            except Exception as exc:  # noqa: BLE001
+                deleted[table] = f"error: {exc}"
+        db._conn.commit()
+    left = {}
+    with db._lock:
+        for table, col in (
+            ("authorized_groups", "chat_id"),
+            ("group_messages", "chat_id"),
+            ("chat_messages", "chat_id"),
+            ("people", "chat_id"),
+        ):
+            ph = ",".join("?" * len(SYNTH_ROOMS))
+            left[table] = db._conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {col} IN ({ph})",
+                SYNTH_ROOMS).fetchone()[0]
+    return deleted, left
+
+
+async def main():
+    db.init()
+    groups.load()
+    _install()
+    nexus.reset_state()
+    nexus.set_state(nexus.ONLINE)
+    m._nexus_visibility[ROOM] = "administrator"
+    m._bot_identity.update(
+        id=BOT_ID, username="mo3i_protect_bot", name="Nexus",
+        aliases=(), resolved=True,
+    )
+    m._nexus_addressed.clear()
+
+    owner = rbac.owner_id()
+    real_rooms = list(config.GROUP_IDS)
+    out = {"real_rooms_authorized": {str(r): bool(m.authorized_group(r)) for r in real_rooms},
+           "probe_room_authorized_before": bool(m.authorized_group(ROOM))}
+
+    groups.register(ROOM, actor_id=owner, title="probe")
+    out["probe_room_authorized_after"] = bool(m.authorized_group(ROOM))
+
+    # Seed the room window so the named-person case has a message to point at.
+    people.remember(_user(MILAD, "میلاد"), ROOM)
+    db.group_capture(ROOM, MILAD, "member", "میلاد", "سلام بچه‌ها", keep=200,
+                     message_id=MILAD_MSG_ID)
+
+    try:
+        await _cases(out)
+    finally:
+        deleted, left = _cleanup()
+
+    print("PROBE_JSON_START")
+    print(json.dumps({
+        "probe_room": ROOM,
+        "parent_message_id": PARENT_ID,
+        "current_message_id": CURRENT_ID,
+        "milad_message_id": MILAD_MSG_ID,
+        "cleanup_deleted": deleted,
+        "cleanup_rows_left": left,
+        "cases": out,
+    }, ensure_ascii=False, indent=1))
+    print("PROBE_JSON_END")
+
+
+asyncio.run(main())

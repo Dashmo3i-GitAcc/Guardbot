@@ -629,6 +629,7 @@ def compose(
     reading: Reading,
     *,
     admin: str = "",
+    target: str = "",
     room: str = "",
     awareness: str = "",
     state: str = "",
@@ -652,7 +653,8 @@ def compose(
     be.
 
     The order is fixed and is the order the sources answer their questions in:
-    the administrative roster, the room (its transcript, then the server's
+    the administrative roster, the reply relationship (what this message is
+    answering and what it points at), the room (its transcript, then the server's
     reading of the message), the active state, the person's memory, the server's
     date, and finally any web findings. A skipped source leaves no trace — no
     empty label, no placeholder — so the model never reads a heading for
@@ -663,15 +665,19 @@ def compose(
     state_text = str(state or "")
     memory_text = str(memory or "")
     admin_text = str(admin or "")
+    target_text = str(target or "")
     date_text = str(date or "")
     search_text = str(search or "")
 
     dropped: list[tuple[str, str]] = []
 
-    # The reading owns the selection. The administrative roster, the date and
-    # the web findings are not gated: they are not among the four selectable
-    # sources — the first is a security property, the second stops a date being
-    # invented, and the third is policy's to decide, not the selector's.
+    # The reading owns the selection. The administrative roster, the reply
+    # relationship, the date and the web findings are not gated: they are not
+    # among the four selectable sources — the first is a security property, the
+    # second is a structural fact about the message being answered (it is not
+    # retrieved, it is read from the message and Telegram's own metadata), the
+    # third stops a date being invented, and the fourth is policy's to decide,
+    # not the selector's.
     if not reading.wants_awareness:
         room_text = ""
         awareness_text = ""
@@ -739,6 +745,8 @@ def compose(
     pieces: list[str] = []
     if admin_text:
         pieces.append(admin_text)
+    if target_text:
+        pieces.append(target_text)
     if room_text:
         pieces.append(room_text)
     if awareness_text:

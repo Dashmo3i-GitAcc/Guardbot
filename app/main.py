@@ -61,6 +61,7 @@ from . import (
     people,
     persian_calendar,
     rbac,
+    reply_target,
     responses,
     state,
     text_filters,
@@ -2429,21 +2430,15 @@ def _reply_context(msg) -> tuple[int, str, int]:
     """Who the current message is replying to, if anyone.
 
     Returned as plain ids and a display name rather than the message object, so
-    nothing downstream can be tempted to read the replied-to *content*. The
+    nothing downstream can be tempted to read the replied-to *content* here. The
     assistant is told who was replied to; it is not handed the message, because
-    the only thing an administrative request needs is the id.
+    the only thing an administrative request needs is the id. The reading itself
+    lives in ``app/reply_target.py``, which is also the reader the conversational
+    path uses when it *does* need the content — one reader of
+    ``reply_to_message``, so the id an action carries and the content the model
+    reads can never disagree about which message the parent is.
     """
-    replied = getattr(msg, "reply_to_message", None)
-    if replied is None:
-        return 0, "", 0
-    author = getattr(replied, "from_user", None)
-    if author is None:
-        return 0, "", int(getattr(replied, "message_id", 0) or 0)
-    return (
-        int(getattr(author, "id", 0) or 0),
-        getattr(author, "full_name", "") or "",
-        int(getattr(replied, "message_id", 0) or 0),
-    )
+    return reply_target.replied_identity(msg)
 
 
 async def _admin_turn_core(
@@ -3044,17 +3039,32 @@ async def _answer_conversationally(
         media=parts is not None,
     )
 
+    # The inbound relationship, read once from Telegram's own fields. This is
+    # the only place the replied-to *content* is available — the update carries
+    # the whole parent message — so it is read here, before any renderer can drop
+    # it. It costs no query and no model: the reply id, its author and its words
+    # are facts Telegram delivered, and the mention entities are the same.
+    incoming = reply_target.read_incoming(msg)
+
     # The window is read **once** and handed to both the transcript and the
     # reading beside it. The reading is the server's understanding of the
     # message being answered — the same ``awareness_context.blocks`` a pass
     # renders — so an addressed «همون رو بن کن» is resolved by the resolver
     # rather than left to the model over raw text.
+    #
+    # It is also read when the target reader needs it and the reading did not ask
+    # for it: a reply directive that names a person («میلاد رو جواب بده») has to
+    # find that person's newest message, and that is a window lookup even on a
+    # turn the selector judged self-contained.
     room_text = ""
     reading = ""
-    if plan_reading.wants_awareness and awareness.enabled():
+    room_window: list[dict] = []
+    wants_room = plan_reading.wants_awareness and awareness.enabled()
+    if wants_room or reply_target.needs_window(incoming, text):
         room_window = awareness.window(
             room.id, limit=max(1, int(config.NEXUS_AWARENESS_CONTEXT_MESSAGES))
         )
+    if wants_room:
         reading = _room_reading(
             room.id,
             message_id=int(getattr(msg, "message_id", 0) or 0),
@@ -3073,6 +3083,34 @@ async def _answer_conversationally(
             messages=room_window,
             budget=context_plan.room_budget(),
         )
+
+    # What the user means, and which message the answer should quote. Two
+    # readings of one message, kept apart on purpose: the semantic target is who
+    # or what the message is about, and the destination is which message id
+    # Telegram should attach the answer to. The default destination is the
+    # message being answered (``reply_to``); it moves to the target only when the
+    # message actually asks for that, and only when the target resolves to a
+    # message the server already holds. The reader never invents an id, and no
+    # model output reaches it — the ids here are Telegram's and the window's.
+    target = reply_target.resolve(
+        text=text,
+        incoming=incoming,
+        chat_id=room.id,
+        window=room_window,
+        current_message_id=int(getattr(msg, "message_id", 0) or 0),
+        bot_id=int(getattr(ctx.bot, "id", 0) or 0),
+        bot_username=str(getattr(ctx.bot, "username", "") or ""),
+    )
+    destination = target.destination(reply_to)
+    log.info(
+        "chat target user=%s chat=%s person=%s message=%s reply_to=%s explicit=%s",
+        user.id,
+        room.id,
+        target.person_id or "-",
+        target.message_id or "-",
+        destination or "-",
+        target.explicit,
+    )
 
     # Long-term memory and conversational state are their own sources and never
     # a dependency of the awareness layer. They are rendered here — never inside
@@ -3149,7 +3187,7 @@ async def _answer_conversationally(
                     decision.reason,
                 )
                 await _send_chat(
-                    ctx, room.id, config.NEXUS_SEARCH_CONFIRM_TEXT, reply_to
+                    ctx, room.id, config.NEXUS_SEARCH_CONFIRM_TEXT, destination
                 )
                 return _timing(True)
         search_block = ""
@@ -3171,6 +3209,7 @@ async def _answer_conversationally(
     plan = context_plan.compose(
         plan_reading,
         admin=context or "",
+        target=reply_target.render(target),
         room=room_text,
         awareness=reading,
         state=state_block,
@@ -3223,12 +3262,12 @@ async def _answer_conversationally(
             kind or "text",
         )
         if result.voice:
-            if await _send_voice(ctx, room.id, result.voice, reply_to):
+            if await _send_voice(ctx, room.id, result.voice, destination):
                 _awareness_note_reply(room.id, result.text)
                 return _timing(True)
             # The upload failed; the text is still the answer and is sent below.
             log.warning("voice reply failed; falling back to text")
-        if await _send_chat(ctx, room.id, result.text, reply_to):
+        if await _send_chat(ctx, room.id, result.text, destination):
             # What the assistant said is part of the conversation the next
             # awareness pass has to understand — otherwise it reads questions
             # and never its own answers, and repeats itself.
@@ -3247,7 +3286,7 @@ async def _answer_conversationally(
     # Silent for the reasons that are nobody's business — a switched-off feature
     # should not announce itself every time somebody says hello.
     if result.message:
-        return _timing(bool(await _send_chat(ctx, room.id, result.message, reply_to)))
+        return _timing(bool(await _send_chat(ctx, room.id, result.message, destination)))
     return _timing(False)
 
 
