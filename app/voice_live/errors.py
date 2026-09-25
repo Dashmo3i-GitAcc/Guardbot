@@ -67,6 +67,31 @@ REASON_TRANSPORT_UNAVAILABLE = "transport_unavailable"
 REASON_NOT_IN_CALL = "not_in_call"
 REASON_JOIN_REJECTED = "join_rejected"
 
+# ── Why a join was refused, in enough detail to fix it ────────────────────
+# ``join_rejected`` alone is the answer to "was the join refused", and it is not
+# the answer to "what do I change". Telegram offers four distinct reasons a voice
+# chat cannot be joined, each with a different fix, and collapsing them is how an
+# operator ends up hunting the wrong one:
+#
+# * ``no_active_call`` — the group has no voice chat right now. Nothing to fix;
+#   start one, or ask again later. This is the *normal* case, not a fault.
+# * ``scheduled_call`` — a voice chat exists but is scheduled, not live. Joining
+#   it is not what "come into the call" means, and PyTgCalls deliberately refuses
+#   a call whose ``schedule_date`` is set.
+# * ``call_not_visible`` — the account cannot see the call: it is not a member,
+#   or was removed, or the peer is forbidden. A membership/permission fix.
+# * ``discovery_failed`` — asking Telegram failed (network, flood wait, an
+#   unexpected reply). Transient or environmental; retrying later may work.
+#
+# These are the four the *resolver* returns. The library's own
+# ``NoActiveGroupCall`` cannot tell them apart, because its cache swallows the
+# exception that would have said which one it was — see
+# ``app/voice_live/call_discovery.py``.
+REASON_NO_ACTIVE_CALL = "no_active_call"
+REASON_SCHEDULED_CALL = "scheduled_call"
+REASON_CALL_NOT_VISIBLE = "call_not_visible"
+REASON_DISCOVERY_FAILED = "discovery_failed"
+
 # Fatal to the session and a configuration problem: something the operator has
 # to change. Retrying these is a loop that cannot terminate.
 REASON_SETUP_REJECTED = "setup_rejected"

@@ -1,49 +1,46 @@
 """Carrying the call: the interface, a working double, and the real adapter.
 
-The interface exists because the real transport cannot be exercised in this
-deployment, and the reason is worth stating precisely rather than vaguely,
-because it is a *credentials* limit and not a technical one — and an earlier
-version of this note got that wrong.
+The interface exists so the session, the audio pipeline, the speaker map and the
+barge-in logic can be tested without a voice channel, and so the native transport
+can be swapped later without touching any of them.
 
-What is true
-------------
-``py-tgcalls`` (2.3.3) with ``ntgcalls`` (2.2.5) is the transport, and it is
-sufficient: it joins a voice chat, hands over the incoming PCM tagged with an
-``ssrc``, accepts outgoing PCM for the microphone, and lists the participants
-with the ``user_id`` each ``ssrc`` belongs to — which is the whole of what this
-feature needs, including speaker identity. It also installs cleanly on this
-deployment's Python 3.12: ``ntgcalls 2.2.5`` publishes
-``cp312-manylinux_2_28_x86_64`` wheels. A previous reading of this — that no
-cp312 wheel existed and the transport was therefore impossible — was wrong, and
-is recorded here so that the mistake is not repeated.
+What is true now
+----------------
+``py-tgcalls`` (2.3.3) over ``ntgcalls`` (2.2.5) is the transport. It joins a
+voice chat, hands over incoming PCM tagged with an ``ssrc``, accepts outgoing PCM
+for the microphone, and lists participants with the ``user_id`` each ``ssrc``
+belongs to — which is the whole of what this feature needs, including speaker
+identity. It installs on this deployment's Python 3.12 (``ntgcalls 2.2.5``
+publishes ``cp312-manylinux_2_28_x86_64`` wheels; an earlier note that claimed
+otherwise was wrong). The MTProto credential — an ``api_id``/``api_hash`` pair
+and a logged-in user session — now exists, and this adapter has held a real call
+with it.
 
-What is *not* available is the credential. Joining a voice chat is an MTProto
-operation: the Bot API has no method for it at all (checked against all 277
-public ``Bot`` methods, and ``VideoChatStarted`` and its siblings are inbound
-service messages only). So it needs an ``api_id``/``api_hash`` pair and a
-logged-in user session, which this deployment does not have.
+Finding the call is done here, not left to the library
+------------------------------------------------------
+``py-tgcalls`` discovers an active call by reading ``ChannelFull.call`` and by
+caching ``UpdateGroupCall``. Its cache wraps the fallback lookup in a bare
+``except Exception: pass``, so every discovery error — not a member, forbidden,
+flood wait, an unresolvable id — is flattened into ``None`` and reported by the
+caller as one ``NoActiveGroupCall``. That single sentence covers four different
+problems with four different fixes, so this adapter finds the call itself with
+:mod:`app.voice_live.call_discovery`, keeps the outcomes apart, and hands the
+found call to the library so it does not look it up a second time and miss. The
+library's own finder remains the fallback when handing it over is not possible.
 
-The consequence, and the design that follows from it
----------------------------------------------------
-The real adapter is written — against the library's actual signatures, read from
-the installed package rather than from memory — but it cannot be *run* here. So:
+The session is connected with ``connect()`` and checked with
+``is_user_authorized()`` rather than started with ``start()``, because
+``start()`` prompts interactively for a phone number when the session is not
+logged in, and a bot process that blocks on a phone-number prompt is a bot
+process that has stopped moderating.
 
-* the **interface** and the **double** are real and exercised by the suite, and
-  everything above them (session, audio, awareness, actions) is tested against
-  the double;
-* the **adapter** reports ``not_configured`` with a reason that distinguishes
-  "the library is missing" from "the credentials are missing", so an operator
-  learns which of the two they have to fix;
-* nothing anywhere claims a call has been held, because none has.
-
-One thing this file cannot verify, and says so
----------------------------------------------
+One thing still unverified, and said so
+---------------------------------------
 The native layer's contract for an outgoing microphone frame — 16-bit PCM at
 48 kHz, mono, 20 ms — is what ``ntgcalls`` documents and what ``audio.py``
-implements, but it has not been confirmed against a live call, because holding
-one is the thing that needs the missing credential. It is one constant in
-``audio.py`` if it turns out to be wrong, and stating that is better than
-presenting an unverified number as a measured one.
+implements, but it has not been confirmed against a live call's audio. It is one
+constant in ``audio.py`` if it turns out to be wrong, and stating that is better
+than presenting an unverified number as a measured one.
 """
 from __future__ import annotations
 
@@ -53,7 +50,7 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Protocol, runtime_checkable
 
 from .. import config
-from . import audio, errors
+from . import audio, call_discovery, errors
 
 log = logging.getLogger("guardbot.voice.transport")
 
@@ -276,6 +273,11 @@ class PytgcallsTransport:
         self._closed = False
         self._frames_seen = 0
         self._libs = None
+        # The chats this adapter is currently in. Kept so that a second join is
+        # a no-op and so that ``close`` knows which calls to leave — the
+        # library's ``leave_call`` needs a chat id, and without this there is
+        # nothing to pass it.
+        self._joined: set[int] = set()
 
     # -- availability, decided without touching the network --
     @property
@@ -348,9 +350,10 @@ class PytgcallsTransport:
 
         Both halves are required and the failure modes are distinct: a session
         that cannot be authorised is ``not_configured``, and a join the server
-        refuses is ``join_rejected``. Reporting them as one thing would send an
-        operator looking for the wrong problem.
+        refuses is ``join_rejected`` — carrying a reason that says *which*
+        refusal, so the log names the fix rather than the symptom.
         """
+        chat_id = int(chat_id)
         reason = self.unavailable_reason
         if reason == UNAVAILABLE_LIBRARY:
             raise errors.NotConfigured(
@@ -378,13 +381,48 @@ class PytgcallsTransport:
                     "the voice-live MTProto session is not logged in",
                     reason=errors.REASON_NOT_CONFIGURED,
                 )
+
+        if chat_id in self._joined:
+            # A second join for a call we are already in is not an error, and
+            # re-running discovery for it is pure cost. ``play`` is idempotent
+            # underneath, so this only skips the round trips.
+            log.info("[voice] already in the voice chat chat=%s", chat_id)
+            return
+
         if self._call is None:
             self._call = libs.pytgcalls.PyTgCalls(self._client)
             self._register(libs)
+            # ``play`` is wrapped in ``@mtproto_required``, which raises
+            # ``ClientNotStarted`` until ``start`` has wired the library's
+            # handlers. Without this the very first join fails before Telegram
+            # is ever asked.
+            await self._call.start()
+
+        # Find the call here rather than letting the library report every
+        # failure as ``NoActiveGroupCall``. A discovery that raises rather than
+        # answering is itself a failure worth naming, so it is caught and
+        # reported as one instead of escaping as an unrelated exception.
+        try:
+            found = await call_discovery.discover(self._client, chat_id)
+        except BaseException as exc:  # noqa: BLE001 - a discovery is not a crash
+            raise errors.JoinRejected(
+                f"discovery:{type(exc).__name__}",
+                reason=errors.REASON_DISCOVERY_FAILED,
+            ) from None
+
+        if not found.active:
+            raise errors.JoinRejected(
+                f"{found.kind}:{found.detail}" if found.detail else found.kind,
+                reason=call_discovery.reason_for(found.kind),
+            )
+
+        # Hand the library exactly the call that was found, so its own lookup —
+        # and the swallowed exception inside it — is not consulted at all.
+        self._seed_call(chat_id, found.input_call)
 
         try:
             await self._call.play(
-                int(chat_id),
+                chat_id,
                 None,
                 libs.GroupCallConfig(
                     invite_hash=invite_hash or None, auto_start=False
@@ -392,7 +430,46 @@ class PytgcallsTransport:
             )
         except BaseException as exc:  # noqa: BLE001 - a join is not a crash
             raise errors.JoinRejected(f"{type(exc).__name__}") from None
+        self._joined.add(chat_id)
         log.info("[voice] joined the voice chat chat=%s", chat_id)
+
+    def _seed_call(self, chat_id: int, input_call) -> bool:
+        """Give PyTgCalls the call we already found, through one guarded seam.
+
+        The library keeps its own ``InputGroupCall`` cache and consults it before
+        asking Telegram. Filling that cache from outside is private API, so it is
+        reached in exactly one place, feature-detected, and allowed to fail: if a
+        future release renames it the join still works, because the library then
+        falls back to looking the call up itself. Returns whether the seed took.
+
+        This is the adapter's own instance cache, not module or global state, and
+        nothing outside this adapter's call can observe it.
+        """
+        try:
+            cache = self._call._app._bind_client._cache
+            cache.set_cache(int(chat_id), input_call)
+            return True
+        except BaseException as exc:  # noqa: BLE001 - the fallback is the library's
+            log.debug(
+                "[voice] could not seed the call cache (%s); "
+                "the library will look the call up itself",
+                type(exc).__name__,
+            )
+            return False
+
+    def _drop_call(self, chat_id: int) -> None:
+        """Forget the call in the library's cache after leaving it.
+
+        ``leave_call`` clears the library's peer state but not the call cache, so
+        a seeded call would linger there for the cache's lifetime and be handed
+        to a later join that should have looked for a new one.
+        """
+        if self._call is None:
+            return
+        try:
+            self._call._app._bind_client._cache.drop_cache(int(chat_id))
+        except BaseException:  # noqa: BLE001 - dropping a cache is best effort
+            log.debug("[voice] dropping the call cache raised; ignoring", exc_info=True)
 
     def _register(self, libs: _Libs) -> None:
         """Wire the library's events onto this adapter's queue.
@@ -428,12 +505,16 @@ class PytgcallsTransport:
             log.info("[voice] a stream ended")
 
     async def leave(self, chat_id: int) -> None:
+        chat_id = int(chat_id)
+        self._joined.discard(chat_id)
         if self._call is None:
             return
         try:
-            await self._call.leave_call(int(chat_id))
+            await self._call.leave_call(chat_id)
         except BaseException as exc:  # noqa: BLE001 - teardown is best effort
             log.info("[voice] leaving the call raised (%s)", type(exc).__name__)
+        # Drop the seeded call *after* leaving, because ``leave_call`` reads it.
+        self._drop_call(chat_id)
 
     async def participants(self, chat_id: int) -> list:
         if self._call is None:
@@ -507,10 +588,18 @@ class PytgcallsTransport:
             return
         self._closed = True
         if self._call is not None:
-            try:
-                await self._call.leave_call()
-            except BaseException:  # noqa: BLE001
-                log.debug("[voice] final leave raised; ignoring", exc_info=True)
+            # ``leave_call`` takes a chat id. This used to be called with no
+            # argument, which raised ``TypeError`` into the handler below and was
+            # swallowed — so shutting the adapter down left the account sitting
+            # in the voice chat until the socket happened to die. Leave each call
+            # we know about, by id.
+            for chat_id in sorted(self._joined):
+                try:
+                    await self._call.leave_call(chat_id)
+                except BaseException:  # noqa: BLE001
+                    log.debug("[voice] final leave raised; ignoring", exc_info=True)
+                self._drop_call(chat_id)
+            self._joined.clear()
         if self._client is not None:
             try:
                 await self._client.disconnect()

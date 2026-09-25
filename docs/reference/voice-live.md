@@ -89,8 +89,10 @@ installed package rather than from memory, and it reports
 `not_configured` with a reason that distinguishes "the library is missing" from
 "the credentials are missing" — because those need two different fixes. The
 interface and the double are real and exercised by the suite; everything above
-them is tested against the double. **No live Telegram call has been held**, and
-nothing in this document claims one has been.
+them is tested against the double. **The credential now exists and a real call
+has been held with it** — §51.18 records the live join, the two defects it
+exposed, and the discovery defect that had been reported as one misleading
+sentence.
 
 ### 51.4 The audio path, and the finding the feature was built around
 
@@ -392,12 +394,22 @@ starts cannot both win.
 order, the shared verb, the contradiction, the negation, the non-owner, and each
 of the four refusal sentences.
 
+`tests/test_voice_live_discovery.py` (34) covers finding the call and the
+adapter's join path: a live call found and returned, no call, a scheduled call, a
+visibility error, a flood wait, an unresolvable id, a basic group, a slug, the
+outcome→reason mapping, the library being started before it plays, the discovered
+call being seeded into the library's cache, a seed that fails not failing the
+join, each refusal reason, a second join being a no-op, `close` leaving every
+joined call by id, and — against the source — that neither the transport nor the
+resolver imports another AI workload. The resolver tests skip where Telethon is
+absent; the adapter tests do not, because the resolver is stubbed for them.
+
 `tests/test_gemini_pool.py` gained four tests for the `LIVE` gate. Two existing
 guard tests were widened rather than deleted: the workload-vocabulary test now
 names `live_voice` as a second deliberate addition, and the daily-allowance test
 records why a live call is rationed in *calls per day* rather than in minutes.
 
-The whole suite is **2225 passing**.
+The whole suite is **3897 passing**.
 
 ### 51.14 Configuration
 
@@ -434,16 +446,17 @@ ended by the same gate that refuses the next one.
 Stated plainly, because the difference between a measured fact and a documented
 assumption is the difference between an engineer and a brochure:
 
-* **No live Telegram voice call has been held.** The missing piece is the
-  MTProto credential (§51.3). Everything above the transport interface is tested
-  against a double, and the transport adapter is written against the library's
-  real signatures read from the installed package.
+* **A live Telegram voice call has been held** (§51.18). The adapter joined a
+  group whose voice chat was active, read back its own participant entry — `ssrc`
+  included, so the identity path was exercised — left, and closed with the
+  account no longer in the call. The session is a real logged-in user session,
+  not a bot: `BOT=False`.
 * **The outgoing microphone frame format** — 16-bit PCM, 48 kHz, mono, 20 ms — is
   what `ntgcalls` documents and what `audio.py` implements, but it has not been
-  confirmed against a live call, because holding one is the thing that needs the
-  missing credential. It is one constant in `audio.py` if it turns out to be
-  wrong, and saying so is better than presenting an unverified number as a
-  measured one.
+  confirmed against a live call's *audio*: the join above was a control-plane
+  join, and no microphone frame was carried through the provider on it. It is one
+  constant in `audio.py` if it turns out to be wrong, and saying so is better
+  than presenting an unverified number as a measured one.
 * **The provider path itself was exercised live**, on this project's own keys:
   Persian TTS → continuous feed → transcript → answer → audio, at 1.12–1.21 s;
   and a spoken ban end to end, from the utterance through the tool call, the
@@ -548,10 +561,83 @@ appear in a document, a log, a test fixture or a Telegram message. Rotating it
 means running the command again with `--force`, or deleting the file and
 re-running — the account's own Telegram session list can revoke it.
 
-**Where this stands (2026-09-24).** The `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`
+**Where this stands (2026-09-25).** The `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`
 pair is provisioned in the host's `.env` (mode `0600`, gitignored) — never in
-Git, never in the image. `GEMINI_LIVE_ENABLED` is still `false`, and the session
-file does not exist yet: creating it is the one step that has to be run by hand,
-because it needs the code Telegram sends to the operator's phone. After it
-exists, the gate is flipped by setting `GEMINI_LIVE_ENABLED=true` and recreating
-the container (`env_file` is read at start), not by rebuilding.
+Git, never in the image. **The session now exists and is authorised**:
+`/data/voice_live.session` (host `data/voice_live.session`, mode `0600`,
+`root:root`), belonging to a real user account with `BOT=False`. It has been used
+to hold a real call (§51.18). `GEMINI_LIVE_ENABLED` remains `false`: the session
+being ready is not the same as the feature being switched on, and the flip is a
+deploy that needs a fresh go-ahead. The flip itself is setting
+`GEMINI_LIVE_ENABLED=true` and recreating the container (`env_file` is read at
+start), not rebuilding.
+
+### 51.18 Finding the call: what the library swallows, and the live join
+
+Holding a call is two steps — find the active call, then join it — and the
+failure recorded here was in the first one, not the second. A join against a
+group whose voice chat was believed to be active returned
+`JoinRejected: NoActiveGroupCall`. The account was a member and the creator, the
+session was authorised, and the library imported and started. Nothing in that
+message said what had actually gone wrong.
+
+**What the library does.** `py-tgcalls` finds a call through
+`ClientCache.get_input_call`, which reads its own `InputGroupCall` cache and, on a
+miss, falls back to `ChannelFull.call` / `ChatFull.call`. That fallback is wrapped
+in
+
+    except Exception:
+        pass
+
+so every discovery failure — not a member, forbidden, a flood wait, a network
+error, an id the client cannot resolve — becomes `None`, which `play()` then
+reports as `NoActiveGroupCall`. One sentence for four problems, and it is the
+wrong sentence for three of them.
+
+**What Telegram actually exposes.** The active call of a channel or supergroup is
+`ChannelFull.call`; of a basic group, `ChatFull.call`. There is no third
+mechanism. A Telegram client that connected *after* a call began never receives
+the `UpdateGroupCall` that announced it — which is why a raw-update listener can
+watch a group with a live call for a minute and see nothing. Discovery must ask
+for the full chat; it must not wait for an update, and the absence of an update
+proves nothing.
+
+**The fix.** `app/voice_live/call_discovery.py` does the asking, in the open, and
+returns a *kind* rather than a `None`: `active`, `scheduled`, `none`, `no_access`,
+`unsupported` or `error`. `PytgcallsTransport.join` turns the kind into a machine
+reason and — when it found a call — hands the call to the library by seeding the
+cache, so the library's own lookup, and the swallowed exception inside it, is not
+consulted at all. The seed is private API, so it is one guarded seam that is
+allowed to fail: if a release moves it, the join still works and the library
+looks the call up itself.
+
+The refusal now names the fix:
+
+| what Telegram said | reason | what it means |
+|---|---|---|
+| `call` is `None` | `no_active_call` | there is no call here. Start one |
+| a call with `schedule_date` set | `scheduled_call` | it is scheduled, not live |
+| `ChannelPrivateError`, `ValueError`, … | `call_not_visible` | this account cannot see it |
+| a flood wait, or an unexpected reply | `discovery_failed` | asking failed; retry later |
+
+**The live join, and the two defects it exposed.** With the real session, joining
+a group that *does* have an active call succeeds: the adapter reports its own
+`ssrc` from the participant list, leaves, and closes with the account out of the
+call. Two things had to be fixed for that to be true at all:
+
+* `PyTgCalls.play` is wrapped in `@mtproto_required`, which raises
+  `ClientNotStarted` until `start()` has run. The adapter now starts the library
+  before it plays — without it, the first join failed before Telegram was asked;
+* `close()` called `leave_call()` with no argument. `leave_call` requires a chat
+  id, so it raised `TypeError` into a handler that logged at debug and moved on:
+  shutting the adapter down left the account sitting in the voice chat until the
+  socket happened to die. It now leaves every call it holds, by id.
+
+**What the live run also settled.** `ChannelFull.call` was checked across every
+group the session is in, in one run with one session: four returned a live call
+and the rest returned `None`. The mechanism is therefore not the problem, and a
+`None` is Telegram's answer about *that* group rather than a failure to ask. The
+target group of the original report returned `None`, had no call service message
+in its history, and produced no `UpdateGroupCall` while watched — so the
+resolver now reports it as `no_active_call`, which is a fact, instead of a
+`NoActiveGroupCall` that could have meant four different things.

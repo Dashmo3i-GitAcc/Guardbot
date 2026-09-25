@@ -23,7 +23,10 @@ Nothing in here is reachable until an operator turns it on. The real Telegram
 transport needs an MTProto credential — an ``api_id``/``api_hash`` pair and a
 logged-in user session, because the Bot API has no method to join a voice chat —
 and reports itself as unavailable rather than pretending when it does not have
-one. (The library, ``py-tgcalls`` over ``ntgcalls``, does install on this
-deployment's Python 3.12; the credential is the missing piece, and an earlier
-note that said otherwise was wrong.)
+one. (The library, ``py-tgcalls`` over ``ntgcalls``, installs on this
+deployment's Python 3.12, and the credential is provisioned; an earlier note that
+said no wheel existed for this interpreter was wrong.) Finding the call that is
+already open is done in ``call_discovery`` rather than left to the library, whose
+finder reports every discovery failure as one ``NoActiveGroupCall`` — see
+``docs/reference/voice-live.md`` §51.18.
 """
