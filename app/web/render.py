@@ -15,17 +15,17 @@ from app.web.jalali import now_text
 from app.web.jinja import templates
 
 # (key, label, href). Order matters: it is the order they appear in the nav.
-# M1 ships the shell with a single entry; each later stage appends its own line
+# M1 shipped the shell with a single entry; each later stage appends its own line
 # here rather than growing a second navigation.
 NAV = (
-    ("home", copy.NAV_HOME, "/"),
+    ("overview", copy.NAV_OVERVIEW, "/"),
 )
 
 # Emoji, not an icon font: they are the same glyphs the bot uses in its
 # keyboards, so the two surfaces name a thing the same way. One per item, and
 # only where it helps you find the row.
 NAV_ICONS = {
-    "home": "🏠",
+    "overview": "📊",
 }
 
 

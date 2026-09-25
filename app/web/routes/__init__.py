@@ -5,12 +5,12 @@ a screen means adding one file rather than growing a single router.
 """
 from aiohttp import web
 
-from app.web.routes import auth_routes, home
+from app.web.routes import auth_routes, overview
 
 
 def register(app: web.Application) -> None:
     auth_routes.register(app)
-    home.register(app)
+    overview.register(app)
 
 
 __all__ = ["register"]

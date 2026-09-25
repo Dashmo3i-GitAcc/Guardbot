@@ -13,7 +13,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from app.web import copy
+from app.web import copy, labels
 from app.web.jalali import (
     fa_digits,
     fa_number,
@@ -41,6 +41,11 @@ def build_environment() -> Environment:
             "date": format_jalali,
             "ago": format_relative,
             "duration": format_duration,
+            # The status vocabulary. A template asks ``{{ kind|event }}`` for a
+            # label and a colour rather than deciding either for itself, so a
+            # status means the same thing on every page that shows it.
+            "event": labels.event,
+            "workload": labels.workload,
         }
     )
 

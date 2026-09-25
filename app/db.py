@@ -4427,6 +4427,29 @@ def update_seen(update_id: int) -> bool:
     return row is not None
 
 
+def seen_updates_latest() -> int:
+    """When the most recent update was handled, or 0 if none is retained.
+
+    This is the closest thing the bot has to a heartbeat: every incoming update
+    is claimed exactly once, so the newest ``at`` here is the last moment the
+    bot did anything at all. The panel reads it to answer "is the bot alive",
+    and it is a *proxy*, reported as one.
+
+    It is deliberately not a dedicated heartbeat row. A heartbeat would be a
+    second thing writing the same fact, and it would be written by a timer that
+    is just as capable of stopping as the polling loop — so it would report
+    liveness with the same failure modes and one more moving part. The trade is
+    honest: the table is pruned to ``UPDATE_DEDUP_TTL_SECONDS``, so a bot that
+    has received nothing for longer than that window reads the same here as a
+    bot that is down, and the panel says so rather than pretending to know.
+
+    ``idx_seen_updates_at`` makes this a bounded read rather than a scan.
+    """
+    with _lock:
+        row = _conn.execute("SELECT MAX(at) FROM seen_updates").fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def seen_updates_prune(keep_seconds: int) -> int:
     """Forget update ids older than the window. Best effort.
 

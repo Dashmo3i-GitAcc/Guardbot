@@ -29,7 +29,7 @@ BRAND = "GuardBot"
 # ── Shell ─────────────────────────────────────────────────────────────────
 APP_TITLE = f"مرکز کنترل {BRAND}"
 APP_TAGLINE = "همون ربات، از پشت مرورگر"
-NAV_HOME = "خانه"
+NAV_OVERVIEW = "نمای کلی"
 NAV_LOGOUT = "خروج"
 FOOTER_NOTE = (
     "این پنل فقط داده‌های همون ربات رو نشون می‌ده. هر تغییری اینجا بدی، "
@@ -75,30 +75,112 @@ LOGIN_NO_OPERATOR = (
 LOGOUT_DONE = "خارج شدی. هر وقت خواستی دوباره وارد شو."
 SESSION_EXPIRED = "نشستت منقضی شد. یه بار دیگه وارد شو."
 
-# ── Home ──────────────────────────────────────────────────────────────────
-HOME_TITLE = "خانه"
-HOME_READY_TITLE = "پنل بالاست"
-HOME_READY_BODY = (
-    "این صفحه‌ی ورود و پوسته‌ی پنل راه افتاده. از اینجا به بعد، هر بخشی که "
-    "اضافه می‌شه توی همین قالب می‌شینه."
+# ── Overview ──────────────────────────────────────────────────────────────
+OVERVIEW_TITLE = "نمای کلی"
+OVERVIEW_INTRO = (
+    "یه نگاه سریع به وضعیت ربات: گروه‌ها، حساب‌های هوش مصنوعی و مصرف امروز. "
+    "هر عددی که اینجا می‌بینی از همون دیتابیسیه که ربات داره توش می‌نویسه — "
+    "هیچی اینجا حدس زده نمی‌شه."
 )
-HOME_UPTIME = "از وقتی بالا اومده"
-HOME_ROLE = "نقش پنل"
-HOME_PERMISSIONS = "دسترسی"
-HOME_SESSION = "این نشست تا"
-HOME_NEXT_TITLE = "الان چیزی از اینجا مدیریت نمی‌شه"
-HOME_NEXT_BODY = (
-    "این نسخه فقط پایه‌ی پنل رو می‌سازه: ورود، نشست و پوسته. نمای کلی، "
-    "گروه‌ها، مرکز هوش مصنوعی، مدیریت ربات و گزارش رویدادها مرحله‌به‌مرحله "
-    "اضافه می‌شن. تا اون موقع، هیچ دکمه‌ای اینجا کاری روی ربات انجام نمی‌ده — "
-    "و این عمدیه."
+# Shown when one or more reads failed. The failed source names are listed under
+# it, as code, so the operator can tell which section is short rather than
+# trusting a number that happens to be zero.
+OVERVIEW_PARTIAL = (
+    "یه بخشی از داده‌ها خونده نشد، پس بعضی عددها ناقص‌اند — نه صفر. "
+    "منبع‌هایی که خطا دادن:"
 )
-HOME_SECRET_WARNING = (
+
+# The six headline numbers. Labels are short; the hint under each one says what
+# the number actually counts, because "accounts" and "requests" can mean more
+# than one thing and the panel must not make the operator guess which.
+OVERVIEW_ROOMS = "گروه‌های مجاز"
+OVERVIEW_ROOMS_HINT = "از بین همه‌ی گروه‌های ثبت‌شده"
+OVERVIEW_PEOPLE = "آدم‌ها"
+OVERVIEW_PEOPLE_HINT = "کسی که ربات می‌شناسه"
+OVERVIEW_ACCOUNTS = "حساب‌های هوش مصنوعی"
+OVERVIEW_ACCOUNTS_HINT = "فعال، از کل حساب‌های ثبت‌شده"
+OVERVIEW_REQUESTS = "درخواست‌های امروز"
+OVERVIEW_REQUESTS_HINT = "جمع چهار بخشِ مصرف"
+OVERVIEW_ERRORS = "خطاهای امروز"
+OVERVIEW_ERRORS_HINT = "همون چهار بخش"
+OVERVIEW_LAST_UPDATE = "آخرین آپدیت"
+OVERVIEW_LAST_UPDATE_HINT = "آخرین پیامی که ربات پردازش کرده"
+
+# What to look at first. One sentence per kind, and the number (where there is
+# one) is rendered by the template, never written here.
+OVERVIEW_ATTENTION_TITLE = "این‌ها رو یه نگاه بنداز"
+OVERVIEW_ATTENTION_EMPTY = "هیچ حساب فعالی نداره"
+OVERVIEW_ATTENTION_ONE = "به یه حساب فعال رسیده"
+OVERVIEW_ATTENTION_INVALID = "کلید نامعتبر داره"
+OVERVIEW_ALL_GOOD = "چیزی نیست که بخواد نگرانت کنه. همه‌ی حساب‌ها سر جاشونن."
+
+OVERVIEW_POOLS_TITLE = "حساب‌های هوش مصنوعی"
+OVERVIEW_POOLS_HINT = "آخرین وضعیتی که ربات ذخیره کرده"
+OVERVIEW_POOLS_EMPTY = (
+    "هنوز هیچ حسابی ثبت نشده. ربات هر حساب رو اولین باری که استفاده کنه "
+    "ذخیره می‌کنه، پس تا اون موقع چیزی برای نشون دادن نیست."
+)
+
+OVERVIEW_USAGE_TITLE = "مصرف امروز"
+OVERVIEW_USAGE_HINT = "روزِ خودِ گوگل، نه نیمه‌شب محلی"
+OVERVIEW_USAGE_EMPTY = "امروز هنوز هیچ درخواستی از این چهار بخش ثبت نشده."
+
+OVERVIEW_SWITCH_TITLE = "کلیدهای اصلی"
+OVERVIEW_SWITCH_NEXUS = "نکسوس"
+OVERVIEW_SWITCH_AWARENESS = "آگاهی از گروه"
+OVERVIEW_SWITCH_SEARCH = "جست‌وجوی وب"
+
+OVERVIEW_EVENTS_TITLE = "رویدادهای اخیر حساب‌ها"
+OVERVIEW_EVENTS_EMPTY = (
+    "هنوز رویدادی ثبت نشده. رویداد وقتی نوشته می‌شه که یه حساب یا مدل "
+    "وضعیتش عوض بشه — عوض شدن مدل، کول‌داون، برگشتن به چرخه."
+)
+
+OVERVIEW_COL_WORKLOAD = "بخش"
+OVERVIEW_COL_ACCOUNTS = "حساب"
+OVERVIEW_COL_ACTIVE = "فعال"
+OVERVIEW_COL_LIMITED = "محدود"
+OVERVIEW_COL_EXHAUSTED = "سهمیه تموم"
+OVERVIEW_COL_INVALID = "نامعتبر"
+OVERVIEW_COL_REQUESTS = "درخواست"
+OVERVIEW_COL_FAILURES = "خطا"
+OVERVIEW_COL_CALLS = "درخواست"
+OVERVIEW_COL_ERRORS = "خطا"
+OVERVIEW_COL_SKIPPED = "رد شده"
+OVERVIEW_COL_RESULT = "نتیجه"
+OVERVIEW_COL_WHEN = "کِی"
+OVERVIEW_COL_EVENT = "رویداد"
+OVERVIEW_COL_DETAIL = "جزئیات"
+
+# The honest footnote. Every clause here names a thing the panel genuinely
+# cannot show, and why — an operator who knows what is missing stops looking
+# for it in the wrong place.
+OVERVIEW_NOT_SHOWN_TITLE = "چیزی که این صفحه نشون نمی‌ده"
+OVERVIEW_NOT_SHOWN_BODY = (
+    "تأخیر پاسخ‌ها جایی ذخیره نمی‌شه، پس اینجا هم نیست — ربات زمان‌ها رو فقط "
+    "توی لحظه اندازه می‌گیره. لاگ خطایی هم به‌صورت فایل وجود نداره؛ خطاها "
+    "فقط توی شمارنده‌ی همون روز شمرده می‌شن. و ربات ضربان جدا نمی‌فرسته، پس "
+    "«آخرین آپدیت» بالا نزدیک‌ترین چیز به «زنده بودن»‌ه — اگه ربات مدتی هیچ "
+    "پیامی نگیره، این عدد هم قدیمی می‌مونه."
+)
+
+# ── The panel's own state ─────────────────────────────────────────────────
+# Not about the bot: whether *this panel* is configured and whether its sessions
+# survive a restart. Shown on the Overview because an operator who cannot tell
+# these apart from a bot fault will debug the wrong process.
+PANEL_TITLE = "خود پنل"
+PANEL_UPTIME = "از وقتی بالا اومده"
+PANEL_ROLE = "نقش پنل"
+PANEL_PERMISSIONS = "دسترسی"
+PANEL_SESSION = "این نشست تا"
+PANEL_SECRET_TITLE = "نشست‌ها بعد از ری‌استارت"
+PANEL_NOT_CONFIGURED_TITLE = "ورود تنظیم نشده"
+PANEL_SECRET_WARNING = (
     "<code>DASHBOARD_SECRET</code> تنظیم نشده. با هر بار ری‌استارت، همه از "
     "پنل بیرون می‌افتن. برای اینکه نشست‌ها بمونن، یه مقدار ثابت توی "
     "<code>.env</code> بذار."
 )
-HOME_NOT_CONFIGURED_WARNING = (
+PANEL_NOT_CONFIGURED_WARNING = (
     "هنوز رمز ورود تنظیم نشده، پس کسی نمی‌تونه وارد بشه. توی <code>.env</code> "
     "مقدار <code>DASHBOARD_PASSWORD</code> یا <code>DASHBOARD_PASSWORD_HASH</code> "
     "رو پر کن."

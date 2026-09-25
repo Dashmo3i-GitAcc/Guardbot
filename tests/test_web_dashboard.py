@@ -373,12 +373,14 @@ class HttpTests(DashboardTestCase):
         self.assertNotEqual(first_token, second_token)
         self.assertEqual(first.status, second.status, 303)
 
-    async def test_the_authenticated_home_renders(self):
+    async def test_the_authenticated_overview_renders(self):
         await self.login()
         response = await self.client.get("/")
         self.assertEqual(response.status, 200)
         body = await response.text()
-        self.assertIn("پنل بالاست", body)
+        # M3 replaced the M1 placeholder with the real overview; the panel's own
+        # state moved into a section of its own at the bottom.
+        self.assertIn("نمای کلی", body)
         # The uptime is the injected start time, formatted in Persian.
         self.assertIn("۲ ساعت", body)
 

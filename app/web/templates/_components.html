@@ -1,0 +1,43 @@
+{# Reusable pieces for the panel's pages.
+
+   Presentation only, like the VPN bot's panel: a page composes these, it does
+   not restate them. Every one of them renders text it is *given* — none of them
+   decides a number, a status or a label. Those live in ``app/web/copy.py`` and
+   ``app/web/labels.py``, so there is one place to change a word and one place
+   that knows what a status means. #}
+
+{# A status pill. ``css`` is one of the semantic variants the stylesheet
+   defines: positive, warn, danger, info, muted, accent. #}
+{% macro badge(text, css="") %}
+<span class="badge{% if css %} badge--{{ css }}{% endif %}">{{ text }}</span>
+{% endmacro %}
+
+{# One headline number. ``value`` is already formatted by the caller — this
+   macro never touches a number, so it cannot invent one. #}
+{% macro stat(label, value, hint="", icon="", accent=false, warn=false) %}
+<div class="stat{% if accent %} stat--accent{% endif %}{% if warn %} stat--warn{% endif %}">
+  {% if icon %}<span class="stat__badge" aria-hidden="true">{{ icon }}</span>{% endif %}
+  <span class="stat__label">{{ label }}</span>
+  <span class="stat__value">{{ value }}</span>
+  {% if hint %}<span class="stat__hint">{{ hint }}</span>{% endif %}
+</div>
+{% endmacro %}
+
+{# Empty is a sentence, not a label (see copy.py rule 2). The caller passes the
+   sentence; the icon is the one decoration allowed here. #}
+{% macro empty(text, icon="🌱") %}
+<div class="empty">
+  <span class="empty__icon" aria-hidden="true">{{ icon }}</span>
+  <p class="empty__text">{{ text }}</p>
+</div>
+{% endmacro %}
+
+{# A short message. ``text`` is autoescaped: a caller with trusted inline HTML
+   (the ``<code>`` in a warning) renders it directly and marks it safe itself,
+   so this macro cannot become a way to smuggle markup in from data. #}
+{% macro note(text, title="", variant="") %}
+<div class="note{% if variant %} note--{{ variant }}{% endif %}">
+  {% if title %}<div class="note__title">{{ title }}</div>{% endif %}
+  <div>{{ text }}</div>
+</div>
+{% endmacro %}

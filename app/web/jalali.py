@@ -38,14 +38,28 @@ def fa_number(value) -> str:
 def _parse(value) -> datetime | None:
     """A stored timestamp as a naive UTC ``datetime``, or ``None``.
 
-    Everything the panel reads comes back from SQLite as either a string in one
-    of these three shapes or already a ``datetime``; anything else is not a
-    timestamp and renders as an em dash rather than as a wrong date.
+    Two shapes reach the panel, and both are real: SQLite's ``CURRENT_TIMESTAMP``
+    columns come back as ``YYYY-MM-DD HH:MM:SS`` strings, and the panel's own
+    epoch columns — ``gemini_events.at``, ``seen_updates.at``,
+    ``dashboard_audit.at`` — come back as integers. A number is taken as an epoch
+    in UTC seconds, which is how every one of those columns is written
+    (``int(time.time())``). Anything else is not a timestamp and renders as an em
+    dash rather than as a wrong date.
+
+    ``bool`` is rejected first because it *is* an ``int``: ``True`` would
+    otherwise render as the first second of 1970.
     """
-    if value is None or value == "":
+    if value is None or value == "" or isinstance(value, bool):
         return None
     if isinstance(value, datetime):
         return value
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc).replace(
+                tzinfo=None
+            )
+        except (OverflowError, OSError, ValueError):
+            return None
     text = str(value).strip()
     for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:

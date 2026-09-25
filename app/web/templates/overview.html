@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% import "_components.html" as ui with context %}
+
+{% block content %}
+  <div class="page-head">
+    <h1 class="page-head__title">{{ copy.OVERVIEW_TITLE }}</h1>
+    <p class="page-head__intro">{{ copy.OVERVIEW_INTRO }}</p>
+  </div>
+
+  {# A read that failed is named, not hidden. The alternative — showing the
+     zero the guard returned — is a number that looks like data and is not. #}
+  {% if failed_sources %}
+  <div class="note note--warn" role="status">
+    <div>
+      <div>{{ copy.OVERVIEW_PARTIAL }}</div>
+      <div class="mono">
+        {% for name in failed_sources %}<code>{{ name }}</code>{% if not loop.last %} {% endif %}{% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <section class="section">
+    <div class="grid grid--stats">
+      {{ ui.stat(copy.OVERVIEW_ROOMS, rooms.enabled|fa ~ ' / ' ~ rooms.total|fa,
+                 hint=copy.OVERVIEW_ROOMS_HINT, icon='👥') }}
+      {{ ui.stat(copy.OVERVIEW_PEOPLE, people|fa_number,
+                 hint=copy.OVERVIEW_PEOPLE_HINT, icon='🙋') }}
+      {{ ui.stat(copy.OVERVIEW_ACCOUNTS, accounts.active|fa ~ ' / ' ~ accounts.total|fa,
+                 hint=copy.OVERVIEW_ACCOUNTS_HINT, icon='🧠',
+                 warn=(accounts.total > 0 and accounts.active == 0)) }}
+      {{ ui.stat(copy.OVERVIEW_REQUESTS, today.requests|fa_number,
+                 hint=copy.OVERVIEW_REQUESTS_HINT, icon='📨', accent=true) }}
+      {{ ui.stat(copy.OVERVIEW_ERRORS, today.errors|fa_number,
+                 hint=copy.OVERVIEW_ERRORS_HINT, icon='⚠️', warn=(today.errors > 0)) }}
+      {{ ui.stat(copy.OVERVIEW_LAST_UPDATE,
+                 (last_update|ago) if last_update else '—',
+                 hint=copy.OVERVIEW_LAST_UPDATE_HINT, icon='💓') }}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section__head">
+      <h2 class="section__title">{{ copy.OVERVIEW_ATTENTION_TITLE }}</h2>
+    </div>
+    {% if attention %}
+    <div class="stack">
+      {% for issue in attention %}
+      <div class="note note--{{ 'danger' if issue.level == 'danger' else 'warn' }}">
+        <div>
+          {{ issue.workload }} —
+          {% if issue.kind == 'pool_empty' %}{{ copy.OVERVIEW_ATTENTION_EMPTY }}
+          {% elif issue.kind == 'pool_one' %}{{ copy.OVERVIEW_ATTENTION_ONE }}
+          {% else %}{{ issue.count|fa }} {{ copy.OVERVIEW_ATTENTION_INVALID }}
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="card">{{ ui.note(copy.OVERVIEW_ALL_GOOD, variant="positive") }}</div>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section__head">
+      <h2 class="section__title">{{ copy.OVERVIEW_POOLS_TITLE }}</h2>
+      <span class="section__hint">{{ copy.OVERVIEW_POOLS_HINT }}</span>
+    </div>
+    {% if pools %}
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>{{ copy.OVERVIEW_COL_WORKLOAD }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_ACCOUNTS }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_ACTIVE }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_LIMITED }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_EXHAUSTED }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_INVALID }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_REQUESTS }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_FAILURES }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pool in pools %}
+          <tr>
+            <td class="primary-cell">{{ pool.label }}</td>
+            <td class="num">{{ pool.accounts|fa }}</td>
+            <td class="num">{{ pool.active|fa }}</td>
+            <td class="num">{{ pool.limited|fa }}</td>
+            <td class="num">{{ pool.exhausted|fa }}</td>
+            <td class="num">{{ pool.invalid|fa }}</td>
+            <td class="num">{{ pool.requests|fa_number }}</td>
+            <td class="num">{{ pool.failures|fa_number }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="card">{{ ui.empty(copy.OVERVIEW_POOLS_EMPTY, '🔑') }}</div>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section__head">
+      <h2 class="section__title">{{ copy.OVERVIEW_USAGE_TITLE }}</h2>
+      <span class="section__hint">{{ copy.OVERVIEW_USAGE_HINT }}</span>
+    </div>
+    {% if today.requests %}
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>{{ copy.OVERVIEW_COL_WORKLOAD }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_CALLS }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_RESULT }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_ERRORS }}</th>
+            <th class="num">{{ copy.OVERVIEW_COL_SKIPPED }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in usage %}
+          <tr>
+            <td class="primary-cell">{{ row.label }}</td>
+            <td class="num">{{ row.calls|fa_number }}</td>
+            <td class="num">{{ row.positive|fa_number }}{% if row.positive_label %} {{ row.positive_label }}{% endif %}</td>
+            <td class="num">{{ row.errors|fa_number }}</td>
+            <td class="num">{{ row.skipped|fa_number }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="card">{{ ui.empty(copy.OVERVIEW_USAGE_EMPTY, '📊') }}</div>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section__head">
+      <h2 class="section__title">{{ copy.OVERVIEW_SWITCH_TITLE }}</h2>
+    </div>
+    <div class="card">
+      {% for item in switches %}
+      {% set label, css = item.state %}
+      <div class="kv">
+        <span class="kv__key">{{ item.label }}</span>
+        <span class="kv__value">{{ ui.badge(label, css) }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section__head">
+      <h2 class="section__title">{{ copy.OVERVIEW_EVENTS_TITLE }}</h2>
+    </div>
+    {% if events %}
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>{{ copy.OVERVIEW_COL_WHEN }}</th>
+            <th>{{ copy.OVERVIEW_COL_WORKLOAD }}</th>
+            <th>{{ copy.OVERVIEW_COL_EVENT }}</th>
+            <th>{{ copy.OVERVIEW_COL_DETAIL }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in events %}
+          {% set label, css = item.kind|event %}
+          <tr>
+            <td class="muted nowrap">{{ item.at|ago }}</td>
+            <td>{{ item.workload|workload }}</td>
+            <td>{{ ui.badge(label, css) }}</td>
+            <td class="muted">{{ item.detail or item.reason or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="card">{{ ui.empty(copy.OVERVIEW_EVENTS_EMPTY, '📡') }}</div>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section__head">
+      <h2 class="section__title">{{ copy.PANEL_TITLE }}</h2>
+    </div>
+    <div class="card">
+      <div class="kv">
+        <span class="kv__key">{{ copy.PANEL_UPTIME }}</span>
+        <span class="kv__value">{{ panel_uptime|duration }}</span>
+      </div>
+      <div class="kv">
+        <span class="kv__key">{{ copy.PANEL_ROLE }}</span>
+        <span class="kv__value">{{ role_label }} · {{ permission_count|fa }} {{ copy.PANEL_PERMISSIONS }}</span>
+      </div>
+      {% if session_expires %}
+      <div class="kv">
+        <span class="kv__key">{{ copy.PANEL_SESSION }}</span>
+        <span class="kv__value mono">{{ session_expires }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if not configured %}
+  <div class="note note--warn" role="status">
+    <div>
+      <div class="note__title">{{ copy.PANEL_NOT_CONFIGURED_TITLE }}</div>
+      <div>{{ copy.PANEL_NOT_CONFIGURED_WARNING|safe }}</div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if secret_is_ephemeral %}
+  <div class="note note--warn" role="status">
+    <div>
+      <div class="note__title">{{ copy.PANEL_SECRET_TITLE }}</div>
+      <div>{{ copy.PANEL_SECRET_WARNING|safe }}</div>
+    </div>
+  </div>
+  {% endif %}
+
+  <section class="card">
+    <h2 class="card__title">{{ copy.OVERVIEW_NOT_SHOWN_TITLE }}</h2>
+    <p class="card__hint">{{ copy.OVERVIEW_NOT_SHOWN_BODY }}</p>
+  </section>
+{% endblock %}
