@@ -628,6 +628,65 @@ def test_the_prompt_drops_banter_when_the_person_is_serious():
     assert "answer normally" in text
 
 
+def test_the_prompt_reacts_to_frustration_without_an_apology_loop():
+    """Frustration gets a calm answer, not a loop of apologies.
+
+    The legacy baseline's own words for it, kept because "sorry, I apologise, I
+    am sorry" is the support-desk register this persona exists to avoid.
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "frustration gets a calm, direct reply rather than an apology loop" in text
+
+
+def test_the_prompt_matches_sarcasm_excitement_and_slang():
+    """Matching the person's register is most of sounding like a person.
+
+    The upper prompt's list, stated as behaviour rather than as adjectives: dry
+    for sarcasm, the same energy for excitement, the same register for slang,
+    and no forced joke when the message is serious.
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Sarcasm gets a dry reply" in text
+    assert "excitement gets the same energy" in text
+    assert "slang is answered in the register it was written in" in text
+    assert "a serious message never gets a forced joke" in text
+
+
+def test_the_prompt_never_adds_an_emoji_or_a_laugh_of_its_own():
+    """Laughter and emoji are reactive, never punctuation.
+
+    The failure the owner flagged was automatic laughter; the rule is stated
+    once for both — an emoji or a laugh the moment did not have is not added.
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "never add an emoji or a laugh the moment did not have" in text
+    assert "laughter as punctuation" in text
+
+
+def test_the_prompt_never_asks_a_question_it_already_has_the_answer_to():
+    """No pointless questions: if the conversation already says it, use it."""
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Never ask a question whose answer is already in this conversation" in text
+    assert "use it instead of asking again" in text
+
+
+def test_the_prompt_never_introduces_the_adult_register():
+    """User-initiated adult humour may be answered in kind; it is never started.
+
+    The safety boundary the upper prompt states in as many words: the register
+    is the person's to open, and an ordinary message is never escalated into it.
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "you never bring that register into a conversation that was not already there" in text
+    assert "never escalate an ordinary message into it" in text
+
+
+def test_the_prompt_does_not_narrate_its_own_helpfulness():
+    """No "I am happy to help" narration — the support-desk tic again."""
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Do not narrate your own helpfulness" in text
+
+
 def test_the_prompt_forbids_false_human_experience():
     text = chat.SYSTEM_INSTRUCTION
     assert "you do not have a body" in text
@@ -646,14 +705,37 @@ def test_the_persona_is_the_system_instruction_and_the_context_follows_it():
 
     Guards that the restoration changed the words and not the wiring — the
     system instruction is still the persona with the trusted context appended,
-    at the same temperature and token ceiling.
+    at the same temperature and token ceiling. The context is closed by
+    ``CONTEXT_FRAME``, which restates the persona's own background rule at the
+    end of the instruction where it is read: the context is data, and the turn
+    that follows is what is being answered. That frame is a placement fix for
+    context dilution, not a second instruction, and it is asserted here so it
+    cannot be dropped silently.
     """
     from google.genai import types
 
     cfg = chat._generation_config(types, context="\nROOM")
-    assert cfg.system_instruction == chat.SYSTEM_INSTRUCTION + "\nROOM"
+    assert cfg.system_instruction == chat.SYSTEM_INSTRUCTION + "\nROOM" + chat.CONTEXT_FRAME
     assert cfg.temperature == 0.8
     assert cfg.max_output_tokens == 8192
+
+
+def test_the_closing_frame_is_only_for_a_conversation():
+    """The awareness pass answers a room, not a message, and gets no frame.
+
+    ``CONTEXT_FRAME`` says "the message you are answering is the person's next
+    turn", which is true of a conversation and false of the awareness pass —
+    that pass reads a transcript and returns a structured decision. A caller
+    that supplies its own ``instruction`` must therefore receive the frame
+    neither appended to it nor to its context.
+    """
+    from google.genai import types
+
+    cfg = chat._generation_config(
+        types, context="\nROOM", instruction="AWARENESS"
+    )
+    assert cfg.system_instruction == "AWARENESS\nROOM"
+    assert chat.CONTEXT_FRAME not in cfg.system_instruction
 
 
 # ── The output boundary ───────────────────────────────────────────────────

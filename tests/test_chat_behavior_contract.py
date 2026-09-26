@@ -154,11 +154,13 @@ def test_owner_and_member_share_the_same_persona(monkeypatch):
     member_ctx = _context_for(monkeypatch, user_id=MEMBER)
     assert owner_ctx.startswith(chat.OWNER_NOTE)
     assert chat.OWNER_NOTE not in member_ctx
-    # The persona underneath is identical for both.
+    # The persona underneath is identical for both, and the context is closed by
+    # the same frame for both — it restates the persona's own background rule at
+    # the end of the instruction, where it is read.
     owner = chat._generation_config(types, context=owner_ctx).system_instruction
     member = chat._generation_config(types, context=member_ctx).system_instruction
-    assert owner == _persona() + owner_ctx
-    assert member == _persona() + member_ctx
+    assert owner == _persona() + owner_ctx + chat.CONTEXT_FRAME
+    assert member == _persona() + member_ctx + chat.CONTEXT_FRAME
 
 
 def test_the_trusted_context_carries_no_personality_directive(monkeypatch):

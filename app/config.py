@@ -2968,16 +2968,27 @@ VOICE_CONTEXT_CONNECT_TIMEOUT_SECONDS = _float(
 # for ever — the failure the call's ``MAX_SECONDS`` bounds for a session, at
 # the scale of one turn. Generous, because a genuine "explain it fully" answer
 # is a long piece of speech; it is a net, not the expected duration.
+#
+# **It must exceed the connect timeout plus the reply ceiling**, or the reply
+# is cut by the deadline before it can ever reach its own bound — which is
+# exactly the defect this default was raised for: the turn's own timeout was
+# below the reply ceiling, so a long spoken answer was truncated by the clock
+# and still reported as complete. ``voice_context.answer`` now derives a floor
+# of ``connect + reply + 20s`` so the invariant holds even when an operator
+# raises only the reply ceiling.
 VOICE_CONTEXT_TURN_TIMEOUT_SECONDS = _float(
-    "VOICE_CONTEXT_TURN_TIMEOUT_SECONDS", 90.0
+    "VOICE_CONTEXT_TURN_TIMEOUT_SECONDS", 200.0
 )
 
 # The reply's own ceiling, in seconds of speech. A model that decides to
 # lecture is cut off here rather than sent as a five-minute voice note. High
 # enough that a real full answer never meets it, low enough that a runaway
-# generation cannot become a file nobody will listen to.
+# generation cannot become a file nobody will listen to. The owner's own
+# instruction is that a long answer is fine: the length follows the request,
+# exactly as it does for a typed message, and being spoken is never a reason to
+# say less.
 VOICE_CONTEXT_MAX_REPLY_SECONDS = _float(
-    "VOICE_CONTEXT_MAX_REPLY_SECONDS", 120.0
+    "VOICE_CONTEXT_MAX_REPLY_SECONDS", 150.0
 )
 
 # ── The input ─────────────────────────────────────────────────────────────

@@ -304,10 +304,13 @@ SPOKEN_ADDENDUM = (
     "* Do not describe the medium and do not narrate yourself. Never say that "
     "you are sending a voice message, that you are answering by voice, or that "
     "something cannot be shown — just say the answer.\n"
-    "* The length still follows the request, exactly as above: a greeting gets a "
-    "few words, a question gets a complete answer, and an explicit request to "
-    "explain fully gets the full explanation, out loud. Do not shorten a real "
-    "answer because it is spoken, and do not pad a short one.\n"
+    "* The length follows the request exactly as above, and the medium never "
+    "changes it: a greeting gets a few words, a question gets a complete "
+    "answer, and an explicit request to explain fully gets the full "
+    "explanation, out loud. Being spoken is never a reason to say less — a "
+    "detailed answer is longer than a chat reply, and a voice note of a minute "
+    "or two is exactly right when that is what was asked for. Do not pad a "
+    "short one either.\n"
     "* If something is genuinely better shown than said, give the shortest "
     "spoken version that is still useful instead of reading out what cannot be "
     "spoken — and never invent a link or a figure to fill the gap.\n"
@@ -421,6 +424,29 @@ def _note_success() -> None:
         log.debug("[voicecontext] pool success note failed; ignoring", exc_info=True)
 
 
+def _turn_timeout() -> float:
+    """The whole-turn deadline, never below what a full reply needs.
+
+    The turn's timeout and its reply ceiling are two numbers that must agree:
+    the deadline is measured from connect to the last audio byte, so a deadline
+    below ``connect + ceiling`` makes the *clock* the real bound and cuts a
+    legitimate long answer off before its own ceiling can apply — reported as a
+    complete answer, which is worse than a short one. This derives the floor
+    rather than trusting the two configured values to have been kept in step,
+    so raising the reply ceiling alone still yields a working turn.
+
+    The margin covers sending the utterance and closing the socket. It is
+    deliberately small: it is a safety net, not the expected duration.
+    """
+    configured = float(config.VOICE_CONTEXT_TURN_TIMEOUT_SECONDS)
+    needed = (
+        float(config.VOICE_CONTEXT_CONNECT_TIMEOUT_SECONDS)
+        + float(config.VOICE_CONTEXT_MAX_REPLY_SECONDS)
+        + 20.0
+    )
+    return max(configured, needed)
+
+
 def _transport_factory(model: str, key: str):
     """A callable returning a *fresh* transport, which is what a retry needs.
 
@@ -505,7 +531,7 @@ async def answer(
         transcript=text,
         send_audio=bool(config.VOICE_CONTEXT_SEND_AUDIO),
         silence_ms=int(config.VOICE_CONTEXT_SILENCE_MS),
-        turn_timeout=float(config.VOICE_CONTEXT_TURN_TIMEOUT_SECONDS),
+        turn_timeout=_turn_timeout(),
         max_reply_seconds=float(config.VOICE_CONTEXT_MAX_REPLY_SECONDS),
         max_attempts=int(config.VOICE_CONTEXT_MAX_ATTEMPTS),
         retry_backoff=float(config.VOICE_CONTEXT_RETRY_BACKOFF_SECONDS),

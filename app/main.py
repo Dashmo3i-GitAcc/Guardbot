@@ -957,14 +957,23 @@ def _nexus_can_observe(chat_id: int) -> bool:
 def _nexus_directed(msg, ctx) -> bool:
     """Whether this message is aimed at Nexus.
 
-    Two independent signals, both server-checked: the Telegram-native ones (a
-    reply to this bot, an @mention of it, a configured ``BOT_ALIASES`` word) and
+    Three independent signals, all server-checked: the Telegram-native ones (a
+    reply to this bot, an @mention of it, a configured ``BOT_ALIASES`` word),
     the Nexus names (``NEXUS_NAMES``), which exist because a group calls the
-    assistant by its role rather than by a username nobody can mention.
+    assistant by its role rather than by a username nobody can mention, and an
+    **instruction about a reply target** — «سر اینو گرم کن», «با این چت کن» —
+    which replies to a third person but is plainly meant for Nexus to act on.
+    That last one is the owner's own report: it used to be left to the
+    awareness pass, which is why Nexus answered the asker instead of the person
+    asked about. It grants nothing: every authority gate still runs below, and
+    the destination and person are still decided by ``reply_target.resolve``.
     """
     if _addressed_to_bot(msg, ctx):
         return True
-    return nexus.is_named(_message_text(msg))
+    text = _message_text(msg)
+    if nexus.is_named(text):
+        return True
+    return reply_target.is_instruction(text, reply_target.read_incoming(msg))
 
 
 def _nexus_will_answer(msg, ctx) -> bool:

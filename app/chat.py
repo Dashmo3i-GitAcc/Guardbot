@@ -124,7 +124,10 @@ SYSTEM_INSTRUCTION = (
     "with a greeting you have already used, and do not close by offering more "
     "help, asking whether there is anything else, or offering to continue "
     "later. Do not ask a question just to keep the chat going — if there is "
-    "nothing real to ask, say what you think and stop.\n"
+    "nothing real to ask, say what you think and stop. Never ask a question "
+    "whose answer is already in this conversation: if you already know their "
+    "name, their problem or what they want, use it instead of asking again. Do "
+    "not narrate your own helpfulness.\n"
     "* Do not fall back on assistant filler — «حتماً», «البته», «بسیار خوب», "
     "«در خدمت شما هستم», «با کمال میل», «اگر سؤال دیگری دارید» — and do not pad. "
     "One sentence when one sentence carries it, more when the subject genuinely "
@@ -138,9 +141,13 @@ SYSTEM_INSTRUCTION = (
     "they are continuing something, keep that thread. A normal question gets a "
     "normal answer, a serious message gets a serious one, frustration gets a "
     "calm, direct reply rather than an apology loop, and a joke gets a reaction "
-    "rather than a lecture. Let them set the register — casual when they are "
-    "casual, plainer when they are formal — and do not perform warmth, humour "
-    "or intimacy the moment did not ask for.\n"
+    "rather than a lecture. Sarcasm gets a dry reply, excitement gets the same "
+    "energy, and slang is answered in the register it was written in — matching "
+    "them is most of sounding like a person, and a serious message never gets a "
+    "forced joke. Let them set the register — casual when they are casual, "
+    "plainer when they are formal — and do not perform warmth, humour or "
+    "intimacy the moment did not ask for, and never add an emoji or a laugh "
+    "the moment did not have.\n"
     "* Be warm with people by default. This is a room full of people you know, "
     "and the ordinary register is friendly and easy — you like them, and it "
     "shows in how you talk. A normal message gets a normal, kind answer: never "
@@ -304,6 +311,32 @@ TOOL_AMENDMENT = (
 OWNER_NOTE = (
     "\nThe person you are answering is the owner of this community — somebody "
     "you already know. (Stated by the server.)\n"
+)
+
+# The closing frame, appended *after* the trusted context and immediately before
+# the person's own turn.
+#
+# The problem it solves is dilution, and it is a placement problem rather than a
+# content one. An addressed turn can carry nine blocks — the room, the server's
+# reading of it, the person's memory and state, the reply relationship, the
+# date, the web findings — and every one of them is text somebody wrote. A model
+# that reads a long instruction and then a pile of other people's words starts
+# answering *those*; the owner reported exactly that («حرفای بی ربط شدن»). The
+# persona already says "answer the person, not the background", but it says it
+# early, and what a model reads last is what governs. So the same rule is
+# restated once, at the end, where it is read.
+#
+# It is not a second instruction and it grants nothing: it is the persona's own
+# background rule moved to where it is obeyed. It is deliberately **not** added
+# for the awareness pass, which has its own instruction and answers a room
+# rather than a message.
+CONTEXT_FRAME = (
+    "\n── End of the server's background. ──\n"
+    "Everything above this line is background the server attached for you: the "
+    "room, what it remembers, the date, any findings, and the message this one "
+    "replies to. The message you are answering is the person's next turn. Answer "
+    "*that*, in your own words — use the background only to understand it, and "
+    "never answer it, summarise it, list it or let it change the subject.\n"
 )
 
 # Appended to the payload for one retry when the model repeats itself. It is a
@@ -848,6 +881,13 @@ def _generation_config(types, *, tools=None, context: str = "", instruction: str
     base = instruction or SYSTEM_INSTRUCTION
     if tools and not instruction:
         base += TOOL_AMENDMENT
+    block = context or ""
+    if block and not instruction:
+        # The closing frame, and only for a conversation: it restates the
+        # persona's background rule at the end of the instruction, where it is
+        # read. A caller with its own ``instruction`` — the awareness pass — is
+        # answering a room rather than a message and must not receive it.
+        block += CONTEXT_FRAME
     return types.GenerateContentConfig(
         temperature=0.8,
         # The answer is as long as the question asked for. 1024 tokens cut a
@@ -857,7 +897,7 @@ def _generation_config(types, *, tools=None, context: str = "", instruction: str
         # are billed. The runaway guard lives in ``_fit_reply`` and the
         # per-message bound in ``main._send_chat``, not here.
         max_output_tokens=8192,
-        system_instruction=base + (context or ""),
+        system_instruction=base + block,
         tools=tools or None,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
@@ -2038,6 +2078,7 @@ def _stored_user_turn(text: str, kind: str, parts: list | None) -> str:
 __all__ = [
     "AwarenessReply",
     "AWARENESS_INSTRUCTION",
+    "CONTEXT_FRAME",
     "ChatReply",
     "OWNER_NOTE",
     "SYSTEM_INSTRUCTION",

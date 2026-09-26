@@ -838,6 +838,117 @@ def test_a_private_message_is_sent_unquoted(monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Part 7 — the "go and engage that one" directives the owner reported
+# ══════════════════════════════════════════════════════════════════════════
+# The reported failure, in the owner's words: «باید دقیقاً بفهمه کاربر رو پیدا
+# کنه … روی اون پیام ریپلی بزنه … وقتی می‌گه سر اینو گرم کن یا با این چت کن باید
+# اول این رو بفهمه و بعد انجام بده نه اینکه دوباره برمی‌گرده روی خودم ریپلی
+# می‌زنه». A reply to a third person that tells Nexus to engage them is an
+# instruction about that person: the person must resolve, and the destination
+# must move to their message.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "سر اینو گرم کن",
+        "سرش رو گرم کن",
+        "با این چت کن",
+        "باهاش حرف بزن",
+        "با این گپ بزن",
+        "حالشو بگیر",
+    ],
+)
+def test_an_engage_directive_moves_the_answer_to_the_person_it_replies_to(text):
+    target = _resolve(text, replied=parent())
+    assert target.reply_to == 480, f"{text!r} did not move the destination"
+    assert target.confidence == "explicit"
+    assert target.person_id == ZAHRA
+    assert target.person_name == "زهرا"
+
+
+def test_an_engage_directive_names_the_person_in_the_block():
+    """The model must be told *who* it is being asked to talk to."""
+    target = _resolve("سر اینو گرم کن", replied=parent())
+    block = reply_target.render(target)
+    assert "The person meant is زهرا (111)" in block
+    assert "Send the answer as a Telegram reply to message id 480" in block
+
+
+def test_a_stray_reply_verb_still_resolves_nobody():
+    """The guard that keeps «جواب ندادی» a complaint, not a directive.
+
+    It carries a reply stem, so the *vocabulary* matches; it points at nothing
+    and names nobody, so neither the destination nor the person may move.
+    """
+    target = _resolve("جواب ندادی", replied=parent())
+    assert target.reply_to == 0
+    assert target.person_id == 0
+    assert target.confidence == ""
+
+
+def test_a_harmless_warm_verb_is_not_a_directive():
+    """«چای گرم کن» is tea, not an instruction to engage somebody."""
+    target = _resolve("چای گرم کن", replied=parent())
+    assert target.reply_to == 0
+    assert target.person_id == 0
+
+
+def test_an_engage_directive_about_nexus_own_message_does_not_answer_the_asker():
+    """The reported symptom: it answered the asker instead of the target.
+
+    A reply to Nexus's own message that carries an engage directive is still an
+    instruction to act, so the destination moves off the asker's message. The
+    person is deliberately *not* set to Nexus — it is about the content, not
+    about Nexus as somebody to address.
+    """
+    own = parent(message_id=470, user_id=BOT_ID, name="Nexus")
+    target = _resolve("سر اینو گرم کن", replied=own)
+    assert target.reply_to == 470
+    assert target.person_id == 0
+
+
+def test_is_instruction_requires_a_reply_edge():
+    """The whole premise: a directive *about a reply* is Nexus's to answer.
+
+    Without a reply edge there is nothing the directive points at, and the
+    message is the awareness layer's to read — widening this to every
+    instruction would let a keyword list decide who Nexus answers.
+    """
+    assert reply_target.is_instruction("سر اینو گرم کن", reply_target.read_incoming(message("سر اینو گرم کن"))) is False
+    assert (
+        reply_target.is_instruction(
+            "سر اینو گرم کن",
+            reply_target.read_incoming(message("سر اینو گرم کن", reply_to_message=parent())),
+        )
+        is True
+    )
+
+
+def test_is_instruction_is_false_for_a_plain_reply():
+    """A reply with no directive is not an instruction, however it points."""
+    assert (
+        reply_target.is_instruction(
+            "ببین این چیه",
+            reply_target.read_incoming(message("ببین این چیه", reply_to_message=parent())),
+        )
+        is False
+    )
+
+
+def test_an_engage_reply_to_a_third_person_reaches_the_model_as_a_target(monkeypatch):
+    """Through the real handler: routed, resolved, and sent under the parent.
+
+    Before the fix this message was not aimed at Nexus by any Telegram signal,
+    so it never reached the conversation path at all.
+    """
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+    run_group(message("سر اینو گرم کن", reply_to_message=parent()), bot)
+    assert bot.sent, "the assistant answered the instruction"
+    assert bot.sent[0]["reply_to_message_id"] == 480
+    assert "The person meant is زهرا (111)" in calls[0]["context"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Part 6 — the block is a source the ceiling cannot drop
 # ══════════════════════════════════════════════════════════════════════════
 def test_the_relationship_block_is_never_dropped_by_the_ceiling():

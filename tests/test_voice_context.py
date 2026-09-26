@@ -466,6 +466,76 @@ def test_the_reply_is_capped(live_seam, monkeypatch):
     assert answer.seconds <= 2.0 + 0.001, "the speech must be cut at the ceiling"
 
 
+def test_a_reply_cut_by_the_deadline_is_reported_as_cut():
+    """A long answer stopped by the clock must not look like a short one.
+
+    The defect this pins: the turn's whole-turn deadline was below its reply
+    ceiling, so a genuinely long spoken answer was cut by the clock and
+    ``_result`` returned it with no reason at all — the caller then sent a
+    truncated reply as though it were whole, which is how "the voice is short"
+    became invisible. Meeting the deadline with audio already in hand is now
+    reported as a cut, exactly like meeting the byte ceiling.
+    """
+    from app.voice_live import turn as turn_module
+
+    class Stalling:
+        """One session that speaks, then never completes the turn."""
+
+        async def connect(self):
+            pass
+
+        async def close(self):
+            pass
+
+        async def send_audio(self, pcm):
+            pass
+
+        async def send_context(self, text, *, turn_complete=False):
+            pass
+
+        async def receive(self):
+            yield gemini_live.LiveEvent(gemini_live.AUDIO, audio=b"\x00" * 4800)
+            await asyncio.sleep(30)
+
+    live = turn_module.LiveTurn(
+        transport_factory=lambda: Stalling(),
+        context="CTX",
+        transcript="سلام",
+        send_audio=False,
+        turn_timeout=1.0,
+        max_reply_seconds=150.0,
+        max_attempts=1,
+    )
+
+    result = asyncio.run(live.run(b""))
+
+    assert result.ok is True, "the partial speech is still delivered"
+    assert result.capped is True
+    assert result.reason == turn_module.REASON_CAPPED
+
+
+def test_the_turn_deadline_never_falls_below_what_a_full_reply_needs():
+    """The invariant, asserted rather than left to two numbers agreeing.
+
+    The deadline is measured from connect to the last audio byte, so it must
+    leave room for the connect and the whole reply ceiling. Deriving it is what
+    makes raising the ceiling alone still yield a working turn.
+    """
+    needed = (
+        float(config.VOICE_CONTEXT_CONNECT_TIMEOUT_SECONDS)
+        + float(config.VOICE_CONTEXT_MAX_REPLY_SECONDS)
+    )
+    assert voice_context._turn_timeout() >= needed
+
+
+def test_raising_the_reply_ceiling_raises_the_deadline(monkeypatch):
+    monkeypatch.setattr(config, "VOICE_CONTEXT_TURN_TIMEOUT_SECONDS", 10.0)
+    monkeypatch.setattr(config, "VOICE_CONTEXT_CONNECT_TIMEOUT_SECONDS", 30.0)
+    monkeypatch.setattr(config, "VOICE_CONTEXT_MAX_REPLY_SECONDS", 150.0)
+
+    assert voice_context._turn_timeout() >= 180.0
+
+
 def test_an_undecodable_clip_still_answers_from_the_transcript(live_seam, monkeypatch):
     stub = StubTransport(audio=b"\x00" * 960, said="جواب")
     live_seam([stub], decode=lambda data, **kw: b"")
@@ -1081,3 +1151,61 @@ def test_the_instruction_starts_from_the_conversational_persona():
     assert instruction.startswith(chat.SYSTEM_INSTRUCTION)
     assert "spoken aloud" in instruction
     assert "voice message" in instruction
+
+
+def test_the_spoken_addendum_never_shortens_a_long_answer():
+    """The owner's own instruction: a long voice answer is fine.
+
+    «اون له‌نگفتاری که قرار بود ویس‌ها زیاد بشه طولانی بشه … مثال پیام‌ها طولانی
+    بشه اینها مشکلی نداره». Being spoken is not a reason to say less; the length
+    follows the request exactly as it does for a typed message.
+    """
+    text = voice_context.SPOKEN_ADDENDUM
+    assert "Being spoken is never a reason to say less" in text
+    assert "a voice note of a minute or two is exactly right" in text
+    assert "Do not pad a short one either" in text
+
+
+def test_the_voice_block_closes_by_pointing_at_the_message_not_the_background():
+    """The same dilution fix as the text path, in the voice block's own words.
+
+    The server's record is sent as one client turn before the audio, so the
+    last thing the model reads before hearing the person must be that the
+    person's voice — not the record — is what it is answering.
+    """
+    from app.voice_live import turn as turn_module
+
+    live = turn_module.LiveTurn(
+        transport_factory=lambda: None, context="ROOM", transcript="سلام"
+    )
+    block = live._context_block()
+
+    assert "Answer *that*, out loud" in block
+    assert block.index("ROOM") < block.index("Answer *that*")
+
+
+def test_the_voice_turn_is_given_the_room_and_the_target(monkeypatch):
+    """A positive assertion of the awareness link, not only an equality.
+
+    The equality test above proves the voice turn gets the *same* context as the
+    text path; this one proves that context actually carries the room and the
+    reply relationship — the two blocks the owner asked to be connected to the
+    voice («کانتکست ویس باید وصل بشه مستقیم به اورنس»).
+    """
+    db.group_capture(
+        CHAT, OTHER, "member", "رضا", "دیشب رفتم سفر",
+        keep=200, message_id=900, kind="",
+    )
+    install_voice_media(monkeypatch)
+    seen: list = []
+    install_voice_answer(monkeypatch, seen=seen)
+
+    run_group(main.on_group_chat, voice_msg(directed=True), FakeBot())
+
+    assert seen, "the spoken turn ran"
+    context = seen[0]["context"]
+    assert "دیشب رفتم سفر" in context, "the room window must reach the voice turn"
+    assert "message id" in context, (
+        "the reply relationship must reach the voice turn"
+    )
+

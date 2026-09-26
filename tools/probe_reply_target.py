@@ -18,6 +18,15 @@ Zahra's message and writes «@Nexus ببین این چیه». Before the fix the
 saw Zahra's words; now it is handed the parent's text and the answer is attached
 to the message it is about.
 
+The second reported scenario is the ``engage_*`` group (2026-09-26): somebody
+replies to Zahra's message and writes «سر اینو گرم کن» or «با این چت کن» — and
+never names Nexus. Before the fix that was not "addressed to the bot" by any
+Telegram signal, so it never reached the conversation path at all and Nexus
+answered the asker. It must now be answered, attached to Zahra's message, with
+Zahra named as the person meant. The ``engage_false_positive`` and
+``engage_stray_verb`` cases guard the other direction: «چای گرم کن» is tea and
+«جواب ندادی» is a complaint, and neither may move anything.
+
 There is no real Telegram round trip here — the harness has no second account to
 reply from. The probe drives the **real** ``on_group_chat`` handler with real
 ``telegram.Message`` objects carrying real ``reply_to_message`` metadata, and the
@@ -225,6 +234,11 @@ async def run(text, *, reply_to=None, mode="stub", uid=MEMBER):
         "context_has_parent_text": bool(calls and PARENT_TEXT in calls[0]["context"]),
         "context_has_zahra_id": bool(calls and str(ZAHRA) in calls[0]["context"]),
         "context_has_reply_to": bool(calls and "reply to message id" in calls[0]["context"]),
+        # The person the message asked Nexus to address, when one resolved.
+        "context_has_person": bool(calls and "The person meant is" in calls[0]["context"]),
+        # Whether the message reached the conversation path at all. The routing
+        # fix is what lets an engage reply that never names Nexus be answered.
+        "answered_by_chat": bool(calls),
         # The server-controlled Telegram mention anchor, when a tag resolved.
         "mentions_milad": f"tg://user?id={MILAD}" in answer_all,
         "mentions_sara": f"tg://user?id={SARA}" in answer_all,
@@ -281,6 +295,24 @@ async def _cases(out):
     # A tag with a name nobody knows must not invent a target or a mention.
     out["tag_unknown_name"] = await run("نکسوس بهرام رو تگ کن")
 
+    # ── The engage directive (2026-09-26) ─────────────────────────────────
+    # The owner's other reported scenario, exactly: reply to Zahra's message and
+    # say «سر اینو گرم کن» — *without* naming Nexus. Before the fix this was not
+    # "addressed to the bot" by any Telegram signal, so it never reached the
+    # conversation path and Nexus answered the asker. It must now be answered,
+    # attached to Zahra's message, with Zahra named as the person meant.
+    out["engage_no_name"] = await run("سر اینو گرم کن", reply_to=parent)
+    out["engage_chat_with_this"] = await run("با این چت کن", reply_to=parent)
+    out["engage_named_nexus"] = await run("نکسوس سر اینو گرم کن", reply_to=parent)
+    # A harmless warm verb is not an engage directive and must not move.
+    out["engage_false_positive"] = await run("چای گرم کن", reply_to=parent)
+    # A stray reply verb with nothing to point at is a complaint, not a request.
+    out["engage_stray_verb"] = await run("جواب ندادی", reply_to=parent)
+    # An engage directive as a reply to Nexus's own message must not land under
+    # the asker's message — that is the "it replies to me again" symptom.
+    own_engage = _parent(mid=900001472, uid=BOT_ID, name="Nexus", text="چیزی لازم داری؟")
+    out["engage_about_bot"] = await run("سر اینو گرم کن", reply_to=own_engage)
+
     # One real-model turn, to show the parent's words actually reach the model.
     if "--real" in sys.argv:
         out["real_reply_then_this"] = await run(
@@ -288,6 +320,20 @@ async def _cases(out):
         body = out["real_reply_then_this"]["answer"]
         out["real_reply_then_this"]["answer_mentions_parent_token"] = (
             "زعفران" in body or "سفر" in body or "عکس" in body
+        )
+        # The engage directive, end to end: a reply to Zahra that never names
+        # Nexus must be answered *to Zahra* — the reported defect was that Nexus
+        # replied to the asker instead.
+        out["real_engage"] = await run("سر اینو گرم کن", reply_to=_parent(), mode="real")
+        engage_body = out["real_engage"]["answer"]
+        out["real_engage"]["answer_mentions_parent_token"] = (
+            "زعفران" in engage_body
+            or "سفر" in engage_body
+            or "عکس" in engage_body
+            or "زهرا" in engage_body
+        )
+        out["real_engage"]["answer_does_not_greet_the_asker"] = (
+            "Asker" not in engage_body
         )
         # The length policy, end to end: an explicit ask for a full explanation
         # must produce a real answer and may arrive as several messages. Before

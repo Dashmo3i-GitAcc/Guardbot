@@ -6931,6 +6931,137 @@ Dashboard **M4 — AI control + credentials** remains the next *product* step pe
 
 ---
 
+### 54.35 Checkpoint (2026-09-26, **legacy behaviour merged into the current architecture — reply targets, voice↔awareness, length**) — **resume here** (supersedes §54.34); CODE COMMITTED AND PUSHED, NOT DEPLOYED
+
+**CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`fa1d8c3`** (the Voice
+Context deploy). The owner sent a long English brief plus a Persian clarification,
+and the Persian part is the operative instruction:
+
+> read the English, but the operative part is the Persian — **do not implement the
+> whole upper prompt into the current structure**. Memory and speaking style are
+> already good; the tone should go back to that prompt's friendly *generality*.
+> Swearing and rudeness are fine already. Since the 21-section overhaul many bugs
+> appeared. **It still cannot find the reply — you have to explicitly say "find the
+> reply", and wrong replies are increasing.** The voice must connect **directly to
+> awareness** («کانتکست ویس باید وصل بشه مستقیم به اورنس»), awareness must be found
+> again, and the **length** behaviour must be added. **Do not tear down or rewrite
+> the architecture — combine the two: the current architecture AND the upper
+> prompt's behaviour.** It gives somewhat irrelevant talk now; find and fix the bugs.
+
+The English brief's own target is explicit: **LEGACY BEHAVIOR + CURRENT
+ARCHITECTURE = TARGET** — reproduce the *mechanism* that produced the legacy style,
+never add adjectives, and preserve every A-to-U+ guarantee.
+
+**What was asked, and what was done.**
+
+| Asked | Done |
+|---|---|
+| It cannot find the reply; you must say «جواب اینو بده» | **Root cause found: a routing bug, not a model bug.** See 1 below. Fixed, and probed live. |
+| Wrong / irrelevant replies increasing | The engage directive now reaches the conversation path *and* resolves the person it points at; the persona gained the legacy warmth (react to frustration/sarcasm/excitement/slang) without adjectives. |
+| Voice must connect directly to awareness | Verified **structural** — the voice branch gets the *same* context string the text path built, awareness included (2 below); pinned by two tests. |
+| The length behaviour must be added (long voice answers are fine) | **Root cause: a clock bug.** See 3 below. Fixed, with the invariant recorded. |
+| Do not tear down or rewrite | No module was restructured; six production files changed, 51/134/17/17/36/23 lines. The legacy prompt was **not** restored (§54.23's A/B stands). |
+
+**1. The reply-target defect was routing, not the model.** `main._nexus_directed`
+returned early for any message not addressed to the bot (reply-to-bot, @mention,
+alias, or the name «نکسوس»). A message that **replied to a third person** and told
+Nexus to engage them — «سر اینو گرم کن», «با این چت کن», «حالشو بگیر» — therefore
+never reached `_answer_conversationally` at all; it was left to the awareness pass,
+which is exactly why the owner had to say «جواب اینو بده» for it to work. Fixed by
+adding a **third signal**: `reply_target.is_instruction(text, incoming)`, which
+requires a reply edge **and** a reply directive **and** something to point at. The
+engage phrases now resolve the person the message *replies to*, not the asker.
+`app/reply_target.py` gained the engage vocabulary (`_ENGAGE_PATTERNS`,
+`_engage_directive`), and the pointed-at-person resolution is gated on `pointing`
+so a bare «جواب ندادی» resolves nobody.
+
+**2. The voice↔awareness link was already structural — and is now proven.** The
+voice branch (`main.py:3709`) receives the **identical** `context` string composed
+above it, awareness block included; nothing parallel was built. Two tests pin it:
+`test_the_spoken_turn_gets_the_same_context_a_text_turn_would` (equality) and
+`test_the_voice_turn_is_given_the_room_and_the_target` (the room window actually
+reaches the spoken turn — the positive assertion, not only the equality).
+
+**3. The voice length defect was a clock bug.** `VOICE_CONTEXT_TURN_TIMEOUT_SECONDS`
+(90 s) was **below** connect + `VOICE_CONTEXT_MAX_REPLY_SECONDS` (120 s), so a
+genuinely long spoken answer was cut by the deadline and `_result` reported the cut
+as a *clean* turn — a long answer could never survive. Fixed: defaults raised
+(200 / 150), `voice_context._turn_timeout()` derives a **floor**
+(`connect + reply + 20`), and a deadline cut is now reported as `capped` instead of
+silently clean. `SPOKEN_ADDENDUM` restates the length rule for speech: being spoken
+is never a reason to say less.
+
+**4. Context dilution, not absence — the legacy mechanism, honestly read.** The
+legacy style came from *few rules + a low ceiling + an empty context + one ask*
+(baseline `3243067`: ~35-line prompt, `max_output_tokens=1024`, context = history +
+message only, no retries). The current architecture deliberately opened the context
+(nine blocks) and the ceiling (8192) — the owner wants that kept. So the fix is not
+to close it again but to let the model tell background from the message: a closing
+frame was added to both paths — `chat.CONTEXT_FRAME` (text) and the closing frame in
+`voice_live.turn._context_block` (voice) — and the persona gained the legacy warmth
+as *rules*, not adjectives: react to frustration/sarcasm/excitement/slang, never add
+an emoji or a laugh the moment did not have, never ask a question whose answer is
+already in this conversation, do not narrate your own helpfulness.
+
+**Files changed.** `app/reply_target.py` (+134), `app/main.py` (+17),
+`app/chat.py` (+51), `app/config.py` (+17), `app/voice_context.py` (+36),
+`app/voice_live/turn.py` (+23); `tests/test_chat.py` (+86),
+`tests/test_reply_target.py` (+111), `tests/test_voice_context.py` (+128),
+`tests/test_chat_behavior_contract.py` (+8); `tools/probe_reply_target.py` (+46),
+`tools/probe_chat_personality.py` (+121). 732 insertions / 46 deletions.
+
+**Evidence.**
+
+* Suite **4227 passed / 0 failed**. Focused isolation / authorization / room plus
+  chat / reply / voice: **734 passed**. pyflakes clean on every touched file.
+  Secret scan of the diff: **no secret patterns found**.
+* **Live reply-target probe** (real model, staged at `/tmp/newapp`; production
+  `/srv/app` untouched): `engage_no_name`, `engage_chat_with_this`,
+  `engage_named_nexus` → `reply_to=900001480`, `answered_by_chat=True`,
+  `context_has_person=True`; `engage_false_positive` («چای گرم کن») and
+  `engage_stray_verb` («جواب ندادی») → **not sent**; `engage_about_bot` → moves to
+  Nexus's own message and does **not** answer the asker; `real_engage`'s answer
+  **does not greet the asker** (42 chars); `real_full_answer` returned **2261 chars
+  in one message** (the length policy working); `cleanup_rows_left` all **0**.
+* **Live personality probe**: **18/18** after the instrument fix below; the first
+  run was 17/18. Notable live answers: `failure_class` («نخند حرومزاده») →
+  «باشه، جدی شدم. چی اذیتت میکنه…»; `prompt_injection` → refuses and does not
+  leak; `ai_identity` → «من یه دستیار هوش مصنوعیام…»; `continuity` → «گفتی اسمم
+  میلاده.»; `no_invented_price` → offers to search instead of inventing a price.
+
+**An honest instrument fix (not a metric greened).** The probe's filler check was a
+bare substring on «بابا»/«داداش»/«قربونت», and flagged the live answer «ای بابا،
+همهچیز رو که قرار نیست از حفظ باشم…» as filler — while that answer was in fact a
+correct reaction to teasing. «ای بابا» is an ordinary Persian interjection, not the
+canned dismissal filler that was the legacy defect («بیخیال بابا»). Narrowed to
+`_CANNED_FILLER_RE` (matched only where filler/address actually sits, the «ای»
+interjection excluded), exactly as the probe already narrows «بنده خدا» and «سرور».
+Re-verified: the legacy defect, «داداش اینا چیه», «ولش کن بابا» and «قربونت» all
+still **fail**; the live answer and an innocent answer **pass**.
+
+**Invariants preserved.** No new authority. No change to tenant isolation, the room
+boundary, RBAC, server-side admin auth, the chat / awareness / search / live_voice /
+intent pools (separate credentials, counters, limits, breakers), the awareness
+allowance, the queue policy, daily caps, cooldowns, moderation, anti-spam, privacy,
+prompt-injection resistance, tool authorization, audit or DB integrity. The text
+path's *mechanism* is unchanged — same nine blocks, same queue, same model
+parameters; only the instruction text gained the closing frame and four warmth
+lines. The voice path is unchanged except the deadline floor, the `capped` report
+and the closing frame.
+
+**Deliberately not done.** The legacy prompt was **not** restored (§54.23's A/B
+proved it must not be). Nothing was rewritten. The four `voice_live` diagnostics
+from the 2026-09-25 session (`app/voice_live/{session,telegram_voice}.py`,
+`tests/test_voice_live_{discovery,transport}.py`) remain **uncommitted** — out of
+scope, and Voice Live was abandoned by the owner.
+
+**NEXT STEP (exact).** **NOT DEPLOYED** — the owner's go-ahead is required, and the
+image must be built from a **`git archive HEAD`** context (not the working tree),
+because the four uncommitted diagnostics above must not be deployed. Dashboard
+**M4 — AI control + credentials** remains the next *product* step per §54.27.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or

@@ -100,6 +100,47 @@ _TAG_PHRASES = (
 # Every phrase that reads as "address a person", used by the directive test.
 _DIRECTIVE_PHRASES = _ADDRESS_PHRASES + _TAG_PHRASES
 
+# The "go and engage that one" shapes, as patterns rather than substrings.
+#
+# These are the phrasings the owner reported by name — «سر اینو گرم کن», «با این
+# چت کن» — where a reply to somebody else's message is an instruction to Nexus
+# to *address them*. They cannot be a plain substring list because the object
+# sits between the verb and its particle («سر اینو گرم کن» beside «سرش گرم
+# کن»), and because the bare particle is a different request entirely: «چای گرم
+# کن» is tea, «اینو گرم کن» is a plate. Every pattern therefore carries its own
+# object, and the caller still requires a pointer or a resolved name before the
+# destination moves, which is what keeps «چای گرم کن» from being a directive.
+#
+# The folded text is what these match against, so «سر اینو» is spelled with the
+# fold's own letters and the zero-width joiner has already become a space.
+_ENGAGE_PATTERNS = (
+    # «سر اینو گرم کن», «سرش رو گرم کن», «سر این گرم کن»
+    r"سر\s*(?:این|اون|همون|همین|اینو|اونو|این\s*رو|اون\s*رو|ش|شو|شه)?"
+    r"\s*[^\n]{0,14}?گرم\s*کن",
+    # «با این چت کن», «باهاش حرف بزن», «با این گپ بزن»
+    r"(?:با\s*(?:این|اون|همون|همین)|باهاش|باش)\s*[^\n]{0,12}?"
+    r"(?:چت|حرف|صحبت|گپ)\s*(?:بزن|کن)",
+    # «حالشو بگیر», «حال اینو بگیر»
+    r"حال\s*(?:این|اون|همون|همین|ش|شو|شه)?\s*(?:رو|و)?\s*بگیر",
+    # «باهاش شوخی کن», «با این کل کل کن»
+    r"(?:با\s*(?:این|اون|همون|همین)|باهاش|باش)\s*[^\n]{0,12}?"
+    r"(?:شوخی|کل\s*کل)\s*(?:بزن|کن)",
+)
+
+_ENGAGE_RE = None
+
+
+def _engage():
+    """The compiled engage-pattern matcher, built once and lazily."""
+    global _ENGAGE_RE
+    if _ENGAGE_RE is None:
+        import re
+
+        _ENGAGE_RE = re.compile(
+            "|".join(_ENGAGE_PATTERNS), re.IGNORECASE | re.UNICODE
+        )
+    return _ENGAGE_RE
+
 # ── The implicit reference vocabulary ─────────────────────────────────────
 # A message can be *about* the replied-to message without asking for anything.
 # These are the shapes that refer back, and they are grammatical rather than
@@ -444,6 +485,19 @@ def _points_at_something(text: str) -> bool:
         return False
 
 
+def _engage_directive(text: str) -> bool:
+    """Whether the message uses one of the "go and engage that one" shapes.
+
+    Separate from :func:`_reply_directive` because it is also *evidence of
+    pointing*: the phrase carries its own object («سرش», «باهاش», «حالشو»), so
+    a message that uses one has pointed at somebody even when no demonstrative
+    and no separate person expression appear. That is what lets «با این چت کن»
+    and «سرش رو گرم کن» resolve to the same target.
+    """
+    folded = _fold(text)
+    return bool(folded) and bool(_engage().search(folded))
+
+
 def _reply_directive(text: str) -> bool:
     """Whether the message asks for the answer to be sent to the target."""
     folded = _fold(text)
@@ -451,7 +505,11 @@ def _reply_directive(text: str) -> bool:
         return False
     if any(stem in folded for stem in _REPLY_STEMS):
         return True
-    return any(phrase in folded for phrase in _DIRECTIVE_PHRASES)
+    if any(phrase in folded for phrase in _DIRECTIVE_PHRASES):
+        return True
+    # The "go and engage that one" shapes, which carry their object inside the
+    # phrase and so cannot be a substring list. See ``_ENGAGE_PATTERNS``.
+    return bool(_engage().search(folded))
 
 
 def _tag_directive(text: str) -> bool:
@@ -602,6 +660,42 @@ def needs_window(incoming: Incoming | None, text: str) -> bool:
     common turn, where the reading already decided the window was wanted.
     """
     return _reply_directive(text)
+
+
+def is_instruction(text: str, incoming: Incoming | None = None) -> bool:
+    """Whether this message instructs Nexus about a message it replies to.
+
+    The reported case, stated once: somebody replies to a person's message and
+    tells Nexus to engage them — «سر اینو گرم کن», «با این چت کن». The reply
+    edge points at a *third* person, so the message is not "addressed to the
+    bot" by Telegram's own signals, and it used to be left to the awareness
+    pass — which is why Nexus answered the asker instead of the person asked
+    about. An explicit directive about a reply target is aimed at Nexus.
+
+    Deliberately cheap and database-free: the handler asks it on every group
+    message, so it is the directive vocabulary plus the same pointer evidence
+    ``resolve`` requires before a destination moves. It requires the message to
+    *be* a reply, because that is the whole premise — a directive with no reply
+    edge is the awareness layer's to read, and widening this to every
+    instruction would make a keyword list decide who Nexus answers.
+
+    It grants nothing. It says only that this message is Nexus's to answer; the
+    destination, the person and every authority check are still decided by
+    :func:`resolve` and the layers above it.
+    """
+    incoming = incoming or Incoming()
+    if incoming.replied is None or not incoming.replied.message_id:
+        return False
+    if not _reply_directive(text):
+        return False
+    if _points_at_something(text):
+        return True
+    # A directive that names somebody outright — «با میلاد چت کن» — carries no
+    # pointer of its own. Only Telegram's own resolved entities are consulted
+    # here, because a name-memory lookup on every group message is exactly the
+    # query this function exists to avoid; the caller's ``resolve`` does the
+    # lookup once it has decided the turn is Nexus's.
+    return any(mention.user_id for mention in incoming.mentions)
 
 
 def _resolve_name(query: str, chat_id: int) -> tuple[int, str]:
@@ -811,6 +905,18 @@ def resolve(
             text, chat_id=chat_id
         )
 
+    # Whether the message *points* at something outside itself — a demonstrative
+    # or a person expression. Read once here because two later decisions need it:
+    # the person resolution below, and the destination rule that requires a
+    # directive to point somewhere before it moves. An engage phrase («سر اینو
+    # گرم کن», «باهاش حرف بزن») carries its object inside itself, so it points
+    # even when no demonstrative appears. A stray reply verb with nothing to
+    # point at («جواب ندادی», a complaint) therefore resolves nobody and moves
+    # nothing.
+    pointing = (
+        bool(expression) or _points_at_something(text) or _engage_directive(text)
+    )
+
     # The semantic message: the replied-to message, when there is one. This is
     # the reading the assistant never had — the parent's own words.
     message_id = 0
@@ -826,8 +932,14 @@ def resolve(
         message_kind = replied.kind
         why.append(f"it replies to message {message_id}")
 
-    # The semantic person. An explicit name wins; otherwise a *person* pointer
-    # reads the reply edge's author, while a bare «این» stays about the message.
+    # The semantic person. An explicit name wins; then a *person* pointer reads
+    # the reply edge's author; and then — the case the owner reported — a message
+    # that *asks Nexus to address somebody* and points at the replied-to message
+    # means the author of that message. «سر اینو گرم کن» as a reply to علی is an
+    # instruction to engage علی, so leaving ``person_id`` at zero was why the
+    # model was never told who it was being asked to talk to. The bot's own
+    # message is excluded: a reply to Nexus with a directive is about the
+    # *content*, not about Nexus as a person to address.
     person_id = 0
     person_name = ""
     if named_id:
@@ -839,6 +951,20 @@ def resolve(
             person_id = replied.user_id
             person_name = replied.name
             why.append(f"«{surface}» points at the author of the replied-to message")
+    if (
+        not person_id
+        and directive
+        and pointing
+        and replied is not None
+        and replied.user_id
+        and int(replied.user_id) != int(bot_id)
+    ):
+        person_id = replied.user_id
+        person_name = replied.name
+        why.append(
+            "the message asks for the reply to go to the replied-to message, so "
+            "the person meant is its author"
+        )
 
     # The Telegram destination. The default is the message being answered, which
     # is what the caller passes as ``current_message_id``; a destination is set
@@ -857,7 +983,6 @@ def resolve(
     confidence = ""
     reply_to = 0
     no_reply = False
-    pointing = bool(expression) or _points_at_something(text)
     if directive and (pointing or named_id):
         if person_id and replied is not None and person_id == replied.user_id:
             reply_to = replied.message_id
@@ -1045,6 +1170,7 @@ __all__ = [
     "Replied",
     "RENDER_CAP",
     "Target",
+    "is_instruction",
     "needs_window",
     "read_incoming",
     "render",
