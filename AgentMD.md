@@ -6931,7 +6931,7 @@ Dashboard **M4 — AI control + credentials** remains the next *product* step pe
 
 ---
 
-### 54.35 Checkpoint (2026-09-26, **legacy behaviour merged into the current architecture — reply targets, voice↔awareness, length**) — **resume here** (supersedes §54.34); CODE COMMITTED AND PUSHED, NOT DEPLOYED
+### 54.35 Checkpoint (2026-09-26, **legacy behaviour merged into the current architecture — reply targets, voice↔awareness, length**) — **resume here** (supersedes §54.34); CODE COMMITTED, PUSHED **AND DEPLOYED**
 
 **CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`fa1d8c3`** (the Voice
 Context deploy). The owner sent a long English brief plus a Persian clarification,
@@ -7068,10 +7068,36 @@ from the 2026-09-25 session (`app/voice_live/{session,telegram_voice}.py`,
 `tests/test_voice_live_{discovery,transport}.py`) remain **uncommitted** — out of
 scope, and Voice Live was abandoned by the owner.
 
-**NEXT STEP (exact).** **NOT DEPLOYED** — the owner's go-ahead is required, and the
-image must be built from a **`git archive HEAD`** context (not the working tree),
-because the four uncommitted diagnostics above must not be deployed. Dashboard
-**M4 — AI control + credentials** remains the next *product* step per §54.27.
+**NEXT STEP (exact).** **Deployed 2026-09-26 21:38Z** after the owner's explicit
+go-ahead. Commit **`b4a1ea1`** (the tests and this doc followed `6b76efe`), pushed to
+both remotes and verified there with `git ls-remote`. Built from a **`git archive
+HEAD`** context, not the working tree, so the four uncommitted `voice_live`
+diagnostics were excluded; the image's `/srv/app` and `/srv/tools` were verified
+**byte-identical** to the archive before the recreate (`APP IDENTICAL` / `TOOLS
+IDENTICAL`). Image **`2420f251ec1f`**, rollback tag **`guardbot:rollback-pre-b4a1ea1`
+= `da7a621700de`** (the previously running image). Container recreated
+`5d89c7ac309c` → **`d96027b4d29b`**, `restarts=0`, **zero** tracebacks; startup
+reports the pools as expected (chat 7 accounts/5 usable, awareness 5/4,
+`voice_context` 1/1) and Awareness is reading the two real rooms. The dashboard was
+not rebuilt and stayed healthy on its own image (`c89925bf3da0`).
+
+The **live reply-target probe ran against production** (`/srv`, real model): the
+three engage forms reached the person the message replied to, `engage_false_positive`
+and `engage_stray_verb` stayed silent, `engage_about_bot` moved to Nexus's own message
+without answering the asker, `real_engage` did not greet the asker, `real_full_answer`
+returned **1350 chars in one message**, and `cleanup_rows_left` was all **0** (the two
+real rooms are intact and the probe room was removed). Rollback is
+`docker tag guardbot:rollback-pre-b4a1ea1 guardbot:latest && docker compose up -d
+--no-build --force-recreate guardbot`.
+
+One honest note for whoever continues: **Voice Context was not live-probed on
+production**, because its persisted switch is **off** — and it is off by the owner's
+own action (`voice_context_control`: `enabled=0, changed_by=6931339207, reason='ai'`).
+The credential is loaded (`[pool] voice_context: accounts=1 usable=1`), so the layer
+works the moment he turns it on; flipping his switch was not mine to do. The voice
+path's own changes were covered by the deterministic tests and by the staged live
+probe on code verified byte-identical to the deployed image. Dashboard **M4 — AI
+control + credentials** remains the next *product* step per §54.27.
 
 ---
 
