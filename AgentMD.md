@@ -7007,8 +7007,21 @@ already in this conversation, do not narrate your own helpfulness.
 `app/chat.py` (+51), `app/config.py` (+17), `app/voice_context.py` (+36),
 `app/voice_live/turn.py` (+23); `tests/test_chat.py` (+86),
 `tests/test_reply_target.py` (+111), `tests/test_voice_context.py` (+128),
-`tests/test_chat_behavior_contract.py` (+8); `tools/probe_reply_target.py` (+46),
-`tools/probe_chat_personality.py` (+121). 732 insertions / 46 deletions.
+`tests/test_chat_behavior_contract.py` (+81); `tools/probe_reply_target.py` (+46),
+`tools/probe_chat_personality.py` (+121). 805 insertions / 46 deletions.
+
+**The 26-point contract, audited.** The brief enumerated 26 deterministic points.
+All 26 now have a **deterministic** test, not only a live scenario:
+`tests/test_chat_behavior_contract.py` pins points 1–20 as persona rules — including
+the four that were added in the audit (9 repeated greeting, 17 self-description,
+18 honest identity, 19 invented experience, 20 invented commercial fact) — with
+`test_the_contract_points_are_all_reachable_from_the_persona` as the one-place
+list that fails if a future edit drops a rule; `tests/test_ai_isolation.py` and
+`tests/test_chat_daily_budget.py` cover points 22–23 (acquisition/intent and chat
+isolation); `tests/test_owner_personality.py` plus
+`test_owner_and_member_share_the_same_persona` cover point 24; and
+`test_adult_joking_is_contextual_and_reactive` covers points 25–26. The live probe
+is the behavioural acceptance beside them, not the only evidence.
 
 **Evidence.**
 

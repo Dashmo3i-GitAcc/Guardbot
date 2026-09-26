@@ -269,6 +269,79 @@ def test_adult_joking_is_contextual_and_reactive():
     assert "never escalate an ordinary message into it" in text
 
 
+# ── The remaining contract points, each pinned to its own rule ────────────
+def test_a_greeting_is_never_repeated_and_no_false_offer_closes():
+    """Contract points 9 and 10.
+
+    A repeated greeting and a generic «anything else?» ending are the two shapes
+    the legacy bot used to pad a turn; both are named and forbidden rather than
+    left to the model's judgement.
+    """
+    text = _persona()
+    assert "do not open with a greeting you have already used" in text
+    assert "asking whether there is anything else" in text
+
+
+def test_the_identity_is_stated_only_when_asked():
+    """Contract points 17 and 18: honest when asked, never announced.
+
+    The two are one rule: an honest answer to a direct question, and no
+    unprompted self-description or capability announcement.
+    """
+    text = _persona()
+    assert "if someone asks you say so plainly" in text
+    assert "you simply do not announce it, introduce yourself or talk about " in text
+
+
+def test_no_invented_experience_or_commercial_fact():
+    """Contract points 19 and 20.
+
+    Nexus has no body and no real-world experience to report, and no price,
+    plan, availability or credential it could know — so it may state none of
+    them, and a credential in particular is something it cannot even issue.
+    """
+    text = _persona()
+    assert "Do not invent experiences" in text
+    assert "you do not have a body" in text
+    assert (
+        "Do not state prices, plan details, availability or account information" in text
+    )
+    assert "must not invent one" in text
+
+
+def test_the_contract_points_are_all_reachable_from_the_persona():
+    """One place to see the whole list: each point is a rule in the persona.
+
+    This is deliberately a *mechanism* check, not a behavioural one — it fails
+    if a future edit drops one of the contract's rules from the single source of
+    truth, which is the failure mode the list exists to catch.
+    """
+    text = _persona()
+    required = (
+        "A normal question gets a normal answer",          # 1, 2
+        "a serious message gets a serious one",            # 3
+        "frustration gets a ",                             # 4
+        "Sarcasm gets a dry reply",                        # 5
+        "a joke gets a reaction",                          # 6
+        "slang is answered in the register",               # 7
+        "You remember the recent turns",                   # 8
+        "do not open with a greeting you have already used",  # 9
+        "asking whether there is anything else",           # 10
+        "Do not ask a question just to keep the chat going",  # 11
+        "Do not fall back on assistant filler",            # 12
+        "never use laughter as punctuation",               # 13, 14
+        "Never use titles or servile address",             # 15
+        "You are not restricted to VPN or internet",       # 16
+        "you simply do not announce it, introduce yourself",  # 17
+        "if someone asks you say so plainly",              # 18
+        "Do not invent experiences",                       # 19
+        "Do not state prices, plan details, availability", # 20
+        "Do not narrate your own helpfulness",             # 12/17
+    )
+    for rule in required:
+        assert rule in text, f"the persona dropped a contract rule: {rule!r}"
+
+
 # ── The failure-class regression ──────────────────────────────────────────
 def test_the_failure_class_is_fixed_at_the_mechanism_not_the_sentence():
     """«نخند حرومزاده» must never come back as the old shape.
