@@ -416,8 +416,12 @@ or status here as a claim to re-check, not as evidence.
     §53.11 raw audio) are **deliberately excepted** for this isolated store, with
     audio off by default. **Deployed 2026-09-26 (image `ccd8867f7d18`, sha
     `e2496a9`) and live-probed** — a real turn read back from `/data/observability`
-    end to end, and the probe caught an **open** reply-target defect: «به <نام> بگو
-    …» was answered as a reply to the asker instead of the named person (§54.36).
+    end to end. The probe caught a reply-target defect («به <نام> بگو …» was
+    answered as a reply to the asker instead of the named person); it is **fixed**
+    in `app/people.py` (a sound-skeleton fallback that bridges Persian and Latin
+    spellings — «ساحل» ~ «Sahel» — used only when the exact fold finds nobody) and
+    `app/reply_target.py` (the named-object address directive), with exact-match
+    always first and the ask-don't-pick rule intact (§54.36).
   - Full suite green: `python -m pytest -q` — **4297 passed / 0 failed** after the
     observation subsystem (4201 after Voice Context, 4114 at the 2026-09-26
     overhaul, 3862 at the panel's M3, 3843 at M2, and 1845 when the media pipeline

@@ -27,6 +27,7 @@ ADMIN = 556
 MEMBER = 42
 ZAHRA = 111
 MILAD = 222
+SAHEL = 333
 BOT_ID = 1
 CHAT = -1001234567890
 CURRENT = 500
@@ -564,6 +565,49 @@ def test_a_plain_message_that_merely_names_somebody_does_not_move_it():
     remember(MILAD, "میلاد")
     window = [{"user_id": MILAD, "message_id": 490, "at": 990, "text": "x", "kind": ""}]
     target = _resolve("میلاد گفت فردا میاد", window=window)
+    assert target.reply_to == 0
+    assert target.destination(CURRENT) == CURRENT
+
+
+# ── The owner's «به ساحل بگو …» class ─────────────────────────────────────
+# A person's name sitting between the preposition and the verb. Before this the
+# phrase read as an instruction to the model but the *destination* never moved,
+# so the answer landed on whoever asked — reported as "رو من ریپ زدی".
+def test_a_named_object_address_directive_moves_to_that_person():
+    remember(MILAD, "میلاد")
+    window = [
+        {"user_id": MILAD, "message_id": 470, "at": 900, "text": "سلام", "kind": ""},
+        {"user_id": MILAD, "message_id": 490, "at": 990, "text": "خوبی؟", "kind": ""},
+    ]
+    target = _resolve("به میلاد بگو سلام", window=window)
+    assert target.person_id == MILAD
+    assert target.reply_to == 490
+
+
+def test_a_persian_name_reaches_a_person_stored_in_latin():
+    """The reported case end to end: «ساحل» against a person stored «𝐒𝐚𝐡𝐞𝐥🪴»."""
+    remember(SAHEL, "𝐒𝐚𝐡𝐞𝐥🪴")
+    window = [
+        {"user_id": SAHEL, "message_id": 470, "at": 900, "text": "سلام", "kind": ""},
+    ]
+    target = _resolve("به ساحل بگو سلام گاو", window=window)
+    assert target.person_id == SAHEL
+    assert target.reply_to == 470
+
+
+def test_telling_nexus_to_speak_to_the_asker_moves_nothing():
+    """«به من بگو» names nobody the server can resolve, so it stays put."""
+    remember(MILAD, "میلاد")
+    target = _resolve("به من بگو چرا")
+    assert target.reply_to == 0
+    assert target.destination(CURRENT) == CURRENT
+
+
+def test_the_address_directive_does_not_read_a_past_tense_report():
+    """«به میلاد گفتم …» is a report, not an instruction to go and speak."""
+    remember(MILAD, "میلاد")
+    window = [{"user_id": MILAD, "message_id": 490, "at": 990, "text": "x", "kind": ""}]
+    target = _resolve("به میلاد گفتم سلام", window=window)
     assert target.reply_to == 0
     assert target.destination(CURRENT) == CURRENT
 

@@ -7,7 +7,10 @@ conveniences:
   the Telegram id, and never a credential; and
 * resolution is **exact and refuses to guess** — one match is an answer, two
   matches is a question, and nothing in the module ever picks the most likely
-  candidate.
+  candidate. When the exact fold finds nobody, a name spoken in one script and
+  stored in another is read once more as a *sound skeleton* («ساحل» ~ «Sahel»);
+  that reading is a fallback, it is bounded below, and it too answers with a
+  question when several people match.
 
 Nothing here talks to Telegram or to Google.
 """
@@ -381,3 +384,71 @@ def test_reset_clears_the_counter():
 
     db.identity_reset()
     assert db.identity_resolution_counts() == {}
+
+
+# ── The script bridge: a name spoken in one script, stored in another ─────
+# The owner reported a directive naming «ساحل» that could not reach a person
+# whose Telegram name is «𝐒𝐚𝐡𝐞𝐥🪴»: the decorative emoji was part of the key
+# («sahel🪴»), and the Persian spelling shared no character with the Latin one.
+def test_a_decorative_emoji_is_not_part_of_a_name():
+    remember(500, "𝐒𝐚𝐡𝐞𝐥🪴")
+
+    found = identity.resolve("Sahel", chat_id=CHAT)
+
+    assert found["status"] == "ok"
+    assert found["identity"]["user_id"] == 500
+
+
+def test_a_persian_spelling_reaches_a_latin_stored_name():
+    remember(500, "Sahel")
+
+    found = identity.resolve("ساحل", chat_id=CHAT)
+
+    assert found["status"] == "ok"
+    assert found["identity"]["user_id"] == 500
+
+
+def test_an_exact_match_outranks_the_sound_reading():
+    """The bridge is a fallback; it never widens a query the fold already met."""
+    remember(500, "ساحل")   # the exact Persian spelling
+    remember(501, "Sahel")  # the same sound, the other script
+
+    found = identity.resolve("ساحل", chat_id=CHAT)
+
+    assert found["status"] == "ok"
+    assert found["identity"]["user_id"] == 500
+
+
+def test_a_sound_that_matches_several_people_is_still_a_question():
+    """The cardinal rule holds across the bridge too: never pick."""
+    remember(500, "Sahel")
+    remember(501, "ساحل")
+
+    found = identity.resolve("Sahil", chat_id=CHAT)  # a third spelling
+
+    assert found["status"] == "ambiguous"
+    assert {c["user_id"] for c in found["candidates"]} == {500, 501}
+
+
+def test_a_two_consonant_skeleton_is_not_evidence():
+    """«رضا» reduces to two consonants; below the floor it is not a match."""
+    remember(500, "Reza")
+
+    assert identity.resolve("رضا", chat_id=CHAT)["status"] == "unknown"
+
+
+def test_the_sound_bridge_never_crosses_rooms():
+    remember(500, "Sahel", chat_id=OTHER_CHAT)
+
+    assert identity.resolve("ساحل", chat_id=CHAT)["status"] == "unknown"
+
+
+def test_the_sound_skeleton_folds_both_scripts_to_one_form():
+    """The mapping itself, pinned, so a table edit cannot quietly break it."""
+    for persian, latin in (
+        ("ساحل", "Sahel"), ("میلاد", "Milad"), ("محمد", "Mohammad"),
+        ("حسین", "Hossein"), ("مهدی", "Mahdi"), ("زهرا", "Zahra"),
+        ("نوید", "Navid"), ("سروش", "Soroush"), ("مصطفی", "Mostafa"),
+        ("امیر", "Amir"), ("نگار", "Negar"), ("یاسر", "Yaser"),
+    ):
+        assert people._skeletons(persian) & people._skeletons(latin), (persian, latin)

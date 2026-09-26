@@ -7101,7 +7101,7 @@ control + credentials** remains the next *product* step per §54.27.
 
 ---
 
-### 54.36 Checkpoint (2026-09-26, **runtime observation, conversation archive and incident investigation**) — **resume here** (supersedes §54.35); CODE COMMITTED (`af837ff`, doc `e2496a9`), PUSHED TO BOTH REMOTES, **DEPLOYED (image `ccd8867f7d18`) AND LIVE-PROBED**
+### 54.36 Checkpoint (2026-09-26, **runtime observation, conversation archive and incident investigation**) — **resume here** (supersedes §54.35); CODE COMMITTED (`af837ff`, doc `e2496a9`), PUSHED TO BOTH REMOTES, **DEPLOYED (image `ccd8867f7d18`) AND LIVE-PROBED**; the probe-caught reply-target defect («به ساحل بگو …») is **DIAGNOSED AND FIXED** — see below
 
 **What it is.** A production evidence system, `app/observe/` (13 modules), that
 records what Nexus actually did — the incoming Telegram event, the room boundary
@@ -7203,32 +7203,50 @@ the runtime actually emits
 (`test_observe_query.py::test_the_query_labels_match_the_instrumentation_source`
 pins that), rather than left as always-zero functions.
 
-**The probe caught a real defect (OPEN, not fixed).** «به ساحل بگو سلام گاو»
-(message 6845023) was answered «سلام ساحل، گاو!» **as a reply to the asker's own
-message** (`delivery.reply_to=6845023`; the owner reported it as "رو من ریپ زدی").
-Two independent causes, each reproduced against the live DB:
+**The probe caught a real defect — DIAGNOSED AND FIXED (2026-09-26).** «به ساحل
+بگو سلام گاو» (message 6845023) was answered «سلام ساحل، گاو!» **as a reply to
+the asker's own message** (`delivery.reply_to=6845023`; the owner reported it as
+"رو من ریپ زدی"). Two independent causes, each reproduced against the live DB:
 
-1. `reply_target._reply_directive` is **False** for «به <نام> بگو …»: the address
-   vocabulary carries «بهش بگو» and «بگو به» but not the named-object shape, so the
-   destination never moves off the asker (`reply_target.py:67-101`).
-2. Even with the directive read, the name cannot resolve. The room's stored key for
-   that person is `sahel🪴` (`people.normalize('𝐒𝐚𝐡𝐞𝐥🪴') == 'sahel🪴'` — the
-   decorative emoji is glued into the key), so `identity.resolve('Sahel')` and
-   `identity.resolve('ساحل')` both answer `unknown`, while
-   `identity.resolve('𝐒𝐚𝐡𝐞𝐥🪴')` answers `ok`. There is no Persian↔Latin bridge, and
-   `people` is exact-match **by design** — it never guesses between similar names.
+1. `reply_target._reply_directive` was **False** for «به <نام> بگو …»: the address
+   vocabulary carried «بهش بگو» and «بگو به» but not the named-object shape, so
+   the destination never moved off the asker. **Fixed** with `_ADDRESS_PATTERNS`
+   (a bounded regex, because the person's name sits *between* the preposition and
+   the verb) — and the caller still requires the name to *resolve* before the
+   destination moves, so «به من بگو» (tell me) stays on the asker, where it
+   belongs.
+2. The name could not resolve. The room's stored key for that person was
+   `sahel🪴` (the decorative emoji glued into the key), and there was no
+   Persian↔Latin bridge: `identity.resolve('Sahel')` and `('ساحل')` both answered
+   `unknown` while the exact `𝐒𝐚𝐡𝐞𝐥🪴` answered `ok`. **Fixed** in
+   `app/people.py` with two additions — `name_key()` (the fold minus decoration:
+   emoji and punctuation are not part of a name) and `_skeletons()`, a *sound
+   skeleton* that maps both scripts to one consonant form («ساحل» and «Sahel»
+   both give `shl`, «میلاد»/«Milad» → `mlyd`, «سروش»/«Soroush» → `srsh`), with
+   both readings emitted for the ambiguous letters (Persian «و», Latin «i») and a
+   final «ی» also droppable.
 
-Cause 2 is a design decision (bridging scripts risks the false-ambiguity the
-resolver exists to refuse), so it awaits the owner's call. Also open: the model
-produced the relay text without asking, and `resolve_person`/tool calls leave no
-archive event, so a read-tool call is not currently reconstructible from evidence.
+The bridge is a **fallback**: an exact match always outranks it, and
+`_PHONETIC_MIN = 3` stops a two-consonant skeleton from standing as evidence on
+its own. That floor is measured, not guessed — on this bot's own room, 60 of 550
+members reduce to two consonants (Ali, Reza) and stay reachable only by their
+exact spelling. The module's cardinal rule is unchanged: a skeleton that matches
+several people is `ambiguous` and the model must ask, never pick. Verified on the
+live DB: `people.resolve('ساحل', chat_id=-1001299527312)` now returns
+`𝐒𝐚𝐡𝐞𝐥🪴`; «Sahel», «ساهل», «مریم»→Maryam, «نرگس»→Narges and «کیان»→Kiana all
+bridge correctly, and a full scan of the 550 stored names found no case where the
+bridge resolves to a single *wrong* person.
 
-**NEXT STEP (exact).** The deploy half of §54.36 is DONE. Owner's call on the
-reply-target defect above (fix scope: directive vocabulary only, or also a
-script-safe name bridge, or make an unresolvable named directive not answer the
-asker) — then rebuild with `GIT_SHA=$(git rev-parse HEAD)`, tag
-`guardbot:rollback-pre-<sha>`, recreate, and re-probe with the same message. Then
-dashboard **M4 — AI control + credentials** per §54.27.
+Still open (recorded, not fixed): the model produced the relay text without
+asking, and `resolve_person`/tool calls leave no archive event, so a read-tool
+call is not currently reconstructible from evidence.
+
+**NEXT STEP (exact).** Owner go-ahead → rebuild with
+`GIT_SHA=$(git rev-parse HEAD)` from a `git archive HEAD` context, tag
+`guardbot:rollback-pre-<sha>`, recreate, verify `/srv/app` byte-identical, and
+re-probe with the same message «به ساحل بگو سلام گاو» — the reply must land under
+𝐒𝐚𝐡𝐞𝐥's message, not the asker's. Then dashboard **M4 — AI control + credentials**
+per §54.27.
 
 ---
 

@@ -22,6 +22,15 @@ required to ask. Returning the most likely candidate would be the single most
 dangerous thing this module could do, because the consequence of being wrong is
 a ban on the wrong person.
 
+One thing sits beside that rule rather than under it, and it is stated here so it
+is not mistaken for a similarity score: when the exact comparison finds nobody, a
+name spoken in one script and stored in another is read once more as a *sound
+skeleton* (``_skeletons`` — «ساحل» and «Sahel» both reduce to ``shl``). It is a
+fallback, never the first reading, it is bounded below so a two-consonant
+skeleton cannot stand as evidence, and it answers ``ambiguous`` exactly like the
+exact path when several people match. It exists because the owner reported a
+directive naming «ساحل» that could not reach a person stored as «𝐒𝐚𝐡𝐞𝐥🪴».
+
 **It stores no conversation.** Names, usernames and timestamps. There is no
 column for a message body, and no code path writes one. The retention bounds are
 in ``app/config.py`` and are applied on the observation path, because this
@@ -100,9 +109,115 @@ def normalize(text: str) -> str:
     return " ".join(folded.split())
 
 
+# ── The name key: the fold, minus decoration ──────────────────────────────
+# Emoji, punctuation and symbols carry no identity, and leaving them in the key
+# is a real defect rather than tidiness: a person whose Telegram name is
+# «𝐒𝐚𝐡𝐞𝐥🪴» had the key «sahel🪴», so neither «Sahel» nor «ساحل» could reach
+# them. Everything that is not a letter, a digit or whitespace is dropped from a
+# *name* key. The shared :func:`normalize` is deliberately left alone —
+# ``reply_target`` borrows it as its fold, and a fold has to keep the
+# punctuation a sentence is made of.
+_NOT_A_LETTER = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def name_key(text: str) -> str:
+    """The form a *name* is matched in: :func:`normalize` with decoration gone."""
+    return " ".join(_NOT_A_LETTER.sub("", normalize(text)).split())
+
+
+# ── The phonetic skeleton: the bridge between two scripts ─────────────────
+# A name spoken in Persian and stored in Latin shares no character with it —
+# «ساحل» against «Sahel» — so an exact comparison can never match the two, and
+# the owner reported exactly that. Each script is reduced to the same *sound*
+# skeleton: consonants only, digraphs folded, doubled letters collapsed. Both
+# sides land on ``shl`` for Sahel, ``mhmd`` for Mohammad, ``hsyn`` for Hossein.
+#
+# This is a *fallback*, never the first reading — an exact match always outranks
+# it — and it keeps the module's cardinal rule: a skeleton that matches several
+# people is ``ambiguous`` and the model must ask. ``_PHONETIC_MIN`` is the
+# threshold that keeps a two-consonant skeleton from standing as evidence on its
+# own: measured on this bot's own rooms, 60 of 550 members in one room reduce to
+# two consonants (Ali, Reza), and those stay reachable by their exact spelling
+# but not by sound. Lowering it is one constant; it widens the match at the cost
+# of more false ambiguity, which is answered with a question rather than a pick.
+_PHONETIC_MIN = 3
+_PHONETIC_VARIANT_CAP = 8
+
+# Post-:func:`normalize` Persian letters, by the sound each carries. Vowels and
+# «ع» carry no consonant and drop out; the rest fold to one Latin spelling so a
+# romanisation written either way meets in the middle.
+_FA_SOUND = {
+    "ا": "", "ب": "b", "پ": "p", "ت": "t", "ث": "s", "ج": "j", "چ": "ch",
+    "ح": "h", "خ": "kh", "د": "d", "ذ": "z", "ر": "r", "ز": "z", "ژ": "zh",
+    "س": "s", "ش": "sh", "ص": "s", "ض": "z", "ط": "t", "ظ": "z", "ع": "",
+    "غ": "gh", "ف": "f", "ق": "gh", "ک": "k", "گ": "g", "ل": "l", "م": "m",
+    "ن": "n", "و": "v", "ه": "h", "ی": "y",
+}
+# A romanisation's digraphs, matched before the single letters below.
+_LATIN_DIGRAPHS = {
+    "kh": "kh", "gh": "gh", "sh": "sh", "ch": "ch", "zh": "zh",
+    "ph": "f", "th": "t", "ck": "k",
+}
+# Latin letters by the same sounds. Vowels drop out; «i» is handled by
+# ``_AMBIGUOUS`` above, because it is the consonant of «Milad» and the vowel of
+# «Sahil» and only one reading would lose a name.
+_LATIN_SOUND = {
+    "b": "b", "p": "p", "t": "t", "s": "s", "c": "k", "j": "j", "h": "h",
+    "d": "d", "z": "z", "r": "r", "f": "f", "g": "g", "k": "k", "l": "l",
+    "m": "m", "n": "n", "v": "v", "w": "v", "y": "y", "x": "ks", "q": "gh",
+    "a": "", "e": "", "o": "", "u": "",
+}
+# The letters with two honest readings, in either script. A Persian «و» is a
+# «v» in «نوید» (Navid) and a vowel in «سروش» (Soroush); a Latin «i» is the
+# consonant of «Milad» (میلاد) and the vowel of «Sahil». Both skeletons are
+# produced for each, so a name written either way is found.
+_AMBIGUOUS = {"و": ("v", ""), "i": ("y", "")}
+
+
+def _skeletons(text: str) -> set[str]:
+    """Every sound skeleton a name could reduce to, ignoring script.
+
+    A *set* rather than one string because a romanisation is not a function: the
+    same Persian word has more than one honest Latin reading, and producing both
+    is what lets «سروش» and «Soroush» meet.
+    """
+    out: set[str] = set()
+    for word in name_key(text).split():
+        variants = [""]
+        index = 0
+        while index < len(word):
+            char = word[index]
+            if char in _AMBIGUOUS:
+                options = _AMBIGUOUS[char]
+                index += 1
+            elif char in _FA_SOUND:
+                options = (_FA_SOUND[char],)
+                index += 1
+            elif char.isascii():
+                pair = word[index:index + 2]
+                if pair in _LATIN_DIGRAPHS:
+                    options = (_LATIN_DIGRAPHS[pair],)
+                    index += 2
+                else:
+                    options = (_LATIN_SOUND.get(char, char),)
+                    index += 1
+            else:
+                options = ("",)
+                index += 1
+            variants = [base + option for base in variants for option in options]
+            variants = variants[:_PHONETIC_VARIANT_CAP]
+        # A doubled consonant is one sound: «Mohammad» and «محمد» are ``mhmd``.
+        collapsed = {re.sub(r"(.)\1+", r"\1", v) for v in variants}
+        # A final «ی» is often the long vowel «-i» (مصطفی ~ Mostafa), so the
+        # same word with it dropped is a second legitimate reading.
+        collapsed |= {v[:-1] for v in collapsed if v.endswith("y")}
+        out |= collapsed
+    return {s for s in out if len(s) >= _PHONETIC_MIN}
+
+
 def _tokens(text: str) -> list[str]:
     """The individual name words, normalised and long enough to be one."""
-    return [t for t in normalize(text).split() if len(t) >= MIN_NAME_LENGTH]
+    return [t for t in name_key(text).split() if len(t) >= MIN_NAME_LENGTH]
 
 
 def reset_state() -> None:
@@ -190,14 +305,26 @@ def _keys(row: dict) -> set[str]:
     first = row.get("first_name", "") or ""
     last = row.get("last_name", "") or ""
     keys = {
-        normalize(first),
-        normalize(last),
-        normalize(f"{first} {last}"),
-        normalize(row.get("username", "") or ""),
+        name_key(first),
+        name_key(last),
+        name_key(f"{first} {last}"),
+        name_key(row.get("username", "") or ""),
     }
     keys.update(_tokens(first))
     keys.update(_tokens(last))
     return {k for k in keys if len(k) >= MIN_NAME_LENGTH}
+
+
+def _phonetic_keys(row: dict) -> set[str]:
+    """Every sound skeleton this person's stored names reduce to.
+
+    Built from the same keys the exact comparison uses, so the two readings can
+    never disagree about *what* a person is called — only about how it sounds.
+    """
+    keys: set[str] = set()
+    for key in _keys(row):
+        keys |= _skeletons(key)
+    return keys
 
 
 def _public(row: dict) -> dict:
@@ -236,7 +363,7 @@ def resolve(name: str, *, chat_id: int = 0) -> dict:
     """
     if not config.NEXUS_PEOPLE_ENABLED:
         return {"status": "disabled"}
-    query = normalize(name)
+    query = name_key(name)
     if len(query) < MIN_NAME_LENGTH:
         return {
             "status": "unknown",
@@ -250,6 +377,19 @@ def resolve(name: str, *, chat_id: int = 0) -> dict:
     # reached from a group's conversational path.
     rows = db.people_rows(int(chat_id)) if chat_id else db.people_rows(limit=0)
     matches = [row for row in rows if query in _keys(row)]
+    if not matches:
+        # The exact fold found nobody. A name spoken in Persian and stored in
+        # Latin shares no character with it, so the query is read a second time
+        # as a sound skeleton — the bridge the owner asked for. It is a
+        # *fallback*: an exact match always outranks it, and a skeleton shorter
+        # than ``_PHONETIC_MIN`` never counts at all. Everything below is
+        # unchanged, so a skeleton that matches several people is still
+        # ``ambiguous`` and the model must ask rather than pick.
+        spoken = _skeletons(query)
+        if spoken:
+            matches = [row for row in rows if spoken & _phonetic_keys(row)]
+            if matches:
+                log.info("name resolved by sound skeleton, not by exact fold")
 
     # One person, even if they were seen in several chats: deduplicate by user
     # id and keep the most recent row, which is the first one ``people_rows``

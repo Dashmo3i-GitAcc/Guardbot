@@ -100,6 +100,35 @@ _TAG_PHRASES = (
 # Every phrase that reads as "address a person", used by the directive test.
 _DIRECTIVE_PHRASES = _ADDRESS_PHRASES + _TAG_PHRASES
 
+# The *named-object* address shapes, as patterns rather than substrings, because
+# the person's name sits between the preposition and the verb: «به ساحل بگو …»,
+# «به علی بنویس …». A substring list can only carry a fixed phrase, and «بهش
+# بگو» (tell him) is not the same sentence as «به ساحل بگو» (tell Sahil). The
+# owner reported the second: it read as an instruction, resolved no target, and
+# the answer went back to whoever asked instead of to Sahil.
+#
+# The object is bounded and cannot cross a line, so a long message that merely
+# contains «به» and «بگو» far apart is not read as one directive. A message whose
+# name does not resolve still moves nothing — the caller requires the name to
+# resolve before the destination changes — which is what keeps «به من بگو»
+# (tell me) sitting on the asker, where it belongs.
+_ADDRESS_PATTERNS = (
+    r"به\s+[^\n]{1,24}?\s*(?:بگو|بنویس|بفرست)",
+)
+_ADDRESS_RE = None
+
+
+def _address():
+    """The compiled named-object address matcher, built once and lazily."""
+    global _ADDRESS_RE
+    if _ADDRESS_RE is None:
+        import re
+
+        _ADDRESS_RE = re.compile(
+            "|".join(_ADDRESS_PATTERNS), re.IGNORECASE | re.UNICODE
+        )
+    return _ADDRESS_RE
+
 # The "go and engage that one" shapes, as patterns rather than substrings.
 #
 # These are the phrasings the owner reported by name — «سر اینو گرم کن», «با این
@@ -506,6 +535,11 @@ def _reply_directive(text: str) -> bool:
     if any(stem in folded for stem in _REPLY_STEMS):
         return True
     if any(phrase in folded for phrase in _DIRECTIVE_PHRASES):
+        return True
+    # The named-object address shapes («به ساحل بگو …»), which carry the person's
+    # name inside the phrase and so cannot be a substring list. See
+    # ``_ADDRESS_PATTERNS``.
+    if _address().search(folded):
         return True
     # The "go and engage that one" shapes, which carry their object inside the
     # phrase and so cannot be a substring list. See ``_ENGAGE_PATTERNS``.
