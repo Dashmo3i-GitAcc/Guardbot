@@ -7101,7 +7101,7 @@ control + credentials** remains the next *product* step per §54.27.
 
 ---
 
-### 54.36 Checkpoint (2026-09-26, **runtime observation, conversation archive and incident investigation**) — **resume here** (supersedes §54.35); CODE COMMITTED AND PUSHED, **NOT YET DEPLOYED**
+### 54.36 Checkpoint (2026-09-26, **runtime observation, conversation archive and incident investigation**) — **resume here** (supersedes §54.35); CODE COMMITTED (`af837ff`) AND PUSHED TO BOTH REMOTES, **NOT YET DEPLOYED**
 
 **What it is.** A production evidence system, `app/observe/` (13 modules), that
 records what Nexus actually did — the incoming Telegram event, the room boundary
