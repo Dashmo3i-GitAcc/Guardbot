@@ -1698,6 +1698,38 @@ async def generate(
             provider_s * 1000.0,
             retry_s * 1000.0,
         )
+        # The same facts, recorded for the archive. Emitted only where the log
+        # line is — a request that failed over, ran out of our own time, or
+        # found nothing usable — so the archive carries the pool's *decisions*
+        # (a retry, a cooled model, an empty pool) without a record per clean
+        # provider call. Durations and masked counts only: never a credential,
+        # never a payload.
+        try:
+            from . import observe
+
+            if observe.started():
+                # A success that needed more than one attempt is the pool's
+                # *retry* event; a clean success emits nothing (it was filtered
+                # out above by `if not failures`). A failure keeps its own
+                # outcome name so a query can tell a cooled pool from a dead one.
+                observe.emit(
+                    observe.schema.KIND_POOL,
+                    ok=outcome == "ok",
+                    event="retry" if (outcome == "ok" and failures) else outcome,
+                    error="" if outcome == "ok" else outcome,
+                    data={
+                        "outcome": outcome,
+                        "workload": pool.workload,
+                        "attempts": attempts,
+                        "accounts": len(tried_slots),
+                        "failures": failures,
+                        "select_ms": round(select_s * 1000.0, 1),
+                        "provider_ms": round(provider_s * 1000.0, 1),
+                        "retry_ms": round(retry_s * 1000.0, 1),
+                    },
+                )
+        except Exception:  # noqa: BLE001 — a record must never break a request
+            pass
 
     # The retention sweep rides the request path, every
     # ``GEMINI_POOL_PRUNE_EVERY`` requests. Here rather than inside the attempt

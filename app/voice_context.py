@@ -494,6 +494,54 @@ async def answer(
     is False, because the caller's next move — answer on the text path — is a
     branch and not an exception.
     """
+    result = await _answer(
+        context=context,
+        transcript=transcript,
+        audio=audio,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    _observe_voice_answer(result, chat_id=chat_id, user_id=user_id)
+    return result
+
+
+def _observe_voice_answer(result, *, chat_id: int, user_id: int) -> None:
+    """Record one spoken turn, as evidence. Never raises."""
+    try:
+        from . import observe
+
+        if not observe.started():
+            return
+        observe.emit(
+            observe.schema.KIND_VOICE,
+            event="voice_context",
+            ok=bool(getattr(result, "ok", False)),
+            text=getattr(result, "said", "") or "",
+            error=""
+            if getattr(result, "ok", False)
+            else (getattr(result, "reason", "") or "failed"),
+            data={
+                "chat_id": int(chat_id or 0),
+                "user_id": int(user_id or 0),
+                "voice": bool(getattr(result, "voice", None)),
+                "heard": getattr(result, "heard", "") or "",
+                "attempts": int(getattr(result, "attempts", 0) or 0),
+                "detail": (getattr(result, "detail", "") or "")[:200],
+                "timing": getattr(result, "timing", None) or {},
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _answer(
+    *,
+    context: str,
+    transcript: str = "",
+    audio: bytes = b"",
+    chat_id: int = 0,
+    user_id: int = 0,
+) -> Answer:
     started = time.monotonic()
     if not available():
         stats["skipped"] += 1

@@ -1489,11 +1489,37 @@ async def synthesize(text: str) -> bytes | None:
         # must not silence the text assistant, which is a different model on a
         # different endpoint. It is logged and the caller falls back.
         log.warning("[chat] voice synthesis failed: %s", type(exc).__name__)
+        _observe_tts(0, ok=False, error=type(exc).__name__)
         return None
     ogg = _pcm_to_ogg(pcm)
     if ogg:
         log.info("[chat] voice reply bytes=%d", len(ogg))
+    _observe_tts(len(ogg or b""), ok=bool(ogg), error="" if ogg else "package_failed")
     return ogg
+
+
+def _observe_tts(size: int, *, ok: bool, error: str = "") -> None:
+    """Record one speech synthesis, as evidence. Never raises.
+
+    The speech half of a voice turn, recorded beside the words it read. It is
+    deliberately its own event: a turn that produced words and no audio is a
+    different fault from one that produced neither, and only the archive can
+    tell them apart after the fact.
+    """
+    try:
+        from . import observe
+
+        if not observe.started():
+            return
+        observe.emit(
+            observe.schema.KIND_VOICE,
+            event="tts",
+            ok=ok,
+            error=error,
+            data={"bytes": int(size or 0)},
+        )
+    except Exception:  # noqa: BLE001 — a record must never break the reply
+        pass
 
 
 async def reply(

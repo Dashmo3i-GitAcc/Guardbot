@@ -380,6 +380,127 @@ The execution half is a separate host process, `tools/agent_runner.py`, because
 the container ships neither Node nor the CodeBuddy CLI. Pointing `AGENT_CLI` at a
 working invocation is a deployment step — see `AgentMD.md` §39.
 
+## Runtime observation, conversation archive and incident investigation
+
+A production evidence system, separate from the bot's own database and its own
+logs. It records what Nexus actually did — the incoming Telegram event, the room
+boundary and routing decisions, the assembled context the model was given, the
+model's request and response, what Telegram received, and every failure, retry
+and timeout between them — so a coding agent can reconstruct a real conversation
+or a single turn and debug from evidence rather than from a log tail.
+
+It is a **sink**. Nothing on the authority path reads it, and its failure can
+never change, delay, duplicate or suppress a reply: writes are batched by a
+background worker off the response path, the queue is bounded, a failed batch is
+counted and dropped, and every call is written never to raise into Nexus. Turn
+it off with `OBSERVE_ENABLED=false` and the bot behaves exactly as it did before
+the subsystem existed.
+
+It is also a **separate store**: its own SQLite file (WAL, `synchronous=NORMAL`)
+under `/data/observability`, with its own connection and lock, so it can neither
+contend with nor corrupt the production database. It is never served over HTTP,
+never reaches Telegram, and is never read into a prompt. It lives under the
+`/data` bind mount, so it survives a redeploy, and it is excluded from git and
+the image by the existing `data/` rules.
+
+### Operating it
+
+```bash
+# What the archive is, where it lives, how big it is
+docker exec guardbot python -m app.observe status
+docker exec guardbot python -m app.observe health
+
+# What happened recently
+docker exec guardbot python -m app.observe recent --last 6h
+docker exec guardbot python -m app.observe turns --last 24h --limit 50
+
+# Reconstruct one turn, completely
+docker exec guardbot python -m app.observe trace <turn_id>
+docker exec guardbot python -m app.observe trace-trace <trace_id>
+
+# Reconstruct a person's thread in a room, in order
+docker exec guardbot python -m app.observe conversation -- -1001234567890:555
+
+# Find a described bug, or a class of failure
+docker exec guardbot python -m app.observe incidents "did not answer"
+docker exec guardbot python -m app.observe failures --last 24h
+docker exec guardbot python -m app.observe find tts --last 24h
+docker exec guardbot python -m app.observe find voice --last 24h
+docker exec guardbot python -m app.observe find delivery --last 24h
+docker exec guardbot python -m app.observe find retries --last 6h
+
+# Full-text search over what people said and what Nexus answered
+docker exec guardbot python -m app.observe search "سلام"
+docker exec guardbot python -m app.observe search-conversations "پیام نرسید"
+
+# Which version produced a behaviour, and compare two
+docker exec guardbot python -m app.observe deployments
+docker exec guardbot python -m app.observe compare <before_sha> <after_sha>
+
+# Reports and retention
+docker exec guardbot python -m app.observe report --write
+docker exec guardbot python -m app.observe report --latest 5
+docker exec guardbot python -m app.observe summarize --last 24h
+docker exec guardbot python -m app.observe capacity
+docker exec guardbot python -m app.observe cleanup --dry-run
+```
+
+Every command prints JSON, so an agent consumes it without parsing prose. The
+same interface is importable: `from app.observe import query`.
+
+### The runtime story it records
+
+| Stage | Event kind | What it holds |
+| --- | --- | --- |
+| Telegram | `update.received`, `update.duplicate` | every update, and the dedup refusal |
+| Boundary | `room.boundary` | the room allowlist decision |
+| Routing | `routing.decided` | whether Nexus considered itself addressed |
+| Turn | `turn.started`, `turn.ended` | one thing Nexus did, with its outcome |
+| Context | `context.composed` | the exact system instruction the model was given |
+| Model | `ai.request`, `ai.response` | the request shape, the answer, the timing |
+| Delivery | `delivery` | what Telegram received, with the sent message id |
+| Voice | `voice.stage` | download, transcribe, route, tts, send |
+| Awareness | `awareness.pass` | the pass's timings and the room's stored state |
+| Pool | `pool.event` | a retry, a cooled model, an empty pool |
+| Admin | `admin.command` | an owner/admin action that changed behaviour |
+| Failure | `error` | a caught failure, with the stage that caught it |
+| Version | `deployment.marker` | the build sha that produced the behaviour |
+| Maintenance | `retention.cleanup`, `report.generated` | the archive's own upkeep |
+
+Everything is correlated: one turn carries a `turn_id` (also its `trace_id`) and
+a `conversation_id`, and every event recorded while it was in flight inherits
+them. The `deployment_id` on every event is the commit the image was built from,
+baked into `/srv/BUILD_INFO` at build time (`ARG GIT_SHA`), so "the assistant
+started doing X" can become "the assistant started doing X on build abc123".
+
+### Retention and capacity
+
+Retention is configurable with no short maximum (`OBSERVE_RETENTION_SECONDS`;
+1h/6h/24h/48h/3d/7d, default 24h) and runs on the observation worker's own clock,
+never inside a turn. It is a sweep, not a trim-on-write, and every sweep records
+what it removed. Capacity is **explicit rather than silent**: when the archive
+outgrows `OBSERVE_MAX_BYTES` it is reported and logged once, instead of deleting
+evidence to stay under a number nobody chose.
+
+Two of the project's invariants are about *not* keeping things, and this
+subsystem is a deliberate, owner-authorised exception to both, recorded here
+rather than quietly broken:
+
+* AgentMD §53.6 — no store holds a message body except the bounded conversation
+  history. The archive holds message bodies **on purpose**; it is isolated to
+  this store, which the conversation path never reads.
+* AgentMD §53.11 — no raw audio is persisted. Audio capture here is **off by
+  default** (`OBSERVE_AUDIO_ENABLED=false`) and, when an operator turns it on,
+  ages out on a shorter window of its own.
+
+### The daily report
+
+`app/observe/report.py` writes a JSON and a Markdown report on the observation
+worker's own clock — never by Nexus and never by a model, because it is counts
+and patterns over the archive. Both land in the archive's own `reports/`
+directory, and the run is recorded as an event so the report's own existence is
+part of the evidence.
+
 ## Test in a private test group first
 
 Set `GROUP_IDS` to a test group, send normal photos / videos / stickers and

@@ -7101,6 +7101,111 @@ control + credentials** remains the next *product* step per §54.27.
 
 ---
 
+### 54.36 Checkpoint (2026-09-26, **runtime observation, conversation archive and incident investigation**) — **resume here** (supersedes §54.35); CODE COMMITTED AND PUSHED, **NOT YET DEPLOYED**
+
+**What it is.** A production evidence system, `app/observe/` (13 modules), that
+records what Nexus actually did — the incoming Telegram event, the room boundary
+and routing decisions, the composed context, the model request and response, what
+Telegram received, and every failure/retry/timeout between them — so an agent can
+reconstruct a real conversation or one turn from evidence instead of a log tail.
+
+**The three rules it is built to, and the tests that pin them.**
+
+1. **Telemetry is never authority.** Nothing on the authority path reads the
+   archive. `tests/test_observe_isolation.py` asserts, over the AST of every
+   `app/observe/*.py`, that the package imports nothing that can act (no
+   `telegram`, no `db`/`main`/`chat`/`rbac`/`admin_service`/…), and that
+   `query`/`store.rows`/`store.one` appear in no authority module. The read API is
+   imported only by `report.py` and `cli.py`.
+2. **A failure here can never change Nexus.** Writes are batched by a background
+   worker off the response path; the queue is bounded and a full queue drops and
+   counts; a failed batch is counted and the worker survives; `emit()` never
+   raises and never waits; `start()` returns False and stays inert if the archive
+   cannot be opened. Each of those is a test in `test_observe_isolation.py`,
+   including "a store write that sleeps for five seconds does not block fifty
+   `emit()` calls".
+3. **It is a separate, operator-only store.** Its own SQLite file (WAL,
+   `synchronous=NORMAL`, `busy_timeout=4000`) under `/data/observability`, its own
+   connection and lock, never served over HTTP, never reaching Telegram, never
+   read into a prompt, and outside git and the image by the existing `data/`
+   rules.
+
+**Two invariants are deliberately excepted, and recorded rather than broken.**
+§53.6 says no store holds a message body except the bounded conversation history;
+the archive holds message bodies **on purpose**, isolated to this store which the
+conversation path never reads. §53.11 says no raw audio is persisted; audio
+capture here is **off by default** (`OBSERVE_AUDIO_ENABLED=false`) and ages out
+on a shorter window of its own. Both exceptions are stated in
+`app/observe/__init__.py`, the `app/config.py` block and `README.md`.
+
+**The layout.** `schema.py` (closed event vocabulary + never-raising coercion),
+`context.py` (deployment/process/turn correlation; the current turn is a
+`ContextVar`, so two concurrent turns never cross), `redact.py` (delegates to
+`agent_bridge.redact` — one pattern list, never a copy — plus a bounded clip that
+reports exactly what it dropped), `store.py` (the archive), `collector.py` (the
+bounded queue and batching worker), `api.py` (`emit`, `turn`, lifecycle, the
+scheduled `sweep`/`report_now`), `query.py` (the investigation questions),
+`audio.py` (opt-in), `retention.py`, `report.py` (JSON + Markdown, on the
+worker's own clock, never by a model), `cli.py` + `__main__.py` (`python -m
+app.observe …`).
+
+**Instrumented seams** (guarded one-liners that preserve every existing log line
+and behaviour): `main.on_any_update` (`update.received`/`update.duplicate` — and
+the handler is now registered when the guard **or** observation is on, so an
+unobserved deployment keeps its previous wiring); `on_group_chat`
+(`room.boundary`, `routing.decided`, and the `missed` label when a message
+replied to Nexus but was not routed); `_answer_conversationally`
+(`context.composed`, `ai.request`/`ai.response` for both the text and the voice
+path, `error` on prep failure and on a declined turn); the turn itself is minted
+around the answering call in `on_group_chat`/`on_private_text`, so every event
+inherits one `turn_id`; `_send_chat`/`_send_voice` (`delivery`, with the sent
+message id); `awareness._awareness_pass` (its own turn + `awareness.pass`, with
+`ok=0` when the pass never reached a decision); `transcribe.transcribe_ref`
+(`voice.stage` transcribe); `chat.synthesize` (`voice.stage` tts);
+`voice_context.answer` (its own event); `gemini_pool._log_request`
+(`pool.event`, with `retry` for a retried success and the failure outcome
+otherwise); `admin_service._record` (`admin.command`).
+
+**Deployment marker.** The image has no `.git`, so the Dockerfile now takes
+`ARG GIT_SHA` (default `unknown`) and writes `/srv/BUILD_INFO`; `context.py` reads
+it (env `GUARDBOT_BUILD_SHA` wins) as the `deployment_id` on every event, and
+`docker-compose.yml` passes `${GIT_SHA:-unknown}` as a build arg. The deploy
+recipe must therefore set `GIT_SHA=$(git rev-parse HEAD)` when it builds.
+
+**Lifecycle.** `main._start_observation` runs first in `post_init`: starts the
+collector, records the boot marker and the feature-flag snapshot, and registers
+the retention sweep and the report on their own clocks. `main.post_shutdown`
+flushes and closes, so the last events of a shutdown are not lost. Both are
+best-effort and cannot fail the boot.
+
+**Verified (deterministic).** Full suite **4297 passed / 0 failed** (`python -m
+pytest -q`, 2026-09-26) — the 66 new observation tests plus the 4231 that
+preceded them. `tests/test_observe_core.py` (22), `test_observe_isolation.py`
+(10), `test_observe_query.py` (28), `test_observe_runtime.py` (6) — the last
+drives the real `on_group_chat` and asserts the whole story reaches the archive,
+and that with observation on the bot says **exactly** what it says with it off.
+`pyflakes` clean on every changed file; secret scan clean.
+
+**Deliberately not done.** No deploy and no live end-to-end probe yet: a real
+event reaching the archive *on the deployed image* requires the image to carry
+this code, and a deploy is the owner's call (the standing rule — no deploy
+without a go-ahead, and a deploy means deploy *and* take a live probe). The four
+`voice_live` diagnostics from 2026-09-25 remain **uncommitted** and out of scope.
+The named failure finders were aligned to the labels the runtime actually emits
+(`test_observe_query.py::test_the_query_labels_match_the_instrumentation_source`
+pins that), rather than left as always-zero functions.
+
+**NEXT STEP (exact).** Owner go-ahead → build with `GIT_SHA=$(git rev-parse
+HEAD) docker compose build` from a `git archive HEAD` context, tag
+`guardbot:rollback-pre-<sha>`, recreate, verify `/srv/app` byte-identical, then
+take the live probe: send one real addressed message in a registered room and
+read `docker exec guardbot python -m app.observe recent --last 5m` back to
+confirm a real `turn.started`/`ai.response`/`delivery`/`turn.ended` reached
+`/data/observability`. Then dashboard **M4 — AI control + credentials** per
+§54.27.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or

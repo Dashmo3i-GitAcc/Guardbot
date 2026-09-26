@@ -1606,6 +1606,36 @@ def _record(
         log.exception("audit write failed action=%s", request.operation)
     _remember(request, result)
     _maybe_prune()
+    # The same action, recorded in the observation archive beside the turns it
+    # affected. It is deliberately a *second* record and not a replacement for
+    # the audit row: the audit is the accountability trail the panel reads, and
+    # this is the investigation trail that lets "the behaviour changed at 14:02"
+    # be tied to the command that changed it. Never raises.
+    try:
+        from . import observe
+
+        if observe.started():
+            observe.emit(
+                observe.schema.KIND_ADMIN,
+                ok=bool(result.ok),
+                event=result.operation or request.operation,
+                error="" if result.ok else (result.outcome or "refused"),
+                chat_id=int(request.chat_id or 0),
+                user_id=int(request.actor_id or 0),
+                data={
+                    "outcome": result.outcome,
+                    "reason": result.reason,
+                    "detail": (result.detail or "")[:300],
+                    "target_id": int(request.target_id or 0),
+                    "interface": request.interface,
+                    "role": rbac.resolve(request.actor_id).role,
+                    "request_id": request.request_id,
+                    "duplicate": bool(result.duplicate),
+                    "allowed": None if decision is None else bool(decision.allowed),
+                },
+            )
+    except Exception:  # noqa: BLE001 — a record must never break an action
+        pass
 
 
 # ── Retention ─────────────────────────────────────────────────────────────

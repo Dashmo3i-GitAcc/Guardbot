@@ -396,10 +396,30 @@ or status here as a claim to re-check, not as evidence.
     `group_messages.username` on the transcript line, and **full search delivery**
     (8 results, longer snippets, 3600-char block — the lever is the findings, never
     a second request). No new model call on any path.
-  - Full suite green: `python -m pytest -q` — **4201 passed / 0 failed** after
-    Voice Context (4114 at the 2026-09-26 overhaul, 3862 at the panel's M3, 3843
-    at M2, and 1845 when the media pipeline was removed). There is no model in
-    the image, so a light venv can run the suite.
+  - **Runtime observation, conversation archive and incident investigation**
+    (2026-09-26, `AgentMD.md` §54.36) — a production **evidence** system,
+    `app/observe/`, that records what Nexus actually did so an agent can
+    reconstruct a real conversation or one turn from evidence rather than a log
+    tail: the incoming Telegram event, the room boundary and routing decisions,
+    the composed context the model was given, the model request and response,
+    what Telegram received, and every failure/retry/timeout between them. It is a
+    **sink** — nothing on the authority path reads it and its failure can never
+    change, delay or suppress a reply — and a **separate store**: its own SQLite
+    file (WAL) under `/data/observability`, never in git, never over HTTP, never
+    in a prompt. Correlated by `turn_id`/`trace_id`/`conversation_id`, and every
+    event carries the `deployment_id` baked into `/srv/BUILD_INFO` at build time
+    (`ARG GIT_SHA`). Operators and agents drive it with
+    `python -m app.observe {status,health,recent,turns,trace,conversation,search,
+    incidents,failures,find,compare,summarize,report,cleanup,capacity}` (JSON).
+    Retention is configurable with no short maximum (default 24h) and capacity is
+    reported, never silently trimmed. Two invariants (§53.6 message bodies,
+    §53.11 raw audio) are **deliberately excepted** for this isolated store, with
+    audio off by default. **Committed and pushed; not yet deployed.**
+  - Full suite green: `python -m pytest -q` — **4297 passed / 0 failed** after the
+    observation subsystem (4201 after Voice Context, 4114 at the 2026-09-26
+    overhaul, 3862 at the panel's M3, 3843 at M2, and 1845 when the media pipeline
+    was removed). There is no model in the image, so a light venv can run the
+    suite.
 - **What is not done / not present:**
   - No visual / media content moderation of any kind, by design.
   - No ban and no permanent punishment; the only member action is a timed

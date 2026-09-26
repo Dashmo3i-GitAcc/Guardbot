@@ -471,6 +471,40 @@ async def transcribe_ref(ref, *, download) -> Transcript:
     caller that hands over a photo gets a clear "not audio" instead of a wasted
     request against the quota.
     """
+    result = await _transcribe_ref(ref, download=download)
+    # One record per voice note, whatever it became: the words, or the reason
+    # there were none. This is the seam every caller shares, so recording it
+    # here means no caller has to remember to.
+    _observe_transcript(ref, result)
+    return result
+
+
+def _observe_transcript(ref, result) -> None:
+    """Record one transcription, as evidence. Never raises."""
+    try:
+        from . import observe
+
+        if not observe.started():
+            return
+        observe.emit(
+            observe.schema.KIND_VOICE,
+            event="transcribe",
+            ok=bool(result.ok),
+            text=result.text if result.ok else "",
+            error="" if result.ok else (result.error or result.skipped or "failed"),
+            data={
+                "duration": float(getattr(ref, "duration", 0) or 0),
+                "file_size": int(getattr(ref, "file_size", 0) or 0),
+                "mime": str(getattr(ref, "effective_mime", "") or ""),
+                "model": result.model,
+                "no_speech": bool(getattr(result, "no_speech", False)),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _transcribe_ref(ref, *, download) -> Transcript:
     if ref is None:
         return Transcript(skipped="no_media", model=config.TRANSCRIBE_MODEL)
     if not getattr(ref, "is_transcribable", False):

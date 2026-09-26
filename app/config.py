@@ -3587,3 +3587,81 @@ DASHBOARD_OPERATOR_ID = _int("DASHBOARD_OPERATOR_ID", OWNER_USER_ID)
 DASHBOARD_AUDIT_RETENTION_SECONDS = _int(
     "DASHBOARD_AUDIT_RETENTION_SECONDS", 90 * 86400
 )
+
+
+# ── Runtime observation, conversation archive and incident investigation ────
+#
+# A production evidence system, separate from the bot's own stores and from the
+# bot's own logs. It records what Nexus actually did — the incoming message, the
+# routing decision, the assembled context, the model's request and response,
+# what Telegram received, and every failure and retry between them — so a coding
+# agent can reconstruct a real conversation or a single turn and debug from
+# evidence rather than from a log tail.
+#
+# The design rules it is built to, all enforced in `app/observe/` and pinned by
+# `tests/test_observe_*.py`:
+#
+#   * **Telemetry is never authority.** Nothing in `rbac` or `admin_service`
+#     imports it, and a model's words are stored as evidence, never replayed.
+#   * **It can never change Nexus.** Writes are batched off the response path;
+#     a full queue drops, a failed batch is counted, and no observation call can
+#     raise into a reply or delay one.
+#   * **It is a separate, operator-only store.** Its own SQLite file with its own
+#     connection and lock, under `/data/observability`, never served over HTTP,
+#     never reachable from Telegram, and never read into a prompt.
+#
+# Two existing invariants are about *not* keeping things, and this subsystem is
+# a deliberate, owner-authorised exception to both — recorded here rather than
+# quietly broken. AgentMD §53.6 says no store holds a message body except the
+# bounded conversation history; the archive holds message bodies on purpose,
+# isolated to this store, which the conversation path never reads. AgentMD
+# §53.11 says no raw audio is persisted; audio capture here is **off by
+# default** and, when an operator turns it on, is retained on a window of its
+# own, independent of the metadata and transcript retention.
+OBSERVE_ENABLED = _bool("OBSERVE_ENABLED", True)
+# The dedicated storage area. It is under the same `/data` bind mount as the
+# production database — so it survives container recreation and a redeploy — and
+# it is excluded from git and from the image by the existing `data/` rules.
+OBSERVE_PATH = os.getenv("OBSERVE_PATH", "/data/observability")
+OBSERVE_DB_PATH = os.getenv(
+    "OBSERVE_DB_PATH", os.path.join(OBSERVE_PATH, "observability.db")
+)
+# How long evidence is kept. Configurable, not hard-coded, and deliberately
+# without a short maximum: the whole point is to be able to investigate a longer
+# period when something is wrong. The named windows are documented so an
+# operator can reason in hours and days rather than seconds:
+#
+#     1h  =    3_600      6h  =   21_600     24h =    86_400
+#     48h =  172_800      3d  =  259_200     7d  =   604_800
+#
+# The default is 24 hours. Storage growth is made explicit rather than silent:
+# `observe status` reports the row counts and the file size, and
+# OBSERVE_MAX_BYTES raises a named warning (and is reported) when the archive
+# outgrows it, instead of quietly deleting evidence.
+OBSERVE_RETENTION_SECONDS = _int("OBSERVE_RETENTION_SECONDS", 24 * 3600)
+# A per-string bound, set far above any real message, answer or transcript. When
+# it does bite — a pathological paste — the number of dropped characters is
+# recorded beside the row, so a truncation is evidence, never a silent loss.
+OBSERVE_TEXT_CHARS = _int("OBSERVE_TEXT_CHARS", 20000)
+# The queue is bounded so a dead store cannot grow memory without limit; a full
+# queue drops the newest event and counts it.
+OBSERVE_QUEUE_MAX = _int("OBSERVE_QUEUE_MAX", 5000)
+OBSERVE_BATCH = _int("OBSERVE_BATCH", 200)
+OBSERVE_FLUSH_SECONDS = _float("OBSERVE_FLUSH_SECONDS", 0.25)
+# Retention runs on its own clock, from the observation worker, never from a
+# request. How often the sweep is attempted, and the size at which the archive
+# is called out as needing attention.
+OBSERVE_SWEEP_SECONDS = _int("OBSERVE_SWEEP_SECONDS", 3600)
+OBSERVE_MAX_BYTES = _int("OBSERVE_MAX_BYTES", 2 * 1024 * 1024 * 1024)
+# Raw audio is the one piece of evidence that is off unless an operator asks for
+# it, and it ages out on a window of its own: a shorter one than the metadata, so
+# turning audio on cannot quietly turn it into the archive's largest cost.
+OBSERVE_AUDIO_ENABLED = _bool("OBSERVE_AUDIO_ENABLED", False)
+OBSERVE_AUDIO_RETENTION_SECONDS = _int("OBSERVE_AUDIO_RETENTION_SECONDS", 6 * 3600)
+OBSERVE_AUDIO_MAX_BYTES = _int("OBSERVE_AUDIO_MAX_BYTES", 512 * 1024 * 1024)
+# The daily observation report. Written by the observation worker, never by
+# Nexus, and never by a model: it is counts and patterns over the archive.
+OBSERVE_REPORT_ENABLED = _bool("OBSERVE_REPORT_ENABLED", True)
+OBSERVE_REPORT_INTERVAL_SECONDS = _int(
+    "OBSERVE_REPORT_INTERVAL_SECONDS", 24 * 3600
+)

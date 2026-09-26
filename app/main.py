@@ -60,6 +60,7 @@ from . import (
     moderation,
     net,
     nexus,
+    observe,
     people,
     persian_calendar,
     rbac,
@@ -279,6 +280,48 @@ def mention(user) -> str:
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 
+def _observe_update(update: Update) -> None:
+    """Record the raw Telegram event, before any handler decides about it.
+
+    This is the first entry in the runtime story: what arrived, from where, from
+    whom. It is the one event emitted for *every* update — including the ones no
+    handler acts on — which is what lets an investigation tell "Telegram never
+    delivered it" from "we received it and chose not to act".
+
+    Guarded so an unobserved deployment pays one attribute read, and wrapped so a
+    malformed update can never raise out of the update guard.
+    """
+    if not observe.started():
+        return
+    try:
+        msg = getattr(update, "effective_message", None)
+        room = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        if msg is not None:
+            what = "message"
+        elif getattr(update, "callback_query", None) is not None:
+            what = "callback_query"
+        elif getattr(update, "edited_message", None) is not None:
+            what = "edited_message"
+        else:
+            what = "other"
+        observe.emit(
+            observe.schema.KIND_UPDATE,
+            event=what,
+            chat_id=int(getattr(room, "id", 0) or 0),
+            user_id=int(getattr(user, "id", 0) or 0),
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+            text=_message_text(msg) if msg is not None else "",
+            data={
+                "update_id": int(getattr(update, "update_id", 0) or 0),
+                "chat_type": str(getattr(room, "type", "") or ""),
+                "username": str(getattr(user, "username", "") or ""),
+            },
+        )
+    except Exception:  # noqa: BLE001 — the update guard must always proceed
+        pass
+
+
 async def on_any_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Claim every update, and stop the ones that have already been handled.
 
@@ -301,21 +344,30 @@ async def on_any_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     the behaviour that existed before this guard.
     """
     if not config.UPDATE_DEDUP_ENABLED:
+        _observe_update(update)
         return
     update_id = int(getattr(update, "update_id", 0) or 0)
     if update_id <= 0:
         # Not something Telegram does. Refusing to guess is the safe direction:
         # treating a missing id as claimable would collide every such update on
         # one row and start dropping real ones.
+        _observe_update(update)
         return
     try:
         first_time = db.update_claim(update_id)
     except Exception:  # noqa: BLE001 - a dedup failure must not silence the bot
         log.exception("could not claim update_id=%s; handling it anyway", update_id)
+        _observe_update(update)
         return
     if first_time:
+        _observe_update(update)
         return
     log.info("duplicate update dropped update_id=%s", update_id)
+    observe.emit(
+        observe.schema.KIND_DEDUP,
+        event="dropped",
+        data={"update_id": update_id},
+    )
     raise ApplicationHandlerStop
 
 
@@ -1333,17 +1385,42 @@ async def _awareness_pass(ctx, chat_id: int, row: dict) -> None:
         chat_id=int(chat_id), trigger_at=awareness.trigger_at(chat_id)
     )
     trace.mark("batch")
-    try:
-        await _awareness_read(ctx, chat_id, row, trace)
-    finally:
-        trace.mark("end")
-        # Durations only. See ``awareness.PassTrace``: the transcript, the
-        # decision and the reply are other people's words and are not logged.
-        log.info("awareness timing %s", trace.summary())
+    # A pass is a turn too, so everything it does — the request, the decision,
+    # the reply it may send — carries one id and can be replayed beside the
+    # conversation turns in the same room.
+    turn = observe.turn("awareness", chat_id=int(chat_id))
+    info: dict = {}
+    with turn:
+        try:
+            await _awareness_read(ctx, chat_id, row, trace, info)
+        finally:
+            trace.mark("end")
+            # Durations only. See ``awareness.PassTrace``: the transcript, the
+            # decision and the reply are other people's words and are not logged.
+            log.info("awareness timing %s", trace.summary())
+            # The pass's own record: its stage timings and what the room was
+            # left understood to be. The stored state is the server's own row —
+            # the decision, the subject reading, the watermark — so it is
+            # evidence about a decision rather than a copy of the model's prose.
+            # A pass that never reached a decision is recorded as an anomaly
+            # (`ok=0`), which is what makes "the room was read but not
+            # understood" findable rather than invisible.
+            observe.emit(
+                observe.schema.KIND_AWARENESS,
+                ok=bool(info.get("completed")),
+                event="pass" if info.get("completed") else "incomplete",
+                chat_id=int(chat_id),
+                data={
+                    "trace": trace.summary(),
+                    "state": awareness.state(chat_id),
+                    "completed": bool(info.get("completed")),
+                },
+            )
+        turn.finish("pass" if info.get("completed") else "incomplete")
 
 
 async def _awareness_read(
-    ctx, chat_id: int, row: dict, trace: awareness.PassTrace
+    ctx, chat_id: int, row: dict, trace: awareness.PassTrace, info: dict | None = None
 ) -> None:
     """The body of one pass. See ``_awareness_pass`` for the contract.
 
@@ -1448,6 +1525,11 @@ async def _awareness_read(
     awareness.record(
         chat_id, seen_message_id=max_id, decision=decision, reading=reading
     )
+    # The pass reached a decision and recorded it, so it is a complete pass. This
+    # is the one bit the archive's `awareness.pass` event needs to tell "the room
+    # was understood" from "the room was read and the answer was unusable".
+    if info is not None:
+        info["completed"] = True
     log.info(
         "awareness chat=%s relevant=%s respond=%s writes=%d intent=%s about=%s "
         "subject=%s/%d participation=%d topic=%r",
@@ -2476,6 +2558,7 @@ async def _send_chat(
     """
     chunks = _split_for_telegram(text, config.GEMINI_CHAT_REPLY_CHARS)
     sent_any = False
+    first_id = 0
     for index, chunk in enumerate(chunks):
         safe = html.escape(chunk)
         if index == 0 and mention and mention[0]:
@@ -2489,7 +2572,7 @@ async def _send_chat(
         except TelegramError:
             pass
         try:
-            await ctx.bot.send_message(
+            sent = await ctx.bot.send_message(
                 chat_id,
                 safe,
                 parse_mode="HTML",
@@ -2500,12 +2583,47 @@ async def _send_chat(
         except TelegramError as exc:
             if index == 0:
                 log.warning("chat reply failed: %s", exc)
+                observe.emit(
+                    observe.schema.KIND_DELIVERY,
+                    ok=False,
+                    event="text_failed",
+                    chat_id=int(chat_id),
+                    error=f"{type(exc).__name__}: {exc}",
+                    data={"chunks": len(chunks), "chars": len(text or "")},
+                )
                 return False
             # The answer is already partly delivered; losing the tail is a
             # smaller fault than reporting the whole turn as unanswered.
             log.warning("chat reply part %d/%d failed: %s", index + 1, len(chunks), exc)
+            observe.emit(
+                observe.schema.KIND_DELIVERY,
+                ok=False,
+                event="text_partial",
+                chat_id=int(chat_id),
+                error=f"{type(exc).__name__}: {exc}",
+                data={"part": index + 1, "chunks": len(chunks)},
+            )
             return sent_any
+        if index == 0:
+            first_id = int(getattr(sent, "message_id", 0) or 0)
         sent_any = True
+    if sent_any:
+        # What Telegram actually received, with the id it gave the message, so a
+        # later turn's reply edge can be traced back to this one.
+        observe.emit(
+            observe.schema.KIND_DELIVERY,
+            event="text",
+            chat_id=int(chat_id),
+            text=text,
+            data={
+                "sent_message_id": first_id,
+                "chunks": len(chunks),
+                "chars": len(text or ""),
+                "reply_to": int(reply_to or 0),
+                "mention": bool(mention and mention[0]),
+                "keyboard": keyboard is not None,
+            },
+        )
     return sent_any
 
 
@@ -3391,6 +3509,13 @@ async def _answer_conversationally(
             # be opened when it was simply silent is a small lie that costs
             # them a second attempt. This path is only reached for a message
             # that was *aimed* at Nexus, so the honest sentence is always owed.
+            observe.emit(
+                observe.schema.KIND_ERROR,
+                ok=False,
+                event="prepare",
+                error=str(problem),
+                data={"kind": kind or "", "voice": bool(want_voice)},
+            )
             await _send_chat(
                 ctx,
                 room.id,
@@ -3508,6 +3633,21 @@ async def _answer_conversationally(
         len(target.ambiguous) or "-",
         target.no_reply,
     )
+    # A tag directive that named somebody the room could not be resolved to one
+    # person. It is the server refusing to guess, which is correct — but it is
+    # still a named target that failed, and it is recorded as one.
+    if target.ambiguous:
+        observe.emit(
+            observe.schema.KIND_ROUTING,
+            event="target_unresolved",
+            chat_id=int(room.id),
+            user_id=int(user.id),
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+            data={
+                "candidates": len(target.ambiguous),
+                "query": target.ambiguous_query,
+            },
+        )
 
     # A spoken name matched more than one person in this room. The server refuses
     # to pick between them — that is ``people.resolve``'s rule and it is kept —
@@ -3672,6 +3812,16 @@ async def _answer_conversationally(
     if relationship_block:
         context = relationship_block + context
     log.info("chat context user=%s chat=%s %s", user.id, room.id, plan.summary())
+    # What the model was actually given, as evidence. This is the answer to "why
+    # did it say that?" — the plan's own names, the assembled system instruction
+    # and the user's words, all in one place. It is the composed context, not the
+    # model's output, so it can be read without trusting anything the model said.
+    observe.emit(
+        observe.schema.KIND_CONTEXT,
+        event="composed",
+        text=context,
+        data={"plan": plan.summary(), "chars": len(context or "")},
+    )
     # End of context assembly: the plan is built and the system instruction is
     # final. What follows is the model call.
     assemble_done = time.monotonic()
@@ -3719,6 +3869,16 @@ async def _answer_conversationally(
         # question being answered — which is the stored topic when this voice
         # note was the «آره» that ran a search.
         heard_words = text if config.VOICE_CONTEXT_SEND_AUDIO else answer_text
+        observe.emit(
+            observe.schema.KIND_AI,
+            event="voice_context",
+            data={
+                "transcript": heard_words,
+                "context_chars": len(context or ""),
+                "audio_bytes": len(voice_audio),
+                "send_audio": bool(config.VOICE_CONTEXT_SEND_AUDIO),
+            },
+        )
         async with chat_queue.serialized(room.id, user.id):
             spoken_answer = await voice_context.answer(
                 context=context,
@@ -3729,6 +3889,18 @@ async def _answer_conversationally(
             )
         gemini_done = time.monotonic()
         pool_ms = 0.0
+        observe.emit(
+            observe.schema.KIND_AI_DONE,
+            event="voice_context",
+            ok=bool(spoken_answer.ok),
+            text=spoken_answer.said or "",
+            duration_ms=(gemini_done - assemble_done) * 1000.0,
+            error="" if spoken_answer.ok else (spoken_answer.reason or "no_voice"),
+            data={
+                "voice": bool(spoken_answer.voice),
+                "describe": spoken_answer.describe(),
+            },
+        )
         # A turn that produced an answer delivers it here and never re-asks the
         # text model: the words already exist, and asking again would spend a
         # second request to answer the same message a second time. Only a turn
@@ -3775,6 +3947,18 @@ async def _answer_conversationally(
     # and telling the person off. A turn the window never frees is left silent —
     # `chat._MESSAGES` has no sentence for `rate_limit` any more. The provider's
     # rate limits stay the pool's business; the queue never sees one.
+    observe.emit(
+        observe.schema.KIND_AI,
+        event="chat",
+        data={
+            "message": answer_text,
+            "context_chars": len(context or ""),
+            "kind": kind or "text",
+            "voice": bool(want_voice),
+            "media": parts is not None,
+            "tools": len(tools or []),
+        },
+    )
     result = await chat_queue.reply(
         room.id,
         user.id,
@@ -3789,6 +3973,25 @@ async def _answer_conversationally(
     gemini_done = time.monotonic()
     # The network seam's share of the model stage, when the turn reported it.
     pool_ms = float((getattr(result, "timing", None) or {}).get("pool_ms") or 0.0)
+    # The model's own answer, recorded as evidence beside the request that
+    # produced it. A turn the model declined or the queue abandoned is recorded
+    # with its reason, which is what makes "the assistant was silent" answerable.
+    observe.emit(
+        observe.schema.KIND_AI_DONE,
+        event="chat",
+        ok=bool(result),
+        text=result.text or "",
+        duration_ms=(gemini_done - assemble_done) * 1000.0,
+        error="" if result else (result.error or result.skipped or "declined"),
+        data={
+            "turns": int(getattr(result, "turns", 0) or 0),
+            "model": getattr(result, "model", "") or "",
+            "voice": bool(getattr(result, "voice", None)),
+            "truncated": bool(getattr(result, "truncated", False)),
+            "repeated": bool(getattr(result, "repeated", False)),
+            "pool_ms": pool_ms,
+        },
+    )
 
     if result:
         log.info(
@@ -3825,6 +4028,16 @@ async def _answer_conversationally(
         room.id,
         result.error or result.skipped,
     )
+    # Recorded with its reason: a declined turn is the other half of "why was
+    # there no answer", and the reason is a value the server produced, not a
+    # guess about the model.
+    observe.emit(
+        observe.schema.KIND_ERROR,
+        ok=False,
+        event="chat.declined",
+        error=result.error or result.skipped or "declined",
+        data={"kind": kind or "text", "voice": bool(want_voice)},
+    )
     # Silent for the reasons that are nobody's business — a switched-off feature
     # should not announce itself every time somebody says hello.
     if result.message:
@@ -3845,15 +4058,33 @@ async def _send_voice(
     except TelegramError:
         pass
     try:
-        await ctx.bot.send_voice(
+        sent = await ctx.bot.send_voice(
             chat_id,
             voice=ogg,
             reply_to_message_id=reply_to,
         )
-        return True
     except TelegramError as exc:
         log.warning("send_voice failed: %s", exc)
+        observe.emit(
+            observe.schema.KIND_DELIVERY,
+            ok=False,
+            event="voice_failed",
+            chat_id=int(chat_id),
+            error=f"{type(exc).__name__}: {exc}",
+            data={"bytes": len(ogg or b"")},
+        )
         return False
+    observe.emit(
+        observe.schema.KIND_DELIVERY,
+        event="voice",
+        chat_id=int(chat_id),
+        data={
+            "sent_message_id": int(getattr(sent, "message_id", 0) or 0),
+            "bytes": len(ogg or b""),
+            "reply_to": int(reply_to or 0),
+        },
+    )
+    return True
 
 
 def _schedule_background(ctx, coro) -> None:
@@ -3946,6 +4177,17 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # This gate is about the *room*; once it passes, every member of the room is
     # eligible for ordinary conversation.
     if not authorized_group(room.id):
+        # The room boundary, recorded as a decision rather than left to be
+        # inferred from silence. "The bot ignored us" and "the bot is not
+        # registered for this room" are different faults and the archive must be
+        # able to tell them apart.
+        observe.emit(
+            observe.schema.KIND_BOUNDARY,
+            event="refused",
+            chat_id=int(room.id),
+            user_id=int(user.id),
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+        )
         return
     if was_deleted(room.id, getattr(msg, "message_id", 0)):
         return
@@ -3968,6 +4210,38 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     #     answers to differ, and it is a regex pass over the message. It sits
     #     above the observation for exactly that reason.
     directed = _nexus_directed(msg, ctx)
+    # The routing decision, recorded beside the message it was made about. It is
+    # the answer to the single most common investigation question — "why did the
+    # assistant not answer this?" — because everything below either answers the
+    # message or hands it to the awareness layer based on this one value.
+    #
+    # One case gets its own label: a message that *replied to Nexus's own
+    # message* but was not routed. That is the "it did not find my reply" defect
+    # class, and it is exactly what `reply_target_failures` searches for.
+    parent = getattr(msg, "reply_to_message", None)
+    replied_to_bot = bool(
+        parent is not None
+        and int(getattr(getattr(parent, "from_user", None), "id", 0) or 0)
+        == int(getattr(ctx.bot, "id", 0) or 0)
+    )
+    observe.emit(
+        observe.schema.KIND_ROUTING,
+        event=(
+            "missed"
+            if (replied_to_bot and not directed)
+            else ("directed" if directed else "ambient")
+        ),
+        chat_id=int(room.id),
+        user_id=int(user.id),
+        message_id=int(getattr(msg, "message_id", 0) or 0),
+        text=text,
+        data={
+            "reply": parent is not None,
+            "reply_to_bot": replied_to_bot,
+            "online": bool(nexus.is_online()),
+            "actor": bool(nexus.is_actor(principal)),
+        },
+    )
 
     # Long-term user memory, also before every gate and also free — and, unlike
     # everything above it, **off this thread**. The learning is scheduled as a
@@ -4057,7 +4331,24 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _nexus_addressed[room.id] = max(
         _nexus_addressed.get(room.id, 0), int(getattr(msg, "message_id", 0) or 0)
     )
-    if not await _answer_conversationally(update, ctx, reply_to=msg.message_id):
+    # The turn. Minted here, around the one call that does the answering, so
+    # every event recorded inside it — the context, the model request and
+    # response, the send — inherits one turn_id and can be replayed in order.
+    # It is the conversation path's alone: the ambient branch above returns
+    # before this line.
+    turn = observe.turn(
+        "chat",
+        chat_id=int(room.id),
+        user_id=int(user.id),
+        message_id=int(getattr(msg, "message_id", 0) or 0),
+        text=text,
+    )
+    with turn:
+        answered = await _answer_conversationally(
+            update, ctx, reply_to=msg.message_id
+        )
+        turn.finish("sent" if answered else "withheld")
+    if not answered:
         _nexus_addressed.pop(room.id, None)
 
 
@@ -4120,7 +4411,19 @@ async def on_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             nexus.is_online(),
         )
         return
-    await _answer_conversationally(update, ctx)
+    # The private turn, in the same shape as the group one: one turn_id for the
+    # whole answer, so a private conversation can be reconstructed exactly as a
+    # group one can.
+    turn = observe.turn(
+        "chat",
+        chat_id=int(room.id),
+        user_id=int(user.id),
+        message_id=int(getattr(msg, "message_id", 0) or 0),
+        text=_message_text(msg),
+    )
+    with turn:
+        answered = await _answer_conversationally(update, ctx)
+        turn.finish("sent" if answered else "withheld")
 
 
 async def on_transcribe_command(
@@ -6348,7 +6651,127 @@ async def update_dedup_reaper(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("update dedup: forgot %d expired update id(s)", dropped)
 
 
+# ---------------------------------------------------- observation upkeep
+#
+# The archive's own maintenance, on the archive's own clock. Both jobs are
+# deliberately *separate* callbacks rather than folded into another job: a
+# failure in one must never stop the other, and neither may touch the response
+# path. `observe.sweep()` and `observe.report_now()` return an error dict rather
+# than raising, so a broken archive is a logged line here and nothing else.
+async def observation_sweep(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete evidence past its retention window, and report what went."""
+    result = await observe.sweep()
+    if result.get("error"):
+        log.warning("[observe] retention sweep: %s", result["error"])
+        return
+    removed = result.get("removed") or {}
+    if removed.get("events") or removed.get("turns"):
+        log.info(
+            "[observe] retention removed %d event(s) and %d turn(s); archive=%s",
+            removed.get("events", 0),
+            removed.get("turns", 0),
+            result.get("size_bytes"),
+        )
+
+
+async def observation_report(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Write the periodic observation report, from the archive alone."""
+    result = await observe.report_now()
+    if not result.get("ok"):
+        log.warning(
+            "[observe] report not written: %s", result.get("error", "unknown")
+        )
+        return
+    log.info(
+        "[observe] report written %s (notable: %s)",
+        result.get("json"),
+        "; ".join(result.get("notable") or []) or "nothing",
+    )
+
+
+async def _start_observation(app: Application) -> None:
+    """Bring the archive up, anchor this boot to a version, and schedule upkeep.
+
+    Entirely best-effort. Observation is a sink: if it cannot start, Nexus runs
+    exactly as it would without it, and every call below is written so a failure
+    is a log line rather than a boot that does not finish.
+    """
+    if not config.OBSERVE_ENABLED:
+        log.info("[observe] archive off (OBSERVE_ENABLED=0)")
+        return
+    if not await observe.start():
+        log.warning(
+            "[observe] archive unavailable; observation is off and Nexus is "
+            "unaffected"
+        )
+        return
+
+    # The marker that makes every later event attributable to a version. It is
+    # the first thing written, so an investigation can always answer "which
+    # build was running when this happened".
+    observe.mark_deployment(note="boot", image=os.getenv("GUARDBOT_IMAGE", ""))
+
+    # The configuration that explains behaviour, captured once at boot. Read
+    # defensively: a flag whose module cannot be asked is recorded as unknown
+    # rather than left out, so a report never silently omits a switch.
+    def _runtime_running(module) -> str:
+        try:
+            return "on" if module.running() else "off"
+        except Exception:  # noqa: BLE001
+            return "unknown"
+
+    for name, value in (
+        ("chat", bool(config.GEMINI_CHAT_ENABLED)),
+        ("awareness.configured", bool(config.NEXUS_AWARENESS_ENABLED)),
+        ("awareness.running", _runtime_running(awareness)),
+        ("search.configured", bool(config.GEMINI_SEARCH_ENABLED)),
+        ("search.running", _runtime_running(web_search)),
+        ("voice_context", bool(config.VOICE_CONTEXT_ENABLED)),
+        ("observe.audio", bool(config.OBSERVE_AUDIO_ENABLED)),
+        ("observe.retention_seconds", int(config.OBSERVE_RETENTION_SECONDS)),
+    ):
+        observe.flag(name, value)
+
+    sweep_interval = max(60.0, float(config.OBSERVE_SWEEP_SECONDS))
+    app.job_queue.run_repeating(
+        observation_sweep, interval=sweep_interval, first=sweep_interval
+    )
+    if config.OBSERVE_REPORT_ENABLED:
+        report_interval = max(300.0, float(config.OBSERVE_REPORT_INTERVAL_SECONDS))
+        app.job_queue.run_repeating(
+            observation_report, interval=report_interval, first=report_interval
+        )
+    else:
+        report_interval = 0.0
+    log.info(
+        "[observe] archive on sha=%s path=%s retention=%ss sweep=%.0fs "
+        "report=%s audio=%s",
+        observe.deployment_id(),
+        config.OBSERVE_DB_PATH,
+        int(config.OBSERVE_RETENTION_SECONDS),
+        sweep_interval,
+        f"{report_interval:.0f}s" if report_interval else "off",
+        "on" if config.OBSERVE_AUDIO_ENABLED else "off",
+    )
+
+
+async def post_shutdown(app: Application) -> None:
+    """Flush what is queued and close the archive. Never raises.
+
+    A clean stop is what makes the last few events of a shutdown — including the
+    reason for it — reachable, rather than sitting in a queue that dies with the
+    process.
+    """
+    try:
+        await observe.stop()
+    except Exception:  # noqa: BLE001 — shutdown must always complete
+        pass
+
+
 async def post_init(app: Application) -> None:
+    # Observation first, so the boot itself is recorded and every event after
+    # this point inherits this deployment's marker.
+    await _start_observation(app)
     if config.UPDATE_DEDUP_ENABLED:
         interval = max(60.0, float(config.UPDATE_DEDUP_PRUNE_INTERVAL_SECONDS))
         app.job_queue.run_repeating(update_dedup_reaper, interval=interval, first=interval)
@@ -6743,13 +7166,23 @@ def main() -> None:
     # exactly as it did before.
     net.install_preference()
 
-    app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(config.BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     # The update guard, and the reason it is a handler rather than a decorator
     # around the dispatcher: it has to run before *every* other handler, and the
     # only thing that is guaranteed to run before every handler is a handler in a
     # lower group. Group -1 is that group, and no other handler uses it.
-    if config.UPDATE_DEDUP_ENABLED:
+    #
+    # Registered when the guard is on *or* observation is on. With observation on
+    # and the guard off, this handler records the incoming update and stops
+    # nothing — so an unobserved deployment keeps exactly its previous wiring.
+    if config.UPDATE_DEDUP_ENABLED or config.OBSERVE_ENABLED:
         app.add_handler(TypeHandler(Update, on_any_update), group=-1)
 
     app.add_handler(

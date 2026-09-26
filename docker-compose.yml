@@ -10,7 +10,14 @@ x-guardbot-image: &guardbot_image guardbot:latest
 
 services:
   guardbot:
-    build: .
+    # The commit the image is built from, baked into /srv/BUILD_INFO so the
+    # running process can report which version produced a behaviour. The deploy
+    # recipe passes it (`GIT_SHA=$(git rev-parse HEAD) docker compose build`);
+    # an unset value records `unknown`, which is visibly not a version.
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     image: *guardbot_image
     container_name: guardbot
     restart: always
@@ -70,7 +77,14 @@ services:
   # route, a slow query, an out-of-memory page) must not be able to disturb
   # Telegram polling, and the two can be restarted independently.
   dashboard:
-    build: .
+    # The commit the image is built from, baked into /srv/BUILD_INFO so the
+    # running process can report which version produced a behaviour. The deploy
+    # recipe passes it (`GIT_SHA=$(git rev-parse HEAD) docker compose build`);
+    # an unset value records `unknown`, which is visibly not a version.
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     image: *guardbot_image
     container_name: guardbot-dashboard
     restart: always

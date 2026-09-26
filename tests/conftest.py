@@ -16,6 +16,12 @@ os.environ.setdefault("TMP_DIR", "/tmp/guardbot-test")
 os.environ.setdefault(
     "GEMINI_KEY_STORE_PATH", "/tmp/guardbot-test/gemini_keys.json"
 )
+# The observation archive defaults to the container's data volume, which does
+# not exist on a test host — and a test must never be able to write into a real
+# one. Pointing it at the test temp directory keeps the suite hermetic; the
+# tests that actually exercise the archive override it again with a per-test
+# path (see the `archive` fixture in `tests/test_observe_store.py`).
+os.environ.setdefault("OBSERVE_PATH", "/tmp/guardbot-test/observability")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -53,6 +59,7 @@ def fresh_nexus_state():
         main,
         memory,
         nexus,
+        observe,
         state,
         voice_context,
         vpn_service,
@@ -134,6 +141,12 @@ def fresh_nexus_state():
     # process state keyed by (chat, user) that must not carry a held lock across
     # a test boundary.
     chat_queue.reset_state()
+    # The observation collector and its archive handle. A test that started
+    # observation would otherwise leave the writer task and an open SQLite
+    # connection behind, and the next test would inherit a running collector
+    # pointed at the previous test's file. `reset()` drops the collector and
+    # closes the store; the archive file itself lives in the per-test temp path.
+    observe.reset()
     yield
     nexus.reset_state()
     # Only the cache is cleared here, never the table: a module fixture's own
@@ -154,4 +167,25 @@ def fresh_nexus_state():
     state.reset_state()
     awareness_schedule.reset()
     chat_queue.reset_state()
+    observe.reset()
+
+
+@pytest.fixture
+def archive(tmp_path, monkeypatch):
+    """An isolated observation archive for one test.
+
+    Points the whole observation package at a per-test SQLite file and a
+    per-test directory, so a test can start the collector, write real events and
+    read them back without touching the shared test path or the host. The
+    collector is stopped and the store closed on the way out, so no writer task
+    or open handle survives the test.
+    """
+    from app import config, observe
+
+    monkeypatch.setattr(config, "OBSERVE_ENABLED", True)
+    monkeypatch.setattr(config, "OBSERVE_PATH", str(tmp_path))
+    monkeypatch.setattr(config, "OBSERVE_DB_PATH", str(tmp_path / "observability.db"))
+    observe.reset()
+    yield tmp_path / "observability.db"
+    observe.reset()
 

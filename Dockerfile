@@ -51,5 +51,21 @@ COPY tools ./tools
 # modules it imports need the bot's environment, which only exists here.
 COPY ops ./ops
 
+# The build's identity, so a running container can say which commit produced
+# the behaviour being investigated.
+#
+# The image deliberately contains no `.git` (`.dockerignore` excludes it), so the
+# running process cannot read its own version from the working tree. This writes
+# the commit the image was built from to a plain file instead, and
+# `app/observe/context.py` reads it as the `deployment_id` every recorded event
+# carries. That is what turns "the assistant started doing X" into "the assistant
+# started doing X on build abc123", which is the difference between an
+# investigation and a guess.
+#
+# `GIT_SHA` has no default that could be mistaken for a real commit: an unset
+# build records `unknown`, and `unknown` is visibly not a version.
+ARG GIT_SHA=unknown
+RUN printf '%s\n' "$GIT_SHA" > /srv/BUILD_INFO
+
 ENV PYTHONUNBUFFERED=1
 CMD ["python", "-m", "app.main"]
