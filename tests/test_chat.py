@@ -562,17 +562,64 @@ def test_the_prompt_bounds_banter_against_escalation():
     assert "never humiliate anybody sexually" in text
 
 
-def test_the_prompt_mirrors_register_including_a_serious_insult():
-    """The owner's override: a serious curse gets the same energy back.
+def test_the_prompt_makes_warmth_the_default():
+    """The regression the owner reported: the persona read as permanently sharp.
 
-    It is not a warning and not a lecture, and a joke is answered as a joke —
-    the model must tell the two apart from the message, not from a keyword.
+    «الان صحبتاش رفتاراش خیلی اگرسیو شده … باید مهربون و دوستانه باشه» — warmth is
+    stated as the ordinary register rather than something a person has to earn,
+    and the performed-intimacy rule from the same paragraph is reconciled with it
+    so the two cannot be read as a contradiction.
     """
     text = chat.SYSTEM_INSTRUCTION
-    assert "give it straight back as hard as they gave it" in text
-    assert "Somebody who curses at you gets the same energy" in text
-    assert "not a warning" in text
-    assert "If it is a joke, joke back" in text
+    assert "Be warm with people by default" in text
+    assert "A normal message gets a normal, kind answer" in text
+    assert "Warmth here is being kind and easy" in text
+
+
+def test_the_prompt_keeps_answering_rudeness_in_kind_but_not_as_the_default():
+    """The capability is kept; the always-on aggressive framing is not.
+
+    The owner asked for exactly this split: «فحش … رو به کسی بگه که باهاش کانتکست
+    بد داره» — answering in kind stays, but it is no longer the state the model
+    starts every ordinary message in. The old bullet is named here so a future
+    edit cannot quietly restore the wording that caused the regression.
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Rudeness is never your first move" in text
+    assert "answer at the strength you were given" in text
+    assert "no escalation" in text
+    assert "assume it was not and stay friendly" in text
+    # The old framing must not come back: it was read as the default.
+    assert "never flinch" not in text
+    assert "match their intensity" not in text
+    assert "give it straight back as hard as they gave it" not in text
+
+
+def test_the_prompt_de_escalates_the_moment_the_person_does():
+    """The rule the aggressive version was missing, in the owner's words.
+
+    «به محض اینکه طرف کوتاه میاد … باید همین‌جوری راه بیاد دیگه دنبال پیام قبلیش
+    نره».
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "Come down the moment they do" in text
+    assert "you drop it at once and completely" in text
+    assert "do not answer their earlier message" in text
+    assert "your next message is warm again" in text
+
+
+def test_the_prompt_reads_the_relationship_line_as_tone_data():
+    """The server's relationship line is data, and it is bounded.
+
+    It grants the rude register and takes it back the instant the person is
+    friendly again — which is what makes "answer only somebody with bad context"
+    expressible without a second personality.
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "how this person has treated you before" in text
+    assert "permission, never an order" in text
+    assert "ends the moment they are friendly again" in text
+    assert "stay warm with them" in text
 
 
 def test_the_prompt_drops_banter_when_the_person_is_serious():

@@ -286,11 +286,25 @@ def test_the_sender_role_is_assigned_by_the_server():
 
 
 def test_the_window_has_a_hard_message_bound():
+    """The count bound is a **flood** bound, enforced on the periodic sweep.
+
+    It used to run on every capture. Now that three days of a busy room is tens
+    of thousands of rows, the ceiling is a flood bound and the ``NOT IN`` delete
+    that enforces it is deferred to the same clock as the age purge (58 ms at the
+    production ceiling, measured against 44,000 rows). Both halves are pinned
+    here: a burst inside one interval is not trimmed message by message, and the
+    next sweep trims it back to the ceiling.
+    """
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(config, "NEXUS_AWARENESS_MAX_ROWS", 5)
     try:
         for index in range(12):
             capture(CHAT, index, awareness.ROLE_MEMBER, "u", f"m{index}")
+        # Inside one purge interval nothing is trimmed: the bound is deferred.
+        assert len(db.group_window(CHAT, limit=100)) == 12
+        # The next sweep is due, and enforces it.
+        awareness.reset_timers()
+        capture(CHAT, 99, awareness.ROLE_MEMBER, "u", "m99")
         assert len(db.group_window(CHAT, limit=100)) == 5
     finally:
         monkeypatch.undo()
@@ -2025,3 +2039,136 @@ def test_a_members_voice_note_is_recorded_as_its_kind_and_nothing_is_spent(
     row = db.group_window(CHAT, limit=5)[-1]
     assert row["text"] == "[voice]"
     assert row["actor"] is False
+
+
+# ── The window is measured in time, and the digest is what makes it usable ──
+# The owner's requirement, in their words: «برحسب پیام نباشه، برحسب روز باید باشه
+# تا سه روز» and «باید بدونه دقیقاً کی چی گفته کی چی نگفته». Two halves: the window
+# is bounded by time (the count is only a flood cap), and the part of the window
+# that cannot fit in a prompt is summarised — who spoke, how much, what they said
+# last, and who said nothing.
+def _backdate(text, *, seconds, chat_id=CHAT):
+    """Move one captured row back in time, so the window can be tested."""
+    db._exec(
+        "UPDATE group_messages SET at=? WHERE chat_id=? AND text=?",
+        (int(time.time()) - int(seconds), int(chat_id), str(text)),
+    )
+
+
+def test_the_window_is_bounded_by_time_not_only_by_count(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_WINDOW_MESSAGES", 400)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_WINDOW_SECONDS", 3 * 86400)
+    for index in range(3):
+        capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", f"recent{index}")
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "ancient")
+    _backdate("ancient", seconds=4 * 86400)
+    texts = [row["text"] for row in awareness.window(CHAT)]
+    assert "ancient" not in texts
+    assert "recent2" in texts
+
+
+def test_the_default_window_reaches_back_three_days(monkeypatch):
+    """Two days old is inside the window; the shipped default is the assertion."""
+    assert config.NEXUS_AWARENESS_WINDOW_SECONDS >= 3 * 86400 - 1
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "two days ago")
+    _backdate("two days ago", seconds=2 * 86400)
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "now")
+    texts = [row["text"] for row in awareness.window(CHAT)]
+    assert "two days ago" in texts
+    assert "now" in texts
+
+
+def test_the_default_window_messages_is_a_flood_cap_not_the_bound(monkeypatch):
+    """The count must be big enough not to be the ordinary bound.
+
+    The character budget trims the transcript; the count exists only to stop a
+    flood turning one read into an unbounded scan. If it were small it would be
+    the bound again — which is exactly the message-count window the owner asked
+    to stop being the rule.
+    """
+    assert config.NEXUS_AWARENESS_WINDOW_MESSAGES >= 300
+
+
+def test_the_digest_counts_who_spoke_and_what_they_said_last(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "چطوری")
+    capture(CHAT, ADMIN, awareness.ROLE_ADMIN, "milad", "خوبم")
+    text = awareness.activity(CHAT)
+    assert "reza" in text
+    assert "2 messages" in text
+    assert "چطوری" in text  # the newest words, not the first
+    assert "milad" in text
+
+
+def test_the_digest_does_not_count_nexus_as_a_person_in_the_room(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    capture(CHAT, BOT_ID, awareness.ROLE_NEXUS, "Nexus", "سلام رضا")
+    text = awareness.activity(CHAT)
+    assert "reza" in text
+    assert "Nexus" not in text
+
+
+def test_the_digest_names_who_said_nothing(monkeypatch):
+    """The half a transcript cannot show: a person who never spoke.
+
+    It is read from the room's name memory, because somebody who did not speak
+    has no row in the window to be missing from.
+    """
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_SILENT", 8)
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    db.people_remember(CHAT, ADMIN, first_name="milad")
+    # Seen five days ago: inside the fortnight, outside the three-day window.
+    db._exec(
+        "UPDATE people SET last_seen=? WHERE chat_id=? AND user_id=?",
+        (int(time.time()) - 5 * 86400, CHAT, ADMIN),
+    )
+    text = awareness.activity(CHAT)
+    assert "Said nothing" in text
+    assert "milad" in text
+
+
+def test_a_person_who_left_long_ago_is_not_called_silent(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    db.people_remember(CHAT, ADMIN, first_name="ghost")
+    db._exec(
+        "UPDATE people SET last_seen=? WHERE chat_id=? AND user_id=?",
+        (int(time.time()) - 200 * 86400, CHAT, ADMIN),
+    )
+    text = awareness.activity(CHAT)
+    assert "ghost" not in text
+
+
+def test_the_digest_respects_its_people_and_character_bounds(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_PEOPLE", 2)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_CHARS", 300)
+    for index in range(6):
+        capture(CHAT, MEMBER + index, awareness.ROLE_MEMBER, f"p{index}", "سلام")
+    text = awareness.activity(CHAT)
+    assert 0 < len(text) <= 300
+
+
+def test_the_digest_is_empty_when_the_switch_is_off(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", False)
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+    assert awareness.activity(CHAT) == ""
+
+
+def test_the_digest_is_empty_with_nothing_to_say(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+    assert awareness.activity(CHAT) == ""
+
+
+def test_the_digest_fails_soft(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+    capture(CHAT, MEMBER, awareness.ROLE_MEMBER, "reza", "سلام")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("db is gone")
+
+    monkeypatch.setattr(db, "group_activity", _boom)
+    assert awareness.activity(CHAT) == ""

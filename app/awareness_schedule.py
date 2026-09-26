@@ -277,15 +277,24 @@ _hints: dict[int, tuple[str, float]] = {}
 def _bound() -> float:
     """How long a hint may live, and how long a room may be deferred.
 
-    One number for both, and it is derived rather than configured:
-    ``NEXUS_AWARENESS_RETENTION_SECONDS``. A hint describes a batch of unread
+    One number for both, and it is derived from
+    ``NEXUS_AWARENESS_RETENTION_SECONDS`` — but **capped** by
+    ``NEXUS_AWARENESS_HINT_SECONDS``. A hint describes a batch of unread
     messages, and a deferral postpones reading that batch; past the retention
     the rows have been purged from the window, so the hint would describe
     nothing and the deferral would lose the messages it was holding back.
     Deriving it means there is no second number to drift out of step with the
-    retention it is about, and no knob an operator has to reason about.
+    retention it is about.
+
+    The cap is the other half, and it exists because the retention is no longer
+    an hour: the room window now reaches back three days, and an uncapped bound
+    would let a low-priority room be postponed for three days to save one
+    request. The ``min`` keeps the invariant the derivation is for — a hint never
+    outlives the rows it describes — while keeping the delay a sane length.
     """
-    return max(1.0, float(config.NEXUS_AWARENESS_RETENTION_SECONDS))
+    retention = max(1.0, float(config.NEXUS_AWARENESS_RETENTION_SECONDS))
+    hint = max(1.0, float(config.NEXUS_AWARENESS_HINT_SECONDS))
+    return min(retention, hint)
 
 
 def note(chat_id: int, priority: str, *, now: float | None = None) -> None:

@@ -1255,13 +1255,21 @@ def _awareness_context(
     messages: list[dict] | None = None,
     anchor: dict | None = None,
 ) -> str:
-    """The system-instruction context for a pass: roster, memory, then the room.
+    """The system-instruction context for a pass: roster, memory, digest, room.
 
     The transcript is *not* in here. For the awareness pass the transcript is
     the user turn — the thing to be read — and duplicating it would double the
     prompt for no gain.
 
-    The third part is staged, and that is the point: ``awareness_context``
+    The **digest** is: ``awareness.activity`` is the server's own count of the
+    whole three-day window — who spoke, how much, what each said last, and who
+    said nothing. It is here rather than in the transcript because three days
+    cannot fit in a prompt and the transcript is trimmed to the newest
+    conversation; without it, widening the window from 150 messages to three days
+    would change nothing about what the model knows. It makes no provider call,
+    so it costs nothing in the currency that is rationed.
+
+    The last part is staged, and that is the point: ``awareness_context``
     renders the cheap context always (the room's name, and who was here last
     time) and the deeper context — recent administrative actions, and who the
     batch is about — only when a predicate over the batch says the conversation
@@ -1281,6 +1289,7 @@ def _awareness_context(
     return (
         awareness.roster()
         + awareness.memory_block(chat_id)
+        + awareness.activity(chat_id)
         + awareness_context.blocks(context)
     )
 
@@ -3056,6 +3065,34 @@ def _memory_context(chat_id: int, user_id: int, text: str) -> str:
         return ""
 
 
+def _relationship_context(chat_id: int, user_id: int) -> str:
+    """How this person has treated Nexus, as one bounded server-stated block.
+
+    The behavioural half of the persona's rudeness rule. The persona may answer
+    rudeness in kind only when there is a real history — «فحش … رو به کسی بگه که
+    باهاش کانتکست بد داره» — and this is where that history comes from: the
+    server's own count of messages *aimed at the assistant*, never the model's
+    guess, never a username, never anything the speaker wrote. It grants
+    nothing; every authority gate has already run by the time it is added, and
+    it changes tone and nothing else.
+
+    It is deliberately not part of the selector: the room reading chooses
+    between retrieval sources, and this is a fact about the person being
+    answered, like the owner note. It is bounded by ``NEXUS_RELATIONSHIP_CHARS``
+    and an absent block is the warm default — the safe direction.
+
+    A failure returns ``""``: a context block is never worth failing an answer
+    over.
+    """
+    if not config.NEXUS_RELATIONSHIP_ENABLED or not chat_id or not user_id:
+        return ""
+    try:
+        return memory.relationship(int(chat_id), int(user_id))
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the person's relationship")
+        return ""
+
+
 def _state_context(chat_id: int, user_id: int, text: str) -> str:
     """What this interaction is trying to accomplish, as one bounded block.
 
@@ -3531,6 +3568,16 @@ async def _answer_conversationally(
     # no capability. Every authority gate above this line has already run.
     if rbac.is_owner(user.id):
         context = chat.OWNER_NOTE + context
+    # How this person has treated Nexus, counted by the server, prepended beside
+    # the owner note for the same reason: it is a fact about the person being
+    # answered, not a retrieval the selector chooses between. It is what makes
+    # the persona's rudeness rule conditional on a real history instead of being
+    # the state every ordinary message starts in — «فحش … رو به کسی بگه که باهاش
+    # کانتکست بد داره». Absent when nothing has been promoted, which is the warm
+    # default. It grants nothing and it changes tone and nothing else.
+    relationship_block = _relationship_context(room.id, user.id)
+    if relationship_block:
+        context = relationship_block + context
     log.info("chat context user=%s chat=%s %s", user.id, room.id, plan.summary())
     # End of context assembly: the plan is built and the system instruction is
     # final. What follows is the model call.
@@ -3645,7 +3692,9 @@ def _schedule_background(ctx, coro) -> None:
         log.exception("could not schedule a background observation")
 
 
-def _schedule_memory_observation(ctx, user, chat_id: int, text: str) -> None:
+def _schedule_memory_observation(
+    ctx, user, chat_id: int, text: str, *, directed: bool = False
+) -> None:
     """Learn from one message **off** the answer path, and never wait for it.
 
     Long-term memory is an enhancement, so it is deliberately not awaited.
@@ -3654,9 +3703,13 @@ def _schedule_memory_observation(ctx, user, chat_id: int, text: str) -> None:
     enable — runs in a background task, so none of it can add a millisecond to
     the reply somebody is waiting for, and a slow or unavailable memory workload
     cannot delay chat at all.
+
+    ``directed`` is carried so the relationship counter can tell a message aimed
+    at Nexus from one aimed at somebody else; it is the flag the handler already
+    computed, passed rather than derived a second time.
     """
     try:
-        coro = memory.observe(user, chat_id, text)
+        coro = memory.observe(user, chat_id, text, directed=bool(directed))
     except Exception:  # noqa: BLE001 - building the coroutine must not fail
         log.exception("could not prepare memory observation")
         return
@@ -3723,6 +3776,15 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     principal = rbac.resolve(user.id)
     text = _message_text(msg)
 
+    # 1a. Is this aimed at Nexus? Computed once and used three times — by the
+    #     capture, which records it as a hint for choosing the pass's anchor; by
+    #     the memory observation, where it decides whether the message counts as
+    #     evidence of how this person treats the assistant; and by the routing
+    #     below, which answers it. Asking twice would be two chances for the two
+    #     answers to differ, and it is a regex pass over the message. It sits
+    #     above the observation for exactly that reason.
+    directed = _nexus_directed(msg, ctx)
+
     # Long-term user memory, also before every gate and also free — and, unlike
     # everything above it, **off this thread**. The learning is scheduled as a
     # background task rather than awaited, so neither the regex pass, nor a
@@ -3731,8 +3793,9 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # a memory is a sentence for the model to read, and authority stays in
     # ``rbac`` above. Scoped to the group path because that is where the
     # observation already happens; the key is ``(chat_id, user_id)``, so a
-    # private chat's memory could never render here in any case.
-    _schedule_memory_observation(ctx, user, room.id, text)
+    # private chat's memory could never render here in any case. ``directed`` is
+    # the flag above: only a message aimed at Nexus is evidence about Nexus.
+    _schedule_memory_observation(ctx, user, room.id, text, directed=directed)
 
     # Conversational state (increment X), the same shape and the same reason: the
     # transition one message states about the interaction is learned in a
@@ -3746,12 +3809,6 @@ async def on_group_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _schedule_state_observation(
         ctx, user, room.id, text, getattr(msg, "message_id", 0)
     )
-
-    # 1a. Is this aimed at Nexus? Computed once and used twice — by the capture,
-    #     which records it as a hint for choosing the pass's anchor, and by the
-    #     routing below, which answers it. Asking twice would be two chances for
-    #     the two answers to differ, and it is a regex pass over the message.
-    directed = _nexus_directed(msg, ctx)
 
     # 1b. Awareness. Captured for **everybody**, before every gate, and at no
     #     AI cost: understanding the room is the feature, and a member whose

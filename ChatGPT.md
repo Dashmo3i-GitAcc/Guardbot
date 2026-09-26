@@ -277,8 +277,9 @@ The point of this file is that the project does not have to be re-explained.
 
 Update this section after each meaningful change. The facts below were verified
 against the repository when this file was created, and re-verified against the
-repository on **2026-09-26** (after the 21-section conversational overhaul) —
-treat any hash, count or status here as a claim to re-check, not as evidence.
+repository on **2026-09-26** (after the 21-section conversational overhaul and the
+warmth/relationship/three-day-scan follow-up) — treat any hash, count or status
+here as a claim to re-check, not as evidence.
 
 - **Branch:** `main` is the production state and the only live branch; the Nexus
   intelligence evolution was **merged into it** as `25ddee8` (2026-09-24) and
@@ -302,6 +303,17 @@ treat any hash, count or status here as a claim to re-check, not as evidence.
     coverage bought with scheduling, not with spend. **V is not scoped**: its
     evidence base (`tools/eval_chat_quality.py`) exists, but its live run has not
     been made. See `AgentMD.md` §54, the checkpoints from §54.9 onward.
+  - **Conversational tone restored, relationship memory, three-day room scan** —
+    the 21-section overhaul's persona bullet made the assistant permanently sharp;
+    it is replaced by *warm by default*, *rudeness is never the first move*, and an
+    explicit **de-escalation** rule, with the old wording asserted absent in the
+    suite. `app/memory.py` now counts how a person treats Nexus (only on messages
+    **directed at it**) and renders a **server-stated** relationship line that
+    gates the rude register on a real history. The room window is now bounded by
+    **time** (`NEXUS_AWARENESS_WINDOW_SECONDS`, three days; the message count is a
+    flood cap) and `awareness.activity` summarises the whole window — who spoke,
+    how much, their newest words, and who said nothing. **Committed and pushed,
+    not deployed** — see `AgentMD.md` §54.33.
   - **Text moderation** — the moderation AI's verdict on a group text message,
     turned into an action by `app/mod_policy.py`. Off by default
     (`MODERATION_TEXT_ENABLED=0`). Only `MODERATION_DELETABLE_CLASSES`

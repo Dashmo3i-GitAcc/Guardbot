@@ -343,13 +343,28 @@ def test_the_deferral_bound_is_the_retention_window(monkeypatch):
     A hint describes a batch of unread messages, and a deferral postpones
     reading that batch. Past the retention window the rows have been purged, so
     both would describe nothing. Deriving the one number from the other is what
-    stops them drifting apart.
+    stops them drifting apart — up to the hint ttl, which is the cap added when
+    the retention became three days (asserted next).
     """
     monkeypatch.setattr(config, "NEXUS_AWARENESS_RETENTION_SECONDS", 120)
     assert awareness_schedule._bound() == 120.0
     awareness_schedule.note(CHAT, awareness_schedule.P_LOW, now=100.0)
     assert awareness_schedule.defer(CHAT, waited=119.0, now=100.0) is True
     assert awareness_schedule.defer(CHAT, waited=120.0, now=100.0) is False
+
+
+def test_the_deferral_bound_is_capped_by_the_hint_ttl(monkeypatch):
+    """A three-day window must not mean a three-day postponement.
+
+    The retention is how far the window reaches; the hint ttl is how long a
+    routine room may be held back. Deriving the delay from the window is right
+    only up to a point, and the room window reaching back three days is past it:
+    without the cap a room whose batch is idle chatter would be postponed for
+    three days to save one request.
+    """
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_RETENTION_SECONDS", 3 * 86400)
+    monkeypatch.setattr(config, "NEXUS_AWARENESS_HINT_SECONDS", 3600)
+    assert awareness_schedule._bound() == 3600.0
 
 
 def test_a_nonpositive_retention_cannot_make_the_bound_vanish(monkeypatch):

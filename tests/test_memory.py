@@ -41,16 +41,21 @@ def memory_env(monkeypatch):
     monkeypatch.setattr(config, "NEXUS_MEMORY_VALUE_CHARS", 200)
     monkeypatch.setattr(config, "NEXUS_MEMORY_ITEMS", 4)
     monkeypatch.setattr(config, "NEXUS_MEMORY_CHARS", 300)
+    monkeypatch.setattr(config, "NEXUS_RELATIONSHIP_ENABLED", True)
+    monkeypatch.setattr(config, "NEXUS_RELATIONSHIP_THRESHOLD", 3)
+    monkeypatch.setattr(config, "NEXUS_RELATIONSHIP_CHARS", 260)
     monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_CHARS", 1500)
     monkeypatch.setattr(config, "NEXUS_AWARENESS_CONTEXT_DEEP", True)
     monkeypatch.setattr(config, "NEXUS_PEOPLE_ENABLED", True)
     db.init()
     db.memory_reset()
+    db.signal_reset()
     db.people_reset()
     awareness_context.reset_rooms()
     memory.reset_state()
     yield
     db.memory_reset()
+    db.signal_reset()
     db.people_reset()
     awareness_context.reset_rooms()
     memory.reset_state()
@@ -438,3 +443,122 @@ def test_the_whole_point_a_person_is_known_in_a_later_batch():
     anchor = _msg(USER, "یه سوال دارم")
     out = awareness_context.blocks(_ctx(anchor))
     assert "برنامه‌نویس پایتونم" in out
+
+
+# ── Relationship: how this person has treated Nexus ───────────────────────
+# The behavioural memory behind the persona's rudeness rule. The properties
+# worth pinning are all *refusals*: only a directed message counts, one message
+# never promotes, the row is never shown as the person's own words, and an
+# absent history is the warm default.
+def _directed(text, *, user_id=USER, chat_id=CHAT):
+    return memory._observe_deterministic(chat_id, user_id, text, directed=True)
+
+
+def _undirected(text, *, user_id=USER, chat_id=CHAT):
+    return memory._observe_deterministic(chat_id, user_id, text, directed=False)
+
+
+def test_a_directed_insult_is_counted():
+    _directed("کصکش")
+    assert db.signal_for(CHAT, USER).get("hostile") == 1
+
+
+def test_an_undirected_insult_is_never_evidence_about_nexus():
+    """A member cursing about their ISP is not cursing at the assistant."""
+    _undirected("کصکش")
+    assert "hostile" not in db.signal_for(CHAT, USER)
+
+
+def test_one_hostile_message_does_not_promote_a_tone():
+    _directed("کصکش")
+    _directed("خارکصه")
+    assert memory.relationship(CHAT, USER) == ""
+    assert _values() == []
+
+
+def test_repeated_hostility_promotes_the_hostile_tone():
+    for _ in range(3):
+        _directed("کصکش")
+    text = memory.relationship(CHAT, USER)
+    assert "hostile" in text
+    assert "may answer their rudeness in kind" in text
+    # The permission is explicitly bounded by the persona's de-escalation rule.
+    assert "moment they are friendly again" in text
+
+
+def test_repeated_kindness_promotes_the_friendly_tone():
+    for _ in range(3):
+        _directed("ممنون از تو")
+    text = memory.relationship(CHAT, USER)
+    assert "friendly" in text
+    assert "Stay warm with them" in text
+
+
+def test_the_relationship_is_never_rendered_as_the_persons_own_words():
+    """It is the server's observation, so ``about``/``render`` must not carry it.
+
+    Otherwise the model would read a count of its own abuse back as something the
+    person asked to be remembered.
+    """
+    for _ in range(3):
+        _directed("کصکش")
+    assert memory.about(CHAT, USER) == []
+    assert memory.render(memory.about(CHAT, USER)) == ""
+
+
+def test_the_relationship_is_scoped_to_the_room_and_the_person():
+    for _ in range(3):
+        _directed("کصکش")
+    assert memory.relationship(OTHER_CHAT, USER) == ""
+    assert memory.relationship(CHAT, OTHER_USER) == ""
+    assert memory.relationship(CHAT, USER) != ""
+
+
+def test_a_stronger_hostile_history_survives_a_few_friendly_messages():
+    """The stored tone is the reading of the evidence, not the last message.
+
+    A de-escalation is handled *immediately* by the persona; the durable tone is
+    deliberately conservative so a brief friendly spell does not erase a real
+    history of abuse.
+    """
+    for _ in range(4):
+        _directed("کصکش")
+    for _ in range(3):
+        _directed("ممنون")
+    assert "hostile" in memory.relationship(CHAT, USER)
+
+
+def test_the_relationship_is_off_with_the_switch(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_RELATIONSHIP_ENABLED", False)
+    for _ in range(3):
+        _directed("کصکش")
+    assert memory.relationship(CHAT, USER) == ""
+
+
+def test_the_relationship_reader_fails_soft(monkeypatch):
+    for _ in range(3):
+        _directed("کصکش")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("db is gone")
+
+    monkeypatch.setattr(db, "memory_for", _boom)
+    assert memory.relationship(CHAT, USER) == ""
+
+
+def test_the_relationship_block_respects_its_budget(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_RELATIONSHIP_CHARS", 80)
+    for _ in range(3):
+        _directed("کصکش")
+    assert 0 < len(memory.relationship(CHAT, USER)) <= 80
+
+
+def test_observe_carries_the_directed_flag_to_the_relationship():
+    """The real entry point, not only the internal helper."""
+    import asyncio
+
+    for _ in range(3):
+        asyncio.run(
+            memory.observe(_User(USER), CHAT, "کصکش", directed=True)
+        )
+    assert "hostile" in memory.relationship(CHAT, USER)

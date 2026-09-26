@@ -1638,10 +1638,18 @@ This is a security and privacy boundary, not a performance optimisation.
   action and speech are the model's exclusively.
 * `awareness.due` **cannot see messages** — its signature is asserted.
 * The window preserves order, carries the sender id and a **server-derived**
-  role, is keyed by `chat_id` alone, and applies **both** a count and a character
-  bound.
-* `NEXUS_AWARENESS_WINDOW_MESSAGES` is **sized against the pass cadence**;
-  lowering it below the interval re-introduces silent loss.
+  role, is keyed by `chat_id` alone, and applies **a time bound, a count bound
+  and a character bound**. The **time** bound (`NEXUS_AWARENESS_WINDOW_SECONDS`,
+  three days) is the one that decides what is in the window; the count
+  (`NEXUS_AWARENESS_WINDOW_MESSAGES`) is a **flood cap**, not the rule.
+* `NEXUS_AWARENESS_RETENTION_SECONDS` must be **at least**
+  `NEXUS_AWARENESS_WINDOW_SECONDS`, or the window would be emptied from behind.
+* The count cap (`NEXUS_AWARENESS_MAX_ROWS`) is a **flood** bound enforced on
+  the purge clock, not per capture: a 60,000-row `NOT IN` delete costs 58 ms
+  (measured) and the age purge is the bound that applies in normal traffic.
+* `awareness.activity` is the **server's count** over the window (who spoke, how
+  much, newest words, who was silent). It makes **no provider call**, is bounded
+  by people and by characters, and never raises.
 * Media is recorded as its **kind**, never as bytes.
 * `calendar` renders **first** and derives only from `Ctx.now`, **Tehran not
   UTC**.
@@ -6588,6 +6596,91 @@ daily `errors` figure counts empty *responses*, not failed *clips*.
 
 **NEXT STEP (exact).** Suite 4121 passed / 0 failed (was 4115). Dashboard **M4 — AI
 control + credentials** remains the next *product* step per §54.27.
+
+---
+
+### 54.33 Checkpoint (2026-09-26, **warmth restored, relationship memory, three-day room scan**) — **resume here** (supersedes §54.32); CODE COMMITTED AND PUSHED, **NOT DEPLOYED**
+
+**CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`c9b8163`** (the overhaul,
+the report, and the empty-draft re-ask). Three owner reports, one instruction:
+
+1. «الان صحبتاش رفتاراش خیلی اگرسیو شده … باید مهربون و دوستانه باشه مثل همون
+   کامیت قبل از این بیست و یک» — the persona had gone permanently sharp.
+2. «فحش … رو به کسی بگه که باهاش کانتکست بد داره» — the rude register must be
+   **kept**, but gated on a real history, not the default.
+3. «به محض اینکه طرف کوتاه میاد … باید همین‌جوری راه بیاد دیگه دنبال پیام قبلیش
+   نره» — de-escalate the instant the other person does.
+4. «برحسب پیام نباشه، برحسب روز باید باشه تا سه روز … باید بدونه دقیقاً کی چی گفته
+   کی چی نگفته» — the room scan must be by time, not by message count.
+
+**Root cause of (1).** Commit `01725c9` (part of §54.31's overhaul) added a persona
+bullet — *"Meet them at their own level, and never flinch from it … match their
+intensity, do not turn the other cheek"* — and the model read it as the **default
+state** rather than the exception. The capability it described was wanted; the
+framing was not.
+
+**What was built.**
+
+* **`app/chat.py` — the persona.** The aggressive bullet is replaced by three:
+  *warm by default* (a normal message gets a normal, kind answer), *rudeness is
+  never your first move* (answering in kind is conditional on a real attack or on
+  the server's relationship line, and never escalates), and *come down the moment
+  they do* (the de-escalation rule the old version was missing). A background
+  bullet tells the model how to read the relationship line. The old wording is
+  asserted **absent** in `tests/test_chat.py` so it cannot be restored by accident.
+* **`app/memory.py` — relationship memory.** Two new deterministic signals
+  (`hostile`, `friendly`) counted **only on messages directed at Nexus**, promoted
+  past `NEXUS_RELATIONSHIP_THRESHOLD` (3) into the slot `relationship.tone`. New
+  reader `memory.relationship(chat_id, user_id)` renders a **server-stated**
+  block («hostile … you may answer their rudeness in kind … the moment they are
+  friendly again, be friendly»). It is **excluded from `about`/`render`**, so a
+  server observation is never shown as something the person said about themselves.
+* **`app/main.py` — wiring.** `_nexus_directed` now runs **before** the memory
+  observation and is passed through (`observe(..., directed=…)`), so only a
+  message aimed at Nexus is evidence about Nexus. `_relationship_context` is
+  prepended beside the owner note; it grants nothing and changes tone only.
+* **Time-based room scan.** `NEXUS_AWARENESS_WINDOW_SECONDS` (3 days) is now the
+  bound that decides what is in the window; `NEXUS_AWARENESS_WINDOW_MESSAGES` is a
+  **flood cap** (400), not the rule. `NEXUS_AWARENESS_RETENTION_SECONDS` is 3 days
+  (it must be ≥ the window or the window is emptied from behind).
+* **`app/awareness.py` — the digest.** `awareness.activity()` is the server's
+  count over the whole window: per person, message count, when they last spoke and
+  their **newest words**, plus **who said nothing**. It is what makes a three-day
+  window usable — three days cannot fit in a prompt, so the part that does not fit
+  is summarised instead of dropped. No provider call. Rendered by
+  `main._awareness_context` on every pass.
+* **Flood cap moved off the hot path.** `db.group_capture(..., trim=…)`: the
+  count trim is now enforced on the purge clock, not per capture — a 60,000-row
+  `NOT IN` delete costs **58 ms** (measured) and removing nothing 610 times an
+  hour is the wrong trade. The age purge (a range delete on an indexed column) is
+  the bound that applies in normal traffic.
+* **Deferral bound decoupled.** `awareness_schedule._bound()` is now
+  `min(retention, NEXUS_AWARENESS_HINT_SECONDS)` (3600): deriving the delay from
+  the window was right while the window was an hour, but a three-day window would
+  have let a routine room be postponed for three days.
+
+**Measurements that chose the numbers** (production copy, 44,000 rows / 3 days /
+8.8 MB): time-bounded read of the newest 400 = **0.9 ms**; full three-day scan =
+277 ms (why the count cap exists); the digest's `GROUP BY` = **18 ms**, once per
+pass; the per-person newest-words lookup = ~0.01 ms each (the window-function
+alternative measured 111 ms, so it is not used); the 60,000-row trim = 58 ms.
+
+**Architecture preserved.** No new authority, no new table, no change to the
+queue, the pool, tenant isolation, or the awareness request allowance. The digest
+is a server count and makes no provider call; the relationship block is data and
+grants nothing; the persona is still the single behavioural source of truth.
+
+**Known limitations.** The relationship tone is conservative — a brief friendly
+spell does not erase a real history of abuse; the *immediate* de-escalation is the
+persona's job, not the memory's. The digest is on the **awareness pass** only, not
+the addressed reply path (whose prompt is ceiling-bounded and already carries the
+transcript and the reading). The insult lexicon is a small auditable list, not a
+moderation classifier, and a match only bumps a counter.
+
+**NEXT STEP (exact).** Suite 4148 passed / 0 failed (was 4121). **Not deployed** —
+the owner's go-ahead is required, and the deploy must take a live end-to-end probe
+(§54.32's pattern). Dashboard **M4 — AI control + credentials** remains the next
+*product* step per §54.27.
 
 ---
 

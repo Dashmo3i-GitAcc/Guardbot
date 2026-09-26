@@ -309,6 +309,13 @@ def about(
     except Exception:  # noqa: BLE001 - a block is never worth a pass
         log.exception("could not read a person's memory")
         return []
+    # The relationship row is a server observation, not something the person
+    # asked to be remembered, so it is never returned here: it is rendered by
+    # ``relationship`` in its own framing. Filtering at the reader is what makes
+    # that a property of the reader rather than of every renderer.
+    rows = [
+        row for row in rows if row.get("category") != CATEGORY_RELATIONSHIP
+    ]
     if topic:
         rows = _rank(rows, topic)
     return rows[:limit]
@@ -393,6 +400,13 @@ CATEGORY_INTEREST = "interest"
 CATEGORY_PREFERENCE = "preference"
 CATEGORY_STYLE = "style"
 CATEGORY_HUMOR = "humor"
+# How this person has treated Nexus. A category of its own because it is not a
+# fact *about* them that they told us — it is the server's own count of their
+# behaviour toward the assistant, and it is rendered by ``relationship`` in a
+# framing of its own rather than through ``render``. Keeping it out of
+# ``about``/``render`` is what stops a server observation from being shown to
+# the model as something the person said about themselves.
+CATEGORY_RELATIONSHIP = "relationship"
 
 SOURCE_AUTO = "auto"
 SOURCE_MODEL = "model"
@@ -417,6 +431,10 @@ SLOTS: dict[str, tuple[str, str]] = {
     "style.teasing": (CATEGORY_STYLE, "teasing"),
     "humor.adult": (CATEGORY_HUMOR, "adult humour"),
     "humor.sarcasm": (CATEGORY_HUMOR, "sarcasm"),
+    # The one slot that is not a fact about the person but a reading of how they
+    # have treated the assistant. Its value is a closed token (``hostile`` or
+    # ``friendly``) so the renderer can state it as the server's observation.
+    "relationship.tone": (CATEGORY_RELATIONSHIP, "how they treat you"),
 }
 
 # The categories that describe **the person** rather than a subject, and so are
@@ -950,6 +968,177 @@ _SIGNAL_RULES: dict[str, tuple[re.Pattern, str, str]] = {
     ),
 }
 
+# How a message *directed at Nexus* treats it. Separate from ``_SIGNAL_RULES``
+# above for two reasons that are both structural:
+#
+#   * These count only on messages aimed at the assistant. A member cursing
+#     about their ISP, or teasing another member, says nothing about how they
+#     treat Nexus — so the caller passes ``directed`` and nothing is counted
+#     otherwise. The addressed path already computes that flag once per message
+#     (``main._nexus_directed``); this reuses it rather than guessing again.
+#   * They promote into ``relationship.tone``, whose two values are the two
+#     directions of the same question. Whichever direction has the stronger
+#     count wins the slot, so the stored tone is the reading of the evidence
+#     rather than whichever rule happened to be evaluated last.
+#
+# The lexicon is deliberately small and generic: profanity and plain insults,
+# with no identity slur in it. It is auditable on sight, it is not a moderation
+# classifier, and a message that matches it still only bumps a counter.
+_RELATIONSHIP_RULES: dict[str, tuple[re.Pattern, str]] = {
+    "hostile": (
+        re.compile(
+            r"(?:ک[صس]کش|ک[صس]خل|خارک[صس]ه|خارک[سص]ده"
+            r"|حر[و]?م[ه]?زاد[ه]?"
+            r"|مادرجنده|مادرقحبه|جنده"
+            r"|کونی|دیوث"
+            r"|گایید|گاییدم|گاییدن|گاییدی"
+            r"|بی[\s\u200c]*ادب|بی[\s\u200c]*شعور"
+            r"|احمق|خنگ|کودن|نفهم|نادان|ابله"
+            r"|آشغال|اشغال|پدرسگ|پدر[\s\u200c]*سگ"
+            r"|خفه[\s\u200c]*شو|دهن[\s\u200c]*بست)"
+            r"|(?:\bf+u+c+k\b|\bshit\b|\bidiot\b|\bstupid\b)",
+            re.IGNORECASE | re.UNICODE,
+        ),
+        "hostile",
+    ),
+    "friendly": (
+        re.compile(
+            r"(?:ممنون|مرسی|مرسیم|ممنونم"
+            r"|دمت[\s\u200c]*گرم|دستت?[\s\u200c]*درد[\s\u200c]*نکنه"
+            r"|دستت[\s\u200c]*طلا|خدا[\s\u200c]*قوت"
+            r"|لطف[\s\u200c]*کردی|لطف[\s\u200c]*داری|لطفت"
+            r"|عالی[\s\u200c]*بود|عالیه|احسنت|آفرین|افرین|ایول"
+            r"|مخلص|مرام[\s\u200c]*داری"
+            r"|مهربون|مهربان|خوبی[\s\u200c]*داری"
+            r"|دوستت[\s\u200c]*دارم|دوسِ?ت[\s\u200c]*دارم)"
+            r"|(?:\bthanks?\b|\bthank you\b|\bthx\b)",
+            re.IGNORECASE | re.UNICODE,
+        ),
+        "friendly",
+    ),
+}
+
+
+def _observe_relationship(
+    chat_id: int, user_id: int, text: str, *, directed: bool
+) -> list[str]:
+    """Count how one *directed* message treats Nexus, and promote the tone.
+
+    Returns the slots it wrote — ``["relationship.tone"]`` at most once. A
+    message that is not aimed at the assistant is not evidence about the
+    assistant and is never counted, which is what keeps "hostile" meaning
+    "hostile *to you*" rather than "used a rude word in this room".
+
+    The direction with the larger count owns the slot. A tie goes to hostile,
+    because the cost of wrongly granting the rude register is one sharp reply
+    from an assistant that the persona still bounds, while the cost of wrongly
+    withholding it is nothing at all.
+    """
+    if not config.NEXUS_RELATIONSHIP_ENABLED or not directed:
+        return []
+    raw = str(text or "")
+    if len(raw.strip()) < 2:
+        return []
+    threshold = max(1, int(config.NEXUS_RELATIONSHIP_THRESHOLD))
+    crossed: dict[str, int] = {}
+    for signal, (pattern, value) in _RELATIONSHIP_RULES.items():
+        if not pattern.search(raw):
+            continue
+        try:
+            count = db.signal_bump(int(chat_id), int(user_id), signal)
+        except Exception:  # noqa: BLE001 - a counter is never worth a handler
+            log.exception("could not count a relationship signal")
+            continue
+        if count >= threshold:
+            crossed[value] = count
+    if not crossed:
+        return []
+    # Hostile wins a tie: see the docstring.
+    value = max(crossed, key=lambda tone: (crossed[tone], tone == "hostile"))
+    try:
+        rows = db.memory_for(int(chat_id), int(user_id), limit=0)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read a person's memory before promoting")
+        return []
+    for row in rows:
+        if str(row.get("key") or "") == "relationship.tone":
+            if str(row.get("value") or "") == value:
+                return []
+            break
+    try:
+        _store(
+            int(chat_id),
+            int(user_id),
+            "relationship.tone",
+            value=value,
+            source=SOURCE_AUTO,
+            confidence=0.6,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("could not promote a relationship tone")
+        return []
+    return ["relationship.tone"]
+
+
+def relationship(chat_id: int, user_id: int) -> str:
+    """How this person has treated Nexus, stated by the server, or ``""``.
+
+    The behavioural half of the persona's rudeness rule. The persona may answer
+    rudeness in kind *only* when there is a real history, and this is where that
+    history is stated — as the server's count, never as the model's guess and
+    never as something the person said about themselves.
+
+    It is deliberately a *statement about behaviour* and not a transcript: the
+    counts are what the server counted, and no message is quoted. It renders
+    nothing when the switch is off, when no tone has been promoted, or on any
+    failure — an absent line is the warm default, which is the safe direction.
+
+    Bounded by ``NEXUS_RELATIONSHIP_CHARS``; never raises.
+    """
+    if not config.NEXUS_RELATIONSHIP_ENABLED:
+        return ""
+    if not chat_id or not user_id:
+        return ""
+    try:
+        rows = db.memory_for(int(chat_id), int(user_id), limit=0)
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not read a person's relationship")
+        return ""
+    tone = ""
+    for row in rows:
+        if str(row.get("key") or "") == "relationship.tone":
+            tone = str(row.get("value") or "").strip()
+            break
+    if tone not in ("hostile", "friendly"):
+        return ""
+    try:
+        counts = db.signal_for(int(chat_id), int(user_id))
+    except Exception:  # noqa: BLE001
+        log.exception("could not read a person's signal counts")
+        counts = {}
+    hostile = int(counts.get("hostile") or 0)
+    friendly = int(counts.get("friendly") or 0)
+    if tone == "hostile":
+        body = (
+            "── How this person has treated you (server-counted) ──\n"
+            "They have been hostile with you before. You may answer their "
+            "rudeness in kind, never harder, and only while it lasts — the "
+            "moment they are friendly again, be friendly. "
+            f"({hostile} hostile against {friendly} friendly directed "
+            "messages.)\n"
+        )
+    else:
+        body = (
+            "── How this person has treated you (server-counted) ──\n"
+            "They have been friendly with you. Stay warm with them. "
+            f"({friendly} friendly against {hostile} hostile directed "
+            "messages.)\n"
+        )
+    cap = int(config.NEXUS_RELATIONSHIP_CHARS)
+    if cap > 0 and len(body) > cap:
+        body = _clip(body, cap)
+    return body
+
 
 def _observe_signals(chat_id: int, user_id: int, text: str) -> list[str]:
     """Count the behavioural signals in one message, promoting past threshold.
@@ -1005,8 +1194,16 @@ def _observe_signals(chat_id: int, user_id: int, text: str) -> list[str]:
     return promoted
 
 
-def _observe_deterministic(chat_id: int, user_id: int, text: str) -> list[str]:
-    """The free half of the automatic path: statements, then signals."""
+def _observe_deterministic(
+    chat_id: int, user_id: int, text: str, *, directed: bool = False
+) -> list[str]:
+    """The free half of the automatic path: statements, then signals.
+
+    ``directed`` is passed straight through to ``_observe_relationship`` and
+    changes nothing else — the stated-fact and style rules are about the person
+    whoever they were addressing, while "how they treat you" is only meaningful
+    on a message aimed at the assistant.
+    """
     stored: list[str] = []
     for candidate in automatic(text):
         try:
@@ -1023,6 +1220,11 @@ def _observe_deterministic(chat_id: int, user_id: int, text: str) -> list[str]:
             continue
         stored.append(candidate["slot"])
     stored.extend(_observe_signals(int(chat_id), int(user_id), text))
+    stored.extend(
+        _observe_relationship(
+            int(chat_id), int(user_id), text, directed=bool(directed)
+        )
+    )
     return stored
 
 
@@ -1098,7 +1300,9 @@ async def _observe_model(
     return stored
 
 
-async def observe(user, chat_id: int, text: str) -> list[str]:
+async def observe(
+    user, chat_id: int, text: str, *, directed: bool = False
+) -> list[str]:
     """Learn what one ordinary message says about its author. Never raises.
 
     The single automatic entry point, and it is deliberately **not awaited on
@@ -1107,6 +1311,12 @@ async def observe(user, chat_id: int, text: str) -> list[str]:
     somebody is waiting for. The explicit clause is handled first, through the
     same ``remember`` the first version exposed, because what a person asked to
     be kept is the strongest signal there is.
+
+    ``directed`` says whether the message was aimed at Nexus, and it is used by
+    exactly one rule — the relationship counter — so "they cursed at you" is
+    never inferred from a message that was aimed at somebody else. The caller
+    already computed it (``main._nexus_directed``); it is passed rather than
+    re-derived so the two can never disagree.
 
     Every stage is wrapped, so the worst case is that a memory is not learned —
     never that the handler fails. It returns the slots it stored, for tests and
@@ -1123,7 +1333,11 @@ async def observe(user, chat_id: int, text: str) -> list[str]:
     except Exception:  # noqa: BLE001 - the explicit path is wrapped too
         log.exception("explicit memory failed")
     try:
-        stored.extend(_observe_deterministic(int(chat_id), user_id, text))
+        stored.extend(
+            _observe_deterministic(
+                int(chat_id), user_id, text, directed=bool(directed)
+            )
+        )
     except Exception:  # noqa: BLE001
         log.exception("deterministic memory extraction failed")
     try:

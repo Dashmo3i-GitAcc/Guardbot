@@ -1023,6 +1023,34 @@ NEXUS_MEMORY_SIGNAL_RETENTION = _int(
     "NEXUS_MEMORY_SIGNAL_RETENTION", 30 * 86400
 )
 
+# ── Relationship: how this person has treated Nexus ───────────────────────
+# The behavioural memory the persona reads. It answers a different question from
+# the rest of this section — not "what do I know about them" but "how have they
+# treated *me*" — and it exists so the ability to answer rudeness in kind is
+# gated on a real history instead of being the state the model starts in.
+#
+# It is counted, not inferred: only messages **directed at Nexus** are observed,
+# a single message never promotes, and the counters decay on the same sweep as
+# every other signal. So one bad evening does not brand a member, and somebody
+# who was hostile a month ago and has been friendly since is not hostile now.
+# The two directions are deliberately separate signals, so the promoted tone is
+# the *more recently demonstrated* one rather than a total: see
+# ``memory.relationship``.
+NEXUS_RELATIONSHIP_ENABLED = _bool("NEXUS_RELATIONSHIP_ENABLED", True)
+
+# How many directed hostile (or friendly) messages before the tone is promoted.
+# Lower than ``NEXUS_MEMORY_SIGNAL_THRESHOLD`` on purpose: a style is a
+# preference and can wait, while being cursed at repeatedly is a fact the next
+# reply should know about. Still a repetition, so a single angry message — which
+# the persona already answers at the strength it was given — changes nothing.
+NEXUS_RELATIONSHIP_THRESHOLD = _int("NEXUS_RELATIONSHIP_THRESHOLD", 3)
+
+# The rendered block's ceiling. Small: it is two or three sentences of the
+# server's own observation, prepended beside the owner note, and it is never a
+# transcript of what was said. Sized so the instruction — which is the part that
+# must never be clipped — is followed by the counts rather than preceded by them.
+NEXUS_RELATIONSHIP_CHARS = _int("NEXUS_RELATIONSHIP_CHARS", 320)
+
 # ── The model seam (OFF by default, and isolated when on) ──────────────────
 # For a sentence that looks like durable self-information but matches no slot,
 # the deterministic layer may ask a model to structure it. That path is OFF
@@ -1186,18 +1214,100 @@ NEXUS_AWARENESS_MIN_INTERVAL_SECONDS = _float(
 # nothing in the currency that is actually rationed: ``NEXUS_AWARENESS_DAILY_LIMIT``
 # counts *requests*, not tokens, so reading more of the same conversation per
 # pass is free, and the prompt stays bounded by the character budget either way.
-NEXUS_AWARENESS_WINDOW_MESSAGES = _int("NEXUS_AWARENESS_WINDOW_MESSAGES", 150)
+#
+# **The window is now measured in time, and the count is only a safety cap.**
+# The owner's requirement: «برحسب پیام نباشه، برحسب روز باید باشه تا سه روز» —
+# the room should be read as "the last three days", not as "the last N messages".
+# ``NEXUS_AWARENESS_WINDOW_SECONDS`` is therefore the bound that decides what is
+# in the window, and the count below is what stops a flood from turning one read
+# into an unbounded scan: the read is capped, the *time* is not.
+#
+# The transcript that reaches the model is still bounded by the character budget
+# beneath this (6000), so widening the time does not widen the prompt — in a busy
+# room the character bound is what actually trims, and in a quiet room the time
+# bound is what keeps the window from reaching back past three days. What the
+# wider time buys in a busy room is the *digest* (see
+# ``NEXUS_AWARENESS_ACTIVITY_*``), which summarises the whole three days for a
+# few hundred characters rather than trying to put them in the prompt.
+NEXUS_AWARENESS_WINDOW_MESSAGES = _int("NEXUS_AWARENESS_WINDOW_MESSAGES", 400)
 NEXUS_AWARENESS_WINDOW_CHARS = _int("NEXUS_AWARENESS_WINDOW_CHARS", 6000)
+
+# How far back the room window reaches. Three days, in seconds. Measured, not
+# guessed: the production room runs at ~610 messages/hour, so three days is
+# ~44,000 rows and ~9 MB in this table, and the time-bounded read of the newest
+# 400 of them is 0.9 ms (the full 44,000-row scan is 277 ms, which is why the
+# count cap above exists). The digest's GROUP BY over the same three days is
+# 18 ms and runs once per pass, not per message.
+NEXUS_AWARENESS_WINDOW_SECONDS = _int(
+    "NEXUS_AWARENESS_WINDOW_SECONDS", 3 * 86400
+)
 
 # How long a captured message is kept. The window is a *recent* view of the
 # room, not a transcript: rows older than this are dropped, which is what stops
 # the table from becoming a permanent record of the group's conversation.
-NEXUS_AWARENESS_RETENTION_SECONDS = _int("NEXUS_AWARENESS_RETENTION_SECONDS", 3600)
+#
+# It has to be at least ``NEXUS_AWARENESS_WINDOW_SECONDS`` or the window it
+# describes would be emptied from behind: the time bound would ask for three
+# days of a table that retention had already cut to one. It is three days for
+# the same reason the window is — that is the horizon the owner asked for.
+NEXUS_AWARENESS_RETENTION_SECONDS = _int(
+    "NEXUS_AWARENESS_RETENTION_SECONDS", 3 * 86400
+)
 
 # A ceiling on the table as well as on the age, because a busy hour can produce
 # more rows than the age bound alone would remove. Applied per chat, oldest
 # first.
-NEXUS_AWARENESS_MAX_ROWS = _int("NEXUS_AWARENESS_MAX_ROWS", 400)
+#
+# It is a **flood** bound, not the ordinary bound: three days at the measured
+# rate is ~44,000 rows, so 60,000 leaves headroom and only a genuine flood
+# reaches it. It is deliberately *not* enforced on every message any more — a
+# 60,000-row trim costs 58 ms (measured) and this is the hottest path in the
+# feature — so it runs on the same clock as the age purge, once per
+# ``NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS``. A flood that arrives inside one
+# such interval is bounded by the next one, and the age purge beside it is the
+# bound that actually applies in normal traffic.
+NEXUS_AWARENESS_MAX_ROWS = _int("NEXUS_AWARENESS_MAX_ROWS", 60000)
+
+# The three-day digest: who was in this room, who spoke and how much, what each
+# of them said last, and who has been silent. This is what makes "the window is
+# three days" mean something the model can actually use — three days of raw
+# messages cannot fit in a prompt, but one line per person can.
+#
+# It is a **server count, not a model reading**: a single indexed GROUP BY over
+# the time window (18 ms measured over 44,000 rows, once per pass) plus one
+# indexed lookup per listed person for their newest words (0.07 ms for eight,
+# measured). No provider is called for it, and it is bounded by rows and by
+# characters so a large room degrades to a shorter digest rather than a longer
+# prompt.
+NEXUS_AWARENESS_ACTIVITY_ENABLED = _bool("NEXUS_AWARENESS_ACTIVITY_ENABLED", True)
+
+# How many people the digest lists, most active first. Bounded because the
+# digest is context, not a membership dump.
+NEXUS_AWARENESS_ACTIVITY_PEOPLE = _int("NEXUS_AWARENESS_ACTIVITY_PEOPLE", 12)
+
+# The digest's whole ceiling, header included.
+NEXUS_AWARENESS_ACTIVITY_CHARS = _int("NEXUS_AWARENESS_ACTIVITY_CHARS", 1200)
+
+# How much of each person's newest message is quoted. One short line is what
+# makes "who said what" concrete without turning the digest into a transcript.
+NEXUS_AWARENESS_ACTIVITY_SNIPPET_CHARS = _int(
+    "NEXUS_AWARENESS_ACTIVITY_SNIPPET_CHARS", 60
+)
+
+# How many silent people are named. "Who did not say anything" is part of the
+# requirement, and it is the one half a transcript cannot show.
+NEXUS_AWARENESS_ACTIVITY_SILENT = _int("NEXUS_AWARENESS_ACTIVITY_SILENT", 8)
+
+# How long a scheduling *hint* may live, and therefore how long a low-priority
+# room may be postponed. It used to be derived from the retention window with no
+# cap — one number, so the two could not drift — and that was right while the
+# retention was an hour. Now that the retention is three days, deriving it
+# unchanged would let a room whose batch is idle chatter be postponed for three
+# days, which is a behaviour change nobody asked for. The bound is therefore the
+# **smaller** of this and the retention: the invariant the derivation protected
+# (a hint never outlives the rows it describes) still holds, and the delay keeps
+# a sane ceiling. See ``app/awareness_schedule._bound``.
+NEXUS_AWARENESS_HINT_SECONDS = _int("NEXUS_AWARENESS_HINT_SECONDS", 3600)
 
 # How often the age-based purge may run. It is the one capture-path statement
 # that is not scoped to a chat, and the retention window it enforces is measured

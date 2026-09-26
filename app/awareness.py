@@ -284,6 +284,17 @@ def capture(
     if not body:
         return False
     now = time.monotonic()
+    # Both table bounds are enforced on one clock, and the *count* bound is
+    # deferred to it. Three days of the production room is ~44,000 rows, so the
+    # ceiling sits at 60,000 and the ``NOT IN`` delete that enforces it costs
+    # 58 ms (measured) — paying that on every message to remove nothing is the
+    # wrong trade now that the age bound, which is a range delete on an indexed
+    # column, is the one that applies in normal traffic. ``every`` of zero means
+    # the operator asked for no periodic sweep, which restores the old
+    # per-message trim and disables the purge, exactly as before.
+    every = max(0.0, float(config.NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS))
+    purge_due = bool(every) and (now - _purged_at) >= every
+    trim_due = (not every) or purge_due
     try:
         db.group_capture(
             chat_id,
@@ -300,6 +311,7 @@ def capture(
             actor=actor,
             kind=kind,
             username=username,
+            trim=trim_due,
         )
     except Exception:  # noqa: BLE001 - a capture is never worth a crash
         log.exception("could not record a room message")
@@ -310,8 +322,7 @@ def capture(
         # a failed capture cannot start a clock for a message that is not there.
         _trigger_at[int(chat_id)] = now
 
-    every = max(0.0, float(config.NEXUS_AWARENESS_PURGE_INTERVAL_SECONDS))
-    if every and (now - _purged_at) >= every:
+    if purge_due:
         _purged_at = now
         try:
             db.group_purge(max(1, int(config.NEXUS_AWARENESS_RETENTION_SECONDS)))
@@ -392,13 +403,188 @@ class PassTrace:
         )
 
 
-def window(chat_id: int, *, limit: int = 0) -> list[dict]:
-    """The bounded recent view of one room, oldest first."""
+def window(chat_id: int, *, limit: int = 0, seconds: int = 0) -> list[dict]:
+    """The recent view of one room, oldest first, bounded by time and by count.
+
+    The bound that decides **what is in the window** is time —
+    ``NEXUS_AWARENESS_WINDOW_SECONDS``, three days — and the count is a safety
+    cap. That is the owner's requirement stated in the config: «برحسب پیام نباشه،
+    برحسب روز باید باشه تا سه روز». The count cap exists because the read has to
+    stay bounded when a room floods: the full three days of the production room
+    is ~44,000 rows and 277 ms to scan, while the newest 400 of them is 0.9 ms
+    (both measured).
+
+    The transcript that reaches the model is still trimmed by the character
+    budget in ``render``, so widening the time does not widen the prompt: in a
+    busy room the character bound is what actually trims, and in a quiet room the
+    time bound is what stops the window reaching back past three days.
+    """
     return db.group_window(
         chat_id,
         limit=max(1, int(limit or config.NEXUS_AWARENESS_WINDOW_MESSAGES)),
-        ttl=max(1, int(config.NEXUS_AWARENESS_RETENTION_SECONDS)),
+        ttl=max(1, int(seconds or config.NEXUS_AWARENESS_WINDOW_SECONDS)),
     )
+
+
+def _ago(at: int, now: int) -> str:
+    """A short "how long ago", for the digest's lines. ``""`` when unknown."""
+    at = int(at or 0)
+    if not at or at > now:
+        return ""
+    seconds = now - at
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def activity(chat_id: int, *, seconds: int = 0) -> str:
+    """The room over the whole window, as a compact server-built digest.
+
+    This is what makes a *time* window usable rather than merely honest. Three
+    days of a busy room cannot be put in a prompt — the transcript is bounded to
+    6000 characters and reads the newest conversation — so the part of the window
+    that does not fit is summarised instead of dropped: who was here, who spoke
+    and how much, what each of them said last, and who has said nothing.
+
+    It answers the owner's requirement exactly: «باید بدونه دقیقاً کی چی گفته کی
+    چی نگفته». «Who said what» is the per-person count and the newest words; «who
+    said nothing» is the silent list, which is the one half a transcript cannot
+    show because a person who never spoke never appears in one.
+
+    Everything in it is the **server's count**, never a model's reading: a single
+    indexed ``GROUP BY`` (18 ms over 44,000 rows, measured) plus one short
+    indexed lookup per listed person for their newest words. It makes no provider
+    call, so it costs nothing in the currency that is actually rationed.
+
+    Bounded by ``NEXUS_AWARENESS_ACTIVITY_PEOPLE``, by
+    ``NEXUS_AWARENESS_ACTIVITY_SILENT`` and by
+    ``NEXUS_AWARENESS_ACTIVITY_CHARS``; it degrades to a shorter digest rather
+    than a longer prompt. Returns ``""`` when the switch is off, when there is
+    nothing to say, or on any failure — a context block is never worth failing a
+    pass over.
+    """
+    if not config.NEXUS_AWARENESS_ACTIVITY_ENABLED:
+        return ""
+    if not chat_id:
+        return ""
+    span = max(1, int(seconds or config.NEXUS_AWARENESS_WINDOW_SECONDS))
+    now = int(time.time())
+    since = now - span
+    cap = int(config.NEXUS_AWARENESS_ACTIVITY_CHARS)
+    if cap <= 0:
+        return ""
+    try:
+        speakers = db.group_activity(
+            int(chat_id),
+            since=since,
+            limit=max(0, int(config.NEXUS_AWARENESS_ACTIVITY_PEOPLE)),
+            snippet_chars=max(0, int(config.NEXUS_AWARENESS_ACTIVITY_SNIPPET_CHARS)),
+        )
+    except Exception:  # noqa: BLE001 - a digest is context, never worth a pass
+        log.exception("could not read the room activity")
+        return ""
+    if not speakers:
+        return ""
+
+    days = max(1, span // 86400)
+    span_label = f"{days} days" if days > 1 else "day"
+    header = (
+        f"\nThis room over the last {span_label}, counted by the server "
+        "(who spoke, how much, and what they said last):\n"
+    )
+    if len(header) >= cap:
+        header = "Room activity:\n"
+    if len(header) >= cap:
+        return ""
+    lines: list[str] = []
+    used = len(header)
+    spoken: set[int] = set()
+    for person in speakers:
+        user_id = int(person.get("user_id") or 0)
+        if not user_id:
+            continue
+        spoken.add(user_id)
+        name = " ".join(str(person.get("name") or "").split()) or "?"
+        username = str(person.get("username") or "").strip()
+        handle = f" (@{username})" if username else ""
+        snippet = " ".join(str(person.get("text") or "").split())
+        when = _ago(person.get("last_at") or 0, now)
+        tail = f" — last {when}" if when else ""
+        words = f': «{snippet}»' if snippet else ""
+        count = int(person.get("count") or 0)
+        plural = "message" if count == 1 else "messages"
+        line = (
+            f"- {name}{handle} (id {user_id}): {count} "
+            f"{plural}{tail}{words}\n"
+        )
+        if used + len(line) > cap:
+            break
+        lines.append(line)
+        used += len(line)
+
+    # Who has said nothing. Read from the room's name memory rather than the
+    # transcript, because a person who did not speak has no row in the window to
+    # be missing from. Bounded to people seen in the last fortnight, so "silent"
+    # means "around lately and quiet", not "left the group a year ago".
+    silent = _silent_people(int(chat_id), spoken, since, now)
+    if silent:
+        line = "- Said nothing over these days: " + ", ".join(silent) + "\n"
+        if used + len(line) <= cap:
+            lines.append(line)
+            used += len(line)
+    if not lines:
+        return ""
+    body = header + "".join(lines)
+    return body[:cap]
+
+
+def _silent_people(
+    chat_id: int, spoken: set[int], since: int, now: int, *, within: int = 14 * 86400
+) -> list[str]:
+    """Names of people around this room lately who said nothing in the window.
+
+    The second half of «کی چی نگفته». A person is *silent* when the room knows
+    them, they have been seen inside the last ``within`` seconds, and they have
+    no message in the window — which is a fact about the room's own name memory,
+    not about anybody's absence. Bounded by
+    ``NEXUS_AWARENESS_ACTIVITY_SILENT`` and never raises: a name that cannot be
+    read is simply not named.
+    """
+    limit = max(0, int(config.NEXUS_AWARENESS_ACTIVITY_SILENT))
+    if limit <= 0:
+        return []
+    try:
+        rows = db.people_rows(int(chat_id), limit=max(limit * 4, limit))
+    except Exception:  # noqa: BLE001 - a name list is never worth a failure
+        log.exception("could not read the room's people for the silent list")
+        return []
+    out: list[str] = []
+    for row in rows:
+        user_id = int(row.get("user_id") or 0)
+        if not user_id or user_id in spoken:
+            continue
+        last_seen = int(row.get("last_seen") or 0)
+        if last_seen >= since:
+            # They did speak inside the window, so they are in the digest above.
+            continue
+        if last_seen < now - int(within):
+            # Not around lately: "silent these three days" would be misleading
+            # about somebody who left the room months ago.
+            continue
+        name = " ".join(
+            f"{row.get('first_name') or ''} {row.get('last_name') or ''}".split()
+        ) or str(row.get("username") or "").strip()
+        if not name:
+            continue
+        out.append(f"{name} (id {user_id})")
+        if len(out) >= limit:
+            break
+    return out
+
 
 
 # ── Rendering the window for the model ────────────────────────────────────
