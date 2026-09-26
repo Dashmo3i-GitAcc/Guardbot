@@ -54,6 +54,7 @@ def fresh_nexus_state():
         memory,
         nexus,
         state,
+        voice_context,
         vpn_service,
         web_search,
     )
@@ -89,6 +90,11 @@ def fresh_nexus_state():
     # informational question silently unsearched, and the failure would read as
     # "search is broken" rather than as a leaked breaker.
     web_search.reset_state()
+    # The Voice Context switch and its turn limiter, for the same reason: a test
+    # that switched the layer off or held its semaphore would leave every later
+    # test's voice note answering on the wrong path, and the failure would read
+    # as "Voice Context is broken" rather than as leaked state.
+    voice_context.reset_state()
     # An armed "send me the key now" prompt is process state with a five-minute
     # life, which is longer than a test run. Left behind, it would make the next
     # test's private message be consumed as a credential.
@@ -142,6 +148,7 @@ def fresh_nexus_state():
     main._nexus_addressed.clear()
     main._bot_rights_cache.clear()
     web_search.reset_state()
+    voice_context.reset_state()
     vpn_service.prune_reset()
     memory.reset_state()
     state.reset_state()

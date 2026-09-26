@@ -624,15 +624,17 @@ def test_awareness_has_its_own_model_timeout_and_breaker_settings():
 
 # ══ THE VOICE PIPELINE: the transcript crosses, the audio does not ════════
 def test_a_transcript_is_what_reaches_the_conversation_never_the_audio():
-    """The audio goes to the speech workload and nowhere else.
+    """The transcript is what the *text conversation* carries; the audio is not.
 
     This is the requirement's "no voice message may enter conversational
-    Gemini", and it holds because of one return: the transcribable branch of
-    ``_prepare_conversation_media`` hands back ``None`` for the parts and the
-    transcript for the text. If it ever handed back the bytes as well, the
-    conversational model would be receiving audio — a second, invisible speech
-    workload running on the conversation's allowance, with the conversation's
-    history.
+    Gemini", restated for Voice Context. The transcribable branch of
+    ``_prepare_conversation_media`` still hands back ``None`` for the parts and
+    the transcript for the text, so the conversational request is built from
+    words and never from an audio part. What changed with Voice Context is that
+    the note's own bytes are *also* returned, so the speech path can hear the
+    person's voice without a second download — and they are returned to that
+    path alone. The assertions below pin the half that must not move: the bytes
+    never become a part of the conversation's request.
     """
     from app import main
 
@@ -640,9 +642,16 @@ def test_a_transcript_is_what_reaches_the_conversation_never_the_audio():
         kind="voice", is_transcribable=True, is_visual=False, duration=3
     )
     seen: list = []
+    audio = b"OGG-BYTES"
+
+    async def _fetch(ctx, fid):
+        return audio
 
     async def _fake_transcribe(candidate, *, download):
         seen.append(candidate)
+        # The real ``transcribe_ref`` downloads before it asks the model; the
+        # stub does the same, so the capture under test is exercised.
+        assert await download("f") == audio
         return transcribe.Transcript(ok=True, text="سلام", model="stub")
 
     class _Media:
@@ -654,8 +663,9 @@ def test_a_transcript_is_what_reaches_the_conversation_never_the_audio():
     try:
         monkeypatch_.setattr(main, "media", _Media)
         monkeypatch_.setattr(main.transcribe, "transcribe_ref", _fake_transcribe)
+        monkeypatch_.setattr(main, "_download_file", _fetch)
 
-        parts, kind, text, want_voice, problem = asyncio.run(
+        parts, kind, text, want_voice, problem, got_audio = asyncio.run(
             main._prepare_conversation_media(
                 SimpleNamespace(), SimpleNamespace(), "/tmp"
             )
@@ -669,6 +679,7 @@ def test_a_transcript_is_what_reaches_the_conversation_never_the_audio():
     assert kind == "voice"
     assert want_voice is True
     assert problem == main.PREPARE_OK
+    assert got_audio == audio, "the bytes are kept for the voice path, not the chat"
 
 
 def test_the_speech_workload_is_never_reached_from_the_classifier():

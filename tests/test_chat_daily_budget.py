@@ -317,11 +317,20 @@ def test_the_other_workloads_have_no_daily_allowance():
     backlog of learning cannot spend the request a person is waiting on an answer
     to. Its allowance is small (``NEXUS_MEMORY_MODEL_DAILY_LIMIT``) because the
     seam is off by default and, when on, is reached by only a small share of
-    messages. The workloads that are neither conversation, awareness, search nor
-    memory — intent, moderation, transcription, tts — still have none, and that
-    is the property this test exists to hold.
+    messages.
+
+    ``voice_context`` is the fifth, and it is the live call's argument at a
+    different scale: it shares the provider capability and, by default, the
+    credential, but a voice note is a short, request-shaped turn sent by ordinary
+    members while a call is one connection held for minutes. One budget would let
+    a busy room of voice notes spend the day a call was waiting on, so this
+    workload gets its own allowance sized for chat
+    (``VOICE_CONTEXT_DAILY_LIMIT``). The workloads that are neither conversation,
+    awareness, search, memory nor voice context — intent, moderation,
+    transcription, tts — still have none, and that is the property this test
+    exists to hold.
     """
-    allowed = {"chat", "awareness", "live_voice", "search", "memory"}
+    allowed = {"chat", "awareness", "live_voice", "search", "memory", "voice_context"}
     for spec in config.GEMINI_POOLS:
         if spec["workload"] in allowed:
             assert spec["daily_budget"] >= 1

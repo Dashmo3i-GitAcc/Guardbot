@@ -2920,6 +2920,71 @@ checkpoint is §54.27). These rules are non-negotiable for every stage:
   Overview may show how many rooms are registered; it must not put a room's
   title, id, or anything from inside a room on the page (§53.6).
 
+### 53.14 Voice Context (`app/voice_context.py`, `app/voice_live/turn.py`)
+
+* It is the **same Nexus**, not a second voice bot. A voice note is understood by
+  the existing pipeline *first* — download, transcription, sender identity, reply
+  edge and target, room/awareness, memory, state, the date, the web finding — and
+  only then is that assembled context handed to the Live API. It is the
+  **identical** `context` text a text turn puts in its system instruction; the
+  module builds none of it and re-decides none of it.
+* **The spoken session has no tools.** A voice note containing an instruction is
+  answered with words. Authority stays in `app/admin_service.py`; a voice turn
+  cannot ask for an action, so the authority model is not weakened — it is
+  absent. `app/voice_context.py` is never imported by `admin_service`/`rbac`.
+* **The instruction is the persona plus the medium.** `voice_context.instruction()`
+  is `chat.SYSTEM_INSTRUCTION + SPOKEN_ADDENDUM`. `SPOKEN_ADDENDUM` changes only
+  what changes when the answer is heard (no Markdown/links/ids, do not narrate
+  the medium, length still follows the request). It is **not** a second persona.
+* **One turn, always closed.** `voice_live.turn.LiveTurn` connects, sends the
+  context block (`turn_complete=False` when audio follows, `True` when the block
+  *is* the message), sends the utterance plus the trailing silence, collects
+  bounded audio, and **closes on every path**. A retry opens a **fresh** session
+  (a transport *factory*, not a transport). A non-retryable failure is not
+  retried. The reply is capped in seconds of speech.
+* **The trailing silence is mandatory.** The provider finds the end of an
+  utterance in the silence that follows it; a turn that sends only the speech
+  gets no answer at all. This is the same finding the call's silence pump exists
+  for (`§53.11`).
+* **Failure is a fallback, never a crash.** No credential, a rejected setup, a
+  dropped socket, a timeout, undecodable input, an unencodable reply, a refused
+  upload — every one returns `Answer(ok=False)` (or `ok=True` with no voice) and
+  the message is answered on the **text path**. `answer()` never raises except
+  `CancelledError`.
+* **A turn that produced an answer is never re-asked.** When the speech cannot be
+  delivered, the turn's own `said` is sent as text. The text model is consulted
+  again only when the spoken turn produced nothing at all — otherwise one voice
+  note would cost two model calls and produce two different answers.
+* **It is its own pool workload** (`voice_context`), with its own allowance,
+  breaker and timeout, even when it shares the call's credential. A busy room of
+  voice notes must not spend the day a call was waiting on, and one bad afternoon
+  must not stop both. `live` is the gate that keeps streaming-only models out of
+  every other workload.
+* **The switch is persisted and owner-only.** `voice_context_control` is a
+  one-row table beside `nexus_state`/`awareness_control`/`search_control`; the
+  ops are held by `nexus.control`, which **no role bundle carries**. `set_running`
+  has no permission check — the one authority is `admin_service.execute`.
+  `configured()` (deploy-time) and `running()` (owner's last word) must **both**
+  agree for `enabled()`. Untouched means on.
+* **Naming the layer is the gate for its vocabulary.** `command_from` reads the
+  layer's own phrases (and widens the shared switch vocabulary) only when
+  `named(text)` is true. That is why «باز»/«بسته» and the bare English
+  «on»/«off» are safe here and deliberately absent from the shared list. The bare
+  word «voice» is **not** a name for this layer — it belongs to the call.
+* **A voice turn is ordered behind the conversation's earlier turns.** It takes
+  the same lock as `chat_queue.reply` via `chat_queue.serialized`, and releases it
+  **before** any fallback to the text path (the lock is not reentrant). The turn
+  limiter (`VOICE_CONTEXT_MAX_CONCURRENCY`) bounds provider connections; it is
+  **not** the text queue's gate and never holds it.
+* **No audio outlives the turn.** The bytes are held in memory only; the work
+  directory is removed by the caller; nothing logs a transcript, an answer or a
+  credential. `Answer.describe()` and `status()` carry sizes and reasons only.
+* A voice note with a **tag directive** (`mention`) keeps the text path: a voice
+  message cannot carry Telegram's mention anchor, so a spoken reply could not
+  notify the person it asked for.
+* A deployment with no Live credential is **inert, not broken**: `available()` is
+  false, the voice path is skipped, and the note takes the old text path.
+
 ## 54. Nexus intelligence evolution — checkpoint (2026-09-24)
 
 A durable checkpoint for continuing the Intent/Awareness evolution. `§53.7` is
@@ -6704,6 +6769,124 @@ guardbot:latest && docker compose up -d --no-build guardbot`. The room window
 will fill to three days over time (it holds the pre-deploy rows now, ~30 minutes
 of span); that is expected, not a fault. Dashboard **M4 — AI control +
 credentials** remains the next *product* step per §54.27.
+
+---
+
+### 54.34 Checkpoint (2026-09-26, **Voice Context — a voice note answered as a spoken turn on the same context**) — **resume here** (supersedes §54.33); CODE COMMITTED AND PUSHED, DEPLOY PENDING
+
+**CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`46314db`** (the warmth
+deploy and its live probe). The owner asked for a complete, production **Voice
+Context** feature, in his own terms, with one governing instruction:
+
+> the same Nexus, not a second voice bot — «از تووکن همون‌قسمت لایو برای این‌کار
+> استفاده کن».
+
+**What was asked, and what was built.**
+
+| Asked | Built |
+|---|---|
+| Voice → context → conversational AI → answer, **normal mode unchanged** | `_prepare_conversation_media` still transcribes and returns the turn's text; the text path is untouched. Voice Context is a *branch* in `_answer_conversationally`, taken only when the layer is on with a credential. |
+| The voice must **not** be sent raw; it is understood first | The note is downloaded, transcribed, its sender resolved, its reply edge and target read, and the room/memory/state/awareness/date/search context composed — the **identical** `context` string a text turn gets — *before* the Live call. `test_the_spoken_turn_gets_the_same_context_a_text_turn_would` asserts the equality directly. |
+| Gemini Live is not a separate chatbot | `voice_context.instruction()` = `chat.SYSTEM_INSTRUCTION + SPOKEN_ADDENDUM`. Same persona, same length policy; the addendum is about the **medium** only. The session is opened with `tools=None`. |
+| AI output is data, never authority | Nothing in the voice path can act: no tools on the session, and `app/voice_context.py` is imported by no authority module. Every action still goes through `admin_service.execute` against the actor's Telegram id. |
+| **Part 2** — real voice output, a direct reply to the incoming note | The spoken answer is encoded to OGG/Opus by the same ffmpeg invocation the TTS path uses (`voice_live.audio.encode_pcm24_to_ogg`, now shared — `chat._pcm_to_ogg` delegates to it) and sent with `_send_voice(..., destination)`, where `destination` defaults to the incoming message id. |
+| **Part 3** — not too brief | The persona's existing "length follows the request" rule is inherited unchanged; `SPOKEN_ADDENDUM` restates it for speech and forbids shortening a real answer because it is spoken. |
+| **Part 4** — a real persistent toggle | `voice_context_control` (one-row table, the `search_control` shape), owner-only ops in `admin_service`/`admin_tools`, and the natural phrases. Off = the exact old path. |
+| Natural commands | «ویس کانتکست باز/روشن» → on, «ویس کانتکست بسته/خاموش» → off, plus the English "voice context on/off". |
+| Memory / awareness are part of it | Both are the **existing** blocks, already in the composed context; nothing parallel was built. `test_a_voice_note_is_understood_before_it_is_spoken` proves a memory and a room message both reach the spoken turn. |
+| Queue / concurrency | `chat_queue.serialized` exposes the conversation lock so a voice turn is ordered behind the conversation's earlier turns; `VOICE_CONTEXT_MAX_CONCURRENCY` bounds provider connections in a limiter of its own. The text queue is never held. |
+| Failure handling | Every failure returns an `Answer`; the caller answers in text. A turn that produced an answer sends its own `said` rather than re-asking the model. |
+| Testing | `tests/test_voice_context.py` (new, 53): switch, persistence, RBAC, the commands, the turn (retry, cap, undecodable clip, no credential, nothing-to-send, closed-on-error, limiter), the path through the conversation (same context, off→old path, all four fallbacks, tag directive, duplicate delivery), execution authority, status/diagnostics, input bounds, the instruction, the end-to-end turn, memory isolation and two rooms. |
+
+**The four root decisions, and why.**
+
+1. **The context is composed by `main.py`, not by this module.** The tempting
+   design is to open a live session and let the model talk. It is refused: a bare
+   live session knows nothing about who is speaking, what they replied to, what
+   the room is doing or what it remembers, and supplying those *by asking the
+   model* would make identity and memory model output. The server composes them
+   exactly as it does for a text turn, and the Live session is only a consumer.
+2. **A turn, not a call.** `voice_live.turn.LiveTurn` connects, sends the context
+   block, sends the utterance plus the trailing silence, reads bounded audio and
+   **closes on every path**. It is built on the *same transport* the call uses
+   (`GeminiLiveTransport`) and shares nothing else with `session.py` — no
+   Telegram channel, no speaker map, no playback queue, no barge-in, no reconnect.
+   Bolting a one-shot mode onto `VoiceSession` would have given every field above
+   a second meaning.
+3. **The trailing silence is mandatory.** The provider finds the end of an
+   utterance in the silence that *follows* it. This is the same finding the
+   call's silence pump exists for, and it is why a turn that sends only the
+   speech gets no answer at all.
+4. **Its own pool workload.** Same provider capability, same credential by
+   default, but its own allowance and breaker: a call is rationed by how many a
+   day an account may open and a voice note by how many it may answer, and one
+   budget would let a busy room spend the day a call was waiting on.
+
+**Two seams that were widened, deliberately.**
+
+* `GeminiLiveTransport.send_context(text, *, turn_complete=False)`. The default
+  is what the call's refresh wants — leave the turn open so the speech that
+  follows completes it. `True` is for a turn that carries **no speech at all**
+  (a text-only Voice Context turn, `VOICE_CONTEXT_SEND_AUDIO=false`), where the
+  block itself is the message and nothing else would close it. The call's own
+  call site is unchanged.
+* `chat._pcm_to_ogg` now delegates to `voice_live.audio.encode_pcm24_to_ogg`, so
+  the bitrate and the container are decided in one place instead of two that
+  would drift.
+
+**What was found and fixed while testing** (each a real defect, not a test
+adjustment):
+
+* **A failed upload re-asked the text model.** The first wiring fell through to
+  `chat_queue.reply` when Telegram refused the voice, spending a second model
+  call to answer a message that already had an answer — and producing a
+  *different* answer. Fixed: a turn that produced an answer delivers its own
+  words as text; only a turn that produced **nothing** falls through.
+* **`command_from` trusted its caller to have checked the name.** The layer's own
+  phrases («باز»/«بسته») and the bare English «on»/«off» are only unambiguous
+  *because* the layer is named. The check is now inside `voice_context.command_from`
+  rather than left to `_owner_state_command`, so the function cannot move this
+  switch on a sentence that does not name it.
+* **The tool-declaration ceiling.** Adding the fourth switch pair
+  (`voice_context_offline`/`voice_context_online`, +2162 chars) took the owner's
+  declaration set from 61500 to 63662, past the 62000 ceiling that had only 500
+  chars of headroom. Raised to **66000** with the measurement and the reason
+  recorded in `tests/test_awareness_latency.py`, following the three earlier
+  raises.
+
+**Architecture preserved.** No new authority (the ops are held by `nexus.control`,
+which no role bundle carries), no change to `chat.py`'s persona, the queue's
+policy, tenant isolation, the awareness allowance, or any existing switch. The
+voice path adds one branch to one function and one lock scope; the text path is
+byte-for-byte what it was when the layer is off.
+
+**Known limitations (honest).**
+
+* The reply is capped in **seconds of speech** (`VOICE_CONTEXT_MAX_REPLY_SECONDS`,
+  120) with a one-second floor in `LiveTurn`; a cap below one second is not
+  configurable. The cap truncates and reports `capped`; the transcript is still
+  sent as text if the audio cannot be delivered.
+* The provider's own speech recognition mishears Persian names — measured,
+  «نکسوس» came back as «نیکسوس» — which is exactly why the server's transcript is
+  sent as a grounding block beside the audio rather than trusting the audio alone.
+* `VOICE_CONTEXT_SEND_AUDIO=true` is the default and the feature; the text-only
+  variant exists as a config escape hatch and is covered by tests, but it is not
+  what the live probe exercises.
+* A voice note cannot carry Telegram's mention anchor, so a **tag directive**
+  keeps the text path. A spoken reply could not notify the person it asked for.
+* The layer shares the Live credential by default; the isolation is the workload
+  (allowance + breaker), not the key.
+
+**NEXT STEP (exact).** Suite **4201 passed / 0 failed** (was 4198 before the
+three new end-to-end tests; 4148 at §54.33's raise). pyflakes clean on every
+touched file. Commit and push to both remotes, then build from **`git archive
+HEAD`** — not the working tree, because a concurrent session's uncommitted
+`app/voice_live/{session,telegram_voice}.py` diagnostics must not be deployed
+(the same precaution §54.33 took) — tag the rollback image, recreate only the
+`guardbot` service, and run a self-cleaning live probe proving a voice note gets
+a spoken reply built on the real context. Then record the image and the probe
+evidence here and in `وضعیت.txt`. Dashboard **M4 — AI control + credentials**
+remains the next *product* step per §54.27.
 
 ---
 

@@ -542,6 +542,29 @@ def init() -> None:
             changed_by INTEGER NOT NULL DEFAULT 0,
             reason TEXT NOT NULL DEFAULT '')"""
     )
+    # Whether Voice Context is running: whether a voice message is answered as
+    # a spoken turn built on the assistant's own context, or takes the ordinary
+    # text path.
+    #
+    # A fourth switch beside ``nexus_state``, ``awareness_control`` and
+    # ``search_control``, and its own row for exactly the reason those three are
+    # separate from each other: "the assistant is silent", "the assistant is
+    # answering without reading the room", "the assistant may not look anything
+    # up" and "the assistant answers voice with voice" are four different facts
+    # with four different consequences. Sharing a row would let one switch's
+    # default decide another's.
+    #
+    # Persisted so a container restart cannot silently turn it back on, and so
+    # the owner's decision survives the redeploy that would otherwise be the
+    # moment it was forgotten — which is the same argument the three above carry.
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS voice_context_control (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            changed_at INTEGER NOT NULL DEFAULT 0,
+            changed_by INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '')"""
+    )
     # Who has spoken in a monitored group, so a name can be resolved to the
     # Telegram user id that actually identifies somebody.
     #
@@ -2619,6 +2642,72 @@ def search_control_reset() -> None:
     """Forget the switch row, so the configured default applies again."""
     with _lock:
         _conn.execute("DELETE FROM search_control")
+        _conn.commit()
+
+
+def voice_context_control_get() -> dict | None:
+    """The stored Voice Context switch, or None when it has never been set.
+
+    ``None`` means "nobody has ever touched this switch" — the normal state of a
+    fresh install, and deliberately not the same fact as "off". The caller
+    supplies the default, exactly as the three switches beside it do, so that a
+    deployment which has never used the switch keeps the behaviour its
+    configuration asked for.
+    """
+    with _lock:
+        row = _conn.execute(
+            "SELECT enabled, changed_at, changed_by, reason "
+            "FROM voice_context_control WHERE id=1"
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "enabled": bool(row[0]),
+        "changed_at": int(row[1] or 0),
+        "changed_by": int(row[2] or 0),
+        "reason": str(row[3] or ""),
+    }
+
+
+def voice_context_control_set(
+    enabled: bool, *, actor_id: int = 0, reason: str = ""
+) -> dict:
+    """Write the one switch row and return it. Last write wins, by design.
+
+    The switch is a single fact about the deployment, not an append-only
+    record, so an update is correct here where it would be wrong for the audit
+    table: the audit trail keeps the history of who toggled it, and this keeps
+    the current answer.
+    """
+    row = {
+        "enabled": bool(enabled),
+        "changed_at": int(time.time()),
+        "changed_by": int(actor_id or 0),
+        "reason": str(reason or "")[:200],
+    }
+    _exec(
+        """INSERT INTO voice_context_control
+               (id, enabled, changed_at, changed_by, reason)
+           VALUES (1,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+               enabled=excluded.enabled,
+               changed_at=excluded.changed_at,
+               changed_by=excluded.changed_by,
+               reason=excluded.reason""",
+        (
+            int(row["enabled"]),
+            row["changed_at"],
+            row["changed_by"],
+            row["reason"],
+        ),
+    )
+    return row
+
+
+def voice_context_control_reset() -> None:
+    """Forget the switch row, so the configured default applies again."""
+    with _lock:
+        _conn.execute("DELETE FROM voice_context_control")
         _conn.commit()
 
 

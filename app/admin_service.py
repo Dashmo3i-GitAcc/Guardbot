@@ -292,6 +292,33 @@ OPERATIONS: dict[str, Operation] = {
         requires_nexus_online=False,
         needs_confirmation=True,
     ),
+    # ── The Voice Context switch ──────────────────────────────────────────
+    # A fourth switch beside the three above, and separate for the same reason
+    # they are separate from each other: "a voice note is answered in text" is
+    # its own fact with its own cause — it changes neither whether the assistant
+    # answers nor whether it reads the room nor whether it looks anything up —
+    # and one audit action covering it and the others would leave an operator
+    # unable to tell which had happened. Held by ``nexus.control``, which no role
+    # bundle carries, so "an administrator switches Voice Context" is not
+    # refused — it is inexpressible.
+    "voice_context_offline": _op(
+        "voice_context_offline",
+        "nexus.control",
+        None,
+        "voice_context.offline",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+        needs_confirmation=True,
+    ),
+    "voice_context_online": _op(
+        "voice_context_online",
+        "nexus.control",
+        None,
+        "voice_context.online",
+        kind=OP_SYSTEM,
+        requires_nexus_online=False,
+        needs_confirmation=True,
+    ),
     # ── The room allowlist ────────────────────────────────────────────────
     # Registering or revoking the room a command was typed in. The subject is
     # the *current* room — ``request.chat_id`` — and there is no parameter for a
@@ -1389,6 +1416,22 @@ async def _apply(
         from . import web_search
 
         web_search.set_running(True, actor_id=request.actor_id, reason=request.interface)
+    elif request.operation == "voice_context_offline":
+        # Imported here for the same reason the awareness and search branches
+        # above are: ``app/voice_context.py`` is a peer, and a module-scope
+        # import would make "authorise a ban" depend on the voice workload being
+        # importable.
+        from . import voice_context
+
+        voice_context.set_running(
+            False, actor_id=request.actor_id, reason=request.interface
+        )
+    elif request.operation == "voice_context_online":
+        from . import voice_context
+
+        voice_context.set_running(
+            True, actor_id=request.actor_id, reason=request.interface
+        )
     elif request.operation == "register_group":
         # Imported here rather than at module scope, for the same reason the
         # awareness/search branches above are: ``app/groups.py`` is a peer, and a

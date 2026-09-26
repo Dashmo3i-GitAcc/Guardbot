@@ -36,6 +36,7 @@ decides *when* a turn is allowed to reach it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 import time
@@ -113,7 +114,7 @@ async def reply(chat_id: int, user_id: int, text: str, **kwargs) -> chat.ChatRep
     (``CancelledError``, which is re-raised untouched so a shutdown is not
     swallowed), and it makes no policy decision of its own.
     """
-    async with _lock_for(chat_id, user_id):
+    async with serialized(chat_id, user_id):
         deadline = time.monotonic() + max(
             0.0, float(config.GEMINI_CHAT_QUEUE_MAX_WAIT)
         )
@@ -147,4 +148,25 @@ async def reply(chat_id: int, user_id: int, text: str, **kwargs) -> chat.ChatRep
             delay = min(max(delay, 0.25) * 2.0, 8.0)
 
 
-__all__ = ["reply", "reset_state", "stats"]
+@contextlib.asynccontextmanager
+async def serialized(chat_id: int, user_id: int):
+    """Hold one conversation's order without making a model call.
+
+    The same lock ``reply`` takes, exposed so that a turn which does *not* go
+    through ``chat.reply`` — Voice Context's spoken turn — is ordered behind the
+    conversation's earlier turns exactly as a text turn is. Without it two voice
+    notes sent together would both read the same history and answer each other's
+    context, which is the interleave this module exists to prevent; with it, a
+    voice note and a typed message from one person queue behind each other
+    whichever order they arrive in.
+
+    The lock is *not* reentrant, and that is the reason this is a context
+    manager rather than something ``reply`` could nest inside: a caller must
+    release it before it reaches ``chat.reply``, so a fallback from the spoken
+    path to the text one happens after this block and not inside it.
+    """
+    async with _lock_for(chat_id, user_id):
+        yield
+
+
+__all__ = ["reply", "reset_state", "serialized", "stats"]

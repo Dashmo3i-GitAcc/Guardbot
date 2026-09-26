@@ -2073,6 +2073,7 @@ NEXUS_STATUS_TEXT = os.getenv(
     "پاسخ‌دهی به: {answer_scope}\n"
     "درک گفتگوی گروه: {awareness}\n"
     "سرچ وب: {search}\n"
+    "کانتکست صوتی: {voice_context}\n"
     "{mode}",
 )
 NEXUS_STATE_ONLINE_LABEL = os.getenv("NEXUS_STATE_ONLINE_LABEL", "روشن (ONLINE)")
@@ -2887,6 +2888,205 @@ GEMINI_LIVE_SESSION_PATH = os.getenv(
 )
 
 
+# ── Voice Context ─────────────────────────────────────────────────────────
+#
+# A Telegram **voice message** answered by Nexus as a spoken turn, with the
+# same context a text message gets. It is not the live call above, and the
+# difference is the whole design:
+#
+#   * the call joins a voice channel and holds a socket open for minutes;
+#     Voice Context is one turn — one voice note in, one voice note out;
+#   * the call hands the model a microphone; Voice Context hands it the
+#     server's own assembled context — identity, reply and target, memory,
+#     awareness, conversation state, the date — exactly the blocks the text
+#     path composes, and *then* the audio.
+#
+# The two share one thing deliberately: the provider's Live API, reached
+# through the same transport. What they do not share is an allowance, a
+# breaker, a timeout or a failure domain, which is why this is a workload of
+# its own rather than a corner of ``live_voice`` — a busy afternoon of voice
+# notes must not exhaust the allowance a call is waiting on, and the other way
+# round.
+#
+# The flag defaults **on**, like the search workload's and unlike the call's.
+# The reason is the same in both directions: nothing here joins a channel or
+# holds a resource open, and the credential is what makes the default safe. A
+# deployment with no live credential has no ``voice_context`` account, the
+# feature reports itself inert, and a voice message takes exactly the path it
+# took before this existed — transcribed and answered in text.
+VOICE_CONTEXT_ENABLED = _bool("VOICE_CONTEXT_ENABLED", True)
+
+# Its own credential when one is set, and the live call's otherwise — because
+# it is literally the same provider capability, and an operator who has already
+# provisioned a Live key should not have to provision a second one to try
+# this. The isolation that matters is not the key here but the *workload*: the
+# two draw on separate daily allowances and separate breakers even when they
+# point at one credential, which is what stops one spending the other's day.
+VOICE_CONTEXT_API_KEY = (
+    os.getenv("VOICE_CONTEXT_API_KEY", "").strip() or GEMINI_LIVE_API_KEY
+)
+VOICE_CONTEXT_ALLOW_SHARED_KEY = _bool("VOICE_CONTEXT_ALLOW_SHARED_KEY", False)
+
+# The model and the voice. The same measured preference order as the call —
+# see the block above for the numbers — and a separate setting because a
+# deployment may want the cheaper model for a one-shot turn and the faster one
+# for a live conversation, or the other way round.
+VOICE_CONTEXT_MODEL = os.getenv("VOICE_CONTEXT_MODEL", GEMINI_LIVE_MODEL).strip()
+VOICE_CONTEXT_FALLBACK_MODELS = _str_list(
+    os.getenv(
+        "VOICE_CONTEXT_FALLBACK_MODELS", ",".join(GEMINI_LIVE_FALLBACK_MODELS)
+    )
+)
+# Persian, first-class, and its own setting for the same reason the model is.
+VOICE_CONTEXT_LANGUAGE = os.getenv(
+    "VOICE_CONTEXT_LANGUAGE", GEMINI_LIVE_LANGUAGE
+).strip()
+VOICE_CONTEXT_VOICE = os.getenv("VOICE_CONTEXT_VOICE", GEMINI_LIVE_VOICE).strip()
+
+# ── Ceilings ──────────────────────────────────────────────────────────────
+# How many voice notes one credential will answer in an API day. Per account,
+# and its own number: this is the busiest of the two Live workloads by a wide
+# margin — a voice note is a normal thing to send and a call is not — so it
+# needs a budget sized for chat rather than for calls.
+VOICE_CONTEXT_DAILY_LIMIT = _int("VOICE_CONTEXT_DAILY_LIMIT", 300)
+
+# How many voice turns may be in flight at once. Two is the honest default for
+# a single-group deployment: it lets a second person be served while the first
+# is being answered, and it bounds the provider connections and the memory one
+# busy moment can hold. The text queue's own gate is separate and untouched —
+# a voice turn never waits on it and never holds it.
+VOICE_CONTEXT_MAX_CONCURRENCY = _int("VOICE_CONTEXT_MAX_CONCURRENCY", 2)
+
+# How long the provider is given to accept the connection. The same shape as
+# the call's connect timeout, and separate so the two can move independently.
+VOICE_CONTEXT_CONNECT_TIMEOUT_SECONDS = _float(
+    "VOICE_CONTEXT_CONNECT_TIMEOUT_SECONDS", 30.0
+)
+
+# How long one whole turn may take, from connect to the last audio byte. This
+# is the number that stops a wedged provider from holding a voice turn open
+# for ever — the failure the call's ``MAX_SECONDS`` bounds for a session, at
+# the scale of one turn. Generous, because a genuine "explain it fully" answer
+# is a long piece of speech; it is a net, not the expected duration.
+VOICE_CONTEXT_TURN_TIMEOUT_SECONDS = _float(
+    "VOICE_CONTEXT_TURN_TIMEOUT_SECONDS", 90.0
+)
+
+# The reply's own ceiling, in seconds of speech. A model that decides to
+# lecture is cut off here rather than sent as a five-minute voice note. High
+# enough that a real full answer never meets it, low enough that a runaway
+# generation cannot become a file nobody will listen to.
+VOICE_CONTEXT_MAX_REPLY_SECONDS = _float(
+    "VOICE_CONTEXT_MAX_REPLY_SECONDS", 120.0
+)
+
+# ── The input ─────────────────────────────────────────────────────────────
+# What will be accepted as a voice note. The same bounds as the transcription
+# workload's and deliberately its own numbers: this path spends two provider
+# calls per message rather than one, so the point at which it stops being worth
+# answering is its own decision. A clip outside the bounds is not refused with
+# a sentence — it simply takes the ordinary text path.
+VOICE_CONTEXT_MAX_SECONDS = _float("VOICE_CONTEXT_MAX_SECONDS", 300.0)
+VOICE_CONTEXT_MAX_MB = _float("VOICE_CONTEXT_MAX_MB", 18.0)
+
+# Whether the model is given the audio as well as the server's transcript of
+# it. On by default, because that is the feature: the transcript grounds the
+# words and the audio carries how they were said. Off is the cheap path — one
+# text turn against the same context — and it exists so a deployment that finds
+# the audio unnecessary can say so without a code change.
+VOICE_CONTEXT_SEND_AUDIO = _bool("VOICE_CONTEXT_SEND_AUDIO", True)
+
+# How much silence is pushed after the utterance to let the provider's own
+# voice-activity detector find the end of it. This is not a courtesy: the
+# detector looks for the end of speech in the silence that follows it, and a
+# caller that sends only the utterance gets no answer at all — measured, and
+# the reason the call's silence pump exists. 1200 ms is comfortably past the
+# detector's own threshold without adding a noticeable wait.
+VOICE_CONTEXT_SILENCE_MS = _int("VOICE_CONTEXT_SILENCE_MS", 1200)
+
+# ── Retry ─────────────────────────────────────────────────────────────────
+# A one-shot turn is retried as a whole, and the audio is cheap to re-send —
+# measured at far faster than real time, so a retry costs a connection and not
+# a minute. Two attempts: enough to ride out the provider's ordinary weather,
+# few enough that a rejected configuration does not loop (a non-retryable
+# failure is not retried at all, which is decided by the transport's own
+# taxonomy).
+VOICE_CONTEXT_MAX_ATTEMPTS = _int("VOICE_CONTEXT_MAX_ATTEMPTS", 2)
+VOICE_CONTEXT_RETRY_BACKOFF_SECONDS = _float(
+    "VOICE_CONTEXT_RETRY_BACKOFF_SECONDS", 0.8
+)
+
+# ── The deterministic commands ────────────────────────────────────────────
+# Switching Voice Context is a *command*, not a request to a model: like the
+# other switches it has to work with no model, no network and no allowance, and
+# it is owner-only. So it is matched as a phrase, before any conversational
+# path is reached.
+#
+# How the layer is named, for the same purpose ``NEXUS_AWARENESS_NAMES`` serves
+# for awareness: so a phrase about Voice Context is recognised as being about
+# this layer and not about the assistant's own switch. Deliberately *not* the
+# bare word «voice» — that is in ``GEMINI_LIVE_NAMES`` and belongs to the call,
+# and a name that two layers answer to is a name that moves the wrong switch.
+VOICE_CONTEXT_NAMES = _str_list(
+    os.getenv(
+        "VOICE_CONTEXT_NAMES",
+        "voice context,voice-context,voicecontext,ویس کانتکست,ویس‌کانتکست,"
+        "کانتکست صوتی,ویس هوشمند",
+    )
+)
+
+# The two directions, as extra vocabulary. The shared switch words — «روشن»,
+# «خاموش», «فعال شو» — already move this switch through ``nexus.command_from``
+# because the layer is named; these are the words that are only unambiguous
+# *because* the layer is named, and «باز»/«بسته» are the two the owner actually
+# says. They are not added to the shared list: «باز» is one of the commonest
+# words in Persian, and a shared vocabulary that read it as "turn on" would
+# make «نکسوس باز خراب شد» a command.
+#
+# The bare English «on»/«off» are here for the same reason and carry the same
+# condition: the shared list deliberately leaves them out because they are
+# ambiguous alone (that is why it has «turn on» and «turn off»), but «voice
+# context off» names the layer and so the direction is not in doubt. The name is
+# checked inside ``voice_context.command_from``, not left to the caller, so this
+# vocabulary can never be read on a sentence that does not name the layer.
+VOICE_CONTEXT_ON_PHRASES = _str_list(
+    os.getenv("VOICE_CONTEXT_ON_PHRASES", "باز,باز کن,بازش کن,بازش,on")
+)
+VOICE_CONTEXT_OFF_PHRASES = _str_list(
+    os.getenv("VOICE_CONTEXT_OFF_PHRASES", "بسته,بسته کن,ببند,بستن,off")
+)
+
+# ── What the owner is told ────────────────────────────────────────────────
+VOICE_CONTEXT_ON_LABEL = os.getenv("VOICE_CONTEXT_ON_LABEL", "فعال")
+VOICE_CONTEXT_OFF_LABEL = os.getenv("VOICE_CONTEXT_OFF_LABEL", "غیرفعال")
+# Separate sentences for the two directions, and neither says Nexus is off: an
+# owner who read a bare «خاموش شد» after switching Voice Context off would
+# reasonably conclude the assistant had stopped answering. The wording names
+# the layer and says what still works.
+VOICE_CONTEXT_ON_DONE_TEXT = os.getenv(
+    "VOICE_CONTEXT_ON_DONE_TEXT",
+    "🎙 کانتکست صوتی روشن شد. از این به بعد ویس‌ها رو با کل کانتکست "
+    "(حافظه، آگاهی، گفتگو) جواب می‌دم و جواب هم صوتیه.",
+)
+VOICE_CONTEXT_OFF_DONE_TEXT = os.getenv(
+    "VOICE_CONTEXT_OFF_DONE_TEXT",
+    "🎙 کانتکست صوتی خاموش شد. از این به بعد ویس‌ها مثل قبل متن می‌شن و "
+    "جواب متنی می‌گیرن. چت و آگاهی دست‌نخورده‌اند.",
+)
+VOICE_CONTEXT_ALREADY_TEXT = os.getenv(
+    "VOICE_CONTEXT_ALREADY_TEXT", "کانتکست صوتی از قبل {state} بود."
+)
+# Said when the owner asks for the layer back and the *deployment* has it off.
+# The spoken switch and the deploy-time setting are two halves of one answer,
+# and «کانتکست صوتی روشن» can only move one of them — the row is stored, the
+# workload still does not run, and the fix is a restart only the operator can do.
+VOICE_CONTEXT_CONFIG_OFF_TEXT = os.getenv(
+    "VOICE_CONTEXT_CONFIG_OFF_TEXT",
+    "⚠️ کانتکست صوتی توی تنظیمات این ربات خاموش شده، پس با پیام روشن نمی‌شه. "
+    "برای روشن کردنش باید VOICE_CONTEXT_ENABLED=true باشه و ربات ری‌استارت بشه.",
+)
+
+
 # ── Web Search ────────────────────────────────────────────────────────────
 #
 # A workload that answers a question from the live web, using the provider's own
@@ -3199,6 +3399,42 @@ GEMINI_POOLS = [
         # credential will start in an API day; how long each may last is bounded
         # by ``GEMINI_LIVE_MAX_SECONDS``.
         "daily_budget": max(1, GEMINI_LIVE_DAILY_LIMIT),
+    },
+    {
+        # Voice Context: a Telegram voice message answered as a spoken turn.
+        #
+        # Its own workload beside ``live_voice`` even though the two share a
+        # credential by default, because the *shape* of what they spend is
+        # different in every dimension that matters. A call is one connection
+        # held for minutes and is rationed by how many a day an account may
+        # open; a voice note is a short request-shaped turn, sent by ordinary
+        # members, and is rationed by how many an account may answer. Sharing
+        # one budget would let a busy room of voice notes spend the day a call
+        # was waiting on — and, with one breaker, one bad afternoon would stop
+        # both. The credential may be shared; the accounting is not.
+        "workload": "voice_context",
+        "keys": _pool_key_list(
+            VOICE_CONTEXT_API_KEY,
+            "VOICE_CONTEXT_API_KEY",
+            SHARED_POOL_KEYS,
+            VOICE_CONTEXT_ALLOW_SHARED_KEY,
+        ),
+        "models": _models(
+            VOICE_CONTEXT_MODEL, VOICE_CONTEXT_FALLBACK_MODELS
+        ),
+        # The same three as the call, and for the same reason: ``live`` is the
+        # gate that keeps these streaming-only models out of every other
+        # workload, and ``audio_out`` is what keeps a listen-only live model
+        # from being selected to answer.
+        "capabilities": frozenset({"audio_in", "audio_out", "live"}),
+        "allow_experimental": True,
+        # Retried by the turn itself, which knows whether the failure was
+        # retryable and re-sends the audio as a whole — there is no partial
+        # answer for the pool to fail over from.
+        "retries": 0,
+        "backoff": 0.0,
+        "timeout": _deadline(VOICE_CONTEXT_CONNECT_TIMEOUT_SECONDS),
+        "daily_budget": max(1, VOICE_CONTEXT_DAILY_LIMIT),
     },
     {
         # The live web, as its own workload. Its own credential, model

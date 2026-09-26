@@ -1592,8 +1592,8 @@ def test_the_acquisition_and_assistant_filters_still_overlap():
 
 
 def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones():
-    """The original five are intact; awareness, live_voice and search are
-    deliberate additions, each with its own reason.
+    """The original five are intact; awareness, live_voice, search, memory and
+    voice_context are deliberate additions, each with its own reason.
 
     This test used to assert that Nexus added *no* sixth workload, and that was
     the right invariant while the assistant only ever answered one message at a
@@ -1610,9 +1610,14 @@ def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones()
     extraction changes it a fourth time, and the reason is the same shape again:
     learning about a person runs on a background task and must never spend,
     delay or exhaust the allowance the person's own reply is waiting on, so it
-    gets its own workload rather than a corner of chat's. So there are four
-    additions — and the five that were there before are still there, unrenamed
-    and unmerged, which is the half of this that must never change.
+    gets its own workload rather than a corner of chat's. Voice Context changes
+    it a fifth time, and it is the live call's argument at a different scale: it
+    shares the provider capability and, by default, the credential, but a voice
+    note is a short request-shaped turn sent by ordinary members while a call is
+    one connection held for minutes — one budget would let a busy room of voice
+    notes spend the day a call was waiting on. So there are five additions — and
+    the five that were there before are still there, unrenamed and unmerged,
+    which is the half of this that must never change.
     """
     from app import gemini_pool
 
@@ -1635,6 +1640,7 @@ def test_the_gemini_pool_keeps_its_original_workloads_and_adds_only_named_ones()
         "live_voice",
         "search",
         "memory",
+        "voice_context",
     }
 
 

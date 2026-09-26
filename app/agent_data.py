@@ -35,7 +35,7 @@ import logging
 import re
 import time
 
-from . import awareness, config, db, nexus, rbac, web_search
+from . import awareness, config, db, nexus, rbac, voice_context, web_search
 
 log = logging.getLogger("guardbot.agent.data")
 
@@ -389,6 +389,11 @@ def nexus_diagnostics(chat_id: int = 0) -> dict:
         # diagnostic cannot keep saying "search is on" after the owner switched
         # it off with a message.
         "search_enabled": web_search.enabled(),
+        # The same rule again: the effective state, so a diagnostic cannot keep
+        # saying "voice notes are answered in speech" after the owner switched
+        # the layer off — which is exactly the question "why was my voice note
+        # answered in text?" the diagnostic exists to answer.
+        "voice_context_enabled": voice_context.enabled(),
         "observe_admins": bool(getattr(config, "NEXUS_OBSERVE_ADMINS", False)),
         # The boundary is the room, not the speaker: every member of a registered
         # group is answered, so there is no actor gate to report.

@@ -69,6 +69,7 @@ from . import (
     subject,
     text_filters,
     transcribe,
+    voice_context,
     vpnbot,
     web_search,
 )
@@ -1883,14 +1884,16 @@ async def _owner_state_command(
     right design here for exactly that reason, and it is why this is the one
     place in the Nexus layer where the wording is matched rather than understood.
 
-    **Two switches can be spoken about, and they are not the same switch.** Nexus
-    off is "the assistant is silent"; awareness off is "the assistant is
-    answering, and not reading the room". The owner asked for the second one by
-    name, and the whole point of it is that the first must not happen instead:
-    «اورنس خاموش» and «نکسوس خاموش» share the verb, so a router that read only
-    the verb would silence the assistant when the owner meant to stop it reading
-    the room. Which switch is meant is decided by ``awareness.named`` and it wins
-    over the assistant's own name.
+    **Several switches can be spoken about, and they are not the same switch.**
+    Nexus off is "the assistant is silent"; awareness off is "the assistant is
+    answering, and not reading the room"; search off is "the assistant answers
+    without looking anything up"; Voice Context off is "a voice note is
+    transcribed and answered as text, exactly as before". They share the verbs —
+    «خاموش», «روشن», «باز» — so a router that read only the verb would move the
+    wrong one: silence the assistant when the owner meant to stop it reading the
+    room, or stop it reading the room when the owner meant to answer a voice note
+    in text. Which switch is meant is decided by the layer's own ``named``
+    function, and each layer's name wins over the assistant's own name.
 
     Three conditions, all required, and the third is what stops the group's
     conversation from toggling either switch:
@@ -1917,23 +1920,61 @@ async def _owner_state_command(
         return False
     about_awareness = awareness.named(text)
     about_search = web_search.named(text)
-    names_a_layer = nexus.is_named(text) or about_awareness or about_search
+    about_voice_context = voice_context.named(text)
+    names_a_layer = (
+        nexus.is_named(text)
+        or about_awareness
+        or about_search
+        or about_voice_context
+    )
     if not (names_a_layer or _addressed_to_bot(msg, ctx)):
         return False
     # ``names_a_layer`` is passed rather than recomputed because it is exactly
     # the fact that decides whether the ambiguous half of the vocabulary applies:
     # «بیا پایین» and «راه بنداز» are commands about the layer when the layer is
     # named and ordinary speech otherwise.
-    wanted = nexus.command_from(text, names_layer=names_a_layer)
+    if about_voice_context:
+        # The layer's own pair — «باز»/«بسته» — which is unambiguous *because*
+        # the layer is named, plus the shared switch words through
+        # ``voice_context.command_from``'s own fallback. Kept apart from the
+        # ``nexus.command_from`` call below because «باز» is one of the
+        # commonest words in Persian and must never move the assistant's own
+        # switch.
+        direction = voice_context.command_from(text)
+        wanted = (
+            nexus.ONLINE
+            if direction == voice_context.ON
+            else nexus.OFFLINE
+            if direction == voice_context.OFF
+            else None
+        )
+    else:
+        wanted = nexus.command_from(text, names_layer=names_a_layer)
     if wanted is None:
         return False
 
-    # The target. ``about_awareness`` is tested first and the order is the
-    # safety property rather than a preference: it is the more specific
-    # instruction, and getting it wrong silences the assistant instead of the
-    # layer the owner was talking about.
+    # Which switch the words are about. The order is the safety property rather
+    # than a preference: each layer is more specific than the assistant itself,
+    # and getting it wrong moves the wrong switch — silencing the assistant when
+    # the owner meant to stop it reading the room, or moving the assistant when
+    # they meant the voice layer. Resolved once here and used for the operation,
+    # the sentences and the "already" label below, so the three can never
+    # disagree about which switch was spoken about.
     wants_on = wanted == nexus.ONLINE
-    if about_search:
+    if about_voice_context:
+        layer = "voice_context"
+        operation = (
+            "voice_context_online" if wants_on else "voice_context_offline"
+        )
+        done = (
+            config.VOICE_CONTEXT_ON_DONE_TEXT
+            if wants_on
+            else config.VOICE_CONTEXT_OFF_DONE_TEXT
+        )
+        already = config.VOICE_CONTEXT_ALREADY_TEXT
+        was_on = voice_context.running()
+    elif about_search:
+        layer = "search"
         operation = "search_online" if wants_on else "search_offline"
         done = (
             config.NEXUS_SEARCH_ON_DONE_TEXT
@@ -1943,6 +1984,7 @@ async def _owner_state_command(
         already = config.NEXUS_SEARCH_ALREADY_TEXT
         was_on = web_search.running()
     elif about_awareness:
+        layer = "awareness"
         operation = "awareness_online" if wants_on else "awareness_offline"
         done = (
             config.NEXUS_AWARENESS_ON_DONE_TEXT
@@ -1952,6 +1994,7 @@ async def _owner_state_command(
         already = config.NEXUS_AWARENESS_ALREADY_TEXT
         was_on = awareness.running()
     else:
+        layer = "nexus"
         operation = "nexus_online" if wants_on else "nexus_offline"
         done = (
             config.NEXUS_ONLINE_DONE_TEXT if wants_on else config.NEXUS_OFFLINE_DONE_TEXT
@@ -1986,19 +2029,24 @@ async def _owner_state_command(
     # layer off, the row is stored and nothing runs — so this is checked before
     # the no-op branch below, because "already on" would be just as wrong as
     # "turned on": either sentence reports a half that is not the whole.
-    if about_awareness and wants_on and not awareness.configured():
+    #
+    # One branch, chosen by the layer resolved above, rather than three
+    # independent tests: with three, a message that named two layers could be
+    # acted on as one and answered as another.
+    config_off = (
+        (layer == "voice_context" and not voice_context.configured())
+        or (layer == "search" and not web_search.configured())
+        or (layer == "awareness" and not awareness.configured())
+    )
+    if wants_on and config_off:
         await _reply_in_group(
             ctx,
             room.id,
-            config.NEXUS_AWARENESS_CONFIG_OFF_TEXT,
-            reply_to=msg.message_id,
-        )
-        return True
-    if about_search and wants_on and not web_search.configured():
-        await _reply_in_group(
-            ctx,
-            room.id,
-            config.NEXUS_SEARCH_CONFIG_OFF_TEXT,
+            {
+                "voice_context": config.VOICE_CONTEXT_CONFIG_OFF_TEXT,
+                "search": config.NEXUS_SEARCH_CONFIG_OFF_TEXT,
+                "awareness": config.NEXUS_AWARENESS_CONFIG_OFF_TEXT,
+            }[layer],
             reply_to=msg.message_id,
         )
         return True
@@ -2008,18 +2056,24 @@ async def _owner_state_command(
     # already in the state they asked for.
     if was_on == wants_on:
         # ``already`` is the right sentence for whichever switch was spoken
-        # about, and both of them take a ``{state}`` placeholder. The label is
+        # about, and all of them take a ``{state}`` placeholder. The label is
         # read from the same source the live gate reads, so the sentence cannot
         # report a state the switch is not actually in: ``nexus.state_label()``
-        # describes the persisted Nexus state, and the awareness labels are the
-        # pair ``/nexus status`` prints.
-        if about_search:
+        # describes the persisted Nexus state, and the other labels are the
+        # pairs the status line prints.
+        if layer == "voice_context":
+            state_label = (
+                config.VOICE_CONTEXT_ON_LABEL
+                if wants_on
+                else config.VOICE_CONTEXT_OFF_LABEL
+            )
+        elif layer == "search":
             state_label = (
                 config.NEXUS_SEARCH_ON_LABEL
                 if wants_on
                 else config.NEXUS_SEARCH_OFF_LABEL
             )
-        elif about_awareness:
+        elif layer == "awareness":
             state_label = (
                 config.NEXUS_AWARENESS_ON_LABEL
                 if wants_on
@@ -2228,6 +2282,10 @@ def _nexus_status_text(*, chat_id: int | None = None) -> str:
             # disagree: "Nexus did not look that up" and "Nexus is not allowed to
             # search at all" look identical from inside a group.
             search=web_search.state_label(),
+            # The same rule as the two above: read from the live gate, so the
+            # line and the workload can never disagree about whether a voice
+            # note is answered in text or in speech.
+            voice_context=voice_context.state_label(),
             mode=admin_service.mode_line(),
         )
     ]
@@ -2531,8 +2589,8 @@ PREPARE_UNREADABLE = "unreadable"
 
 async def _prepare_conversation_media(
     ctx: ContextTypes.DEFAULT_TYPE, msg, work_dir: str
-) -> tuple[list | None, str, str, bool, str]:
-    """Turn this message's attachment into (parts, kind, text, want_voice, why).
+) -> tuple[list | None, str, str, bool, str, bytes]:
+    """Turn this message's attachment into (parts, kind, text, want_voice, why, audio).
 
     The outcomes, and they are genuinely different to the person waiting:
 
@@ -2547,30 +2605,47 @@ async def _prepare_conversation_media(
       download that failed — returns no parts and a reason, and the caller says
       which. Nothing here ever guesses what an unreadable attachment was.
 
+    The sixth element is the attachment's own bytes when it is a voice note, and
+    ``b""`` otherwise. It exists so that Voice Context can hear the person's
+    actual voice without a second download: the bytes were fetched here to be
+    transcribed, and the alternative — asking Telegram for the same file again
+    on the voice path — would pay for one file twice. It is held in memory only,
+    and this turn's caller deletes the work directory when it is done.
+
     Never raises.
     """
     ref = media.describe(msg)
     if ref is None:
-        return None, "", _message_text(msg), False, PREPARE_OK
+        return None, "", _message_text(msg), False, PREPARE_OK, b""
 
     if ref.is_transcribable:
-        transcript = await transcribe.transcribe_ref(
-            ref, download=lambda fid: _download_file(ctx, fid)
-        )
+        # The download is captured on its way past, so the voice path gets the
+        # same bytes the transcript was made from rather than fetching them
+        # again. ``transcribe_ref`` still owns the bounds and the refusal, and
+        # the holder is filled before it is asked.
+        held: dict = {}
+
+        async def _keep(fid: str) -> bytes:
+            data = await _download_file(ctx, fid)
+            held["data"] = data
+            return data
+
+        transcript = await transcribe.transcribe_ref(ref, download=_keep)
+        audio = held.get("data", b"")
         if transcript.ok:
-            return None, ref.kind, transcript.text, True, PREPARE_OK
+            return None, ref.kind, transcript.text, True, PREPARE_OK, audio
         if transcript.no_speech:
-            return None, ref.kind, "", False, PREPARE_NO_SPEECH
+            return None, ref.kind, "", False, PREPARE_NO_SPEECH, audio
         log.info(
             "conversation: could not transcribe (%s)",
             transcript.error or transcript.skipped,
         )
-        return None, ref.kind, "", False, PREPARE_UNREADABLE
+        return None, ref.kind, "", False, PREPARE_UNREADABLE, audio
 
     if not ref.is_visual:
         # A document we can neither read nor transcribe. Not a failure of ours,
         # but there is nothing to send either.
-        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE
+        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE, b""
 
     try:
         bundle = await media.build(
@@ -2581,14 +2656,14 @@ async def _prepare_conversation_media(
         )
     except Exception as e:  # noqa: BLE001 - never break the handler
         log.warning("conversation media preparation failed: %s", e)
-        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE
+        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE, b""
 
     if not bundle.ok:
         log.info("conversation media unreadable kind=%s: %s", ref.kind, bundle.note)
-        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE
+        return None, ref.kind, _message_text(msg), False, PREPARE_UNREADABLE, b""
 
     parts = [{"mime_type": p.mime_type, "data": p.data} for p in bundle.parts]
-    return parts, ref.kind, _message_text(msg), False, PREPARE_OK
+    return parts, ref.kind, _message_text(msg), False, PREPARE_OK, b""
 
 
 def _reply_context(msg) -> tuple[int, str, int]:
@@ -3223,6 +3298,10 @@ async def _answer_conversationally(
     text = _message_text(msg)
     want_voice = False
     problem = PREPARE_OK
+    # The voice note's own bytes, when this message is one. They are captured by
+    # the media preparation below so Voice Context can hear the person's voice
+    # without a second download, and they are empty for everything else.
+    voice_audio = b""
 
     def _timing(sent: bool) -> bool:
         """Log this turn's stages once, then hand back the caller's answer.
@@ -3283,9 +3362,14 @@ async def _answer_conversationally(
             dir=config.TMP_DIR,
         )
         try:
-            parts, kind, text, want_voice, problem = await _prepare_conversation_media(
-                ctx, msg, work_dir
-            )
+            (
+                parts,
+                kind,
+                text,
+                want_voice,
+                problem,
+                voice_audio,
+            ) = await _prepare_conversation_media(ctx, msg, work_dir)
         finally:
             # The bytes that matter are already in memory. Nothing on disk
             # outlives this turn, which is the same rule the moderation path
@@ -3582,6 +3666,97 @@ async def _answer_conversationally(
     # End of context assembly: the plan is built and the system instruction is
     # final. What follows is the model call.
     assemble_done = time.monotonic()
+
+    # ── Voice Context ─────────────────────────────────────────────────────
+    #
+    # A voice note that reached this point has already been *understood*: its
+    # bytes were downloaded and transcribed by ``_prepare_conversation_media``,
+    # its sender is resolved, its reply edge and target are read, and the
+    # context above is the same one a typed message would have been given —
+    # memory, awareness, state, people, the date and any web finding. When the
+    # layer is on, that context and the person's own voice are handed to one
+    # spoken turn and the answer comes back as a voice message replying to
+    # theirs. This decides only *how the answer is delivered*; nothing above it
+    # changes, and nothing here re-decides identity, memory or authority.
+    #
+    # Three conditions, and each closes a real hole:
+    #
+    #   * it must be a voice note that was transcribed (``want_voice`` and the
+    #     bytes), because that is the only input this path can carry;
+    #   * there must be a transcript to ground the words, because the provider's
+    #     own speech recognition mishears names — measured, «نکسوس» came back as
+    #     «نیکسوس» — and the server's reading is what fixes the spelling;
+    #   * and the layer must be switched on with a credential. Otherwise the
+    #     message takes the exact path it took before this existed.
+    #
+    # A tag directive (``mention``) is not served by a voice reply — a voice
+    # message cannot carry Telegram's mention anchor — so that one keeps the
+    # text path, which is what actually notifies the person it asked for.
+    #
+    # The turn runs under the conversation's own lock, so a voice turn and a
+    # text turn in the same room are ordered rather than racing. The lock is
+    # released before the fallback below, because ``chat_queue.reply`` takes it
+    # again and it is deliberately not reentrant.
+    if (
+        want_voice
+        and voice_audio
+        and text
+        and not mention
+        and voice_context.available()
+    ):
+        # What the model is told it heard. With the audio attached, that is the
+        # server's transcript of what was actually spoken. Without it the turn
+        # is text-only and the block itself is the message, so it carries the
+        # question being answered — which is the stored topic when this voice
+        # note was the «آره» that ran a search.
+        heard_words = text if config.VOICE_CONTEXT_SEND_AUDIO else answer_text
+        async with chat_queue.serialized(room.id, user.id):
+            spoken_answer = await voice_context.answer(
+                context=context,
+                transcript=heard_words,
+                audio=voice_audio,
+                chat_id=room.id,
+                user_id=user.id,
+            )
+        gemini_done = time.monotonic()
+        pool_ms = 0.0
+        # A turn that produced an answer delivers it here and never re-asks the
+        # text model: the words already exist, and asking again would spend a
+        # second request to answer the same message a second time. Only a turn
+        # that produced *nothing* falls through to the text path below.
+        if spoken_answer.ok and (spoken_answer.voice or spoken_answer.said):
+            if spoken_answer.voice and await _send_voice(
+                ctx, room.id, spoken_answer.voice, destination
+            ):
+                if spoken_answer.said:
+                    # Nexus's own answer is part of the conversation the next
+                    # awareness pass reads, exactly as a text reply is.
+                    _awareness_note_reply(room.id, spoken_answer.said)
+                log.info(
+                    "chat voice context to %s in %s %s",
+                    user.id,
+                    room.id,
+                    spoken_answer.describe(),
+                )
+                return _timing(True)
+            # Telegram refused the upload, or the speech could not be packaged.
+            # The words are the answer either way, so they go out as text rather
+            # than being lost — and without a second model call, because the
+            # answer is already in hand.
+            log.warning("voice context could not send its voice; sending the words")
+            if spoken_answer.said and await _send_chat(
+                ctx, room.id, spoken_answer.said, destination, mention=mention
+            ):
+                _awareness_note_reply(room.id, spoken_answer.said)
+                return _timing(True)
+        else:
+            log.info(
+                "voice context produced no reply for %s in %s reason=%s; "
+                "falling back to text",
+                user.id,
+                room.id,
+                spoken_answer.reason or "no_voice",
+            )
 
     # The turn goes through the queue rather than straight to the model. The
     # queue owns three things `chat.reply` deliberately does not: it serialises

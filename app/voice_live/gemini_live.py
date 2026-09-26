@@ -318,7 +318,7 @@ class GeminiLiveTransport:
         except BaseException as exc:  # noqa: BLE001
             raise classify(exc) from None
 
-    async def send_context(self, text: str) -> None:
+    async def send_context(self, text: str, *, turn_complete: bool = False) -> None:
         """Inject a block of server-built text into the session.
 
         This is how a refreshed awareness snapshot reaches a running call. It
@@ -329,6 +329,12 @@ class GeminiLiveTransport:
         The text is context, never an instruction: it is assembled by
         ``awareness_bridge`` from the room's own records, and the model is told
         what the room looks like, not what to do about it.
+
+        ``turn_complete`` decides whether the model should *answer* this block.
+        False — the default, and what a call's refresh wants — leaves the turn
+        open so the speech that follows is what completes it. True is for a
+        turn that carries no speech at all: a text-only Voice Context turn,
+        where the block itself is the message and nothing else will close it.
         """
         if not text or not self.ready:
             return
@@ -338,7 +344,7 @@ class GeminiLiveTransport:
                 turns=types.Content(
                     role="user", parts=[types.Part(text=text)]
                 ),
-                turn_complete=False,
+                turn_complete=bool(turn_complete),
             )
         except BaseException as exc:  # noqa: BLE001
             raise classify(exc) from None

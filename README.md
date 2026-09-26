@@ -317,6 +317,41 @@ person replied to). A name is understood when it is unambiguous ("میلاد ر�
 Telegram id. If two people share a name, the bot asks rather than guessing — and
 a name never grants anything: authority always comes from the Telegram id.
 
+**Voice messages.** A voice note aimed at Nexus is transcribed and answered, and
+the answer can come back as a **voice message** that replies to the note — the
+same assistant, answering with the same context a typed message would get. This
+is **Voice Context**, and it is a layer of its own with its own switch.
+
+It is *not* a separate voice bot. The note is understood first — downloaded,
+transcribed, its sender resolved, its reply edge and target read, and the same
+room / memory / state / awareness / date / search context a text turn composes —
+and only then is that context, together with the person's own voice, handed to
+the provider's Live API for one spoken turn. The server decides identity,
+memory and authority exactly as before; the model never does, and the spoken
+session is given **no tools at all**. A voice note that contains an instruction
+is answered with words, like any other message.
+
+Because a voice message carries no caption to put `@guardbot` in, the way to aim
+one at Nexus is to send it as a **reply** to one of its messages.
+
+* **Off means the old path.** With the switch off, a voice note is transcribed
+  and answered in text, exactly as before. Nothing else changes.
+* **Every failure falls back to text.** No credential, a dropped connection, a
+  provider that never speaks, audio that cannot be decoded or encoded, a refused
+  upload — the words still reach the person. The turn is bounded and always
+  closes its session, so nothing is left open.
+* **It is owner-only to switch.** «ویس کانتکست خاموش» / «ویس کانتکست باز» (or
+  "voice context off" / "voice context on") moves it; an administrator cannot,
+  because the permission behind it is held by no role. `/nexus status` shows it
+  as the `کانتکست صوتی` line.
+
+It shares the Live API credential with the voice call by default
+(`VOICE_CONTEXT_API_KEY`, falling back to `GEMINI_LIVE_API_KEY`) but keeps its
+own allowance and breaker, so a busy afternoon of voice notes cannot spend the
+day a call was waiting on. Set `VOICE_CONTEXT_ENABLED=false` to remove the layer
+entirely — a deployment with no live credential is inert by itself, and voice
+notes simply take the text path.
+
 ### The coding agent (the bridge)
 
 The owner can ask Nexus in the group for a change to this system's own code —

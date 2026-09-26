@@ -308,6 +308,43 @@ TOOLS: dict[str, ToolSpec] = {
         permission="nexus.control",
         operation="search_online",
     ),
+    # -- the voice-context layer: owner only, and its own switch --------------
+    # A fourth pair, separate from all three above for the same reason each is
+    # separate from the others: "a voice note is transcribed and answered in
+    # text" changes neither whether the assistant answers nor whether it reads
+    # the room nor whether it looks anything up. The descriptions name the layer
+    # and say what does *not* happen, because the mistake being prevented is a
+    # model reaching for ``nexus_offline`` when the owner says «ویس کانتکست
+    # خاموش» — the shared verb «خاموش» is exactly the ambiguity.
+    "voice_context_offline": ToolSpec(
+        name="voice_context_offline",
+        description=(
+            "Switch off only Voice Context: the assistant keeps answering, "
+            "keeps reading the room and keeps looking things up, but a voice "
+            "message is transcribed and answered in text instead of being "
+            "answered with a spoken reply. It does NOT switch the assistant, "
+            "the awareness layer or web search off. Use it when the owner asks "
+            "to turn Voice Context off, such as 'ویس کانتکست خاموش' or 'voice "
+            "context off'. Owner only."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="voice_context_offline",
+    ),
+    "voice_context_online": ToolSpec(
+        name="voice_context_online",
+        description=(
+            "Switch Voice Context back on, so a voice message addressed to the "
+            "assistant is answered with a spoken voice reply built on the same "
+            "context a text message gets. It does NOT switch the assistant, the "
+            "awareness layer or web search on. Use it when the owner asks for "
+            "Voice Context back, such as 'ویس کانتکست روشن' or 'voice context "
+            "on'. Owner only."
+        ),
+        kind=KIND_WRITE,
+        permission="nexus.control",
+        operation="voice_context_online",
+    ),
     # -- the coding agent: owner only, like the assistant's own switch --------
     # One tool that asks for work, two that act on a request already recorded,
     # and one that answers a question about them. The split is the brief's: the

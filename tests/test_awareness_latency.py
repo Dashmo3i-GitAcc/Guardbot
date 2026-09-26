@@ -747,6 +747,19 @@ def test_the_tool_declarations_are_the_largest_part_of_the_prompt():
     ``vpn.read`` and ``vpn.manage`` are carried by no role bundle: they are
     attached for the owner and for nobody else, so no administrator's or
     member's message pays for them.
+
+    Raised again, from 62000 to 66000, when the Voice Context switch was added
+    (``voice_context_offline``, ``voice_context_online``). The measured size at
+    this raise is 63662, up 2162 from 61500 — the previous ceiling had only 500
+    characters of headroom, so a fourth switch pair could not fit under it. The
+    descriptions are long on purpose and follow the three pairs above: each one
+    names the layer and says explicitly what does *not* change, because the
+    mistake being prevented is the model reaching for ``nexus_offline`` when the
+    owner says «ویس کانتکست خاموش» — the shared verb «خاموش» is exactly the
+    ambiguity. Trimming them to a few words was rejected for the same reason it
+    was rejected for the VPN tools: a wrong switch is worse than a longer
+    declaration. Like the VPN pair, both are held by ``nexus.control``, which no
+    role bundle carries, so only the owner's own turns pay for them.
     """
     principal = rbac.resolve(OWNER)
     declarations = admin_tools.declarations_for(principal)
@@ -761,7 +774,7 @@ def test_the_tool_declarations_are_the_largest_part_of_the_prompt():
 
     assert size > fixed, "declarations are the largest item"
     # A ceiling, so growth is noticed. Raise it deliberately, with a reason.
-    assert size < 62000, f"tool declarations grew to {size} chars"
+    assert size < 66000, f"tool declarations grew to {size} chars"
 
 
 # ══ THE ALLOWANCE ═════════════════════════════════════════════════════════

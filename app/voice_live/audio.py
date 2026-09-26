@@ -43,9 +43,13 @@ requirement of this feature rather than an implementation detail.
 """
 from __future__ import annotations
 
+import logging
+import subprocess
 import sys
 from array import array
 from math import gcd
+
+log = logging.getLogger("guardbot.voice.audio")
 
 # The three rates. Named for *what they are*, not for who sends them, because
 # the provider is on both sides of two of them.
@@ -378,3 +382,103 @@ def is_silent(data: bytes) -> bool:
 def frame_samples(rate: int) -> int:
     """How many samples one 20 ms frame holds at a rate."""
     return int(rate) * FRAME_MS // 1000
+
+
+# ── Containers ────────────────────────────────────────────────────────────
+# Everything above this line is arithmetic on PCM. These two are the other
+# direction of the same problem: the *outside* world does not speak raw PCM.
+# Telegram's voice notes are OGG/Opus, and a voice note Nexus sends back has to
+# be OGG/Opus too, while the provider's input and output are bare PCM at fixed
+# rates. So two conversions are needed and neither belongs to the call:
+#
+#   decode_to_pcm16   OGG/Opus  ->  16 kHz mono s16le   (a voice note coming in)
+#   encode_pcm24_to_ogg  24 kHz mono s16le  ->  OGG/Opus (an answer going out)
+#
+# They live here rather than beside their callers because the encode is now
+# used by two features — the text assistant's TTS reply and Voice Context's
+# spoken answer — and one ffmpeg invocation with two call sites is one place to
+# change the bitrate, not two. ``app/chat.py``'s ``_pcm_to_ogg`` delegates
+# here for exactly that reason.
+#
+# Both are best-effort and neither raises: ffmpeg may be absent, a container
+# may be malformed, and a clip may be truncated. The caller is told by the
+# return value and falls back — a codec is never worth failing a turn over, and
+# a voice reply that cannot be encoded must never cost the answer itself.
+OPUS_BITRATE = "32k"
+
+
+def _ffmpeg(args: list[str], data: bytes, *, timeout: float) -> bytes:
+    """Run one ffmpeg pass over ``data``. ``b""`` on any failure.
+
+    The one place a subprocess is started, so the failure handling — missing
+    binary, non-zero exit, timeout, empty output — is written once. stderr is
+    truncated into the log and never returned: it is ffmpeg's own text and it
+    can echo the input path, which for this feature is somebody's audio.
+    """
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", *args],
+            input=data,
+            capture_output=True,
+            timeout=max(1.0, float(timeout)),
+        )
+    except Exception as exc:  # noqa: BLE001 - missing binary, timeout, anything
+        log.warning("[voice] ffmpeg failed to run: %s", type(exc).__name__)
+        return b""
+    if proc.returncode != 0 or not proc.stdout:
+        log.warning(
+            "[voice] ffmpeg returned %d: %s",
+            proc.returncode,
+            (proc.stderr or b"")[:160],
+        )
+        return b""
+    return bytes(proc.stdout)
+
+
+def decode_to_pcm16(data: bytes, *, timeout: float = 60.0) -> bytes:
+    """A voice note's container as the provider's input: 16 kHz mono s16le.
+
+    ``b""`` means the bytes could not be decoded, and the caller treats that as
+    "this clip cannot be sent" rather than as silence — the two are different
+    and only one of them is a reason to spend a turn.
+    """
+    if not data:
+        return b""
+    return _ffmpeg(
+        [
+            "-f", "ogg",
+            "-i", "pipe:0",
+            "-f", "s16le", "-ar", str(RATE_PROVIDER_IN), "-ac", "1",
+            "pipe:1",
+        ],
+        data,
+        timeout=timeout,
+    )
+
+
+def encode_pcm24_to_ogg(pcm: bytes, *, timeout: float = 60.0) -> bytes | None:
+    """The provider's speech as a Telegram voice note. None when it cannot be.
+
+    None rather than ``b""`` because the caller's decision is different here:
+    the audio already exists and is the answer, so "cannot encode" means "send
+    the text instead", which is a branch and not an error.
+    """
+    if not pcm:
+        return None
+    out = _ffmpeg(
+        [
+            "-f", "s16le", "-ar", str(RATE_PROVIDER_OUT), "-ac", "1",
+            "-i", "pipe:0",
+            "-c:a", "libopus", "-b:a", OPUS_BITRATE, "-f", "ogg", "pipe:1",
+        ],
+        pcm,
+        timeout=timeout,
+    )
+    return out or None
+
+
+def pcm_seconds(data: bytes, rate: int) -> float:
+    """How long a PCM buffer is, for a ceiling measured in seconds."""
+    if not data or rate <= 0:
+        return 0.0
+    return len(data) / float(SAMPLE_BYTES) / float(rate)

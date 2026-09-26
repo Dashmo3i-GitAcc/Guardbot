@@ -277,9 +277,9 @@ The point of this file is that the project does not have to be re-explained.
 
 Update this section after each meaningful change. The facts below were verified
 against the repository when this file was created, and re-verified against the
-repository on **2026-09-26** (after the 21-section conversational overhaul and the
-warmth/relationship/three-day-scan follow-up) — treat any hash, count or status
-here as a claim to re-check, not as evidence.
+repository on **2026-09-26** (after Voice Context — a Telegram voice note
+answered as a spoken turn on the same assembled context) — treat any hash, count
+or status here as a claim to re-check, not as evidence.
 
 - **Branch:** `main` is the production state and the only live branch; the Nexus
   intelligence evolution was **merged into it** as `25ddee8` (2026-09-24) and
@@ -312,8 +312,25 @@ here as a claim to re-check, not as evidence.
     gates the rude register on a real history. The room window is now bounded by
     **time** (`NEXUS_AWARENESS_WINDOW_SECONDS`, three days; the message count is a
     flood cap) and `awareness.activity` summarises the whole window — who spoke,
-    how much, their newest words, and who said nothing. **Committed and pushed,
-    not deployed** — see `AgentMD.md` §54.33.
+    how much, their newest words, and who said nothing. **Deployed** — see
+    `AgentMD.md` §54.33.
+  - **Voice Context** (2026-09-26, `AgentMD.md` §53.14 / §54.34) — a Telegram
+    **voice message** addressed to Nexus is answered as a **spoken turn built on
+    the same context a text turn gets**. The note is understood first by the
+    existing pipeline (download, transcription, sender identity, reply edge and
+    target, room/awareness, memory, state, the date, any web finding) and only
+    then is that assembled context, plus the person's own audio, handed to the
+    Live API for **one** turn; the reply goes back as a voice message that
+    **replies to the incoming note**. It is not a second voice bot: the spoken
+    session is given the same `chat.SYSTEM_INSTRUCTION` persona (plus a
+    medium-only addendum) and **no tools at all**, so an instruction spoken into a
+    note is answered with words. New modules `app/voice_context.py` and
+    `app/voice_live/turn.py`; a persisted owner-only switch
+    (`voice_context_control`, `nexus.control`, no role bundle carries it, moved by
+    «ویس کانتکست خاموش/باز»); its **own pool workload** (`voice_context`) sharing
+    the Live credential by default but not the allowance or the breaker. Off,
+    credential-less, or on any failure the note takes the **exact old text path**,
+    and a turn that produced an answer is never re-asked. See `AgentMD.md` §54.34.
   - **Text moderation** — the moderation AI's verdict on a group text message,
     turned into an action by `app/mod_policy.py`. Off by default
     (`MODERATION_TEXT_ENABLED=0`). Only `MODERATION_DELETABLE_CLASSES`
@@ -375,10 +392,10 @@ here as a claim to re-check, not as evidence.
     `group_messages.username` on the transcript line, and **full search delivery**
     (8 results, longer snippets, 3600-char block — the lever is the findings, never
     a second request). No new model call on any path.
-  - Full suite green: `python -m pytest -q` — **4114 passed / 0 failed** after the
-    2026-09-26 overhaul (3862 at the panel's M3, 3843 at M2, and 1845 when the
-    media pipeline was removed). There is no model in the image, so a light venv
-    can run the suite.
+  - Full suite green: `python -m pytest -q` — **4201 passed / 0 failed** after
+    Voice Context (4114 at the 2026-09-26 overhaul, 3862 at the panel's M3, 3843
+    at M2, and 1845 when the media pipeline was removed). There is no model in
+    the image, so a light venv can run the suite.
 - **What is not done / not present:**
   - No visual / media content moderation of any kind, by design.
   - No ban and no permanent punishment; the only member action is a timed

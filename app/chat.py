@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 
@@ -39,6 +38,11 @@ from . import config, db, gemini_pool
 # shadowed by it at every call site inside that function. The alias is only used
 # for the switch, which the pass must consult before it spends the key.
 from . import awareness as awareness_layer
+# The one ffmpeg invocation that turns the TTS model's raw PCM into the OGG/Opus
+# Telegram's ``sendVoice`` wants. Shared with Voice Context, which encodes its
+# own spoken answer the same way; the module holds no application imports, so
+# this is a leaf and not a cycle.
+from .voice_live import audio as voice_audio
 
 log = logging.getLogger("guardbot.chat")
 
@@ -1409,30 +1413,15 @@ TTS_SAMPLE_RATE = 24000
 
 
 def _pcm_to_ogg(pcm: bytes) -> bytes | None:
-    """Wrap raw 24 kHz mono PCM as OGG/Opus. None if ffmpeg cannot do it."""
-    if not pcm:
-        return None
-    try:
-        proc = subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "s16le", "-ar", str(TTS_SAMPLE_RATE), "-ac", "1",
-                "-i", "pipe:0",
-                "-c:a", "libopus", "-b:a", "32k", "-f", "ogg", "pipe:1",
-            ],
-            input=pcm, capture_output=True, timeout=60,
-        )
-    except Exception as e:  # noqa: BLE001 - ffmpeg missing, timeout, anything
-        log.warning("[chat] voice encode failed: %s", e)
-        return None
-    if proc.returncode != 0 or not proc.stdout:
-        log.warning(
-            "[chat] voice encode returned %d: %s",
-            proc.returncode,
-            (proc.stderr or b"")[:160],
-        )
-        return None
-    return proc.stdout
+    """Wrap raw 24 kHz mono PCM as OGG/Opus. None if ffmpeg cannot do it.
+
+    The conversion itself lives in ``app/voice_live/audio.py``, beside the two
+    provider rates it is defined against, because Voice Context encodes its own
+    spoken answer through the same call. Keeping one ffmpeg invocation for both
+    means the bitrate and the container are decided in one place rather than in
+    two that would drift.
+    """
+    return voice_audio.encode_pcm24_to_ogg(pcm)
 
 
 async def synthesize(text: str) -> bytes | None:

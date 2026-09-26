@@ -267,7 +267,7 @@ def test_a_turn_that_never_reaches_the_model_reports_no_model_time(
     install_model(monkeypatch, chat.ChatReply(answered=True, text="unused"))
 
     async def _nothing(*args, **kwargs):
-        return None, "", "", False, main.PREPARE_NO_SPEECH
+        return None, "", "", False, main.PREPARE_NO_SPEECH, b""
 
     monkeypatch.setattr(main, "_prepare_conversation_media", _nothing)
     voice = SimpleNamespace(file_id="f", duration=1, mime_type="audio/ogg")

@@ -1432,11 +1432,13 @@ GATED = (
     "awareness_online",
     "search_offline",
     "search_online",
+    "voice_context_offline",
+    "voice_context_online",
 )
 
 
-def test_the_gated_set_is_exactly_these_eight_operations():
-    """Named, not counted: a ninth appearing by accident should fail here."""
+def test_the_gated_set_is_exactly_these_ten_operations():
+    """Named, not counted: an eleventh appearing by accident should fail here."""
     gated = {
         name
         for name, op in admin_service.OPERATIONS.items()
