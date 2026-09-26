@@ -21,11 +21,12 @@ to the message it is about.
 There is no real Telegram round trip here — the harness has no second account to
 reply from. The probe drives the **real** ``on_group_chat`` handler with real
 ``telegram.Message`` objects carrying real ``reply_to_message`` metadata, and the
-send seam records the ``reply_to_message_id`` the bot was actually handed. One
-optional real-model turn (``--real``) proves the parent's words reach the model.
+send seam records the ``reply_to_message_id`` the bot was actually handed. Two
+optional real-model turns (``--real``) prove the parent's words reach the model
+and measure the length policy.
 
-Synthetic group/user ids only. Everything it creates is deleted in a finally. One
-real turn, when asked for, is the cost of a live probe and stays visible.
+Synthetic group/user ids only. Everything it creates is deleted in a finally. The
+real turns, when asked for, are the cost of a live probe and stay visible.
 
 Run it against the **running** container (WORKDIR is ``/srv``, so the package is
 not on ``sys.path`` for a script under ``/tmp`` — hence the explicit
@@ -34,7 +35,9 @@ not on ``sys.path`` for a script under ``/tmp`` — hence the explicit
     docker cp tools/probe_reply_target.py guardbot:/tmp/
     docker exec -w /srv -e PYTHONPATH=/srv guardbot python /tmp/probe_reply_target.py
 
-Add ``--real`` for the one real-model turn. Or locally from the repo root.
+Add ``--real`` for the two real-model turns (``--real-long`` adds a third that
+asks for a deliberately long answer, which is what exercises the split). Or run
+it locally from the repo root.
 """
 import asyncio
 import datetime
@@ -292,6 +295,15 @@ async def _cases(out):
         # to a few lines; `messages_sent > 1` is the split, not a truncation.
         out["real_full_answer"] = await run(
             "نکسوس لطفا کامل و با جزییات توضیح بده که اینترنت چطور کار می‌کنه",
+            mode="real",
+        )
+    # The split itself needs an answer past one Telegram message, which only a
+    # deliberately long ask produces. Its own flag so the ordinary `--real` run
+    # stays two turns.
+    if "--real-long" in sys.argv:
+        out["real_long_answer"] = await run(
+            "نکسوس لطفا خیلی کامل و مفصل، حدود دویست خط، همه‌چیز رو درباره "
+            "اینترنت و شبکه توضیح بده — از صفر تا صد، با جزییات کامل",
             mode="real",
         )
 
