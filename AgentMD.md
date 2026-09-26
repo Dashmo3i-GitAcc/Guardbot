@@ -1585,11 +1585,11 @@ This is a security and privacy boundary, not a performance optimisation.
   design. Every group-scoped query is bound to its `chat_id`.
 * A Telegram user has **one canonical global identity** — the numeric user id
   (and the internal uuid) — but their **group-specific context and memory never
-  mix across groups**. The name memory is **per room**: `people.resolve` and
-  `identity._names_for` read only the rows for the room they were asked about.
-  Group membership (`chats_seen`) and the audit trail (`recent_audit`) are
-  **group-specific** facts and are returned **only** on the unscoped operator
-  view — never assembled into a group's prompt.
+  mix across groups**. The name memory is **per room**: `people.resolve`,
+  `people.roster` and `identity._names_for` read only the rows for the room they
+  were asked about. Group membership (`chats_seen`) and the audit trail
+  (`recent_audit`) are **group-specific** facts and are returned **only** on the
+  unscoped operator view — never assembled into a group's prompt.
 * The coding-agent task id is **content-derived from `(chat_id, actor_id,
   repository, task, minute)`**, so two groups cannot collide on a request id or
   read each other's task or result; `agent_task_view` refuses a chat mismatch.
@@ -2338,6 +2338,13 @@ This is a security and privacy boundary, not a performance optimisation.
   database keeps working), and `awareness.record` stores what the pass decided. It
   is **understanding, not authority**: nothing in `rbac`, `admin_service` or a
   permission check reads it, and it grants nothing.
+* **A captured message carries its sender's username.** `group_messages.username`
+  (additive, `_ensure_column`, defaulted `''`) is written by
+  `awareness.capture(username=…)` from `user.username`, and `awareness._line`
+  renders it beside the id — `[member] میلاد (222) @milad: …`. It is there because
+  two members can share a display name and only the handle tells them apart; it is
+  shown **only when Telegram gave one**, so a line without a username is byte-for-
+  byte what it always was.
 
 ### 53.8 The assistant
 
@@ -2544,11 +2551,47 @@ asserted in `tests/test_chat.py` and `tests/test_chat_behavior_contract.py`:
 * **Never titles or servile address** — «قربان», «سرور», «جناب», «بنده»,
   «قربون‌سربازیت» — **for anyone, ever**. This is now a rule of the persona
   itself, so it applies to every member and not only to the owner.
-* **The hard boundaries are stated:** never threaten anyone, never use slurs,
+* **The hard boundaries are stated:** never threaten anybody with harm, never use
+  a slur about who somebody is (ethnicity, religion, language, appearance),
   never attack anyone's family (no «ناموسی» insults, no insults about a
-  mother/sister/father/child), never humiliate anyone sexually, never attack
-  somebody over who they are. If the person is genuinely upset or serious, drop
-  the joking entirely and answer normally.
+  mother/sister/father/child), never humiliate anybody sexually. If the person is
+  genuinely upset or serious, drop the joking entirely and answer normally.
+* **Register is mirrored, including a serious insult** (the owner's explicit
+  override, 2026-09-26). A joke is answered as a joke; somebody genuinely
+  disrespecting Nexus gets it straight back **at the same intensity** — not a
+  warning, not a lecture about respect, never a canned politeness line. The
+  reading comes from the whole message and the conversation, never from one word.
+  The hard boundaries above hold **even when giving it back**: match the
+  intensity, never reach for a category (ethnicity, religion, family, sex) and
+  never threaten. `SYSTEM_INSTRUCTION` states this once, in the persona; a test
+  (`test_chat.py::test_the_prompt_mirrors_register_including_a_serious_insult`)
+  pins the clause.
+* **Length follows the request, never a house rule.** The persona's "two or three
+  sentences" is a default for ordinary chat and explicitly **not a ceiling**: an
+  ask to explain fully, to tell everything, or to bring the news gets the
+  complete answer and **never a summary**. `answer_shape.read` renders the ask
+  deterministically into the trusted context (`full` / `news` / `short` /
+  nothing), and `main._send_chat` **splits** an answer longer than one Telegram
+  message at natural seams (`_split_for_telegram`) rather than truncating it —
+  only the first message carries the reply target and the mention.
+  `chat._fit_reply` is no longer a length policy: it is only the runaway guard
+  (`GEMINI_CHAT_REPLY_MAX_CHARS`, far above any ask), and `ChatReply.truncated`
+  survives for the log line and the probes.
+* **Our own rate limit is silent and never drops a turn.** `chat._MESSAGES` has
+  no sentence for `rate_limit` / `user_rate_limit`; `app/chat_queue.py` serialises
+  one conversation's turns (so two messages cannot read the same history and
+  answer each other's context), bounds global concurrency, and **waits** for our
+  window instead of refusing. The provider's rate limits stay the pool's
+  business; the queue never sees one.
+* **Nexus knows the room's names.** `people.roster` returns the people a message
+  actually mentions — name, `@username`, id — even when they have not spoken in
+  the window, and `main._people_context` renders it into its own `people` slot in
+  `context_plan.compose` (never folded into the room, or a person's name would
+  make a memory line look like a duplicate). It is relevance-filtered by exact
+  comparison, bounded twice, and **never a member dump**; the scan is bounded by
+  `NEXUS_PEOPLE_ROSTER_SCAN` because it runs on every room-dependent reply.
+  `group_messages.username` carries the speaker's handle into the transcript line
+  so two members with the same display name can be told apart.
 * **No false humanity.** No body, no real-world experiences, no memories outside
   the conversation. Natural tone, never a claim to be human.
 * **The appended background is background.** The room, state, memory, date and
@@ -2558,8 +2601,10 @@ asserted in `tests/test_chat.py` and `tests/test_chat_behavior_contract.py`:
 * **Every safety clause is preserved verbatim** — no-human, our prices, links,
   credentials, the public-figure-from-search-only rule, the injection defence,
   the no-system-message rule. The wiring is unchanged: `_generation_config` still
-  sets the persona plus the appended context, `temperature=0.8`,
-  `max_output_tokens=1024`.
+  sets the persona plus the appended context, `temperature=0.8`, and
+  `max_output_tokens=8192` (raised from 1024 on 2026-09-26 — 1024 cut a "explain
+  it fully" or a "bring the news" answer off mid-thought; only produced tokens
+  are billed, so a short answer costs the same).
 
 **The owner-aware layer (rebuilt 2026-09-24).** When the person being answered is
 the owner, `chat.OWNER_NOTE` is **prepended to the trusted context** — and so
@@ -2689,6 +2734,10 @@ not a personality: it states *who* is speaking and no rule of its own.
   has no field that could hold a string.
 * `py-tgcalls`, `telethon` and `ntgcalls` are declared **directly** — the
   telethon line is required because it is an *extra*, not a base dependency.
+* The image must **import all three at build time** (a `RUN` step in the
+  Dockerfile), because the native wheel can fail to load for a reason a
+  declaration does not catch and the adapter imports it lazily — the failure
+  would otherwise arrive at the first join, mid-call.
 * The session file is **never** in the image and **never** printed.
 
 ### 53.12 Web search
@@ -2753,6 +2802,13 @@ not a personality: it states *who* is speaking and no rule of its own.
   backoff. Credit waste is a design concern: `search_depth` is `basic` (1 credit),
   and `include_answer`/`include_raw_content` are off.
 * The **awareness pass does not search**.
+* **Findings are delivered in full, never as a digest.** `GEMINI_SEARCH_MAX_RESULTS`
+  is 8, `GEMINI_SEARCH_SNIPPET_CHARS` is 600 per result and `GEMINI_SEARCH_MAX_CHARS`
+  is 3600 — sized for the answer the owner asked for ("bring me the news" gets the
+  news, not a three-line summary). The lever is deliberately the *findings*, never
+  a second request: one Tavily call returns all eight results, so the rationed
+  resource (requests, §53.3) is untouched and only that turn's tokens move. The
+  length itself is the persona's and `answer_shape`'s business (§53.8).
 * The trigger reads the **same text for a voice transcript as for typed text** —
   a spoken question is not a second path to search.
 * `/nexus` status shows the search switch next to awareness, and
@@ -2762,7 +2818,7 @@ not a personality: it states *who* is speaking and no rule of its own.
 ### 53.13 The Admin Control Center (`app/web`)
 
 The panel is built in stages (M1…M8 — the plan is §54.24, and the newest
-checkpoint is §54.26). These rules are non-negotiable for every stage:
+checkpoint is §54.27). These rules are non-negotiable for every stage:
 
 * The dashboard is a **separate process** from the bot — its own compose service
   running `python -m app.web`. It must **never** run inside the bot's event loop,
@@ -2833,6 +2889,28 @@ checkpoint is §54.26). These rules are non-negotiable for every stage:
 * The panel **must not claim a capability it does not have.** There is no
   multi-bot support today and the panel must not pretend otherwise (§54.24
   decision 5).
+* **The panel reads persisted state, never the bot's in-memory state.** The
+  pools live in the bot's process; the panel is a different process and cannot
+  see them. It must **not** import `app.gemini_pool` (or any module that would
+  build a pool registry) to render state — that would build a *second* registry
+  from the panel's own environment and report it as the bot's. It reads the
+  shared database, and says that is what it is showing. A test asserts the
+  import graph in a fresh interpreter, because a row-level test cannot see it.
+* **Every read source is independently guarded, and a failure is named, never
+  zeroed.** One unreadable table degrades *that* number, logs once, and is named
+  on the page (`failed_sources`); it must never blank the page, and a failed
+  read must never render as a confident zero.
+* **The panel shows no metric it cannot source.** Latency is not persisted and
+  there is no error log, so the page states the gap rather than inventing a
+  number or a proxy it does not have. This is the concrete form of "must not
+  claim a capability it does not have".
+* **The panel's read layer never writes.** A page that only reports must not
+  touch a row — no counter, no cache table, no "last viewed" stamp. A test
+  asserts that rendering changes nothing, and the module is checked for writer
+  calls.
+* **A deployment-wide page counts tenants; it never names one.** The owner's
+  Overview may show how many rooms are registered; it must not put a room's
+  title, id, or anything from inside a room on the page (§53.6).
 
 ## 54. Nexus intelligence evolution — checkpoint (2026-09-24)
 
@@ -5712,7 +5790,7 @@ workload boundaries.
 
 ---
 
-### 54.26 Checkpoint (2026-09-24, **M2 — authorization + audit**) — **resume here** (supersedes §54.25); M2 DONE, NOT DEPLOYED, M3 NEXT
+### 54.26 Checkpoint (2026-09-24, **M2 — authorization + audit**) — superseded by §54.27; M2 DONE, NOT DEPLOYED, M3 NEXT
 
 **CHECKPOINT STATUS.** Date **2026-09-24 ~23:05Z**. Branch **`main`**. HEAD
 **`3fb63fa`** — M2's commit, on both remotes (`origin` and `dashmo3i`); the
@@ -5910,6 +5988,168 @@ M4 … M8. Do **not** deploy the dashboard without the owner's go-ahead, and do
 **not** modify Chat, pools, credentials, limits, breakers, tenant isolation or
 workload boundaries.
 
+---
+
+### 54.27 Checkpoint (2026-09-25, **M3 — the Overview, read from the real database**) — **resume here** (supersedes §54.26); M3 DONE, NOT DEPLOYED, M4 NEXT
+
+**CHECKPOINT STATUS.** Date **2026-09-25 ~00:05Z**. Branch **`main`**. HEAD
+**`1433835`** — M3's commit (the code and the tests). Base **`7f8b945`** (M2 plus
+its documentation corrections). Current task: **M3 complete; M4 not started.**
+M3 of the Admin Control Center (§54.24/§54.26) is **implemented, tested and
+committed**. The dashboard is still **not deployed**: the running bot is
+untouched (`guardbot`, image `f36e60bf3971`, `RestartCount=0`,
+`StartedAt=2026-09-24T22:02:18Z`, verified before and after the rebuild). Nothing
+in Chat, the pools, the credentials, the limits, the breakers, tenant isolation
+or the workload boundaries was modified.
+
+**What M3 ships.** The panel's first *read* page replaces M1's placeholder
+landing page. It answers "what is the bot doing right now" from the shared
+SQLite file the bot writes, and from nothing else.
+
+| Piece | File |
+|---|---|
+| the guarded, read-only data layer (`overview()`, `_safe`, `_state_buckets`, `_pools`, `_usage`, `_switches`, `_attention`) | **`app/web/queries.py`** (new, ~281 lines) |
+| the closed status vocabularies (`WORKLOADS`, `EVENTS`, `USAGE_POSITIVE`, `SWITCH_ON/OFF/DEFAULT`) | **`app/web/labels.py`** (new) |
+| the Overview vocabulary (`OVERVIEW_*`, `PANEL_*`, `OVERVIEW_PARTIAL`, the "cannot show" card) | `app/web/copy.py` |
+| the Overview route, behind `@authz.requires(authz.PANEL_PERMISSION)` | **`app/web/routes/overview.py`** (new) |
+| the page and its presentation macros (`badge`, `stat`, `empty`, `note`) | **`app/web/templates/overview.html`** (new, 233 lines), **`app/web/templates/_components.html`** (new) |
+| the `event` / `workload` Jinja filters | `app/web/jinja.py` |
+| the epoch fix in `jalali._parse` | `app/web/jalali.py` |
+| the one additive reader, `seen_updates_latest()` | `app/db.py` |
+| the nav (`overview` → `/`, icon `📊`) | `app/web/render.py`, `app/web/routes/__init__.py` |
+| the Overview styles (page-head, sections, stat grid, badges, `table.data`, empty/note) | `app/web/static/app.css` |
+| M1's placeholder page, **deleted** | `app/web/routes/home.py`, `app/web/templates/home.html` |
+| **19 new tests**: payload, empty DB, every source failing, the write-free read, the import graph | **`tests/test_web_dashboard_overview.py`** (new, 469 lines) |
+
+The page shows: room/people/account counts, today's request and error totals,
+"last update" (relative), a per-workload pool table (9 rows), a per-workload
+usage table, the three owner switches (nexus / awareness / search), the newest
+`gemini_events` (12, badged), an attention list, and a "what this page cannot
+show" card.
+
+**Decisions taken during M3 (all reversible, none touching the bot).**
+
+* **The panel reads persisted state, never the bot's in-memory state.** The pools
+  live in the bot's process; the panel is a different process. It must **not**
+  import `app.gemini_pool` — that would build a *second* registry from the
+  panel's own environment and report it as the bot's. A test asserts the import
+  graph in a **fresh interpreter**, because a row-level test cannot see it.
+  `app/web/queries.py` opens the shared DB through `db.connect()` (no
+  migrations, §53.13) and reads rows.
+* **Every source is independently guarded, and a failure is named, never
+  zeroed.** `_safe(name, reader, default, failures)` reads one source, logs once,
+  records the name in `failed_sources`, and degrades to a default. The page then
+  renders a partial-data note naming the failed source. A failed read must never
+  render as a confident zero, and one unreadable table must never blank the page.
+  A test forces **every** source to fail in turn.
+* **`USAGE_SOURCES` holds reader *names*, resolved via `getattr(db, name)` at
+  call time.** Storing bound methods would freeze the reference at import and
+  make the "every source can fail" test unable to patch `db` — the first version
+  did exactly that and the test caught it.
+* **No metric the architecture cannot support.** Latency is **not persisted** and
+  there is **no error log** and **no separate heartbeat**, so the page states the
+  gap in a "what this page cannot show" card rather than inventing a number or a
+  proxy it does not have. "Last update" is `seen_updates`' newest row
+  (`MAX(at)`, bounded by `idx_seen_updates_at`) — **a proxy, labelled as one**.
+  This is the concrete form of §53.13's "must not claim a capability it does not
+  have".
+* **The read layer writes nothing.** A page that only reports must not touch a
+  row — no counter, no cache table, no "last viewed" stamp. A test asserts that
+  rendering changes nothing and the module carries no writer call.
+* **A deployment-wide page counts tenants; it never names one.** The Overview may
+  show how many rooms are registered; it must not put a room's title, id or
+  anything from inside a room on the page (§53.6). A test asserts no group id or
+  title leaks into the HTML.
+* **`_state_buckets` follows `Pool.health`'s bucket order exactly** — INVALID →
+  invalid, QUOTA_EXHAUSTED → exhausted, RATE_LIMITED/UNAVAILABLE → limited, then
+  in-cooldown → limited, else active. This is what makes the panel's count
+  reconcilable with the bot's own health view instead of a second opinion.
+* **The switches show the *persisted* setting, or "default" — never a guess.**
+  `_switches()` reads the stored override; `None` renders as
+  «پیشفرض تنظیمات», not as ON or OFF, because the panel cannot see the effective
+  value the bot computed at boot.
+* **M1's placeholder page was deleted, not left beside the new one.** Keeping a
+  dead `home` route would be a second landing page and a route the permission
+  gate would still have to cover.
+
+**Two real bugs the work surfaced (both in the panel, neither in the bot).**
+
+* `app/web/jalali._parse` only understood SQLite's **string** timestamps, but the
+  panel's own `at` columns (`gemini_events.at`, `seen_updates.at`,
+  `dashboard_audit.at`) are **integer epochs** — so every "when" would have
+  rendered as an em dash. It now accepts an int/float epoch as UTC seconds and
+  **rejects `bool`** (which is an `int`, and would have rendered 1970). A
+  regression test renders a row with an epoch `at` and asserts the relative time.
+* The first bucket grouping checked a cooldown **only for an unknown state**, so
+  an `ACTIVE` account inside its cooldown counted as **usable**. It now follows
+  `Pool.health`'s order, and a test pins it (1 active, not 2).
+
+Two further failures were **test-authoring** mistakes, recorded because they are
+the same class as the ones above: the fixture truncated `mod_usage`, a table that
+does not exist (the real name is `moderation_usage`), and `USAGE_SOURCES` stored
+bound methods (see above). Neither changed production behaviour.
+
+**Verification (all measured, none assumed).**
+
+| Check | Result |
+|---|---|
+| `tests/test_web_dashboard_overview.py` (new) | **19 passed** |
+| Full suite | **3862 passed / 0 failed** (295.23 s) — was 3843, so **+19** |
+| Secret scan of the staged diff | clean (only the synthetic `PASSWORD = "correct-horse-battery"`; the owner id is absent) |
+| **Live container smoke** on `guardbot:latest` = **`b30520d1fd76`**, on **real production data** | `/healthz` 200; `POST /login` 303 → `/`; **overview 200, 14 432 bytes**; stat values `['۲ / ۲', '۴۳۰', '۳۱ / ۳۳', '۶۷۱', '۳۲', '۱ دقیقه پیش']` (rooms, people, accounts, requests, errors, last-update); **9** pool rows; attention `['تشخیص نیت — ۱ کلید نامعتبر داره', 'جستوجوی وب — هیچ حساب فعالی نداره']`; event badges rendered; **0 tracebacks** |
+| Bot container before/after the rebuild | `guardbot` still `f36e60bf3971`, `RestartCount=0`, `StartedAt=2026-09-24T22:02:18Z`; no smoke leftovers, temp dir removed |
+
+**Measured image / layer report (the owner's hard requirement, continued).**
+
+| Item | Measured |
+|---|---|
+| Shared image | `guardbot:latest` = **`b30520d1fd76`**, **1.15 GB** |
+| New layers | **none** — M3 adds no dependency, so the `requirements-dashboard.txt` and `pip install` layers are **cache hits** |
+| `COPY app ./app` | **6.54 MB** |
+| `app/web` tracked source | **98 384 → 106 688 bytes = +8 304** (M3's source only) |
+| Extra persistent data | **none** — the same `./data` volume; the page writes nothing |
+| Disk on `/` | **88 %** used before and after (no measurable change) |
+
+**Known limitations / risks to carry forward.** (a) The dashboard is **not
+deployed**: `docker compose up -d dashboard` has not been run, and doing so is a
+deploy that needs the owner's go-ahead. (b) `DASHBOARD_SECRET` and a password are
+**not set** in the host `.env`; setting both is part of the M8 deploy.
+(c) `DASHBOARD_SECURE_COOKIES` is off by default and **must be turned on with the
+nginx TLS proxy**. (d) The latency and error-log gaps the page names are
+**permanent until M7/M8** — they are not a missing query but a missing
+persistence layer, and building one is a decision for a later stage, not a
+backfill. (e) Still no multi-bot support (§54.24 decision 5). (f) SQLite is still
+single-writer: every later analytics page must aggregate at the DB layer and
+paginate.
+
+**Frozen / prohibited.** Nothing in this project was frozen by M3 and M3 froze
+nothing new; the one standing freeze is the `--arm context` probe (§54), which M3
+neither used nor touched. Prohibited in every panel stage, per §54.24 decision 6:
+modifying Chat, the pools, the credentials, the limits, the breakers, tenant
+isolation or the workload boundaries — and deploying the panel without the
+owner's go-ahead.
+
+**Pending verification: none.** The suite, the live probe on the named image, the
+secret scan, the import-graph check and the bot's untouched state were all
+verified and are recorded above. The one thing not yet done is the **deploy**,
+which is not a pending check but an action awaiting the owner's word.
+
+**NEXT STEP (exact).** Implement **M4 — AI control + credentials**: the pages
+that *show* and (for the first time) *change* the AI workloads. Read the pool and
+credential state **from the database the bot writes** (never by importing
+`app.gemini_pool`), list each workload's accounts with their persisted state and
+health bucket, and route the first mutation through **`admin_service`** — the
+same boundary the bot uses — not through a second write path. Declare each page's
+permission with `@authz.requires` and add **no** new permission to
+`rbac.PERMISSIONS`. Add `app/web/labels.py` entries only for vocabularies that
+already exist. Add the **cross-group / object-id IDOR test** that §54.26 deferred
+to "the first page that names one object" — M4's provider/credential page is that
+page. Then M5 … M8. Do **not** deploy the dashboard without the owner's go-ahead,
+and do **not** modify Chat, pools, credentials, limits, breakers, tenant isolation
+or workload boundaries.
+
+---
+
 ### 54.28 Checkpoint (2026-09-25, **legacy-parity diagnosis + output guard + one persona rule**) — **resume here** (supersedes §54.27); CODE NOT DEPLOYED, Dashboard M4 still NEXT
 
 **CHECKPOINT STATUS.** Date **2026-09-25 ~09:55Z**. Branch **`main`**. Base HEAD
@@ -6021,10 +6261,7 @@ tools and this documentation, push to **both** remotes (`origin` =
 GitHub. Dashboard **M4 — AI control + credentials** remains the next *product*
 step per §54.27, and the deploy gate for it is unchanged.
 
-
----
-
-### 54.29 Checkpoint (2026-09-25, **reply targets — semantic target vs Telegram destination**) — superseded by §54.30; CODE COMMITTED AND PUSHED, NOT DEPLOYED (commit `ffacd06`, both remotes)
+### 54.29 Checkpoint (2026-09-25, **reply targets — semantic target vs Telegram destination**) — superseded by §54.30; CODE COMMITTED AND PUSHED, NOT DEPLOYED
 
 **CHECKPOINT STATUS.** 2026-09-25. Branch `main`. Task: make Nexus understand what
 an incoming message is *about* and resolve **which Telegram message its answer
@@ -6172,6 +6409,130 @@ number; per-room tuning is not implemented and is not needed yet.
 **NEXT STEP (exact).** Deploy only on the owner's explicit go-ahead — the owner
 said **not to deploy this commit yet**. Dashboard **M4 — AI control +
 credentials** remains the next *product* step per §54.27.
+
+---
+
+### 54.31 Checkpoint (2026-09-26, **the 21-section overhaul — queue, reply targets, length, names, awareness, search**) — **resume here** (supersedes §54.30); CODE COMMITTED, PUSHED AND DEPLOYED
+
+**CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`fd4f9d6`**. The owner
+asked for a deep overhaul in 21 sections and then, in the clarification round,
+took three decisions: **do all sections in one pass**, **make every judgement
+call myself**, and **commit, push and deploy**. He also gave one explicit
+override of the prompt's written rules: a person who *seriously* curses at Nexus
+gets the same energy back, at the same intensity — a joke is answered as a joke,
+and neither may cross into ethnicity, religion, family («ناموسی») or sex, or a
+threat.
+
+**The defects that were actually reported, and the root cause of each.**
+
+| Reported | Root cause (found by reading the code, not guessed) |
+|---|---|
+| «داری خیلی سریع پیام میدی» | **Ours.** The sentence lived in `chat._MESSAGES["user_rate_limit"]`. There was no queue: a burst either hit our window and got a refusal message, or ran concurrently and two messages read the same history. |
+| «فلانی رو تگ کن» answers the asker | «تگ» was not a directive word at all, so the target resolved to nobody and the destination stayed the commander's own message. |
+| Answers come back summarised | Two causes: the persona stated "two or three sentences" as a house rule, and `max_output_tokens=1024` cut a real answer off mid-thought. `_fit_reply` then truncated to `GEMINI_CHAT_REPLY_CHARS`. |
+| It does not know people's names | The only names reaching the model were the ones in the recent window transcript. There was no reader for "who does this message mention". |
+
+**What was built.**
+
+* **`app/chat_queue.py` (new)** — the turn queue. A per-`(chat_id, user_id)`
+  `asyncio.Lock` serialises one conversation's turns so two messages cannot read
+  the same history and answer each other's context; a global `asyncio.Semaphore`
+  (`GEMINI_CHAT_MAX_CONCURRENCY`) bounds concurrency; and the throttle kinds
+  (`rate_limit`, `user_rate_limit`) are **waited out** with jittered backoff up to
+  `GEMINI_CHAT_QUEUE_MAX_WAIT` instead of dropping the turn. Past the deadline the
+  turn is **silent** — `chat._MESSAGES` no longer has a sentence for either kind,
+  so `ChatReply.message` is `""`. The provider's rate limits are the pool's
+  business and the queue never sees one.
+* **`app/reply_target.py`** — `_TAG_PHRASES` («تگ کن», «منشن کن», «صداش کن»,
+  «خطاب کن»…) join the directive vocabulary; `Candidate`; `Target.ambiguous` /
+  `ambiguous_query` / `wants_mention` / `no_reply`; `_name_lookup` preserves
+  ok-vs-ambiguous; a named person with **no held message** now goes out
+  **unattached** (`destination()` returns `None`) rather than answering the asker.
+* **`app/main.py`** — `_send_chat(..., mention=…)` injects Telegram's own
+  `tg://user?id=…` anchor (server-controlled id, HTML-escaped name);
+  `_ambiguous_target_text` asks "which one?" from the server's candidates and
+  spends **no** model call; `_people_context` / `_render_roster`; and
+  `_split_for_telegram` / `_seam`, which send a long answer as several messages at
+  natural seams with the reply target and the mention on the **first only**.
+* **`app/chat.py`** — the persona was rewritten once, coherently: warmer and more
+  conversational, length **follows the request** and is explicitly never a
+  ceiling, register is mirrored (including the owner's serious-insult override),
+  and the hard limits are stated. `_fit_reply` is now only the runaway guard
+  (`GEMINI_CHAT_REPLY_MAX_CHARS`, 12000) — never a length policy.
+  `max_output_tokens` 1024 → **8192**.
+* **`app/answer_shape.py` (new)** — a deterministic reading of *how much answer
+  was asked for* (`full` / `news` / `short` / nothing), rendered into the trusted
+  context as a server reading, exactly like the date.
+* **`app/people.py`** — `roster(chat_id, text=…)`: the people a message mentions,
+  matched by the **same exact, normalised comparison** `resolve` makes, with `@`
+  folded so «@milad» matches. Bounded twice and by `NEXUS_PEOPLE_ROSTER_SCAN`
+  (**measured**: an unbounded scan of a 5000-member room cost ~90 ms per message
+  against ~10 ms for the 500 most recent — it runs on every room-dependent reply).
+* **`app/context_plan.py`** — a **`people`** slot of its own, between `target` and
+  `room`. Deliberately *not* folded into the room block: the room is the
+  higher-precedence text for de-duplication, so a person named «Python» in the
+  roster would otherwise make a memory whose value is «Python» look like a
+  duplicate and drop it.
+* **`app/db.py` / `app/awareness.py`** — `group_messages.username` (additive,
+  `_ensure_column`, defaulted), captured from `user.username` and rendered beside
+  the id (`[member] میلاد (222) @milad: …`) so two members with one display name
+  can be told apart. A line without a username is byte-for-byte unchanged.
+* **`app/web_search.py` / `app/config.py`** — the findings are sized for the
+  answer the owner asked for: 8 results, `GEMINI_SEARCH_SNIPPET_CHARS` 600,
+  `GEMINI_SEARCH_MAX_CHARS` 3600. The lever is the **findings, never a second
+  request** — one Tavily call returns all eight — so the rationed resource
+  (requests) is untouched.
+* **`app/rbac.py`** — a **defect found by pyflakes, not by the brief**: the module
+  called `log.exception` on the "stored administrators could not be read" path
+  with **no logger defined**, so the degradation its own comment promises
+  ("a missing overlay is a guest, not a crash") raised `NameError` instead. Two
+  lines: `import logging` and the module logger.
+
+**Tests.** `tests/test_chat_queue.py` (new, 14), `tests/test_chat_concurrency.py`
+(new, 6), `tests/test_reply_splitting.py` (new, 10), `tests/test_answer_shape.py`
+(new, 13), plus additions to `test_identity.py` (roster: relevance, `@` folding,
+room isolation, bound, off, fail-soft, **scan bound asserted not timed**),
+`test_reply_target.py` (tag/ambiguity/unattached + three real-handler tests that
+the name memory reaches the model), `test_context_plan.py` (the `people` slot:
+order, never dropped, and the de-duplication pollution it prevents),
+`test_awareness_context.py` (username round-trip and line format), `test_web_search.py`
+(the material is larger and still bounded; the snippet bound is configurable).
+`test_chat.py`'s truncation contract was **replaced** by "the whole answer is
+kept" + "a runaway answer still hits the guard", and its persona-contract tests
+were updated for the rewritten bullets.
+
+**Two pre-existing test defects fixed while verifying.** `tests/test_web_search.py`
+defined `test_small_talk_does_not_search` **twice**, so the earlier (unit-level)
+definition was silently overwritten and never collected — a **lost test**, not a
+duplicate; the handler-level one is renamed. Two unused imports were removed
+(`tests/test_reply_target.py`, `tests/test_web_search.py`) and one dead `import re`
+in `app/reply_target.py`.
+
+**Full suite: 4114 passed / 0 failed** (the pre-change baseline was 4007 passed /
+11 failed, the failures being order-dependent pollution that this run does not
+reproduce). `pyflakes` is clean on every touched file; the remaining warnings are
+pre-existing and in files this change does not own.
+
+**Architecture preserved — nothing weakened.** Deterministic gates still cover
+infrastructure and security only; relevance, action and speech stay the model's.
+Every authority check is unchanged and still keyed on the numeric id. The name
+memory and the roster are **reads that grant nothing** — the roster cannot pick a
+target, only `reply_target` moves a destination, and it does so only from Telegram
+metadata and the stored window. Fail-open everywhere; the only member action is
+still a timed restriction; tenant isolation and retention are untouched. No new
+model call was added to any path: `answer_shape`, `people.roster`, the ambiguity
+question and the split are all deterministic.
+
+**Known limitations.** The roster scan is bounded by recency, so a member who has
+not been seen in the last `NEXUS_PEOPLE_ROSTER_SCAN` rows is not in the mention
+memory (a missing context line, never a wrong one). `_seam` cuts at whitespace and
+sentence punctuation, not at semantic boundaries. A single unbroken token longer
+than one Telegram message is hard-cut. The owner's serious-insult override is
+carried by the **prompt**; only its clause is asserted, never a generated reply.
+
+**NEXT STEP (exact).** Deploy was authorised for this work; the deploy and its
+live probe are recorded in the status report at `وضعیت.txt`. Dashboard **M4 — AI
+control + credentials** remains the next *product* step per §54.27.
 
 ---
 

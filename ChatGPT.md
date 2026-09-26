@@ -277,8 +277,8 @@ The point of this file is that the project does not have to be re-explained.
 
 Update this section after each meaningful change. The facts below were verified
 against the repository when this file was created, and re-verified against the
-repository on **2026-09-24** (after the Admin Control Center's M2) — treat any
-hash, count or status here as a claim to re-check, not as evidence.
+repository on **2026-09-26** (after the 21-section conversational overhaul) —
+treat any hash, count or status here as a claim to re-check, not as evidence.
 
 - **Branch:** `main` is the production state and the only live branch; the Nexus
   intelligence evolution was **merged into it** as `25ddee8` (2026-09-24) and
@@ -334,23 +334,47 @@ hash, count or status here as a claim to re-check, not as evidence.
     them. Media is no longer downloaded or inspected for content.
   - **The Admin Control Center (the dashboard)** — stages **M1** (`app/web`: the
     aiohttp app, scrypt password, signed session cookie, CSRF, the dark RTL
-    shell, login/logout, `/healthz`) and **M2** (authorization through `rbac`:
+    shell, login/logout, `/healthz`), **M2** (authorization through `rbac`:
     one configured operator, a fail-closed permission gate, and the panel's own
-    append-only `dashboard_audit` trail) are **built, tested and committed**
-    (`e50ec5c`, `3fb63fa`) and **not deployed**. M3…M8 are planned. It is a
-    second compose service over the **same image and the same `./data` volume**,
-    so it cannot disturb Telegram polling. See `AgentMD.md` §53.13 and §54.26.
-  - Full suite green: `python -m pytest -q` — **3843 passed / 0 failed** at the
-    panel's M2 (it was 1845 when the media pipeline was removed). There is no
-    model in the image, so a light venv can run the suite.
+    append-only `dashboard_audit` trail) and **M3** (the **Overview**: the first
+    read page, answering "what is the bot doing right now" from the shared
+    SQLite file the bot writes and nothing else — room/people/account counts,
+    today's requests/errors, a per-workload pool table, usage, the three owner
+    switches, the newest pool events and an attention list) are **built, tested
+    and committed** (`e50ec5c`, `3fb63fa`, `1433835`) and **not deployed**.
+    M4…M8 are planned. The panel never imports `app.gemini_pool` (that would
+    build a second registry from the panel's own environment), names the gap
+    where the architecture cannot support a metric (latency is not persisted,
+    there is no error log), and writes nothing on a read. It is a second compose
+    service over the **same image and the same `./data` volume**, so it cannot
+    disturb Telegram polling. See `AgentMD.md` §53.13 and §54.27.
+  - **The 21-section conversational overhaul** (2026-09-26, `AgentMD.md` §54.31) —
+    the turn **queue** (`app/chat_queue.py`: one conversation's turns serialised,
+    global concurrency bounded, our own rate window **waited out** and the
+    refusal sentence deleted), **reply-target** completion (tag directives like
+    «فلانی رو تگ کن» resolve the real person and go out under *their* message, an
+    ambiguous name asks instead of guessing, a named person with no held message
+    goes out unattached), **length** (the persona's two-sentence rule is a default
+    and never a ceiling, `max_output_tokens` 1024 → 8192, and a long answer is
+    **split across messages** at natural seams instead of truncated),
+    `app/answer_shape.py` (a deterministic reading of how much answer was asked
+    for), **name memory** (`people.roster` + a dedicated `people` context slot, so
+    Nexus knows the people a message mentions even if they have not spoken),
+    `group_messages.username` on the transcript line, and **full search delivery**
+    (8 results, longer snippets, 3600-char block — the lever is the findings, never
+    a second request). No new model call on any path.
+  - Full suite green: `python -m pytest -q` — **4114 passed / 0 failed** after the
+    2026-09-26 overhaul (3862 at the panel's M3, 3843 at M2, and 1845 when the
+    media pipeline was removed). There is no model in the image, so a light venv
+    can run the suite.
 - **What is not done / not present:**
   - No visual / media content moderation of any kind, by design.
   - No ban and no permanent punishment; the only member action is a timed
     restriction.
   - No raid detection, no hash whitelist/blacklist, no shadow mode, no
     statistics in the bot.
-  - **No dashboard is deployed.** The panel's M1 and M2 are built and committed,
-    but no dashboard container runs and none of its `.env` settings
+  - **No dashboard is deployed.** The panel's M1, M2 and M3 are built and
+    committed, but no dashboard container runs and none of its `.env` settings
     (`DASHBOARD_SECRET`, a password, `DASHBOARD_OPERATOR_ID`) are set. Starting
     it is a deploy and needs the owner's go-ahead.
   - No CI pipeline.
@@ -362,12 +386,12 @@ hash, count or status here as a claim to re-check, not as evidence.
   statistics, raid protection. The visual media-moderation pipeline is **not**
   planned for return; do not reintroduce it unless the owner explicitly asks.
 - **The active staged program is the Admin Control Center** (`AgentMD.md` §54.24):
-  M1 and M2 are done, **M3 (Overview) is next**, then M4 (AI control +
-  credentials) … M8 (security / performance / deploy). Each stage is tests →
+  M1, M2 and M3 are done, **M4 (AI control + credentials) is next**, then M5
+  (groups) … M8 (security / performance / deploy). Each stage is tests →
   secret-scan → commit → push → verify, and **no stage is pre-built**.
-- **Next:** the panel's **M3 — Overview**, only when the owner asks. The panel
-  **deploy** stays blocked until the owner gives the go-ahead *and*
-  `DASHBOARD_SECRET`, a password and `DASHBOARD_OPERATOR_ID` are set.
+- **Next:** the panel's **M4 — AI control + credentials**, only when the owner
+  asks. The panel **deploy** stays blocked until the owner gives the go-ahead
+  *and* `DASHBOARD_SECRET`, a password and `DASHBOARD_OPERATOR_ID` are set.
 
 ---
 
