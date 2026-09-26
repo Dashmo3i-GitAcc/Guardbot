@@ -330,7 +330,11 @@ or status here as a claim to re-check, not as evidence.
     «ویس کانتکست خاموش/باز»); its **own pool workload** (`voice_context`) sharing
     the Live credential by default but not the allowance or the breaker. Off,
     credential-less, or on any failure the note takes the **exact old text path**,
-    and a turn that produced an answer is never re-asked. See `AgentMD.md` §54.34.
+    and a turn that produced an answer is never re-asked. **Deployed and
+    live-probed** — the probe made two real turns against the real credential
+    (29/29 checks); a text-only turn given a fact that existed only in the
+    assembled context repeated it back, which is the proof that the context
+    reaches the live session. See `AgentMD.md` §54.34.
   - **Text moderation** — the moderation AI's verdict on a group text message,
     turned into an action by `app/mod_policy.py`. Off by default
     (`MODERATION_TEXT_ENABLED=0`). Only `MODERATION_DELETABLE_CLASSES`

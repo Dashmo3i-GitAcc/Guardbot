@@ -6772,7 +6772,7 @@ credentials** remains the next *product* step per §54.27.
 
 ---
 
-### 54.34 Checkpoint (2026-09-26, **Voice Context — a voice note answered as a spoken turn on the same context**) — **resume here** (supersedes §54.33); CODE COMMITTED AND PUSHED, DEPLOY PENDING
+### 54.34 Checkpoint (2026-09-26, **Voice Context — a voice note answered as a spoken turn on the same context**) — **resume here** (supersedes §54.33); CODE COMMITTED, PUSHED, **DEPLOYED AND LIVE-PROBED**
 
 **CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`46314db`** (the warmth
 deploy and its live probe). The owner asked for a complete, production **Voice
@@ -6877,16 +6877,57 @@ byte-for-byte what it was when the layer is off.
 * The layer shares the Live credential by default; the isolation is the workload
   (allowance + breaker), not the key.
 
-**NEXT STEP (exact).** Suite **4201 passed / 0 failed** (was 4198 before the
-three new end-to-end tests; 4148 at §54.33's raise). pyflakes clean on every
-touched file. Commit and push to both remotes, then build from **`git archive
-HEAD`** — not the working tree, because a concurrent session's uncommitted
-`app/voice_live/{session,telegram_voice}.py` diagnostics must not be deployed
-(the same precaution §54.33 took) — tag the rollback image, recreate only the
-`guardbot` service, and run a self-cleaning live probe proving a voice note gets
-a spoken reply built on the real context. Then record the image and the probe
-evidence here and in `وضعیت.txt`. Dashboard **M4 — AI control + credentials**
-remains the next *product* step per §54.27.
+**Deployed 2026-09-26 20:17Z and live-probed.** Commit **`ef0e709`**, pushed to
+both remotes and verified there with `git ls-remote` (`ef0e709c501a901d3213999a4b273cad59b8878a`
+on `origin` and `dashmo3i` — read from the remote, never from `git push`'s own
+output). Built from a **`git archive HEAD`** context, not the working tree,
+because a concurrent session still had uncommitted
+`app/voice_live/{session,telegram_voice}.py` diagnostics that must not be
+deployed (the same precaution §54.33 took); the image's `/srv/app/**` was
+verified **byte-identical** to the archive before the recreate. Image
+**`da7a621700de`**, rollback tag **`guardbot:rollback-pre-ef0e709` =
+`645faa141608`** (the previously running image). Container recreated
+`501e6dee…` → **`5d89c7ac309c`**, `restarts=0`, no traceback; the dashboard was
+not rebuilt and stayed healthy on its own image.
+
+Startup now reports the workload as its own line:
+`[pool] voice_context: accounts=1 usable=1 models=2 caps=audio_in,audio_out,live`.
+`tools/probe_voice_context.py` ran in the container: **29/29 checks passed, exit
+0, `rows_left=0`**. The evidence that matters:
+
+* **The context reaches the live session.** A real text-only turn
+  (`VOICE_CONTEXT_SEND_AUDIO=false`, so the context block *is* the message) was
+  given a fact that existed only in the assembled context — «نوشیدنی مورد
+  علاقه‌اش قهوه تلخ است» — and asked «من چه نوشیدنی‌ای دوست دارم؟». The model
+  answered **«قهوه تلخ؛ همونه که همیشه می‌چسبه.»** — it could only have known that
+  from the context, which is the whole claim of the feature and cannot be proven
+  by a test with the provider replaced.
+* **Real speech out.** That turn returned **11,892 bytes / 3.0 s** of OGG/Opus.
+* **Real audio in.** A genuine voice note was made by the deployed TTS path
+  (source=`tts`), decoded by the real ffmpeg to **76,800 bytes = 2.4 s** of
+  16 kHz PCM, and answered with **18,525 bytes / 4.7 s** of speech, `attempts=1`,
+  `capped=False`, with the provider's own input transcript present
+  (`heard_chars=17`) — so the audio really was heard, not just the text.
+* **The switch is real and off is really off.** Off persisted, reloaded from the
+  database, and refused the turn with `reason=disabled` **without a provider
+  call**; on persisted too.
+* **The isolation is real.** `voice_context` and `live_voice` are separate pool
+  objects with separate counters on the same credential fingerprint
+  (`20ed38996022`): after the probe `voice_context` read `requests=2
+  successes=2 failures=0` while `live_voice` was untouched at `requests=4`.
+* The probe restored the switch row exactly as it found it (it was never set, so
+  it is absent again) and wrote no other row.
+
+**NEXT STEP (exact).** Suite **4201 passed / 0 failed**. pyflakes clean on every
+touched file. **Deployed and live-probed**; rollback is
+`docker tag guardbot:rollback-pre-ef0e709 guardbot:latest && docker compose up -d
+--no-build guardbot`. Two honest caveats for whoever continues: the layer shares
+the Live credential with `live_voice` and `search` (one project's quota, three
+sets of counters — the pool warns about this at boot, and a second key from
+another project is the fix), and `search` reported `usable=0` at boot, which is
+the pre-existing free-tier condition noted in §54.24/§54.33, not a regression.
+Dashboard **M4 — AI control + credentials** remains the next *product* step per
+§54.27.
 
 ---
 
