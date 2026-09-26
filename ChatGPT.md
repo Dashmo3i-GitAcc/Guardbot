@@ -414,7 +414,10 @@ or status here as a claim to re-check, not as evidence.
     Retention is configurable with no short maximum (default 24h) and capacity is
     reported, never silently trimmed. Two invariants (§53.6 message bodies,
     §53.11 raw audio) are **deliberately excepted** for this isolated store, with
-    audio off by default. **Committed and pushed; not yet deployed.**
+    audio off by default. **Deployed 2026-09-26 (image `ccd8867f7d18`, sha
+    `e2496a9`) and live-probed** — a real turn read back from `/data/observability`
+    end to end, and the probe caught an **open** reply-target defect: «به <نام> بگو
+    …» was answered as a reply to the asker instead of the named person (§54.36).
   - Full suite green: `python -m pytest -q` — **4297 passed / 0 failed** after the
     observation subsystem (4201 after Voice Context, 4114 at the 2026-09-26
     overhaul, 3862 at the panel's M3, 3843 at M2, and 1845 when the media pipeline
