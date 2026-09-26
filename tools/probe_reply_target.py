@@ -51,10 +51,11 @@ from app import rbac
 ROOM = -1009000000021          # registered by this probe, revoked in cleanup
 MEMBER = 900000201             # the person asking
 ZAHRA = 900000202              # the person whose message is replied to
-MILAD = 900000203              # a person named outright
+MILAD = 900000203              # a person named outright, with a stored message
+SARA = 900000204               # a person named outright, with NO stored message
 BOT_ID = 8342690579
 SYNTH_ROOMS = (ROOM,)
-SYNTH_USERS = (MEMBER, ZAHRA, MILAD)
+SYNTH_USERS = (MEMBER, ZAHRA, MILAD, SARA)
 
 PARENT_ID = 900001480          # Zahra's message
 CURRENT_ID = 900001500         # the asker's message
@@ -153,7 +154,8 @@ class _FakeResult:
         self.turns = 0
         self.timing = {}
         self.error = None
-        self.skipped = False
+        self.skipped = ""
+        self.answered = True
         self.truncated = False
         self.repeated = False
         self.voice = None
@@ -212,13 +214,19 @@ async def run(text, *, reply_to=None, mode="stub", uid=MEMBER):
     sent.clear()
     upd = Update(update_id=_next_id(), message=_msg(text, reply_to=reply_to, uid=uid))
     await m.on_group_chat(upd, CTX)
+    answer_all = "".join(part.get("text") or "" for part in sent)
     return {
         "answer_sent": bool(sent),
         "reply_to": sent[0]["reply_to"] if sent else None,
+        "messages_sent": len(sent),
         "context_has_parent_text": bool(calls and PARENT_TEXT in calls[0]["context"]),
         "context_has_zahra_id": bool(calls and str(ZAHRA) in calls[0]["context"]),
         "context_has_reply_to": bool(calls and "reply to message id" in calls[0]["context"]),
+        # The server-controlled Telegram mention anchor, when a tag resolved.
+        "mentions_milad": f"tg://user?id={MILAD}" in answer_all,
+        "mentions_sara": f"tg://user?id={SARA}" in answer_all,
         "answer": sent[0]["text"] if sent else "",
+        "answer_chars": len(answer_all),
         "context": calls[0]["context"] if calls else "",
     }
 
@@ -255,6 +263,21 @@ async def _cases(out):
     # An unresolvable name must not invent a target.
     out["unknown_name"] = await run("نکسوس رضا رو جواب بده")
 
+    # ── The tag directive (2026-09-26) ────────────────────────────────────
+    # The owner's reported scenario, exactly: reply to Nexus's own message and
+    # say «میلاد رو تگ کن». Before the fix «تگ» was not a directive word at all,
+    # so the target resolved to nobody and the answer went out under the asker's
+    # own message. It must now land under Milad's message and mention him.
+    own_tag = _parent(mid=900001471, uid=BOT_ID, name="Nexus", text="چیزی لازم داری؟")
+    out["tag_while_reply_to_bot"] = await run("میلاد رو تگ کن", reply_to=own_tag)
+    # A tag with no reply: the named person's newest stored message.
+    out["tag_plain"] = await run("نکسوس میلاد رو تگ کن")
+    # A tag for somebody the room knows but who has no stored message: the answer
+    # goes out unattached (never under the asker) and still mentions them.
+    out["tag_with_no_message"] = await run("نکسوس سارا رو تگ کن")
+    # A tag with a name nobody knows must not invent a target or a mention.
+    out["tag_unknown_name"] = await run("نکسوس بهرام رو تگ کن")
+
     # One real-model turn, to show the parent's words actually reach the model.
     if "--real" in sys.argv:
         out["real_reply_then_this"] = await run(
@@ -262,6 +285,14 @@ async def _cases(out):
         body = out["real_reply_then_this"]["answer"]
         out["real_reply_then_this"]["answer_mentions_parent_token"] = (
             "زعفران" in body or "سفر" in body or "عکس" in body
+        )
+        # The length policy, end to end: an explicit ask for a full explanation
+        # must produce a real answer and may arrive as several messages. Before
+        # 2026-09-26 the persona's house length and a 1024-token ceiling cut this
+        # to a few lines; `messages_sent > 1` is the split, not a truncation.
+        out["real_full_answer"] = await run(
+            "نکسوس لطفا کامل و با جزییات توضیح بده که اینترنت چطور کار می‌کنه",
+            mode="real",
         )
 
 
@@ -326,6 +357,9 @@ async def main():
     people.remember(_user(MILAD, "میلاد"), ROOM)
     db.group_capture(ROOM, MILAD, "member", "میلاد", "سلام بچه‌ها", keep=200,
                      message_id=MILAD_MSG_ID)
+    # Sara is known by name but has never had a message captured, so a tag for
+    # her is the "resolved person with no held message" case.
+    people.remember(_user(SARA, "سارا"), ROOM)
 
     try:
         await _cases(out)
