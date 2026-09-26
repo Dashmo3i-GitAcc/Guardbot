@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import chat, config, db, groups, main, nexus, people, reply_target, web_search
+from app import chat, config, db, groups, main, nexus, people, reply_target
 
 OWNER = 999
 ADMIN = 556
@@ -189,6 +189,15 @@ def remember(user_id, first_name, *, last_name=""):
     people.remember(
         SimpleNamespace(id=user_id, first_name=first_name, last_name=last_name,
                         username="", is_bot=False),
+        CHAT,
+    )
+
+
+def remember_named(user_id, first_name, username, *, last_name=""):
+    """Like ``remember`` but with a username, so two people can be told apart."""
+    people.remember(
+        SimpleNamespace(id=user_id, first_name=first_name, last_name=last_name,
+                        username=username, is_bot=False),
         CHAT,
     )
 
@@ -450,10 +459,111 @@ def test_an_unknown_name_does_not_move_the_destination():
     assert target.destination(CURRENT) == CURRENT
 
 
-def test_a_named_person_with_no_message_in_the_window_does_not_move_it():
+def test_a_named_person_with_no_message_goes_out_unattached():
+    """The reported defect: answering the *asker* when told to reach somebody else.
+
+    «میلاد رو جواب بده» names میلاد, but the server holds none of his messages.
+    The old reading left the destination on the current message — so Nexus quoted
+    whoever asked instead of the person asked about, which is exactly what the
+    owner reported. The honest answer is to send it unattached: there is nothing
+    of میلاد's to attach it to.
+    """
     remember(MILAD, "میلاد")
     target = _resolve("میلاد رو جواب بده", window=[])
     assert target.person_id == MILAD
+    assert target.reply_to == 0
+    assert target.no_reply is True
+    assert target.destination(CURRENT) is None
+
+
+# ── The owner's «فلانی رو تگ کن» class ────────────────────────────────────
+def test_tagging_a_named_person_moves_the_destination_to_their_message():
+    """«میلاد رو تگ کن» used to resolve nobody and answer the asker."""
+    remember(MILAD, "میلاد")
+    window = [
+        {"user_id": MILAD, "message_id": 470, "at": 900, "text": "سلام", "kind": ""},
+        {"user_id": MILAD, "message_id": 490, "at": 990, "text": "خوبی؟", "kind": ""},
+    ]
+    target = _resolve("میلاد رو تگ کن", window=window)
+    assert target.person_id == MILAD
+    assert target.reply_to == 490
+    assert target.explicit is True
+    assert target.wants_mention is True
+
+
+def test_tagging_when_replied_to_nexus_does_not_answer_the_asker():
+    """The reported defect, exactly: a reply to Nexus's own message.
+
+    The commander replies to Nexus and says «میلاد رو تگ کن». The answer belongs
+    under میلاد's message — never under the commander's, which is what used to
+    happen because the parent was Nexus's own and nothing resolved.
+    """
+    remember(MILAD, "میلاد")
+    window = [
+        {"user_id": MILAD, "message_id": 470, "at": 900, "text": "سلام", "kind": ""},
+    ]
+    target = _resolve(
+        "میلاد رو تگ کن",
+        replied=parent(user_id=BOT_ID, name="Nexus"),
+        window=window,
+    )
+    assert target.person_id == MILAD
+    assert target.reply_to == 470
+    assert target.destination(CURRENT) == 470
+
+
+def test_a_tagged_person_with_no_message_goes_out_unattached():
+    remember(MILAD, "میلاد")
+    target = _resolve("میلاد رو تگ کن", window=[])
+    assert target.person_id == MILAD
+    assert target.reply_to == 0
+    assert target.no_reply is True
+    assert target.destination(CURRENT) is None
+
+
+def test_the_other_addressing_verbs_also_resolve_the_person():
+    """Every phrase the owner listed for «go talk to so-and-so»."""
+    remember(MILAD, "میلاد")
+    window = [{"user_id": MILAD, "message_id": 490, "at": 990, "text": "x", "kind": ""}]
+    for phrase in (
+        "برو با میلاد حرف بزن",
+        "میلاد رو جواب بده",
+        "روی پیام میلاد ریپلای بزن",
+        "میلاد رو منشن کن",
+        "میلاد رو صداش کن",
+        "برو سر به سر میلاد بذار",
+    ):
+        target = _resolve(phrase, window=window)
+        assert target.person_id == MILAD, phrase
+        assert target.reply_to == 490, phrase
+
+
+def test_an_ambiguous_name_is_returned_as_candidates_not_guessed():
+    """Two people answer to «علی»; the server asks rather than picks."""
+    remember(101, "علی")
+    remember(102, "علی")
+    target = _resolve("علی رو تگ کن")
+    assert target.person_id == 0
+    assert target.reply_to == 0
+    assert {c.user_id for c in target.ambiguous} == {101, 102}
+    assert target.ambiguous_query == "علی"
+    # Nothing moved: the answer stays under the asker while the server asks.
+    assert target.destination(CURRENT) == CURRENT
+
+
+def test_the_ambiguous_block_tells_the_model_not_to_guess():
+    remember(101, "علی")
+    remember(102, "علی")
+    out = reply_target.render(_resolve("علی رو تگ کن"))
+    assert "more than one person" in out
+    assert "101" in out and "102" in out
+
+
+def test_a_plain_message_that_merely_names_somebody_does_not_move_it():
+    """A name without a directive is content, not an instruction to quote."""
+    remember(MILAD, "میلاد")
+    window = [{"user_id": MILAD, "message_id": 490, "at": 990, "text": "x", "kind": ""}]
+    target = _resolve("میلاد گفت فردا میاد", window=window)
     assert target.reply_to == 0
     assert target.destination(CURRENT) == CURRENT
 
@@ -598,6 +708,100 @@ def test_an_explicit_person_target_reaches_the_send_call(monkeypatch):
     bot = FakeBot()
     run_group(message("@guardbot میلاد رو جواب بده"), bot)
     assert bot.sent[0]["reply_to_message_id"] == 490
+
+
+def test_tagging_a_person_when_replied_to_nexus_reaches_their_message(monkeypatch):
+    """The owner's exact scenario, through the real handler.
+
+    A commander replies to Nexus's own message and says «میلاد رو تگ کن». The
+    answer must land under میلاد's message — not under the commander's (the
+    reported defect) and not under Nexus's own.
+    """
+    remember(MILAD, "میلاد")
+    seed("سلام بچه‌ها", user_id=MILAD, message_id=490, name="میلاد")
+    install_model(monkeypatch)
+    bot = FakeBot()
+    own = parent(message_id=470, user_id=BOT_ID, name="Nexus", text="چیزی لازم داری؟")
+    run_group(message("میلاد رو تگ کن", reply_to_message=own), bot)
+    assert bot.sent, "the assistant answered"
+    assert bot.sent[0]["reply_to_message_id"] == 490
+
+
+def test_a_tag_directive_mentions_the_person(monkeypatch):
+    """«تگ کن» is answered with a real Telegram mention, so they are notified."""
+    remember(MILAD, "میلاد")
+    seed("سلام", user_id=MILAD, message_id=490, name="میلاد")
+    install_model(monkeypatch)
+    bot = FakeBot()
+    run_group(message("@guardbot میلاد رو تگ کن"), bot)
+    assert f"tg://user?id={MILAD}" in bot.sent[0]["text"]
+
+
+def test_a_tagged_person_with_no_message_is_sent_unattached(monkeypatch):
+    remember(MILAD, "میلاد")
+    install_model(monkeypatch)
+    bot = FakeBot()
+    run_group(message("@guardbot میلاد رو تگ کن"), bot)
+    assert bot.sent, "the assistant answered"
+    assert bot.sent[0]["reply_to_message_id"] is None
+    assert f"tg://user?id={MILAD}" in bot.sent[0]["text"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Part 3 — the room's name memory reaches the model
+# ══════════════════════════════════════════════════════════════════════════
+# "Nexus knows everybody's name": a message about somebody who has not spoken in
+# the window still reaches their name, username and id — as server data, not as
+# something a person said.
+def test_a_mentioned_name_reaches_the_model_even_without_a_message(monkeypatch):
+    remember_named(MILAD, "میلاد", "milad")
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run_group(
+        message("@guardbot نظرت درباره میلاد چیه؟", reply_to_message=parent()), bot
+    )
+
+    assert bot.sent, "the assistant answered"
+    assert "میلاد" in calls[0]["context"]
+    assert str(MILAD) in calls[0]["context"]
+    assert "milad" in calls[0]["context"]
+
+
+def test_the_name_memory_is_labelled_as_server_data(monkeypatch):
+    remember_named(MILAD, "میلاد", "milad")
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run_group(
+        message("@guardbot میلاد کی بود؟", reply_to_message=parent()), bot
+    )
+
+    assert "People in this room the message mentions" in calls[0]["context"]
+
+
+def test_a_message_that_names_nobody_carries_no_roster(monkeypatch):
+    remember_named(MILAD, "میلاد", "milad")
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+
+    run_group(message("@guardbot این عکس قشنگه", reply_to_message=parent()), bot)
+
+    assert "People in this room" not in calls[0]["context"]
+    assert f"id {MILAD}" not in calls[0]["context"]
+
+
+def test_an_ambiguous_name_asks_instead_of_answering(monkeypatch):
+    """Two people answer to «علی»; the server asks, and spends no model call."""
+    remember_named(101, "علی", "ali_one")
+    remember_named(102, "علی", "ali_two")
+    calls = install_model(monkeypatch)
+    bot = FakeBot()
+    run_group(message("@guardbot علی رو تگ کن"), bot)
+    assert calls == [], "the model must not be consulted to guess between people"
+    assert bot.sent, "the server asked which one"
+    assert "علی" in bot.sent[0]["text"]
+    assert "ali_one" in bot.sent[0]["text"] and "ali_two" in bot.sent[0]["text"]
 
 
 def test_a_reply_chain_is_sent_under_the_immediate_parent(monkeypatch):

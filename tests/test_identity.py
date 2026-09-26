@@ -248,6 +248,83 @@ def test_resolution_grants_nothing():
     assert found["identity"]["role"] == rbac.ROLE_GUEST
 
 
+# ── The room's name memory ────────────────────────────────────────────────
+# ``people.roster`` is the reader behind "Nexus knows everybody's name": the
+# people a message mentions, whether or not they spoke in the window. It is
+# relevance-filtered by construction and never a member dump.
+def test_the_roster_names_the_people_a_message_mentions():
+    remember(500, "میلاد", "رضایی", "milad")
+
+    rows = people.roster(CHAT, text="میلاد دیروز چی گفت؟")
+
+    assert [row["user_id"] for row in rows] == [500]
+    assert rows[0]["name"] == "میلاد رضایی"
+    assert rows[0]["username"] == "milad"
+
+
+def test_the_roster_matches_a_username_too():
+    remember(500, "میلاد", username="milad")
+    rows = people.roster(CHAT, text="@milad سلام")
+    assert [row["user_id"] for row in rows] == [500]
+
+
+def test_a_message_that_names_nobody_returns_no_roster():
+    remember(500, "میلاد")
+    assert people.roster(CHAT, text="امروز هوا خوبه") == []
+
+
+def test_the_roster_never_crosses_rooms():
+    remember(500, "میلاد", chat_id=OTHER_CHAT)
+    assert people.roster(CHAT, text="میلاد کیه؟") == []
+
+
+def test_the_roster_is_bounded(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_PEOPLE_CONTEXT_ITEMS", 2)
+    remember(500, "میلاد")
+    remember(501, "میلاد")
+    remember(502, "میلاد")
+
+    assert len(people.roster(CHAT, text="میلاد")) == 2
+
+
+def test_the_roster_is_empty_when_identity_memory_is_off(monkeypatch):
+    remember(500, "میلاد")
+    monkeypatch.setattr(config, "NEXUS_PEOPLE_ENABLED", False)
+
+    assert people.roster(CHAT, text="میلاد") == []
+
+
+def test_the_roster_scan_is_bounded(monkeypatch):
+    """The reader runs on the hot path, so it must not scan the whole room.
+
+    The bound is asserted rather than timed: a wall-clock test would be flaky,
+    while this pins the property the timing depends on — one bounded read.
+    """
+    seen: dict = {}
+    real = people.db.people_rows
+
+    def spy(chat_id=None, *, limit=0):
+        seen["limit"] = limit
+        return real(chat_id, limit=limit)
+
+    monkeypatch.setattr(people.db, "people_rows", spy)
+    monkeypatch.setattr(config, "NEXUS_PEOPLE_ROSTER_SCAN", 123)
+    remember(500, "میلاد")
+
+    people.roster(CHAT, text="میلاد")
+
+    assert seen["limit"] == 123
+
+
+def test_a_failing_roster_read_is_not_fatal(monkeypatch):
+    remember(500, "میلاد")
+    monkeypatch.setattr(
+        people.db, "people_rows", lambda *a, **k: (_ for _ in ()).throw(RuntimeError())
+    )
+
+    assert people.roster(CHAT, text="میلاد") == []
+
+
 # ── The counter ───────────────────────────────────────────────────────────
 def test_every_resolution_is_counted_by_its_outcome():
     """The tally must be complete by construction, not by remembering to add

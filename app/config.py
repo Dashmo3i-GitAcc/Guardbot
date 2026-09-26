@@ -595,6 +595,32 @@ GEMINI_CHAT_RATE_WINDOW = _float("GEMINI_CHAT_RATE_WINDOW", 60.0)
 GEMINI_CHAT_USER_RATE_LIMIT = _int("GEMINI_CHAT_USER_RATE_LIMIT", 5)
 GEMINI_CHAT_USER_RATE_WINDOW = _float("GEMINI_CHAT_USER_RATE_WINDOW", 30.0)
 
+# ── The turn queue: bounded concurrency, ordered per conversation ─────────
+#
+# A group where ten people talk at once must not lose a message, and nobody may
+# be blamed for the deployment's own limits. The two windows above therefore
+# **queue** a turn rather than drop it: when a window is full, `app/chat_queue.py`
+# waits and retries with a bounded backoff instead of returning a refusal, and
+# the refused sentence was removed from `chat._MESSAGES` entirely.
+#
+# This is a different thing from the provider's rate limits, which stay in the
+# pool (`gemini_pool` owns cooldowns, retries and failover). The internal brake
+# and the external limit are never mixed: an internal full window is waited out,
+# an external 429 is the pool's to absorb.
+#
+# `GEMINI_CHAT_MAX_CONCURRENCY` bounds how many model calls run at once so a
+# burst cannot stampede the provider. `GEMINI_CHAT_QUEUE_MAX_WAIT` is how long a
+# queued turn waits for a window to free before it gives up **silently** — never
+# with a message to the user. It is derived from the larger of the two windows
+# plus a margin so a burst inside one window is served rather than dropped; an
+# operator may raise it but not lower it below the windows it has to outlast.
+GEMINI_CHAT_MAX_CONCURRENCY = _int("GEMINI_CHAT_MAX_CONCURRENCY", 4)
+GEMINI_CHAT_QUEUE_MAX_WAIT = _float(
+    "GEMINI_CHAT_QUEUE_MAX_WAIT",
+    max(GEMINI_CHAT_RATE_WINDOW, GEMINI_CHAT_USER_RATE_WINDOW) + 30.0,
+)
+GEMINI_CHAT_QUEUE_BACKOFF = _float("GEMINI_CHAT_QUEUE_BACKOFF", 1.5)
+
 # Its own daily ceiling, counted on the same Pacific boundary but in its own
 # table, so the two can never be added together by accident.
 #
@@ -624,9 +650,17 @@ GEMINI_CHAT_MAX_CHARS = _int("GEMINI_CHAT_MAX_CHARS", 1500)
 GEMINI_CHAT_HISTORY_TURNS = _int("GEMINI_CHAT_HISTORY_TURNS", 8)
 GEMINI_CHAT_HISTORY_TTL = _int("GEMINI_CHAT_HISTORY_TTL", 1800)
 
-# The reply is truncated to this before it is sent. Telegram's hard limit is
-# 4096 characters; the margin is for the escaping and the length notice.
+# How long one Telegram message may be. Telegram's hard limit is 4096
+# characters and it counts after escaping, so the margin is for that. A reply
+# longer than this is *split* across several messages, never truncated — the
+# answer the person asked for is the answer they get.
 GEMINI_CHAT_REPLY_CHARS = _int("GEMINI_CHAT_REPLY_CHARS", 3500)
+
+# The ceiling on a whole answer, across all of its messages. It is a runaway
+# guard, not a style rule: a model that loops must not turn one turn into a
+# hundred messages. It is far above what the brief allows ("up to a hundred, up
+# to two hundred lines"), so it never truncates an answer somebody asked for.
+GEMINI_CHAT_REPLY_MAX_CHARS = _int("GEMINI_CHAT_REPLY_MAX_CHARS", 12000)
 
 # Sent by /reset. The one piece of this feature's copy that a user can trigger
 # deliberately, so it lives here with the rest of the wording.
@@ -909,6 +943,22 @@ NEXUS_PEOPLE_RETENTION = _int("NEXUS_PEOPLE_RETENTION", 90 * 86400)
 # a match — this only bounds what is shown to the model when several people
 # share a name.
 NEXUS_PEOPLE_MAX_CANDIDATES = _int("NEXUS_PEOPLE_MAX_CANDIDATES", 8)
+
+# The name-awareness block: when a message mentions people the room knows, the
+# model is given who they are — name, username, id — even if they have not spoken
+# in the window. It is relevance-filtered by construction (only names the message
+# actually contains) and bounded twice, so it never becomes a member dump. This is
+# what makes "Nexus knows everybody's name" true without carrying the roster.
+NEXUS_PEOPLE_CONTEXT_ITEMS = _int("NEXUS_PEOPLE_CONTEXT_ITEMS", 8)
+NEXUS_PEOPLE_CONTEXT_CHARS = _int("NEXUS_PEOPLE_CONTEXT_CHARS", 300)
+
+# How many of the room's most-recently-seen people the mention reader scans.
+# It runs on every room-dependent reply, so it is bounded by MEASUREMENT: an
+# unbounded scan of a 5000-member room cost ~90 ms per message (the read plus a
+# normalisation per row), against ~10 ms for the 500 most recent. A name a
+# message mentions is overwhelmingly somebody recently present, and a miss is a
+# missing context line, never a wrong one — so this is the right thing to bound.
+NEXUS_PEOPLE_ROSTER_SCAN = _int("NEXUS_PEOPLE_ROSTER_SCAN", 500)
 
 
 # ---------------- Nexus Memory: what the server may remember about a person ---
@@ -2039,6 +2089,21 @@ NEXUS_SEARCH_CONFIRM_TEXT = os.getenv(
 )
 NEXUS_SEARCH_NEVER_CHANGED_TEXT = os.getenv("NEXUS_SEARCH_NEVER_CHANGED_TEXT", "—")
 NEXUS_NEVER_CHANGED_TEXT = os.getenv("NEXUS_NEVER_CHANGED_TEXT", "—")
+# Asked when a spoken name matches more than one person in the room. The server
+# refuses to pick between them — the same rule `people.resolve` follows — and
+# instead says who the candidates are so the asker can be specific. `{name}` is
+# the spoken name and `{options}` is one line per candidate, each carrying the
+# distinguishing detail (a username, or who spoke last) the asker can use.
+NEXUS_TARGET_AMBIGUOUS_TEXT = os.getenv(
+    "NEXUS_TARGET_AMBIGUOUS_TEXT",
+    "چند نفر با اسم «{name}» اینجا هستن؛ منظورت کدومه؟\n{options}",
+)
+# One candidate line inside the question above. `{name}`, `{username}` and
+# `{hint}` (what distinguishes them, e.g. «آخرین پیام رو خودش فرستاد»).
+NEXUS_TARGET_CANDIDATE_LINE = os.getenv(
+    "NEXUS_TARGET_CANDIDATE_LINE",
+    "• {name}{username}{hint}",
+)
 NEXUS_STATUS_HINT = os.getenv(
     "NEXUS_STATUS_HINT",
     "دستورها: /nexus on | /nexus off | /nexus status",
@@ -2791,11 +2856,21 @@ GEMINI_SEARCH_RATE_WINDOW = _float("GEMINI_SEARCH_RATE_WINDOW", 60.0)
 GEMINI_SEARCH_DAILY_LIMIT = _int("GEMINI_SEARCH_DAILY_LIMIT", 150)
 
 # Bounds on what is kept. ``MAX_RESULTS`` caps how many sources are surfaced;
-# ``MAX_CHARS`` caps the findings block that enters the prompt, because the
-# search allowance is rationed in requests and tokens spent on a long synthesis
-# are paid on every grounded reply.
-GEMINI_SEARCH_MAX_RESULTS = _int("GEMINI_SEARCH_MAX_RESULTS", 5)
-GEMINI_SEARCH_MAX_CHARS = _int("GEMINI_SEARCH_MAX_CHARS", 1800)
+# ``MAX_CHARS`` caps the findings block that enters the prompt.
+#
+# Sized for the answer the owner asked for, not for a summary: "bring me the
+# news" is answered in full, and a full answer needs more material than a
+# five-snippet digest. The lever is deliberately the *findings*, never a second
+# request — one Tavily call returns all of these results, so the rationed
+# resource (requests, per the cost ceiling) is untouched and only the tokens of
+# one turn move. 8 results at up to 600 characters each is ~4800 characters
+# before the block cap trims it to 3600 (~1k tokens), which fits the raised
+# output budget with room to spare.
+GEMINI_SEARCH_MAX_RESULTS = _int("GEMINI_SEARCH_MAX_RESULTS", 8)
+GEMINI_SEARCH_MAX_CHARS = _int("GEMINI_SEARCH_MAX_CHARS", 3600)
+# How much of one result's snippet is kept. The provider returns a content chunk;
+# this is what makes a result worth more than a headline.
+GEMINI_SEARCH_SNIPPET_CHARS = _int("GEMINI_SEARCH_SNIPPET_CHARS", 600)
 # How much of the question is sent. A question longer than this is truncated
 # rather than refused, the same way the conversation truncates its own input.
 GEMINI_SEARCH_QUERY_CHARS = _int("GEMINI_SEARCH_QUERY_CHARS", 600)

@@ -46,6 +46,7 @@ def fresh_nexus_state():
     from app import (
         awareness,
         awareness_schedule,
+        chat_queue,
         db,
         gemini_keys,
         groups,
@@ -121,6 +122,12 @@ def fresh_nexus_state():
     # reading" rather than as a leaked hint. This is the same class of state as
     # ``awareness.reset_timers`` above and is reset for the same reason.
     awareness_schedule.reset()
+    # The turn queue's per-conversation locks and its concurrency gate. The gate
+    # is built once from config and then cached, so a test that set a concurrency
+    # of one would otherwise hand that bound to every later test; the locks are
+    # process state keyed by (chat, user) that must not carry a held lock across
+    # a test boundary.
+    chat_queue.reset_state()
     yield
     nexus.reset_state()
     # Only the cache is cleared here, never the table: a module fixture's own
@@ -139,4 +146,5 @@ def fresh_nexus_state():
     memory.reset_state()
     state.reset_state()
     awareness_schedule.reset()
+    chat_queue.reset_state()
 

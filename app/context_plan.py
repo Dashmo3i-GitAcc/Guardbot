@@ -88,11 +88,11 @@ Every source is bounded by its own reader (``NEXUS_MEMORY_CHARS``,
 then the room window — never by slicing a rendered block in half. A source that
 cannot fit is omitted rather than shown as a misleading fragment.
 
-The administrative roster, the server date and the web findings are outside
-that budget, because they are never dropped: counting a source the ceiling
-cannot remove would let a large roster push the limit past the point where
-anything is left to drop, and the only thing that would happen is the room
-being stripped out of an answer that needs it.
+The administrative roster, the room's name memory, the server date and the web
+findings are outside that budget, because they are never dropped: counting a
+source the ceiling cannot remove would let a large roster push the limit past the
+point where anything is left to drop, and the only thing that would happen is the
+room being stripped out of an answer that needs it.
 
 What this module may never do
 -----------------------------
@@ -630,6 +630,7 @@ def compose(
     *,
     admin: str = "",
     target: str = "",
+    people: str = "",
     room: str = "",
     awareness: str = "",
     state: str = "",
@@ -654,11 +655,20 @@ def compose(
 
     The order is fixed and is the order the sources answer their questions in:
     the administrative roster, the reply relationship (what this message is
-    answering and what it points at), the room (its transcript, then the server's
-    reading of the message), the active state, the person's memory, the server's
-    date, and finally any web findings. A skipped source leaves no trace — no
-    empty label, no placeholder — so the model never reads a heading for
-    something that is not there.
+    answering and what it points at), the room's **name memory** (who the message
+    mentions), the room (its transcript, then the server's reading of the
+    message), the active state, the person's memory, the server's date, and
+    finally any web findings. A skipped source leaves no trace — no empty label,
+    no placeholder — so the model never reads a heading for something that is not
+    there.
+
+    ``people`` is deliberately a slot of its own rather than a suffix on the room
+    block. It carries names and ids, and the de-duplication below treats the room
+    as the higher-precedence text: folding the roster into the room would let a
+    person's name in it make an unrelated memory line look like a duplicate of
+    the room and drop it. It is not selectable and is never dropped, like the
+    administrative roster, the reply relationship, the date and the findings —
+    and it is bounded by its own reader (``NEXUS_PEOPLE_CONTEXT_CHARS``).
     """
     room_text = str(room or "")
     awareness_text = str(awareness or "")
@@ -666,6 +676,7 @@ def compose(
     memory_text = str(memory or "")
     admin_text = str(admin or "")
     target_text = str(target or "")
+    people_text = str(people or "")
     date_text = str(date or "")
     search_text = str(search or "")
 
@@ -747,6 +758,8 @@ def compose(
         pieces.append(admin_text)
     if target_text:
         pieces.append(target_text)
+    if people_text:
+        pieces.append(people_text)
     if room_text:
         pieces.append(room_text)
     if awareness_text:

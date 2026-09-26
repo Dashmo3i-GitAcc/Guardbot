@@ -251,6 +251,7 @@ def capture(
     directed: bool = False,
     actor: bool = False,
     kind: str = "",
+    username: str = "",
 ) -> bool:
     """Append one received message to the room window. Never raises, never calls AI.
 
@@ -298,6 +299,7 @@ def capture(
             directed=directed,
             actor=actor,
             kind=kind,
+            username=username,
         )
     except Exception:  # noqa: BLE001 - a capture is never worth a crash
         log.exception("could not record a room message")
@@ -476,6 +478,12 @@ def _line(
     name = (message.get("name") or "").strip() or "?"
     user_id = int(message.get("user_id") or 0)
     head = f"[{role}] {name} ({user_id})"
+    # The username when Telegram gave one. It is the only thing that tells two
+    # members with the same display name apart, and the room reading has to be
+    # able to follow a conversation where both are called «میلاد».
+    username = (message.get("username") or "").strip().lstrip("@")
+    if username:
+        head += f" @{username}"
     reply_user_id = int(message.get("reply_user_id") or 0)
     if reply_user_id:
         reply_name = (message.get("reply_name") or "").strip() or "?"

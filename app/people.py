@@ -282,3 +282,57 @@ def resolve(name: str, *, chat_id: int = 0) -> dict:
     # room was given. Nothing to annotate: a name that only exists in another
     # group is simply not resolvable here, which is the isolation working.
     return {"status": "ok", **_public(row)}
+
+
+def roster(chat_id: int, *, text: str = "", limit: int = 0) -> list[dict]:
+    """The people this room knows whose names the message actually mentions.
+
+    The reader behind "Nexus knows everybody's name". The room transcript names
+    the people who spoke *recently*; this names the people a message is *about*
+    even when they have not spoken in the window — «میلاد دیروز چی گفت؟» reaches
+    میلاد's id without dumping the membership.
+
+    Relevance is by construction, not by a score: a row is returned only when one
+    of its normalised keys is a whole token of the message, the same exact
+    comparison ``resolve`` makes. Nothing is guessed and nothing is ranked — an
+    unmatched name is simply absent, and the model is not shown a candidate set
+    it might pick from. It is a *read* that grants nothing: it returns rows for
+    the caller to render, and the ids it carries are Telegram's, not an authority.
+
+    ``limit`` bounds the result and ``chat_id`` is required, so a caller cannot
+    ask across rooms — the same isolation rule ``resolve`` enforces.
+
+    The scan is bounded by ``NEXUS_PEOPLE_ROSTER_SCAN`` of the room's most
+    recently seen people, because this reader runs on every room-dependent reply
+    and an unbounded scan of a large room costs tens of milliseconds on the hot
+    path (measured). A name a message mentions is overwhelmingly somebody
+    recently present; and because a miss costs a context line rather than
+    correctness, bounding it is the right trade. The exact comparison is
+    unchanged — the bound only narrows what is compared.
+    """
+    if not config.NEXUS_PEOPLE_ENABLED or not chat_id:
+        return []
+    limit = int(limit or config.NEXUS_PEOPLE_CONTEXT_ITEMS)
+    if limit <= 0:
+        return []
+    wanted = set(_tokens(text))
+    # People write a username with its ``@`` — «@milad سلام» — while the stored
+    # key has none, so both spellings are tried. Only the ``@`` is folded: the
+    # comparison stays exact, and a token that is only ``@`` disappears.
+    wanted |= {token[1:] for token in wanted if token.startswith("@")}
+    wanted = {token for token in wanted if len(token) >= MIN_NAME_LENGTH}
+    if not wanted:
+        return []
+    scan = max(0, int(config.NEXUS_PEOPLE_ROSTER_SCAN))
+    try:
+        rows = db.people_rows(int(chat_id), limit=scan)
+    except Exception:  # noqa: BLE001 - a context read is never worth a turn
+        log.exception("could not read the room roster")
+        return []
+    out: list[dict] = []
+    for row in rows:
+        if _keys(row) & wanted:
+            out.append(_public(row))
+            if len(out) >= limit:
+                break
+    return out

@@ -473,6 +473,41 @@ def test_a_line_has_no_age_when_the_caller_does_not_know_the_clock():
     assert awareness._age_mark({"at": int(time.time())}, 0) == ""
 
 
+# ── The username, which is what tells two same-named members apart ────────
+def test_a_transcript_line_carries_the_speakers_username():
+    line = awareness._line(
+        {"user_id": 1, "text": "hi", "name": "میلاد", "role": "member",
+         "username": "milad"}
+    )
+    assert line == "[member] میلاد (1) @milad: hi"
+
+
+def test_a_line_without_a_username_is_unchanged():
+    line = awareness._line(
+        {"user_id": 1, "text": "hi", "name": "میلاد", "role": "member",
+         "username": ""}
+    )
+    assert line == "[member] میلاد (1): hi"
+
+
+def test_the_username_round_trips_through_the_window():
+    db.group_capture(
+        CHAT, MEMBER, "member", "میلاد", "hello", keep=10, message_id=1,
+        username="milad",
+    )
+    rows = db.group_window(CHAT, limit=10)
+    assert rows[0]["username"] == "milad"
+
+
+def test_the_capture_path_stores_the_username():
+    awareness.capture(
+        CHAT, MEMBER, "member", "میلاد", "hello", message_id=1, username="milad"
+    )
+    rows = db.group_window(CHAT, limit=10)
+    assert rows[0]["username"] == "milad"
+    assert "@milad" in awareness.render(CHAT, messages=rows)
+
+
 def test_a_message_from_the_future_is_not_given_a_negative_age():
     assert awareness._age_mark({"at": int(time.time()) + 60}, int(time.time())) == ""
 

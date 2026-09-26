@@ -960,7 +960,9 @@ def _parse_tavily(response) -> tuple[str, tuple[Source, ...], tuple[str, ...]]:
             continue
         seen.add(url)
         title = _clean_text(item.get("title", ""))[:120]
-        snippet = _clean_text(item.get("content", ""))[:400]
+        snippet = _clean_text(item.get("content", ""))[
+            : max(1, int(config.GEMINI_SEARCH_SNIPPET_CHARS))
+        ]
         try:
             domain = _clean_text(urllib.parse.urlsplit(url).hostname or "")[:80]
         except ValueError:

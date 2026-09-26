@@ -741,6 +741,12 @@ def init() -> None:
     _ensure_column("group_messages", "directed", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column("group_messages", "actor", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column("group_messages", "kind", "TEXT NOT NULL DEFAULT ''")
+    # The speaker's Telegram username, when they have one. Additive and
+    # defaulted, so an existing row simply has none. It is here because two
+    # members can share a display name and only the username tells them apart —
+    # the transcript line shows it beside the id, which is what lets the model
+    # follow a conversation where two people are called «میلاد».
+    _ensure_column("group_messages", "username", "TEXT NOT NULL DEFAULT ''")
     # The room's own newest id, so the anchor query does not have to scan. The
     # index above covers (chat_id, id) already; this one covers the directed
     # filter, which is the shape the anchor actually asks for.
@@ -3759,8 +3765,8 @@ def group_window(
     limit = max(1, int(limit))
     sql = (
         "SELECT id, user_id, role, name, text, at, message_id, reply_user_id, "
-        "reply_name, reply_message_id, directed, actor, kind FROM group_messages "
-        "WHERE chat_id=?"
+        "reply_name, reply_message_id, directed, actor, kind, username "
+        "FROM group_messages WHERE chat_id=?"
     )
     args: list = [int(chat_id)]
     if ttl and ttl > 0:
@@ -3787,6 +3793,7 @@ def group_window(
             "directed": bool(r[10]),
             "actor": bool(r[11]),
             "kind": str(r[12] or ""),
+            "username": str(r[13] or ""),
         }
         for r in reversed(rows)
     ]
@@ -3807,6 +3814,7 @@ def group_capture(
     directed: bool = False,
     actor: bool = False,
     kind: str = "",
+    username: str = "",
 ) -> int:
     """Append one message and trim the room, in **one** transaction.
 
@@ -3831,7 +3839,7 @@ def group_capture(
         cur = _conn.execute(
             "INSERT INTO group_messages (chat_id, user_id, role, name, text, at, "
             "message_id, reply_user_id, reply_name, reply_message_id, directed, "
-            "actor, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "actor, kind, username) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 int(chat_id),
                 int(user_id),
@@ -3846,6 +3854,7 @@ def group_capture(
                 1 if directed else 0,
                 1 if actor else 0,
                 (kind or "")[:32],
+                (username or "")[:64],
             ),
         )
         row_id = int(cur.lastrowid or 0)

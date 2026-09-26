@@ -343,6 +343,41 @@ def test_the_ceiling_never_drops_the_roster_the_date_or_the_findings():
     assert SEARCH in plan.text
 
 
+def test_the_name_memory_sits_between_the_target_and_the_room():
+    plan = context_plan.compose(
+        reading("میلاد رو جواب بده"),
+        target="TARGET",
+        people="PEOPLE",
+        room="ROOM",
+    )
+    assert plan.text.index("TARGET") < plan.text.index("PEOPLE") < plan.text.index("ROOM")
+
+
+def test_the_ceiling_never_drops_the_name_memory():
+    """It is bounded by its own reader, and never by the room's ceiling."""
+    plan = context_plan.compose(
+        reading("همونو بزن"),
+        people="PEOPLE",
+        room="r" * 4000,
+        ceiling=200,
+    )
+    assert "PEOPLE" in plan.text
+
+
+def test_a_name_in_the_memory_block_does_not_suppress_a_memory_line():
+    """The roster is its own slot precisely so it cannot pollute de-duplication.
+
+    A person called «Python» in the room must not make a memory whose value is
+    «Python» look like a duplicate of the room and drop it.
+    """
+    plan = context_plan.compose(
+        reading("همونو بزن"),
+        people="- Python (@py) — id 5\n",
+        memory="- programming: Python\n",
+    )
+    assert "programming: Python" in plan.text
+
+
 def test_the_diagnostic_carries_no_content():
     """A diagnostic names sources and sizes; it never quotes the turn."""
     secret = "این-یک-راز-است"

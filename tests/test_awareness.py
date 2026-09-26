@@ -1708,14 +1708,14 @@ def test_a_silent_decline_leaves_the_room_readable(monkeypatch):
 def test_a_decline_that_speaks_keeps_the_marker(monkeypatch):
     """If the person was told something, the room has been answered.
 
-    A rate limit is the case that matters: the reply is a sentence rather than a
+    A daily cap is the case that matters: the reply is a sentence rather than a
     model answer, but it is a reply, and the ambient path must not add a second
     one on top of it.
     """
     bot = FakeBot()
 
     async def _reply(chat_id, user_id, body, **kwargs):
-        return chat.ChatReply(answered=False, skipped="rate_limit", turns=1)
+        return chat.ChatReply(answered=False, skipped="daily_cap", turns=1)
 
     monkeypatch.setattr(main.chat, "reply", _reply)
     asyncio.run(
@@ -1725,8 +1725,38 @@ def test_a_decline_that_speaks_keeps_the_marker(monkeypatch):
         )
     )
 
-    assert bot.messages == ["یه کم سریع داری پیام می‌دی 🙂 چند لحظه صبر کن."]
+    assert bot.messages == [chat._MESSAGES["daily_cap"]]
     assert main._nexus_addressed.get(CHAT, 0) == 77
+
+
+def test_our_own_rate_limit_is_silent_and_leaves_the_room_readable(monkeypatch):
+    """The deployment's brake is never reported to the person.
+
+    A rate limit used to be the one decline that *spoke* — «یه کم سریع داری
+    پیام می‌دی». That sentence is gone: the limit is ours, not the sender's, and
+    ``app/chat_queue.py`` now waits for the window instead of dropping the turn.
+    What is left for this test is the shape the queue returns when the window
+    never frees: a refusal with no sentence, which is silence — so the ambient
+    path is free to try, exactly like any other withheld answer.
+    """
+    bot = FakeBot()
+
+    async def _reply(chat_id, user_id, body, **kwargs):
+        return chat.ChatReply(answered=False, skipped="rate_limit", turns=1)
+
+    monkeypatch.setattr(main.chat, "reply", _reply)
+    # A zero deadline means "one attempt": the queue must not wait out a window
+    # in a test, and this is the switch that says so.
+    monkeypatch.setattr(config, "GEMINI_CHAT_QUEUE_MAX_WAIT", 0.0)
+    asyncio.run(
+        main.on_group_chat(
+            update_for(message(text="نکسوس سلام", message_id=77), actor=OWNER),
+            ctx_for(bot),
+        )
+    )
+
+    assert bot.messages == []
+    assert main._nexus_addressed.get(CHAT, 0) == 0
 
 
 # ── The guard, as a reading of the window ─────────────────────────────────

@@ -38,11 +38,13 @@ from . import (
     agent_spool,
     ai_intent,
     ai_moderation,
+    answer_shape,
     awareness,
     awareness_context,
     awareness_schedule,
     burst,
     chat,
+    chat_queue,
     classifier,
     config,
     context_plan,
@@ -1174,6 +1176,7 @@ async def _awareness_capture(
         directed=directed,
         actor=actor,
         kind=kind,
+        username=str(getattr(user, "username", "") or ""),
     )
     if recorded:
         # Increment U: classify the message for the *scheduler*, once, here,
@@ -2361,39 +2364,137 @@ async def _send_chat(
     text: str,
     reply_to: int | None = None,
     keyboard: InlineKeyboardMarkup | None = None,
+    *,
+    mention: tuple[int, str] | None = None,
 ) -> bool:
-    """Send one conversational message. Returns whether it was actually sent.
+    """Send one conversational answer. Returns whether it went out.
 
     Escaped, because the body is model output and Telegram is asked to parse
     HTML: an unescaped angle bracket would be a parse error at best. The typing
     action is best-effort — it is a courtesy, and failing to show it must not
     cost the reply.
 
+    An answer longer than one Telegram message is **split** into several, at
+    natural seams, and each is sent in order. This is the other half of the
+    length policy: ``chat`` no longer cuts a reply to a house length, and the
+    per-message limit is Telegram's, so a request to explain fully or to bring
+    the news arrives whole. Only the first message carries the reply target, the
+    keyboard and the mention — a reply chain of four messages should not be four
+    replies to the same person.
+
     The return value exists for the awareness window: what the assistant said
     out loud is part of the conversation the next pass has to understand, and a
-    reply that failed to send must not appear there as though it had.
+    reply that failed to send must not appear there as though it had. It reports
+    whether the answer *began* to go out; a failure on a later message is logged
+    and does not turn a partially-delivered answer into silence.
 
     ``keyboard`` is appended last and defaults to None so the existing callers,
     which pass ``reply_to`` positionally, keep working untouched.
+
+    ``mention`` is a server-controlled ``(user_id, name)`` for a person the
+    message asked Nexus to *bring in* («فلانی رو تگ کن»). It is injected as
+    Telegram's own ``tg://user`` anchor, prepended on its own line, so the person
+    is actually notified. It is never read from the message text or from model
+    output — the id comes from ``people.resolve`` through ``reply_target`` — and
+    the name is HTML-escaped like any other value.
     """
-    safe = html.escape(text)
-    try:
-        await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
-    except TelegramError:
-        pass
-    try:
-        await ctx.bot.send_message(
-            chat_id,
-            safe,
-            parse_mode="HTML",
-            reply_to_message_id=reply_to,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
-    except TelegramError as exc:
-        log.warning("chat reply failed: %s", exc)
-        return False
-    return True
+    chunks = _split_for_telegram(text, config.GEMINI_CHAT_REPLY_CHARS)
+    sent_any = False
+    for index, chunk in enumerate(chunks):
+        safe = html.escape(chunk)
+        if index == 0 and mention and mention[0]:
+            anchor = (
+                f'<a href="tg://user?id={int(mention[0])}">'
+                f"{html.escape(str(mention[1] or '?'))}</a>"
+            )
+            safe = f"{anchor}\n{safe}"
+        try:
+            await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except TelegramError:
+            pass
+        try:
+            await ctx.bot.send_message(
+                chat_id,
+                safe,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to if index == 0 else None,
+                reply_markup=keyboard if index == 0 else None,
+                disable_web_page_preview=True,
+            )
+        except TelegramError as exc:
+            if index == 0:
+                log.warning("chat reply failed: %s", exc)
+                return False
+            # The answer is already partly delivered; losing the tail is a
+            # smaller fault than reporting the whole turn as unanswered.
+            log.warning("chat reply part %d/%d failed: %s", index + 1, len(chunks), exc)
+            return sent_any
+        sent_any = True
+    return sent_any
+
+
+# Where a long answer is allowed to be cut, best first. A blank line is a real
+# seam between thoughts; a single newline is a list item or a line of dialogue;
+# sentence punctuation is the last place that still reads as a boundary. A space
+# is the fallback, and a hard cut at the limit is the floor — a single word or a
+# URL longer than the limit still has to go somewhere.
+_SENTENCE_ENDS = ("\n", ".", "!", "?", "؟", "!", "؛", "،", ":", "…")
+
+
+def _split_for_telegram(text: str, limit: int) -> list[str]:
+    """Split one answer into messages Telegram will accept, at natural seams.
+
+    Never raises and never invents text: every character of the input appears in
+    exactly one output chunk, apart from the whitespace at the seams that a
+    person would not keep either. A short answer comes back as a single chunk,
+    which is what keeps the ordinary case a single message.
+    """
+    limit = max(1, int(limit))
+    body = (text or "").strip()
+    if not body:
+        return [""]
+    if len(body) <= limit:
+        return [body]
+
+    chunks: list[str] = []
+    rest = body
+    while len(rest) > limit:
+        cut = _seam(rest, limit)
+        head = rest[:cut].rstrip()
+        if not head:  # a run of whitespace longer than the limit
+            head = rest[:limit]
+            cut = limit
+        chunks.append(head)
+        rest = rest[cut:].lstrip()
+    if rest:
+        chunks.append(rest)
+    return chunks or [body]
+
+
+def _seam(text: str, limit: int) -> int:
+    """The best cut index at or before ``limit``, or ``limit`` itself."""
+    window = text[:limit]
+    floor = limit // 2
+    # A paragraph break is the strongest seam; keep both newlines out of the
+    # next message by cutting after them.
+    for needle, offset, threshold in (
+        ("\n\n", 2, limit // 4),
+        ("\n", 1, limit // 4),
+    ):
+        at = window.rfind(needle)
+        if at >= threshold:
+            return at + offset
+    best = -1
+    for mark in _SENTENCE_ENDS:
+        at = window.rfind(mark)
+        if at > best:
+            best = at
+    if best >= floor:
+        return best + 1
+    space = window.rfind(" ")
+    if space >= floor:
+        return space + 1
+    return limit
 
 
 async def _download_file(ctx: ContextTypes.DEFAULT_TYPE, file_id: str) -> bytes:
@@ -2856,6 +2957,75 @@ def _room_reading(
         return ""
 
 
+def _people_context(chat_id: int, text: str) -> str:
+    """The room's name memory for the people this message mentions.
+
+    The transcript already names whoever spoke in the window. This closes the
+    other half of the brief's "knows everybody's name": a message about somebody
+    who has not spoken recently still reaches their name, username and id, so
+    Nexus can tell people apart and refer to them correctly.
+
+    It is bounded twice (``NEXUS_PEOPLE_CONTEXT_ITEMS`` rows and
+    ``NEXUS_PEOPLE_CONTEXT_CHARS`` characters) and filtered by the reader to the
+    names the message actually contains, so it is never a member dump. The ids
+    are Telegram's, read through ``people`` — the block is *data* about who is in
+    the room, and it grants nothing: which message an answer is sent under is
+    still decided by ``reply_target`` from the message and Telegram's metadata.
+
+    A failure returns ``""``: a context block is never worth failing an answer
+    over.
+    """
+    if not config.NEXUS_PEOPLE_ENABLED or not chat_id:
+        return ""
+    try:
+        rows = people.roster(
+            int(chat_id),
+            text=str(text or ""),
+            limit=int(config.NEXUS_PEOPLE_CONTEXT_ITEMS),
+        )
+        if not rows:
+            return ""
+        return _render_roster(rows, budget=int(config.NEXUS_PEOPLE_CONTEXT_CHARS))
+    except Exception:  # noqa: BLE001 - context is never worth a failed answer
+        log.exception("could not render the room's name memory")
+        return ""
+
+
+def _render_roster(rows: list[dict], *, budget: int) -> str:
+    """The mentioned people as one bounded block, or ``""``.
+
+    Each line carries what tells one person from another: the name as Telegram
+    has it, the ``@username`` when there is one, and the numeric id. It is framed
+    as the server's name memory rather than as the message's own content, so the
+    model reads it as data about the room and not as something a person said.
+    """
+    cap = int(budget or config.NEXUS_PEOPLE_CONTEXT_CHARS)
+    if cap <= 0:
+        return ""
+    header = "People in this room the message mentions (from Telegram, not guessed):\n"
+    if len(header) >= cap:
+        header = "Room names:\n"
+    if len(header) >= cap:
+        return ""
+    lines: list[str] = []
+    used = len(header)
+    for row in rows or []:
+        name = " ".join(str(row.get("name") or "").split()) or "?"
+        username = str(row.get("username") or "").strip()
+        user_id = int(row.get("user_id") or 0)
+        if not user_id:
+            continue
+        handle = f" (@{username})" if username else ""
+        line = f"- {name}{handle} — id {user_id}\n"
+        if used + len(line) > cap:
+            break
+        lines.append(line)
+        used += len(line)
+    if not lines:
+        return ""
+    return header + "".join(lines)
+
+
 def _memory_context(chat_id: int, user_id: int, text: str) -> str:
     """The person's own long-term memory, as one bounded block.
 
@@ -2910,6 +3080,42 @@ def _state_context(chat_id: int, user_id: int, text: str) -> str:
     except Exception:  # noqa: BLE001 - context is never worth a failed answer
         log.exception("could not render the conversation state")
         return ""
+
+
+def _ambiguous_target_text(target, window) -> str:
+    """The question asked when a spoken name matches several people.
+
+    Built from the server's own candidates — never from the model, which does not
+    have them — so each line carries what tells them apart: the ``@username``
+    when Telegram gave one, and whether they are the person who spoke last. The
+    server refuses to pick between them (``people.resolve``'s rule) and asks
+    instead, which is the behaviour the owner asked for by name.
+    """
+    last_speaker = 0
+    for row in reversed(list(window or ())):
+        try:
+            user_id = int(row.get("user_id") or 0)
+        except Exception:  # noqa: BLE001 - a malformed row is not a failure
+            continue
+        if user_id and str(row.get("role") or "") != awareness.ROLE_NEXUS:
+            last_speaker = user_id
+            break
+    lines = []
+    for candidate in target.ambiguous:
+        username = f" (@{candidate.username})" if candidate.username else ""
+        hint = (
+            " — همین الان داشت حرف می‌زد"
+            if candidate.user_id == last_speaker
+            else ""
+        )
+        lines.append(
+            config.NEXUS_TARGET_CANDIDATE_LINE.format(
+                name=candidate.name or "?", username=username, hint=hint
+            )
+        )
+    return config.NEXUS_TARGET_AMBIGUOUS_TEXT.format(
+        name=target.ambiguous_query or "?", options="\n".join(lines)
+    )
 
 
 async def _answer_conversationally(
@@ -3161,13 +3367,36 @@ async def _answer_conversationally(
     )
     destination = target.destination(reply_to)
     log.info(
-        "chat target user=%s chat=%s person=%s message=%s reply_to=%s explicit=%s",
+        "chat target user=%s chat=%s person=%s message=%s reply_to=%s explicit=%s "
+        "ambiguous=%s no_reply=%s",
         user.id,
         room.id,
         target.person_id or "-",
         target.message_id or "-",
         destination or "-",
         target.explicit,
+        len(target.ambiguous) or "-",
+        target.no_reply,
+    )
+
+    # A spoken name matched more than one person in this room. The server refuses
+    # to pick between them — that is ``people.resolve``'s rule and it is kept —
+    # so it asks, with the candidates it already holds, instead of spending a
+    # model call on a guess. The question is deterministic and costs nothing.
+    if target.ambiguous:
+        await _send_chat(
+            ctx, room.id, _ambiguous_target_text(target, room_window), destination
+        )
+        return _timing(True)
+
+    # The person a tag directive asked Nexus to bring in, when one resolved. The
+    # id is the server's (``people.resolve`` through ``reply_target``), never the
+    # model's, and the mention is injected by ``_send_chat`` as Telegram's own
+    # anchor so the person is actually notified.
+    mention = (
+        (target.person_id, target.person_name)
+        if target.wants_mention and target.person_id
+        else None
     )
 
     # Long-term memory and conversational state are their own sources and never
@@ -3181,6 +3410,12 @@ async def _answer_conversationally(
     memory_block = (
         _memory_context(room.id, user.id, text) if plan_reading.wants_memory else ""
     )
+    # The room's name memory: who this message mentions, whether or not they have
+    # spoken in the window. It is *not* gated on the room being wanted — a
+    # self-contained message that names somebody still gets the name — and it is
+    # its own slot rather than part of the room block, so a person's name in it
+    # can never make the plan treat a memory line as a duplicate of the room.
+    people_block = _people_context(room.id, text)
     # End of context acquisition: the room window/reading, the personal state
     # and the personal memory. Everything above this line reads the database;
     # nothing below it does until the answer is written.
@@ -3268,6 +3503,7 @@ async def _answer_conversationally(
         plan_reading,
         admin=context or "",
         target=reply_target.render(target),
+        people=people_block,
         room=room_text,
         awareness=reading,
         state=state_block,
@@ -3277,6 +3513,15 @@ async def _answer_conversationally(
         message=text,
     )
     context = plan.text
+    # How much answer was asked for, read deterministically from the message and
+    # rendered as a server reading beside the date. It makes the persona's
+    # "length follows the request, never a house rule" a fact for this turn — a
+    # request to explain fully or to bring the news stops being answered with a
+    # summary. It changes only how long the answer is; it can add no content and
+    # remove none.
+    shape = answer_shape.render(answer_shape.read(text))
+    if shape:
+        context = shape + context
     # The owner is recognised by the server, from the configured id, and the
     # note is prepended to the trusted context here. It is never inferred by the
     # model, and never from a username, a display name, a Telegram admin status
@@ -3291,7 +3536,15 @@ async def _answer_conversationally(
     # final. What follows is the model call.
     assemble_done = time.monotonic()
 
-    result = await chat.reply(
+    # The turn goes through the queue rather than straight to the model. The
+    # queue owns three things `chat.reply` deliberately does not: it serialises
+    # one conversation's turns so two messages sent together cannot read the same
+    # history and answer each other's context, it bounds how many calls run at
+    # once, and it **waits** for our own rate window instead of dropping the turn
+    # and telling the person off. A turn the window never frees is left silent —
+    # `chat._MESSAGES` has no sentence for `rate_limit` any more. The provider's
+    # rate limits stay the pool's business; the queue never sees one.
+    result = await chat_queue.reply(
         room.id,
         user.id,
         answer_text,
@@ -3325,7 +3578,7 @@ async def _answer_conversationally(
                 return _timing(True)
             # The upload failed; the text is still the answer and is sent below.
             log.warning("voice reply failed; falling back to text")
-        if await _send_chat(ctx, room.id, result.text, destination):
+        if await _send_chat(ctx, room.id, result.text, destination, mention=mention):
             # What the assistant said is part of the conversation the next
             # awareness pass has to understand — otherwise it reads questions
             # and never its own answers, and repeats itself.

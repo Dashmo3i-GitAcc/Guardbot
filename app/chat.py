@@ -93,9 +93,16 @@ SYSTEM_INSTRUCTION = (
     "\n"
     "How you talk:\n"
     "* In Persian, the way people actually type here — everyday, informal and "
-    "direct. Two or three sentences is usually right; this is a chat, not an "
-    "essay. Do not use headings, numbered sections, bullet lists or Markdown "
-    "for an ordinary reply.\n"
+    "direct, warm rather than formal, the way a person in the room talks rather "
+    "than an assistant reading a form. Two or three sentences is usually right "
+    "for ordinary chat; this is a chat, not an essay. But that is a default for "
+    "small talk and never a ceiling: the length follows what was asked. When "
+    "somebody says to explain fully, to tell them everything, to go through it, "
+    "or to bring the latest news, give the complete, useful answer — as long as "
+    "it genuinely needs, with the detail they asked for, and never a summary of "
+    "it. Cutting a real answer down to look tidy loses the thing they wanted. "
+    "Do not use headings, numbered sections, bullet lists or Markdown for an "
+    "ordinary reply; a genuinely detailed answer may be laid out clearly.\n"
     "* Answer the message you were given, in your own words. Do not restate the "
     "question, do not repeat yourself or what was already said, do not open "
     "with a greeting you have already used, and do not close by offering more "
@@ -118,6 +125,17 @@ SYSTEM_INSTRUCTION = (
     "rather than a lecture. Let them set the register — casual when they are "
     "casual, plainer when they are formal — and do not perform warmth, humour "
     "or intimacy the moment did not ask for.\n"
+    "* Meet them at their own level, and never flinch from it. Read whether a "
+    "sharp, rude or crude message is banter or a real attack — from the whole "
+    "message and the conversation, never from one word on its own — and answer "
+    "at the same strength. If it is a joke, joke back and laugh with them. If "
+    "somebody is genuinely disrespecting you or cursing at you, give it straight "
+    "back as hard as they gave it: match their intensity, do not turn the other "
+    "cheek, do not lecture them about respect, and never answer with a canned "
+    "line about being polite. Somebody who curses at you gets the same energy "
+    "back, not a warning. This is a reaction to them, not a performance of "
+    "toughness — if they are genuinely upset rather than jabbing, drop it and "
+    "answer normally.\n"
     "* Do not drag the product into a conversation that is not about it. If the "
     "subject is something else — a film, a game, their day — answer that subject "
     "and leave VPNs, internet access and this community out of it; never tack on "
@@ -136,11 +154,14 @@ SYSTEM_INSTRUCTION = (
     "somebody you know: familiar and relaxed, felt in your continuity and your "
     "wording, never announced and never a title. Do not tell anyone who they "
     "are, and never state anyone's numeric id.\n"
-    "* Never threaten anyone, never use slurs, never attack anyone's family — "
-    "no «ناموسی» insults, no insults about a mother, sister, father or child, "
-    "ever — never humiliate anyone sexually, and never make an attack meant to "
-    "hurt rather than to tease. If the person is genuinely upset or serious, "
-    "drop the joking entirely and answer normally.\n"
+    "* Even when you give it back, some lines do not move, for anyone: never "
+    "threaten anybody with harm, never use a slur about who somebody is — their "
+    "ethnicity, religion, language or appearance — never attack anyone's family "
+    "(no «ناموسی» talk, no insults about a mother, sister, father or child, "
+    "ever), and never humiliate anybody sexually. Trade at the level you were "
+    "given, with the person in front of you, and never reach for a category to "
+    "win. If the person is genuinely upset or serious, drop the joking entirely "
+    "and answer normally.\n"
     "\n"
     "Background the server gives you:\n"
     "* The server sometimes appends background — what was said in the room, "
@@ -370,11 +391,17 @@ def _strip_leading_address(text: str) -> str:
 
 # How the reply is described when something went wrong, so the caller can say
 # something useful without leaking internals to a stranger.
+#
+# There is deliberately **no** entry for `rate_limit` or `user_rate_limit`. The
+# deployment's own brakes are not the user's fault and must never be reported as
+# if they were: a burst is absorbed by `app/chat_queue.py` — which waits and
+# retries rather than dropping — so a throttled turn stays silent here and the
+# queue is what serves it. Blaming a person for an internal limit («یه کم سریع
+# داری پیام می‌دی») was the behaviour the owner removed; the reason codes remain
+# for the log and the counters, they simply carry no sentence any more.
 _MESSAGES = {
     "disabled": "چت هوش مصنوعی الان خاموشه.",
     "no_key": "چت هوش مصنوعی الان تنظیم نشده.",
-    "rate_limit": "یه کم سریع داری پیام می‌دی 🙂 چند لحظه صبر کن.",
-    "user_rate_limit": "یه کم سریع داری پیام می‌دی 🙂 چند لحظه صبر کن.",
     "daily_cap": "سهم امروز چت تموم شده. فردا دوباره امتحان کن.",
     "circuit_open": "الان نمی‌تونم جواب بدم. چند دقیقه بعد دوباره امتحان کن.",
     "timeout": "پاسخ دادن طول کشید و قطع شد. یه بار دیگه بفرست.",
@@ -774,7 +801,13 @@ def _generation_config(types, *, tools=None, context: str = "", instruction: str
         base += TOOL_AMENDMENT
     return types.GenerateContentConfig(
         temperature=0.8,
-        max_output_tokens=1024,
+        # The answer is as long as the question asked for. 1024 tokens cut a
+        # "explain it fully" or a "bring me the news" answer off mid-thought;
+        # 8192 is the largest ceiling these Flash models accept and costs
+        # nothing when the answer is short — only the tokens actually produced
+        # are billed. The runaway guard lives in ``_fit_reply`` and the
+        # per-message bound in ``main._send_chat``, not here.
+        max_output_tokens=8192,
         system_instruction=base + (context or ""),
         tools=tools or None,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -1160,14 +1193,22 @@ def _truncate(text: str) -> str:
 
 
 def _fit_reply(text: str) -> tuple[str, bool]:
-    """Trim a reply to something Telegram will accept.
+    """Apply the runaway guard to a whole answer.
 
-    Telegram's limit is 4096 characters and it counts after escaping, so the
-    configured bound leaves room. Truncating rather than splitting is deliberate:
-    a model reply cut mid-sentence is obvious, whereas a second message arriving
-    late looks like a duplicate.
+    This is no longer a length *policy*: an answer is as long as the question
+    asked for. The model's ceiling is the token budget, and a reply past
+    Telegram's per-message limit is split by the sender into several messages
+    rather than cut short — the brief is explicit that a request to explain
+    fully, or to bring the news, gets the complete answer and never a summary.
+
+    What remains here is the one bound that is not about style: a model that
+    loops must not turn a single turn into an unbounded number of messages.
+    ``GEMINI_CHAT_REPLY_MAX_CHARS`` sits far above any length a person can
+    reasonably ask for, so in practice this returns the text unchanged; the
+    ``truncated`` flag survives for the caller's log line and for the probes
+    that build a fake result.
     """
-    limit = max(1, int(config.GEMINI_CHAT_REPLY_CHARS))
+    limit = max(1, int(config.GEMINI_CHAT_REPLY_MAX_CHARS))
     text = (text or "").strip()
     if len(text) <= limit:
         return text, False

@@ -14,7 +14,6 @@ of the code rather than of a mock.
 import asyncio
 import httpx
 import inspect
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -726,7 +725,13 @@ def test_a_live_question_reaches_the_model_with_findings(monkeypatch):
     assert not any("http" in message for message in bot.messages)
 
 
-def test_small_talk_does_not_search(monkeypatch):
+def test_small_talk_reaches_the_model_without_a_search(monkeypatch):
+    """The handler-level half of the unit test above.
+
+    This shared its name with the unit test at the top of the file, so the
+    earlier definition was silently overwritten and never collected — a lost
+    test, not a duplicate. Renamed so both run.
+    """
     bot, seen, calls = _run_turn(monkeypatch, "سلام، خوبی؟")
 
     assert calls == []
@@ -923,6 +928,56 @@ def test_tavily_sources_are_deduplicated_and_capped(monkeypatch):
     ]
 
 
+def test_a_full_answer_gets_more_material_than_a_five_snippet_digest(monkeypatch):
+    """The owner asked for the news in full, so the material has to support it.
+
+    The defaults now surface eight results with a longer snippet than the old
+    five-at-400. It costs no extra *request* — one Tavily call returns all of
+    them — so the rationed resource is untouched and only this turn's tokens
+    move.
+    """
+    use_tavily(monkeypatch)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_MAX_RESULTS", 8)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_MAX_CHARS", 3600)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_SNIPPET_CHARS", 600)
+    install_tavily(
+        monkeypatch,
+        tavily_payload(
+            *[
+                {
+                    "title": f"T{i}",
+                    "url": f"https://s{i}.example/x",
+                    "content": "د" * 1000,
+                }
+                for i in range(8)
+            ]
+        ),
+    )
+
+    finding = research("خبر بده")
+
+    assert len(finding.sources) == 8, "eight results are surfaced, not five"
+    assert len(finding.text) > 1800, "more material than the old cap allowed"
+    assert len(finding.text) <= 3600, "and still bounded"
+
+
+def test_the_snippet_bound_is_configurable(monkeypatch):
+    use_tavily(monkeypatch)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_MAX_RESULTS", 1)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_MAX_CHARS", 100000)
+    monkeypatch.setattr(config, "GEMINI_SEARCH_SNIPPET_CHARS", 20)
+    install_tavily(
+        monkeypatch,
+        tavily_payload(
+            {"title": "T", "url": "https://a.example/1", "content": "د" * 100}
+        ),
+    )
+
+    finding = research("چیست؟")
+
+    assert finding.text == "- T: " + "د" * 20
+
+
 def test_tavily_strips_a_credential_from_a_url(monkeypatch):
     use_tavily(monkeypatch)
     install_tavily(
@@ -935,6 +990,7 @@ def test_tavily_strips_a_credential_from_a_url(monkeypatch):
     finding = research("چیست؟")
 
     assert finding.sources[0].url == "https://example.com/page"
+    assert "secret" not in web_search.untrusted_block(finding)
     assert "secret" not in web_search.untrusted_block(finding)
 
 

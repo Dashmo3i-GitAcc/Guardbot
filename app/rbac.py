@@ -38,9 +38,16 @@ the ``admins`` table, which only an authorised actor can write.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from . import config, db
+
+# The module had no logger while one exception path already called ``log``, so a
+# failure to read the stored administrators raised ``NameError`` from inside the
+# ``except`` — the opposite of the degradation that path documents. Declared here
+# so the comment "a missing overlay is a guest, not a crash" is true.
+log = logging.getLogger("guardbot.rbac")
 
 # ── The permission vocabulary ─────────────────────────────────────────────
 # Every entry is something the bot can actually do, or actually needs to know.

@@ -291,8 +291,25 @@ def test_an_empty_answer_is_a_failure_not_a_blank_message(monkeypatch):
     assert result.error == "empty_response"
 
 
-def test_an_oversized_reply_is_truncated_not_rejected(monkeypatch):
+def test_an_answer_longer_than_one_message_is_kept_whole(monkeypatch):
+    """Length is the question's business, not a house rule.
+
+    A reply past Telegram's per-message limit is *split* by the sender, not cut
+    short here — so the model's full answer reaches the caller untouched.
+    """
     monkeypatch.setattr(config, "GEMINI_CHAT_REPLY_CHARS", 40)
+    install(monkeypatch, "ب" * 500)
+
+    result = ask("سلام")
+
+    assert result.answered is True
+    assert result.truncated is False
+    assert len(result.text) == 500, "the whole answer, not a 40-character stub"
+
+
+def test_a_runaway_answer_still_hits_the_guard(monkeypatch):
+    """The only remaining bound is the one against a model that loops."""
+    monkeypatch.setattr(config, "GEMINI_CHAT_REPLY_MAX_CHARS", 40)
     install(monkeypatch, "ب" * 500)
 
     result = ask("سلام")
@@ -530,13 +547,32 @@ def test_the_prompt_allows_playful_banter_reactively():
 
 
 def test_the_prompt_bounds_banter_against_escalation():
-    """Playful is not hostile: the hard limits are stated, not implied."""
+    """Playful is not hostile: the hard limits are stated, not implied.
+
+    These are the lines that do not move even when the persona gives as good as
+    it gets — the owner's explicit override: match a serious insult at the same
+    intensity, but never reach for ethnicity, religion, language, appearance,
+    family («ناموسی») or sex, and never threaten anybody.
+    """
     text = chat.SYSTEM_INSTRUCTION
-    assert "Never threaten anyone" in text
-    assert "never use slurs" in text
+    assert "never threaten anybody with harm" in text
+    assert "never use a slur about who somebody is" in text
     assert "never attack anyone's family" in text
     assert "ناموسی" in text
-    assert "never humiliate anyone sexually" in text
+    assert "never humiliate anybody sexually" in text
+
+
+def test_the_prompt_mirrors_register_including_a_serious_insult():
+    """The owner's override: a serious curse gets the same energy back.
+
+    It is not a warning and not a lecture, and a joke is answered as a joke —
+    the model must tell the two apart from the message, not from a keyword.
+    """
+    text = chat.SYSTEM_INSTRUCTION
+    assert "give it straight back as hard as they gave it" in text
+    assert "Somebody who curses at you gets the same energy" in text
+    assert "not a warning" in text
+    assert "If it is a joke, joke back" in text
 
 
 def test_the_prompt_drops_banter_when_the_person_is_serious():
@@ -570,7 +606,7 @@ def test_the_persona_is_the_system_instruction_and_the_context_follows_it():
     cfg = chat._generation_config(types, context="\nROOM")
     assert cfg.system_instruction == chat.SYSTEM_INSTRUCTION + "\nROOM"
     assert cfg.temperature == 0.8
-    assert cfg.max_output_tokens == 1024
+    assert cfg.max_output_tokens == 8192
 
 
 # ── The output boundary ───────────────────────────────────────────────────

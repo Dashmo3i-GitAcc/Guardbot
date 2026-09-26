@@ -54,7 +54,6 @@ nothing rather than failing a turn.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 # ── The directive vocabulary ──────────────────────────────────────────────
@@ -75,6 +74,31 @@ _ADDRESS_PHRASES = (
     "بنویس به",
     "بهش بنویس",
 )
+
+# Asking Nexus to bring a *named* person into the thread — «فلانی رو تگ کن»,
+# «صداش کن», «منشنش کن». These are their own list rather than additions to the
+# list above because they carry a second meaning: the answer belongs under that
+# person's message, and the server also mentions them in it. The owner reported
+# this class directly — a reply to Nexus saying «فلانی رو تگ کن» used to resolve
+# nobody and answer the *asker* — so it is read as a directive, and a directive
+# that names a person is what moves the destination.
+_TAG_PHRASES = (
+    "تگ کن",
+    "تگش کن",
+    "تگ بزن",
+    "منشن کن",
+    "منشنش کن",
+    "صداش کن",
+    "صداش بزن",
+    "صدا کن",
+    "صدا بزن",
+    "خطاب کن",
+    "خطابش کن",
+    "ادش کن",
+    "ادرش کن",
+)
+# Every phrase that reads as "address a person", used by the directive test.
+_DIRECTIVE_PHRASES = _ADDRESS_PHRASES + _TAG_PHRASES
 
 # ── The implicit reference vocabulary ─────────────────────────────────────
 # A message can be *about* the replied-to message without asking for anything.
@@ -213,6 +237,21 @@ class Incoming:
 
 
 @dataclass(frozen=True)
+class Candidate:
+    """One person a spoken name could have meant, when it meant several.
+
+    The server never picks between candidates — that is ``people.resolve``'s rule
+    and it is kept here — so they are carried out to the caller, which asks. The
+    username is included because it is what tells two people with the same first
+    name apart in the question.
+    """
+
+    user_id: int = 0
+    name: str = ""
+    username: str = ""
+
+
+@dataclass(frozen=True)
 class Target:
     """What the message means, and where the answer should go.
 
@@ -231,6 +270,22 @@ class Target:
     surface: str = ""
     reply_to: int = 0
     explicit: bool = False
+    # The candidates when a *single* spoken name matched more than one person in
+    # the room. The server never picks between them; the caller asks instead.
+    # Empty when there was nothing ambiguous.
+    ambiguous: tuple[Candidate, ...] = ()
+    # The spoken token that matched several people, so the clarification can
+    # name it («منظورت کدوم علیه؟»). Empty when ``ambiguous`` is empty.
+    ambiguous_query: str = ""
+    # The message asked for a named person to be *mentioned* («فلانی رو تگ کن»),
+    # and that person resolved. The caller may attach a Telegram mention for
+    # them; the destination move is separate and already decided.
+    wants_mention: bool = False
+    # A person was named and resolved, but the server holds none of their
+    # messages, so there is nothing to attach the answer to. The answer goes out
+    # unattached rather than under the *asker's* message — quoting the person who
+    # asked instead of the person asked about is the reported defect.
+    no_reply: bool = False
     # The grade of the evidence for ``reply_to``: ``"explicit"`` when the message
     # asked for the reply, ``"reference"`` when it merely referred back to the
     # parent, and ``""`` when nothing moved. The two grades exist because the
@@ -241,10 +296,17 @@ class Target:
     why: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
-        return bool(self.message_id or self.person_id or self.reply_to)
+        return bool(self.message_id or self.person_id or self.reply_to or self.ambiguous)
 
     def destination(self, current: int | None = None) -> int | None:
-        """The id to hand Telegram, falling back to the message being answered."""
+        """The id to hand Telegram, falling back to the message being answered.
+
+        Returns ``None`` when the reading says the answer must go out unattached
+        (``no_reply``): a named target with no message of their own is a real
+        case, and attaching the answer to the asker's message would be wrong.
+        """
+        if self.no_reply:
+            return None
         return self.reply_to or current
 
 
@@ -389,7 +451,19 @@ def _reply_directive(text: str) -> bool:
         return False
     if any(stem in folded for stem in _REPLY_STEMS):
         return True
-    return any(phrase in folded for phrase in _ADDRESS_PHRASES)
+    return any(phrase in folded for phrase in _DIRECTIVE_PHRASES)
+
+
+def _tag_directive(text: str) -> bool:
+    """Whether the message asks Nexus to *mention* a named person.
+
+    A narrower reading than the directive above: every tag phrase is a directive,
+    but only a tag phrase asks for the person to be brought in by name. The
+    server mentions them in the answer only for this grade, so a plain «جوابشو
+    بده» — where the reply edge already notifies — does not also grow a mention.
+    """
+    folded = _fold(text)
+    return bool(folded) and any(phrase in folded for phrase in _TAG_PHRASES)
 
 
 # ── The implicit reference ────────────────────────────────────────────────
@@ -545,6 +619,52 @@ def _resolve_name(query: str, chat_id: int) -> tuple[int, str]:
     return int(found.get("user_id") or 0), str(found.get("name") or "")
 
 
+def _name_lookup(query: str, chat_id: int) -> tuple[list[Candidate], bool]:
+    """Resolve one spoken token, keeping *why* it failed.
+
+    Returns ``(candidates, ambiguous)``. ``ok`` yields one candidate and
+    ``ambiguous`` yields several with the flag set — the difference the caller
+    needs, because "I do not know this name" is answered by the model while "two
+    people answer to it" must be answered by the *server* asking which one.
+    Anything else yields nothing.
+    """
+    if not query:
+        return [], False
+    try:
+        from . import people
+
+        found = people.resolve(query, chat_id=chat_id)
+    except Exception:  # noqa: BLE001 - a lookup is never worth a failure
+        return [], False
+    status = str(found.get("status") or "")
+    if status == "ok":
+        user_id = int(found.get("user_id") or 0)
+        if not user_id:
+            return [], False
+        return (
+            [
+                Candidate(
+                    user_id=user_id,
+                    name=str(found.get("name") or ""),
+                    username=str(found.get("username") or ""),
+                )
+            ],
+            False,
+        )
+    if status == "ambiguous":
+        candidates = [
+            Candidate(
+                user_id=int(c.get("user_id") or 0),
+                name=str(c.get("name") or ""),
+                username=str(c.get("username") or ""),
+            )
+            for c in (found.get("candidates") or [])
+            if int(c.get("user_id") or 0)
+        ]
+        return candidates, bool(candidates)
+    return [], False
+
+
 def _mentioned_person(
     incoming: Incoming, *, chat_id: int, bot_id: int, bot_username: str
 ) -> tuple[int, str]:
@@ -571,18 +691,25 @@ def _mentioned_person(
 
 def _named_person(
     text: str, *, chat_id: int
-) -> tuple[int, str]:
+) -> tuple[int, str, tuple[Candidate, ...], str]:
     """The one person a plainly-written name resolves to, or nobody.
 
-    Only consulted when the message carries a reply directive, because that is
-    the only case the destination depends on a name. Every token is tried; if
-    they resolve to *different* people the answer is nobody, because two names in
-    one message is exactly the ambiguity the server must not resolve by picking.
+    Returns ``(user_id, name, ambiguous_candidates, ambiguous_query)``. Only
+    consulted when the message carries a reply directive, because that is the
+    only case the destination depends on a name. Every token is tried; if they
+    resolve to *different* people the answer is nobody, because two names in one
+    message is exactly the ambiguity the server must not resolve by picking. A
+    *single* token that matches several people is different: that is a question
+    the server can answer with the candidates, so they are returned rather than
+    swallowed, together with the token that was ambiguous so the question can
+    name it.
     """
     folded = _fold(text)
     if not folded:
-        return 0, ""
+        return 0, "", (), ""
     found: dict[int, str] = {}
+    ambiguous: dict[int, Candidate] = {}
+    ambiguous_query = ""
     tried = 0
     for token in folded.split():
         if tried >= _NAME_TOKEN_CAP:
@@ -592,13 +719,25 @@ def _named_person(
         if token.startswith("@"):
             token = token[1:]
         tried += 1
-        user_id, name = _resolve_name(token, chat_id)
-        if user_id:
-            found.setdefault(user_id, name)
+        candidates, is_ambiguous = _name_lookup(token, chat_id)
+        if is_ambiguous:
+            ambiguous_query = ambiguous_query or token
+            for candidate in candidates:
+                ambiguous.setdefault(candidate.user_id, candidate)
+            continue
+        for candidate in candidates:
+            found.setdefault(candidate.user_id, candidate.name)
+    if ambiguous:
+        return (
+            0,
+            "",
+            tuple(sorted(ambiguous.values(), key=lambda c: c.user_id)),
+            ambiguous_query,
+        )
     if len(found) == 1:
         user_id = next(iter(found))
-        return user_id, found[user_id]
-    return 0, ""
+        return user_id, found[user_id], (), ""
+    return 0, "", (), ""
 
 
 def _newest_message_by(window, user_id: int, *, before: int) -> int:
@@ -654,18 +793,23 @@ def resolve(
     surface = str(getattr(expression, "surface", "") or "")
 
     directive = _reply_directive(text)
+    tag = _tag_directive(text)
     mentioned_id, mentioned_name = _mentioned_person(
         incoming, chat_id=chat_id, bot_id=bot_id, bot_username=bot_username
     )
     # A name is looked up whenever the message carries a reply directive, with or
     # without a demonstrative: «با میلاد حرف بزن» names its target outright and
     # carries no pointer at all, and requiring one would have missed exactly the
-    # explicit-person case the reader exists for.
-    named_id, named_name = 0, ""
+    # explicit-person case the reader exists for. The tag phrases («تگ کن») are
+    # directives too, which is what lets «فلانی رو تگ کن» resolve the person
+    # instead of silently answering the asker.
+    named_id, named_name, ambiguous, ambiguous_query = 0, "", (), ""
     if mentioned_id:
         named_id, named_name = mentioned_id, mentioned_name
     elif directive:
-        named_id, named_name = _named_person(text, chat_id=chat_id)
+        named_id, named_name, ambiguous, ambiguous_query = _named_person(
+            text, chat_id=chat_id
+        )
 
     # The semantic message: the replied-to message, when there is one. This is
     # the reading the assistant never had — the parent's own words.
@@ -712,17 +856,39 @@ def resolve(
     # the answer stays under the message that was written.
     confidence = ""
     reply_to = 0
+    no_reply = False
     pointing = bool(expression) or _points_at_something(text)
     if directive and (pointing or named_id):
         if person_id and replied is not None and person_id == replied.user_id:
             reply_to = replied.message_id
         elif person_id:
             reply_to = _newest_message_by(window, person_id, before=current_message_id)
+            if not reply_to:
+                if pointing and message_id:
+                    # The message named a person *and* pointed at the parent
+                    # («اینو ببین و به علی بگو»). The person has no message the
+                    # server holds, but the pointer is an explicit ask for the
+                    # parent, so the answer goes there.
+                    reply_to = message_id
+                else:
+                    # The person is known and the server holds none of their
+                    # messages. Answering under the *asker's* message would be the
+                    # reported defect — Nexus quoting whoever asked instead of the
+                    # person asked about — so the answer goes out unattached.
+                    no_reply = True
         elif message_id:
             reply_to = message_id
-        if reply_to:
+        if reply_to or no_reply:
             confidence = "explicit"
-            why.append(f"the message asks for a reply, so the answer goes to {reply_to}")
+            if reply_to:
+                why.append(
+                    f"the message asks for a reply, so the answer goes to {reply_to}"
+                )
+            else:
+                why.append(
+                    "the message asks about a named person the server holds no "
+                    "message for, so the answer goes out unattached"
+                )
 
     # The implicit grade. The message does not ask for anything, but it is *about*
     # the replied-to message — a deictic, a possessive, a third-person report or a
@@ -769,6 +935,10 @@ def resolve(
         surface=surface,
         reply_to=reply_to,
         explicit=confidence == "explicit",
+        ambiguous=ambiguous,
+        ambiguous_query=ambiguous_query,
+        wants_mention=bool(person_id and tag and not ambiguous),
+        no_reply=no_reply,
         confidence=confidence,
         why=tuple(why),
     )
@@ -827,6 +997,27 @@ def render(target: Target, *, cap: int = RENDER_CAP) -> str:
             f"The person meant is {target.person_name or '?'} "
             f"({target.person_id}).\n"
         )
+        if target.wants_mention:
+            lines.append(
+                "The message asked for that person to be brought in, so address "
+                "them by name.\n"
+            )
+
+    if target.ambiguous:
+        names = ", ".join(
+            f"{candidate.name or '?'} ({candidate.user_id})"
+            for candidate in target.ambiguous
+        )
+        lines.append(
+            "The name the message used matches more than one person here "
+            f"({names}). Do not guess which one — ask.\n"
+        )
+
+    if target.no_reply:
+        lines.append(
+            "Send the answer as a plain message, not as a Telegram reply: the "
+            "person asked about has no message here to attach it to.\n"
+        )
 
     if target.reply_to:
         if target.confidence == "explicit":
@@ -848,6 +1039,7 @@ def render(target: Target, *, cap: int = RENDER_CAP) -> str:
 
 
 __all__ = [
+    "Candidate",
     "Incoming",
     "Mention",
     "Replied",
