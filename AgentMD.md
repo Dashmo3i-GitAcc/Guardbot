@@ -6599,10 +6599,12 @@ control + credentials** remains the next *product* step per §54.27.
 
 ---
 
-### 54.33 Checkpoint (2026-09-26, **warmth restored, relationship memory, three-day room scan**) — **resume here** (supersedes §54.32); CODE COMMITTED AND PUSHED, **NOT DEPLOYED**
+### 54.33 Checkpoint (2026-09-26, **warmth restored, relationship memory, three-day room scan**) — **resume here** (supersedes §54.32); CODE COMMITTED, PUSHED **AND DEPLOYED**
 
 **CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`c9b8163`** (the overhaul,
-the report, and the empty-draft re-ask). Three owner reports, one instruction:
+the report, and the empty-draft re-ask). Commit **`2c4b91e`**, image
+**`645faa141608`**, rollback tag **`guardbot:rollback-pre-2c4b91e` =
+`7fc21bf8ed21`**. Three owner reports, one instruction:
 
 1. «الان صحبتاش رفتاراش خیلی اگرسیو شده … باید مهربون و دوستانه باشه مثل همون
    کامیت قبل از این بیست و یک» — the persona had gone permanently sharp.
@@ -6677,10 +6679,31 @@ the addressed reply path (whose prompt is ceiling-bounded and already carries th
 transcript and the reading). The insult lexicon is a small auditable list, not a
 moderation classifier, and a match only bumps a counter.
 
-**NEXT STEP (exact).** Suite 4148 passed / 0 failed (was 4121). **Not deployed** —
-the owner's go-ahead is required, and the deploy must take a live end-to-end probe
-(§54.32's pattern). Dashboard **M4 — AI control + credentials** remains the next
-*product* step per §54.27.
+**Deployed 2026-09-26 19:19Z and live-probed.** Built from a **`git archive
+HEAD`** context, not the working tree, because a concurrent session had
+uncommitted `app/voice_live/*` changes that must not be deployed; the image's
+`/srv/app/**` was verified byte-identical to `HEAD` before and after the
+recreate (0 mismatches over all `app/*.py`). Container recreated
+`f67152f5…` → `501e6dee…`, `restarts=0`, dashboard untouched and healthy.
+Startup line now reads `window=400 msgs/6000 chars`. `tools/probe_warmth_scan.py`
+ran in the container: **21/21 checks passed, exit 0, `rows_left=0`** — the live
+persona is warm/de-escalating and is what `chat._generation_config` composes for
+the model; a hostile history is promoted only from **directed** messages, is
+never shown as the person's own words, and reaches the trusted context; a
+two-day-old message is inside the window and a four-day-old one is outside it;
+the digest names speakers with counts, quotes the newest words, and names who
+said nothing. Live evidence from the real room: the digest listed 12 real
+speakers with counts and their newest words, and `main._awareness_context`
+(4097 chars) carried it. The relationship counter fired correctly on real
+traffic — one `friendly` count for a directed «ایول», **below** the threshold, so
+no tone was promoted (0 `relationship.tone` rows).
+
+**NEXT STEP (exact).** Suite 4148 passed / 0 failed (was 4121). **Deployed and
+live-probed**; rollback is `docker tag guardbot:rollback-pre-2c4b91e
+guardbot:latest && docker compose up -d --no-build guardbot`. The room window
+will fill to three days over time (it holds the pre-deploy rows now, ~30 minutes
+of span); that is expected, not a fault. Dashboard **M4 — AI control +
+credentials** remains the next *product* step per §54.27.
 
 ---
 
