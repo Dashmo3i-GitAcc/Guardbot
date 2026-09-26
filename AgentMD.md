@@ -6536,6 +6536,61 @@ control + credentials** remains the next *product* step per §54.27.
 
 ---
 
+### 54.32 Checkpoint (2026-09-26, **an unsendable draft gets one bounded re-ask**) — **resume here** (supersedes §54.31); CODE COMMITTED, PUSHED AND DEPLOYED
+
+**CHECKPOINT STATUS.** 2026-09-26. Branch `main`. Base **`c733968`** (the overhaul
+plus its two status reports). The owner reported, with a timestamp and a
+screenshot, that the bot was **still** answering people with «الان نمیتونم جواب
+بدم. یه بار دیگه بپرس.» and «این فایل رو نتونستم باز کنم 🙏…» — "check the log and
+find out why".
+
+**The two messages are neither the throttle sentence** removed in §54.31 **nor one
+message seen twice.** They are two different fallbacks that share **one** root
+cause: the model returned an **empty body**.
+
+| Reported | Log evidence (container life) | Root cause |
+|---|---|---|
+| «الان نمیتونم جواب بدم» | `17:45:46` and `17:47:31` `[chat] malformed kind=empty_response`; `17:36:58` `kind=link_in_reply` | `chat.reply` refuses an empty or link-carrying draft **on the first try** — `_refused()` is deliberately not retried, and `empty_response` sits in `_PERMANENT` |
+| «این فایل رو نتونستم باز کنم» | `17:46:58` `conversation: could not transcribe (empty_response)` | `transcribe()` returns `empty_response` on the first empty answer, with no re-ask |
+
+**The mechanism, proved rather than guessed.** `chat._clean("@Mo3i_ProteCt_Bot")`
+returns `""`: a reply that is nothing but a bare `@handle` line is stripped as an
+addressing artifact, which leaves nothing to send, which the caller then names
+`empty_response`. And an in-container probe with the **real persona** showed the
+model does answer both reported inputs when asked in isolation («کصکششش» →
+«خودتی بابا، فشاری شدی چرا؟»; «@Mo3i_ProteCt_Bot» → a real sentence) — so the
+emptiness is transient and context-dependent, not a refusal of the input.
+
+**What was built.** One **bounded** re-ask before refusing, in both workloads:
+
+* **`app/chat.py`** — `RESHAPE_NUDGE`, and `_reshaped_attempt()`: when the draft is
+  empty **or** carries a link, the model is told exactly what was wrong and asked
+  once more; the retry goes through the same two checks, and a second bad draft is
+  still refused. It shares the single `nudged` budget with the repetition re-ask,
+  so a turn spends **at most one** extra provider call however it went wrong. The
+  retry is counted in both rate windows and in the daily counter.
+* **`app/transcribe.py`** — an empty transcript is re-asked once (`retried_empty`)
+  before the clip is declared unreadable, and both calls are counted.
+
+**The security property is unchanged.** A link is still **never sent** — the retry
+does not relax the rule, it only stops the rule from costing the whole answer.
+Refusing rather than scrubbing is untouched (see the `_LINK_PATTERNS` note).
+
+**Architecture preserved.** No new deterministic gate, no new authority, no change
+to the queue, the pool, tenant isolation or retention. The extra call is real and
+is counted like any other.
+
+**Known limitations.** A provider-side refusal (a safety block that returns an
+empty candidate) is re-asked too and will fail the same way, costing one extra
+call; the re-ask is bounded to one precisely so this cannot loop. `transcribe`
+records the first empty call as `errors` even when the re-ask recovers it, so its
+daily `errors` figure counts empty *responses*, not failed *clips*.
+
+**NEXT STEP (exact).** Suite 4121 passed / 0 failed (was 4115). Dashboard **M4 — AI
+control + credentials** remains the next *product* step per §54.27.
+
+---
+
 ## 55. Context Preservation & Session Handoff
 
 **This is a permanent, non-bypassable project rule.** No new session, agent or

@@ -365,6 +365,12 @@ async def transcribe(
     attempts = 1 if pooled else max(0, int(config.TRANSCRIBE_MAX_RETRIES)) + 1
     backoff = max(0.0, float(config.TRANSCRIBE_BACKOFF_SECONDS))
     last: TranscribeUnavailable | None = None
+    # The one extra call an *empty* answer may spend. Empty is a separate fault
+    # from a transport error: the request succeeded and the model said nothing,
+    # which is almost always a transient hiccup rather than a clip with no speech
+    # in it, so it gets one re-ask of its own rather than being declared
+    # unreadable on the spot.
+    retried_empty = False
 
     for attempt in range(attempts):
         _recent_calls.append(time.monotonic())
@@ -387,6 +393,27 @@ async def transcribe(
                 break
         else:
             text = _clean(raw)
+            if not text and not retried_empty:
+                # An empty answer is usually a transient provider hiccup, not a
+                # clip with nothing in it. Ask once more before declaring the
+                # file unreadable; a second empty answer is a failure, exactly as
+                # before. The re-ask is counted first: it is a second real
+                # request, and the daily ceiling is computed from the same
+                # counter, so an uncounted retry would spend quota the ceiling
+                # cannot see.
+                retried_empty = True
+                _recent_calls.append(time.monotonic())
+                db.record_transcript_attempt("errors")
+                try:
+                    raw = await _request(data, mime_type or "audio/ogg")
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as exc:  # noqa: BLE001
+                    log.warning(
+                        "[transcribe] empty-retry failed: %s", type(exc).__name__
+                    )
+                    raw = ""
+                text = _clean(raw)
             if not text:
                 # An empty answer is a failure to transcribe, not a silent clip.
                 stats["errors"] += 1

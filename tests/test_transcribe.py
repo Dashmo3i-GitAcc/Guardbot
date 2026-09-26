@@ -130,12 +130,24 @@ def test_an_unintelligible_marker_is_an_error_not_silence(monkeypatch):
 
 
 def test_an_empty_answer_is_a_failure(monkeypatch):
-    install(monkeypatch, "")
+    """One re-ask, and if that is empty too the clip is unreadable."""
+    install(monkeypatch, "", "")
 
     result = run()
 
     assert result.ok is False
     assert result.error == "empty_response"
+
+
+def test_an_empty_answer_is_reasked_and_recovered(monkeypatch):
+    """An empty transcription is usually transient, not a silent clip."""
+    recorder = install(monkeypatch, "", "سلام به همه")
+
+    result = run()
+
+    assert result.ok is True
+    assert result.text == "سلام به همه"
+    assert recorder.count == 2
 
 
 def test_control_and_bidi_characters_are_stripped(monkeypatch):

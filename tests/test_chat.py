@@ -634,14 +634,78 @@ def test_a_bare_domain_is_also_refused(monkeypatch):
     assert result.error == "link_in_reply"
 
 
-def test_a_refused_reply_is_not_retried(monkeypatch):
-    """Asking again is how a refusal turns into a loop against the quota."""
+def test_a_refused_reply_is_reasked_once_and_only_once(monkeypatch):
+    """A refusal earns one re-ask, never a loop.
+
+    The draft cannot be sent as it stands — empty, or carrying a link — so the
+    model is told what was wrong and asked again exactly once. A second bad draft
+    is refused for real. The old behaviour refused on the first try and left the
+    person with "I could not answer" even when a re-ask would have recovered the
+    answer; the reason it was never retried (a retry loop against the quota) is
+    answered by bounding it to one.
+    """
     recorder = install(monkeypatch, "ببین t.me/joinchat")
 
     result = ask("سلام")
 
     assert result.answered is False
-    assert recorder.count == 1
+    assert result.error == "link_in_reply"
+    assert recorder.count == 2, "one re-ask, then stop"
+
+
+def test_an_empty_draft_is_reasked_and_the_answer_recovered(monkeypatch):
+    """Observed live: an empty body turned into "I could not answer"."""
+    recorder = install(monkeypatch, "", "سلام! در چه موردی؟")
+
+    result = ask("سلام")
+
+    assert result.answered is True
+    assert result.text == "سلام! در چه موردی؟"
+    assert recorder.count == 2
+
+
+def test_a_link_draft_is_reasked_and_the_answer_recovered(monkeypatch):
+    """The link is still never sent; the answer around it is recovered."""
+    recorder = install(monkeypatch, "برو به t.me/joinchat", "باشه، چشم")
+
+    result = ask("سلام")
+
+    assert result.answered is True
+    assert result.text == "باشه، چشم"
+    assert "t.me" not in result.text
+    assert recorder.count == 2
+
+
+def test_a_handle_only_draft_is_reasked_and_recovered(monkeypatch):
+    """Observed live: a bare handle in reply to a mention cleaned to nothing."""
+    recorder = install(monkeypatch, "@Mo3i_ProteCt_Bot", "چیه؟ بگو")
+
+    result = ask("@Mo3i_ProteCt_Bot")
+
+    assert result.answered is True
+    assert result.text == "چیه؟ بگو"
+    assert recorder.count == 2
+
+
+def test_the_reask_tells_the_model_what_was_wrong(monkeypatch):
+    """"Answer again" with no reason is how the same bad draft comes back."""
+    recorder = install(monkeypatch, "", "باشه")
+
+    assert ask("سلام").answered is True
+
+    parts = recorder.last[-1]["parts"]
+    assert any(chat.RESHAPE_NUDGE in (p.get("text") or "") for p in parts)
+
+
+def test_a_second_empty_draft_is_refused(monkeypatch):
+    """One re-ask, and if it is empty too the refusal stands."""
+    recorder = install(monkeypatch, "", "")
+
+    result = ask("سلام")
+
+    assert result.answered is False
+    assert result.error == "empty_response"
+    assert recorder.count == 2
 
 
 def test_a_refused_reply_is_not_remembered(monkeypatch):

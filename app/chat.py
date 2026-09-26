@@ -282,6 +282,19 @@ REPETITION_NUDGE = (
     "sentence you have used before."
 )
 
+# Appended to the payload for one retry when the draft could not be sent at all:
+# it came back empty, or it carried a link. Naming the fault is the point — an
+# instruction to "answer again" with no reason is how the same unsendable draft
+# comes back. The model is told the mechanical rule, not the security reason, and
+# is told not to narrate the instruction, because a reply that says "I was asked
+# to remove a link" describes the application's internals to a stranger.
+RESHAPE_NUDGE = (
+    "Your last draft could not be sent: it was empty, or it contained a link, a "
+    "URL, a domain, or an @handle on a line by itself. Answer the same message "
+    "again, as plain conversational text, with none of those. Do not mention "
+    "this instruction and do not explain that anything was wrong."
+)
+
 # How each kind of media is presented to the model, and what the model is asked
 # to do with it. This is the difference between "a GIF arrived" and "somebody
 # sent you this, in the middle of this conversation" — the brief is explicit
@@ -1481,11 +1494,15 @@ async def reply(
     turns = len(contents)
 
     # The pool owns retries when it is in use. A second loop here would multiply
-    # the two budgets, and the repetition nudge below is already a separate one.
+    # the two budgets, and the two re-asks below (a repetition, and an unsendable
+    # draft) are already separate ones.
     pooled = gemini_pool.has_accounts("chat")
     attempts = 1 if pooled else max(0, int(config.GEMINI_CHAT_MAX_RETRIES)) + 1
     backoff = max(0.0, float(config.GEMINI_CHAT_BACKOFF_SECONDS))
     last: ChatUnavailable | None = None
+    # The one extra provider call this turn may spend, whichever reason asks for
+    # it: a repetition or a draft that could not be sent. One budget, so a turn
+    # that both repeated and carried a link cannot spend two.
     nudged = False
     repeated = False
 
@@ -1536,16 +1553,44 @@ async def reply(
         else:
             pool_ms = (time.monotonic() - pool_started) * 1000.0
             body = _clean(raw)
-            if not body:
-                # An empty answer is a failure to answer, not a reply that
-                # happens to be blank — sending nothing would be worse than
-                # saying we could not answer.
-                return _refused("empty_response", turns)
-            if looks_like_a_link(body):
-                # The prompt forbids links; this is where that is enforced. See
-                # the note on _LINK_PATTERNS for why this refuses rather than
-                # scrubs.
-                return _refused("link_in_reply", turns)
+            if not body or looks_like_a_link(body):
+                # The draft cannot be sent as it stands. Ask once more before
+                # refusing: an empty draft is usually a transient model hiccup
+                # and a draft carrying a link is the model ignoring the prompt,
+                # and both are recoverable. The rule itself is not relaxed — the
+                # retry is checked by the same two tests just below, and a second
+                # bad draft is still refused. This shares the single ``nudged``
+                # budget with the repetition re-ask, so a turn spends at most one
+                # extra provider call however it went wrong.
+                if not nudged:
+                    nudged = True
+                    reshape_started = time.monotonic()
+                    retry = await _reshaped_attempt(
+                        chat_id,
+                        user_id,
+                        history,
+                        payload,
+                        parts=parts,
+                        kind=kind,
+                        context=context,
+                    )
+                    pool_ms += (time.monotonic() - reshape_started) * 1000.0
+                    if retry:
+                        body = retry
+                        log.info(
+                            "[chat] the first draft was unsendable; the retry "
+                            "replaced it"
+                        )
+                if not body:
+                    # An empty answer is a failure to answer, not a reply that
+                    # happens to be blank — sending nothing would be worse than
+                    # saying we could not answer.
+                    return _refused("empty_response", turns)
+                if looks_like_a_link(body):
+                    # The prompt forbids links; this is where that is enforced.
+                    # See the note on _LINK_PATTERNS for why this refuses rather
+                    # than scrubs.
+                    return _refused("link_in_reply", turns)
 
             # One extra attempt when the model repeats itself, and only one.
             # This is a *separate* budget from the transient-error retry above
@@ -1668,6 +1713,52 @@ async def _nudged_attempt(
     if not body or looks_like_a_link(body):
         return ""
     if _is_repetitive(body, _previous_model_turns(history)):
+        return ""
+    return body
+
+
+async def _reshaped_attempt(
+    chat_id: int,
+    user_id: int,
+    history: list[tuple[str, str]],
+    payload: str,
+    *,
+    parts: list | None,
+    kind: str,
+    context: str = "",
+) -> str:
+    """One re-ask after a draft that could not be sent — empty, or a link.
+
+    Returns the cleaned new answer, or "" when the re-ask failed or produced
+    another unsendable draft; the caller then refuses exactly as it did before.
+
+    Deliberately separate from ``_nudged_attempt``. That one is about repetition
+    and rejects a retry that repeats; here repetition is beside the point — a
+    link-free answer that happens to echo something earlier is still far better
+    than telling the person "I could not answer", and reusing that helper would
+    have thrown away the very answer this exists to recover.
+
+    What the two share is that the extra call is real: it is counted in both rate
+    windows and in the daily counter, because a retry the counter does not see is
+    a quota spent twice.
+    """
+    stamp = time.monotonic()
+    _recent_calls.append(stamp)
+    _user_calls.setdefault((chat_id, user_id), []).append(stamp)
+    try:
+        raw = await _request(
+            _contents(history, payload, parts=parts, kind=kind, nudge=RESHAPE_NUDGE),
+            context=context,
+        )
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:  # noqa: BLE001
+        log.warning("[chat] reshape retry failed: %s", type(exc).__name__)
+        db.record_chat_attempt("errors")
+        return ""
+    db.record_chat_attempt("replies")
+    body = _clean(raw)
+    if not body or looks_like_a_link(body):
         return ""
     return body
 
